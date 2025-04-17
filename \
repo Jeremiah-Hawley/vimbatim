@@ -64,26 +64,18 @@ class run{
       if(heading_level==0){
                 //cite formatting
         if(size==13 && bold){ 
-          return "<w:r><w:rPr><w:rStyle w:val=\"Style13ptBold\"/></w:rPr><w:t>" + text + "</w:t></w:r>";
+          return "<w:r> <w:rPr> <w:rStyle w:val=\"Style13ptBold\"/> </w:rPr> <w:t>" + text + "</w:t></w:r>";
         }
 
-              //non-cite, non-header formatting
-        string xml = "<w:r><w:rPr><w:rStyle w:val=\"StyleUnderline\"/>";
-        if(bold){
-          xml += "<w:b/>";
-        }
+              //non-cite formatting
+        string xml = "<w:r> <w:rPr> <w:rStyle w:val=\"StyleUnderline\"/>";
         if(highlight){
           xml += ("<w:highlight w:val=\"" + highlight_color + "\"/>");
         }
-        if(size!=24){
-          xml += "<w:sz w:val=\"" + size + "\"/>" + "<w:szCs w:val=\"" + size + "\"/>";
-        }
         if(!underline){
-          xml += "<w:u w:val=\"none\"/>";
+          xml += "<w:u w:val=\"none\"";
         }
-        xml += "<w:t>" + text + "</w:t></w:r>";
-        return xml;
-       
+
       }else{
         switch(heading_level){
           case(1): //Pocket
@@ -99,26 +91,6 @@ class run{
 
           break;
           default: //something went wrong.
-            if(size==13 && bold){ 
-              return "<w:r><w:rPr><w:rStyle w:val=\"Style13ptBold\"/></w:rPr><w:t>" + text + "</w:t></w:r>";
-            }
-
-              //non-cite, non-header formatting
-            string xml = "<w:r><w:rPr><w:rStyle w:val=\"StyleUnderline\"/>";
-            if(bold){
-              xml += "<w:b/>";
-            }
-            if(highlight){
-              xml += ("<w:highlight w:val=\"" + highlight_color + "\"/>");
-            }
-            if(size!=24){
-              xml += "<w:sz w:val=\"" + size + "\"/>" + "<w:szCs w:val=\"" + size + "\"/>";
-            }
-            if(!underline){
-              xml += "<w:u w:val=\"none\"/>";
-            }
-            xml += "<w:t>" + text + "</w:t></w:r>";
-            return xml;
 
         }
       }

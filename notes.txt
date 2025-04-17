@@ -18,6 +18,12 @@ the <w:document    </w:document> tags hold the entire document (obviously), but 
 
 the ids in the paragrah and run sections of the document xml are NOT NECISSARY this is HUGE because i dont have to worry about them, if word opens the file, it will auto populate them.
 
+in paragraphs/runs with regular card text, it marks it as StyleUnderlind but turns off the underlined
+
+sz (font size) values are in half points, so 12 is actually size 6
+
+
+
     *** Document.xml notes over ***
 
 core.xml stores date last edited and who edited it, that could be useful for later

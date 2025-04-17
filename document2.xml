@@ -191,61 +191,66 @@
     <w:pPr>
       <w:rPr>
         <w:rStyle w:val="StyleUnderline"/>
-    <w:u w:val="none"/>
-    </w:rPr>
+        <w:u w:val="none"/>
+      </w:rPr>
     </w:pPr>
+
     <w:r 
       w:rsidRPr="003D19D9">
-    <w:rPr>
-      <w:rStyle 
-        w:val="StyleUnderline"/>
-      <w:highlight 
-        w:val="yellow"/>
-      <w:u w:val="none"/>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
+        <w:highlight 
+          w:val="yellow"/>
+        <w:u w:val="none"/>
       </w:rPr>
       <w:t>
-        Highlight</w:t>
-        </w:r>
+          Highlight
+      </w:t>
+    </w:r>
   </w:p>
+
   <w:p 
     w14:paraId="38E450B4" 
     w14:textId="4F153666" 
     w:rsidR="003D19D9" 
     w:rsidRDefault="00254CD6" 
     w:rsidP="003D19D9">
-  <w:pPr>
-    <w:rPr>
-      <w:rStyle 
-        w:val="StyleUnderline"/>
-      <w:u 
-        w:val="none"/>
-        </w:rPr>
-</w:pPr>
-<w:r>
-  <w:rPr>
-    <w:rStyle 
-      w:val="StyleUnderline"/>
-    <w:u 
-      w:val="none"/>
+    <w:pPr>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
+        <w:u 
+          w:val="none"/>
+      </w:rPr>
+    </w:pPr>
+    <w:r>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
+        <w:u 
+          w:val="none"/>
       </w:rPr>
       <w:t>
-          Regular card text</w:t>
-</w:r>
-</w:p>
-<w:p 
-  w14:paraId="2CF2F79D" 
-  w14:textId="260A0A1D" 
-  w:rsidR="00254CD6" 
-  w:rsidRDefault="00254CD6" 
-  w:rsidP="003D19D9">
-<w:pPr>
-  <w:rPr>
-    <w:rStyle 
-      w:val="StyleUnderline"/>
-        <w:sz w:val="12"/>
-        <w:szCs w:val="12"/>
-    <w:u w:val="none"/>
-    </w:rPr>
+        Regular card text
+      </w:t>
+    </w:r>
+  </w:p>
+
+  <w:p 
+    w14:paraId="2CF2F79D" 
+    w14:textId="260A0A1D" 
+    w:rsidR="00254CD6" 
+    w:rsidRDefault="00254CD6" 
+    w:rsidP="003D19D9">
+    <w:pPr>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
+          <w:sz w:val="12"/>
+          <w:szCs w:val="12"/>
+          <w:u w:val="none"/>
+      </w:rPr>
     </w:pPr>
     <w:r>
       <w:rPr>
@@ -256,11 +261,12 @@
         <w:szCs 
           w:val="12"/>
         <w:u w:val="none"/>
-        </w:rPr>
+      </w:rPr>
         <w:t>
             This is tiny card text</w:t>
-  </w:r>
+    </w:r>
   </w:p>
+
   <w:p 
     w14:paraId="1649BAC4" 
     w14:textId="258EB23E" 
@@ -268,23 +274,23 @@
     w:rsidRPr="00254CD6" 
     w:rsidRDefault="00254CD6" 
     w:rsidP="00254CD6">
-  <w:pPr>
-    <w:rPr>
-      <w:rStyle 
-        w:val="StyleUnderline"/>
-      <w:b/>
-      <w:iCs/>
+    <w:pPr>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
+            <w:b/>
+            <w:iCs/>
       </w:rPr>
-      </w:pPr>
-      <w:r>
-        <w:rPr>
-          <w:rStyle 
-            w:val="StyleUnderline"/>
+    </w:pPr>
+    <w:r>
+      <w:rPr>
+        <w:rStyle 
+          w:val="StyleUnderline"/>
           <w:u 
             w:val="none"/>
-</w:rPr>
-<w:t>
-    This text will be normal</w:t>
+      </w:rPr>
+      <w:t>
+        This text will be normal</w:t>
     </w:r>
     <w:proofErr 
       w:type="gramStart"/>
