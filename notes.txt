@@ -1,0 +1,74 @@
+Libraries:
+https://github.com/ctabin/libzippp
+writing my own XML parser
+
+
+Docx File Structure:
+DOCX files are zipped folders of XML files
+  in the settings.xml file on line 127 is the docId ex: w14:val="6FDB7BE2"/> this needs to be different for each word document. it's psuedo random
+
+document.xml appears to store the majority of the data, and is likely the only xml file the program will have to actually edit
+
+
+    *** Document.xml notes here ***
+lines 3-38 (the links) look like they'd be the same for every filem can check this later but i doubt i'd have to fuck with them much - document 1 and document 2 have these lines the same, they're likely the same for all files.
+
+the <w:document    </w:document> tags hold the entire document (obviously), but more notably, the
+    <w:body </w:body> tags hold the text in the file. Within, the body tags are p tags that hold each paragraph which are decided based on newline characters. this should make it fairly easy to edit them. And to read them because we only have to note what heading level they are and the text in the "t" tags
+
+the ids in the paragrah and run sections of the document xml are NOT NECISSARY this is HUGE because i dont have to worry about them, if word opens the file, it will auto populate them.
+
+    *** Document.xml notes over ***
+
+core.xml stores date last edited and who edited it, that could be useful for later
+
+Verbatim Settings:
+Heading Format:
+  Pocket:
+    Heading 1
+    Bold
+    Boxed (4 side border)
+    Center Align
+    Size 26
+
+  Hat:
+    Heading 2
+    Bold
+    Underlined (twice?) 
+    Center Align
+    Size 22
+
+  Block:
+    Heading 3
+    Bold
+    Underlined (Once)
+    Center Align
+    Size 16
+
+  Tag:
+    Heading 4
+    Bold
+    Size 13
+    Left Align 
+
+  Cite:
+    Normal Text
+    Bold
+    Size 13
+    Left Align
+
+  Card:
+    Normal Text
+    Size 11
+    Left Align
+
+  Emphasis:
+    Size 11
+    Bold
+    Underlined
+    Boxed (4 side border)
+    Left Align
+
+
+
+
