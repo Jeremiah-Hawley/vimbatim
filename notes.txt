@@ -1,6 +1,10 @@
 Libraries:
 zip library: (to open the docx folder)
 https://github.com/ctabin/libzippp
+
+GUI library (qt)
+https://doc.qt.io/
+
 writing my own XML parser
 
 

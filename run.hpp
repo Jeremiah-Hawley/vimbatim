@@ -25,30 +25,17 @@ class run{
     void add_word(const string &word){
       text = text + " " + word;
     }
+    void set_highlight(const bool &hl){ highlight=hl; }
+    void set_highlight_color(const string &hlc){ highlight_color=hlc; }
+    void set_underline(const bool &u){ underline=u; }
+    void set_bold(const bool &b){ bold=b; }
+    void set_size(const unsigned char &sz){ size=sz; }
 
-    void set_highlight(const bool &hl){
-      highlight=hl;
-    }
-    
-    coid set_highlight_color(const string &hlc){
-      highlight_color=hlc;
-    }
-
-    void set_underline(const bool &u){
-      underline=u;
-    }
-
-    void set_bold(const bool &b){
-      bold=b;
-    }
-
-    void set_size(const unsigned char &sz){
-      size=sz;
-    }
-
-    string get_text(){
-      return text;
-    }
+    bool get_highlight(){ return highlight; }
+    string get_highlight_color(){return highlight_color; }
+    bool get_underline(){ return underline; }
+    unsigned char get_size(){ return size; }
+    string get_text(){ return text; }
 
     string get_formatting(){
       return to_string((int)highlight) + to_string((int)underline) + to_string((int)bold) + to_string((int)size);

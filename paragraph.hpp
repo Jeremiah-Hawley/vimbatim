@@ -9,31 +9,27 @@ using std::deque;
 
 class paragraph{
   public:
-    paragraph(){
+    paragraph(){ //defult constructor
       type=3;
       heading=0;
     }
 
-    paragraph(ifstream document, int index, string tp){
+    paragraph(ifstream document, int index, char tp){ //from document, index is which paragraph to pull from
       type=tp;
+      
+    }
+
+    paragraph(string xml){ //from paragraph xml string
 
     }
 
-    paragraph(string xml){
+    void set_type(char t){ type=t; }
+    void set_heading(char lv){ heading=lv; }
+    void add_run(run line){ runs.push_back(line); }
 
-    }
-
-    void set_type(char t){
-      type=t;
-    }
-
-    void set_heading(char lv){
-      heading=lv;
-    }
-        
-    void add_run(run line){
-      runs.push_back(line);
-    }
+    char get_type(){ return type; }
+    char get_heading(){ return heading; }
+    run get_run(int index){ return runs[index]; }
 
     void insert_run(run line, int location){
       auto it = runs.begin() + location;
@@ -53,19 +49,11 @@ class paragraph{
       return xml;
     }
 
-    char get_stype(){ return type; }
-
-    char get_heading(){ return heading; }
-
-    run get_run(int index){
-      return runs[index];
-    }
+    
 
 
   private:
-    char type; //tag = 0, cite = 1, metadata = 2, card = 3, 
+    char type; //tag = 0, cite = 1, metadata = 2, text = 3, card = 4
     deque<run> runs; //array of runs
     char heading; // this is the only format that transends runs
 }
-
-
