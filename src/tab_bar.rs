@@ -136,6 +136,9 @@ impl Render for TabBar {
                             .text_sm()
                             .text_color(rgb(0x858585))
                             .cursor(CursorStyle::PointingHand)
+                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                                cx.stop_propagation();
+                            })
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
