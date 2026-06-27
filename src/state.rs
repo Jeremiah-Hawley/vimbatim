@@ -164,6 +164,28 @@ impl AppState {
         }
     }
 
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        /*
+         * Moves the tab at `from` to position `to`, shifting other tabs as needed.
+         * Updates `active_tab` so the visually active tab does not change.
+         */
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        // Keep active_tab pointing at the same logical tab after the move.
+        self.active_tab = if self.active_tab == from {
+            to
+        } else if from < self.active_tab && to >= self.active_tab {
+            self.active_tab - 1
+        } else if from > self.active_tab && to <= self.active_tab {
+            self.active_tab + 1
+        } else {
+            self.active_tab
+        };
+    }
+
     pub fn set_active_tab(&mut self, idx: usize) {
         /*
          * Switches focus to the tab at the given index, if it exists.
