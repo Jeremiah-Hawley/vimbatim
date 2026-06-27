@@ -126,9 +126,10 @@ impl Render for TabBar {
                 let tab_bg   = if is_active { rgb(0x1e1e1e) } else { rgb(0x2d2d2d) };
                 let tab_text = if is_active { rgb(0xd4d4d4) } else { rgb(0x858585) };
 
-                // Each tab and its close button needs a distinct ID
-                let tab_id   = ElementId::named_usize("tab", idx);
-                let close_id = ElementId::named_usize("tab-close", idx);
+                // Use stable tab.id (not loop idx) so GPUI doesn't confuse element
+                // state when tabs are removed and remaining ones shift positions.
+                let tab_id   = ElementId::named_usize("tab", tab.id);
+                let close_id = ElementId::named_usize("tab-close", tab.id);
 
                 div()
                     .id(tab_id)
@@ -200,10 +201,6 @@ impl Render for TabBar {
                             .rounded(px(2.0))
                             .text_sm()
                             .text_color(rgb(0x858585))
-                            .cursor(CursorStyle::PointingHand)
-                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
-                                cx.stop_propagation();
-                            })
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
@@ -249,7 +246,20 @@ impl Render for TabBar {
                 window.start_window_move();
             });
 
-        // "×" button on the far right closes the entire application
+        // Scrollable container for tabs + "+" button. min_w_0 allows it to shrink
+        // below its content size so the drag region and close button are never pushed off.
+        let tab_scroll_area = div()
+            .id("tab-scroll-area")
+            .flex()
+            .flex_row()
+            .h_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .children(tab_elements)
+            .child(new_btn);
+
+        // "×" button on the far right closes the entire application.
+        // flex_none() keeps it at a fixed 46px regardless of how many tabs are open.
         let close_btn = div()
             .id("app-close-btn")
             .flex()
@@ -257,6 +267,7 @@ impl Render for TabBar {
             .justify_center()
             .h_full()
             .w(px(46.0))
+            .flex_none()
             .text_color(rgb(0x858585))
             .cursor_pointer()
             .text_lg()
@@ -267,6 +278,6 @@ impl Render for TabBar {
             })
             .child("×");
 
-        bar.children(tab_elements).child(new_btn).child(drag_region).child(close_btn)
+        bar.child(tab_scroll_area).child(drag_region).child(close_btn)
     }
 }

@@ -1,6 +1,7 @@
 # TOP LEVEL
 Use the GPUI (gpui.rs) crate for all GUI tasks
 
+# GUI
 Create the following things, each bullet point has further instructions below
  - Main Text Editoy
  - File Explorer Side Bar
@@ -28,4 +29,7 @@ underneath the tab menu, and above the main text editor should be a ribbon conta
 
 ## Toggleable floating settings
 you should have it so that when the user presses a settings keybind declared in settings.conf (don't worry, about parsing the file now, just use a placeholder) a centered floating window should open for the user to change certain settings, you don't need to impliment this now, just have the window open, and have a button that prints to console when clicked for a demonstration.
+
+# XML parsing
+using the cpp/hpp files in this codebase as a guide, create rust code that decompiles .docx files and parses the xml files inside of it then pass the text (and its formatting) to the GUI to display within the text editor, then update the document and formatting as it appears in the text editor whenever the user saves (CRTL+s). Consult the advisor on how to design this before coding.
 
