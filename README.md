@@ -2,15 +2,11 @@
 It's a docx editor written in cpp specifically for debate featuring "Verbatim" style functionality and shortcuts. It should be extensible with more features specific to debate, and with vim functionality because why not
 
 # ToDo
-## card.hpp
-File Constructor
-File Saving functionality
+## GUI Branch
+everything
 
-## paragraph.hpp
-XML Constructor
-File Constructor
+## Config Parsing
+Update to use space delimiting
 
-## run.hpp
-
-## main.cpp
-literally everything, probably should start with GUI and trying to get some text displayed
+## XML Parsing
+translate to rust

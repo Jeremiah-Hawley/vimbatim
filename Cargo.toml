@@ -1,7 +1,13 @@
 [package]
 name = "vimbatim"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[[bin]]
+name = "vimbatim"
+path = "src/main.rs"
 
 [dependencies]
-regex = "1"
+gpui          = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", features = ["x11", "wayland"] }
+regex         = "1"
