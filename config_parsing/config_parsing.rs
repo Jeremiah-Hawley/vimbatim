@@ -4,6 +4,7 @@ and output a struct containing the settings from the level
 */
 
 use regex::Regex;
+use std::collections::HashMap;
 use std::fs;
 
 pub struct Settings {
@@ -114,4 +115,24 @@ impl Settings {
 // parse function - called from main
 pub fn parse(filename: &str) -> Settings {
     Settings::parse(filename)
+}
+
+// returns every setting as a flat string→string hashmap
+pub fn parsing_dict(filename: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let content = fs::read_to_string(filename).expect("Failed to read config file");
+    let re = Regex::new(r"^(\w+)=(.+)$").unwrap();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+        if let Some(caps) = re.captures(line) {
+            let key = caps[1].to_string();
+            let value = caps[2].trim().to_string();
+            map.insert(key, value);
+        }
+    }
+    map
 }
