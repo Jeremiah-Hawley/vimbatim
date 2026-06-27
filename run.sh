@@ -54,6 +54,11 @@ fi
 echo "==> cargo build $RELEASE"
 cargo build $RELEASE
 
+# ── Cursor size ───────────────────────────────────────────────────────────────
+# GPUI's X11/WSLg backend can double-scale cursors on HiDPI. Setting
+# XCURSOR_SIZE to 24 (standard for 96 dpi) corrects the oversized cursor.
+export XCURSOR_SIZE=24
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "==> Launching Vimbatim..."
 if [ -n "$RELEASE" ]; then
