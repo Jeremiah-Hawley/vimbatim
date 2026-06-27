@@ -157,7 +157,14 @@ impl AppState {
         if self.tabs.len() <= 1 {
             return; // always keep at least one tab
         }
+        if idx >= self.tabs.len() {
+            return;
+        }
         self.tabs.remove(idx);
+        // If a tab to the left of the active one was removed, shift active_tab left.
+        if idx < self.active_tab {
+            self.active_tab -= 1;
+        }
         // clamp active tab to valid range
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
@@ -173,13 +180,16 @@ impl AppState {
             return;
         }
         let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
+        // When dragging right (from < to), remove() shifts the drop target left by one,
+        // so insert at to-1 to land before the visual indicator.
+        let insert_at = if from < to { to - 1 } else { to };
+        self.tabs.insert(insert_at, tab);
         // Keep active_tab pointing at the same logical tab after the move.
         self.active_tab = if self.active_tab == from {
-            to
-        } else if from < self.active_tab && to >= self.active_tab {
+            insert_at
+        } else if from < self.active_tab && insert_at >= self.active_tab {
             self.active_tab - 1
-        } else if from > self.active_tab && to <= self.active_tab {
+        } else if from > self.active_tab && insert_at <= self.active_tab {
             self.active_tab + 1
         } else {
             self.active_tab
