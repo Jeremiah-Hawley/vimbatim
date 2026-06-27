@@ -6,6 +6,42 @@ use crate::state::AppState;
 // Actions for the tab bar, registered globally in main.rs.
 actions!(tab_bar, [NewTab, CloseActiveTab]);
 
+/// Drag payload for tab reordering. Carries the source tab index and title.
+/// Implements `Render` because GPUI uses the payload value as the ghost view
+/// that floats under the cursor while dragging.
+#[derive(Clone)]
+struct TabDragPayload {
+    from_idx: usize,
+    title: String,
+    /// Cursor offset within the dragged tab at the moment drag started.
+    /// Used to position the ghost so it doesn't jump away from the cursor.
+    offset: Point<Pixels>,
+}
+
+impl Render for TabDragPayload {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // Render at the cursor offset so the ghost tracks the mouse naturally.
+        div()
+            .pl(self.offset.x)
+            .pt(self.offset.y)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(36.0))
+                    .px(px(12.0))
+                    .bg(rgb(0x1e1e1e))
+                    .text_sm()
+                    .text_color(rgb(0xd4d4d4))
+                    .border_1()
+                    .border_color(rgb(0x569cd6))
+                    .shadow_md()
+                    .child(self.title.clone()),
+            )
+    }
+}
+
 /// The tab bar rendered at the top of the window.
 ///
 /// Shows one styled button per open tab, a "+" new-tab button immediately after
@@ -107,7 +143,21 @@ impl Render for TabBar {
                     .border_r_1()
                     .border_color(rgb(0x464647))
                     .when(!is_active, |d| d.border_b_1().border_color(rgb(0x464647)))
-                    // Click tab body → switch to this tab
+                    // Highlight this tab's left edge when a dragged tab hovers over it.
+                    .drag_over::<TabDragPayload>(|style, _, _, _| {
+                        style.border_l_2().border_color(rgb(0x569cd6))
+                    })
+                    // Receive a dropped tab — reorder it into this position.
+                    .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                        if payload.from_idx != idx {
+                            this.state.update(cx, |s, cx| {
+                                s.move_tab(payload.from_idx, idx);
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }
+                    }))
+                    // Click tab body → switch to this tab (fires only when not dragging).
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.state.update(cx, |s, cx| {
                             s.set_active_tab(idx);
@@ -115,6 +165,21 @@ impl Render for TabBar {
                         });
                         cx.notify();
                     }))
+                    // Begin drag — carry the source index and title as payload.
+                    // Plain closure (not cx.listener): on_drag constructor signature is
+                    // Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W>, which does
+                    // not match cx.listener's output signature.
+                    .on_drag(
+                        TabDragPayload { from_idx: idx, title: title.clone(), offset: Point::default() },
+                        |payload: &TabDragPayload, offset, _window, cx| {
+                            let ghost = TabDragPayload {
+                                from_idx: payload.from_idx,
+                                title: payload.title.clone(),
+                                offset,
+                            };
+                            cx.new(|_| ghost)
+                        },
+                    )
                     // Tab title label
                     .child(
                         div()
