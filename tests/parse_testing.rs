@@ -25,13 +25,13 @@ fn test_keybinds_section() {
     assert_eq!(s.emphasis, "f10");
     assert_eq!(s.highlight, "f11");
     assert_eq!(s.clear, "f12");
-    assert_eq!(s.delete_tags, "ALT,f7");
-    assert_eq!(s.new_document, "CRTL, n");
-    assert_eq!(s.start_timer, "CTRL,SHFT,t");
-    assert_eq!(s.open_stats, "CTRL,SHIFT,i");
-    assert_eq!(s.shrink, "ALT,f3");
-    assert_eq!(s.cite_from_link, "CTRL,f8");
-    assert_eq!(s.wikifi, "ALT,CTRL,SHFT,w");
+    assert_eq!(s.delete_tags, "ALT f7");
+    assert_eq!(s.new_document, "CRTL n");
+    assert_eq!(s.start_timer, "CTRL SHFT t");
+    assert_eq!(s.open_stats, "CTRL SHIFT i");
+    assert_eq!(s.shrink, "ALT f3");
+    assert_eq!(s.cite_from_link, "CTRL f8");
+    assert_eq!(s.wikifi, "ALT CTRL SHFT w");
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn test_parsing_dict() {
     assert_eq!(map.get("pilcrows").map(String::as_str),        Some("false"));
     assert_eq!(map.get("vim").map(String::as_str),             Some("true"));
     assert_eq!(map.get("paste").map(String::as_str),           Some("f2"));
-    assert_eq!(map.get("wikifi").map(String::as_str),          Some("ALT,CTRL,SHFT,w"));
+    assert_eq!(map.get("wikifi").map(String::as_str),          Some("ALT CTRL SHFT w"));
 }
 
 #[test]
