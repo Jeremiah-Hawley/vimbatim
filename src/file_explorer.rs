@@ -3,6 +3,7 @@ use gpui::*;
 
 use std::path::PathBuf;
 
+use crate::docx_parser::create_new_docx;
 use crate::state::{AppState, FileNode};
 
 /// The collapsible file explorer sidebar shown on the right side of the window.
@@ -42,8 +43,8 @@ impl FileExplorer {
         }
         let path = dir.join(&name);
 
-        // Create empty placeholder on disk; future: write a minimal .docx skeleton
-        if let Err(e) = std::fs::write(&path, b"") {
+        // Write a valid minimal .docx so the file can be parsed and saved immediately.
+        if let Err(e) = create_new_docx("", &path) {
             eprintln!("[FileExplorer] failed to create {}: {}", path.display(), e);
             return;
         }
@@ -210,19 +211,48 @@ impl Render for FileExplorer {
                     )
                     .child(
                         div()
-                            .id("new-file-btn")
                             .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .text_color(rgb(0x858585))
-                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                this.create_new_file(window, cx);
-                            }))
-                            .child("+"),
+                            .flex_row()
+                            .gap(px(4.0))
+                            // Refresh button — re-scans the working directory so files
+                            // created in external applications become visible without
+                            // restarting vimbatim.
+                            .child(
+                                div()
+                                    .id("refresh-file-btn")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x858585))
+                                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                                        this.state.update(cx, |s, cx| {
+                                            s.refresh_file_tree();
+                                            cx.notify();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child("↻"),
+                            )
+                            .child(
+                                div()
+                                    .id("new-file-btn")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x858585))
+                                    .on_click(cx.listener(|this, _ev, window, cx| {
+                                        this.create_new_file(window, cx);
+                                    }))
+                                    .child("+"),
+                            ),
                     ),
             )
             // ── File tree (scrollable) ────────────────────────────────────────

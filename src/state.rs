@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::docx_parser::{DocxDocument, create_new_docx, parse_docx};
 
 /// A single editor tab, representing either an unsaved "new" tab or an opened .docx file.
 #[derive(Clone, Debug)]
@@ -6,9 +9,11 @@ pub struct Tab {
     pub id: usize,
     pub title: String,
     pub file_path: Option<PathBuf>,
-    /// Plain-text content for this tab. Will be extended to parse/write .docx in the future.
     pub content: String,
     pub is_modified: bool,
+    /// Parsed docx document retained for lossless round-trip save. `None` for
+    /// brand-new tabs that have never been saved or for files that failed to parse.
+    pub document: Option<Arc<DocxDocument>>,
 }
 
 impl Tab {
@@ -23,14 +28,15 @@ impl Tab {
             file_path: None,
             content: String::new(),
             is_modified: false,
+            document: None,
         }
     }
 
     pub fn from_path(id: usize, path: PathBuf) -> Self {
         /*
          * Creates a Tab associated with an existing file path. The tab title is
-         * set to the file name. Content is left empty — loading from disk is handled
-         * separately so the tab can be created before the file is read.
+         * set to the file name. Content is populated by `open_file` which calls
+         * this constructor then parses the docx immediately after.
          */
         let title = path
             .file_name()
@@ -43,6 +49,7 @@ impl Tab {
             file_path: Some(path),
             content: String::new(),
             is_modified: false,
+            document: None,
         }
     }
 }
@@ -133,20 +140,60 @@ impl AppState {
 
     pub fn open_file(&mut self, path: PathBuf) {
         /*
-         * Opens a file in a new tab. If the file is already open in an existing tab,
-         * that tab is focused instead of creating a duplicate. Otherwise, a new tab
-         * is appended for the given path. Content loading from disk is left for a
-         * future implementation phase.
+         * Opens a file in a new tab, parsing its docx content immediately.
+         * If the file is already open, switches to the existing tab instead.
+         *
+         * When `parse_docx` fails (e.g., the file is corrupt or a 0-byte placeholder),
+         * the tab still opens with empty content and `document = None`.
          */
-        // If already open, switch to it
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
             self.active_tab = idx;
             return;
         }
-        let tab = Tab::from_path(self.next_tab_id, path);
+        let mut tab = Tab::from_path(self.next_tab_id, path.clone());
+        if let Ok(doc) = parse_docx(&path) {
+            tab.content  = doc.to_plain_text();
+            tab.document = Some(Arc::new(doc));
+        }
         self.next_tab_id += 1;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+    }
+
+    pub fn save_active_tab(&mut self) -> Result<(), String> {
+        /*
+         * Saves the active tab's content to its associated file path.
+         *
+         * When `document` is `Some`: uses `save_from_content` so the original
+         * docx structure (styles, images) is preserved and only the body text
+         * is replaced.
+         *
+         * When `document` is `None` (file created fresh inside vimbatim): uses
+         * `create_new_docx` to write a valid minimal docx from scratch.
+         *
+         * Tabs with no file path (plain "New Tab") are silently skipped — there
+         * is nowhere to write to yet.
+         */
+        let tab = self.tabs.get(self.active_tab).ok_or("No active tab")?;
+        let path = match &tab.file_path {
+            Some(p) => p.clone(),
+            None    => return Ok(()), // nothing to save yet
+        };
+        if !tab.is_modified {
+            return Ok(());
+        }
+        let content  = tab.content.clone();
+        let document = tab.document.clone();
+        match document {
+            Some(doc) => doc.save_from_content(&content, &path)
+                .map_err(|e| format!("Save failed: {}", e))?,
+            None => create_new_docx(&content, &path)
+                .map_err(|e| format!("Save failed: {}", e))?,
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.is_modified = false;
+        }
+        Ok(())
     }
 
     pub fn close_tab(&mut self, idx: usize) {

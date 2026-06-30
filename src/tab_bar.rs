@@ -246,8 +246,8 @@ impl Render for TabBar {
                 window.start_window_move();
             });
 
-        // Scrollable container for tabs + "+" button. min_w_0 allows it to shrink
-        // below its content size so the drag region and close button are never pushed off.
+        // Scrollable container for tabs only. min_w_0 lets it shrink so the
+        // fixed "+" and "×" buttons are always visible regardless of tab count.
         let tab_scroll_area = div()
             .id("tab-scroll-area")
             .flex()
@@ -255,11 +255,13 @@ impl Render for TabBar {
             .h_full()
             .min_w_0()
             .overflow_x_scroll()
-            .children(tab_elements)
-            .child(new_btn);
+            .children(tab_elements);
+
+        // "+" sits outside the scroll area as a flex_none sibling so it is
+        // never squeezed or scrolled away when many tabs are open.
+        let new_btn_fixed = new_btn.flex_none();
 
         // "×" button on the far right closes the entire application.
-        // flex_none() keeps it at a fixed 46px regardless of how many tabs are open.
         let close_btn = div()
             .id("app-close-btn")
             .flex()
@@ -278,6 +280,6 @@ impl Render for TabBar {
             })
             .child("×");
 
-        bar.child(tab_scroll_area).child(drag_region).child(close_btn)
+        bar.child(tab_scroll_area).child(new_btn_fixed).child(drag_region).child(close_btn)
     }
 }

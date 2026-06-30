@@ -1,3 +1,4 @@
+mod docx_parser;
 mod state;
 mod tab_bar;
 mod app_toolbar;
@@ -10,7 +11,7 @@ mod main_window;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_platform::application;
-use main_window::{MainWindow, ToggleSidebar, ToggleSettings};
+use main_window::{MainWindow, ToggleSidebar, ToggleSettings, Save};
 use tab_bar::{CloseActiveTab, NewTab};
 
 fn main() {
@@ -28,19 +29,16 @@ fn main() {
         // Register application-wide keybindings.
         // Actions are dispatched to whichever view has the keyboard focus.
         cx.bind_keys([
-            // Ctrl+, → open/close the floating settings modal (matches settings.conf)
             KeyBinding::new("ctrl-,", ToggleSettings, None),
-            // Ctrl+B → collapse/expand the file explorer sidebar
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            // Ctrl+T → open a new blank tab
             KeyBinding::new("ctrl-t", NewTab, None),
-            // Ctrl+W → close the active tab
             KeyBinding::new("ctrl-w", CloseActiveTab, None),
+            KeyBinding::new("ctrl-s", Save, None),
         ]);
 
         let bounds = Bounds::centered(
             None,
-            size(px(1200.0), px(800.0)),
+            size(px(1280.0), px(768.0)),
             cx,
         );
 

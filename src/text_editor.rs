@@ -123,6 +123,9 @@ impl Render for TextEditor {
                 div()
                     .flex()
                     .flex_col()
+                    // w_full constrains each line to the editor width so text wraps
+                    // rather than extending off-screen to the right.
+                    .w_full()
                     // Placeholder shown on an empty, unsaved tab
                     .when(is_new_tab, |d| {
                         d.child(

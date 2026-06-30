@@ -9,8 +9,7 @@ use crate::state::AppState;
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 
-// Global actions: ToggleSettings (Ctrl+,) and ToggleSidebar (Ctrl+B)
-actions!(vimbatim, [ToggleSettings, ToggleSidebar]);
+actions!(vimbatim, [ToggleSettings, ToggleSidebar, Save]);
 
 /// The root view of the application window.
 ///
@@ -78,6 +77,19 @@ impl MainWindow {
         });
         cx.notify();
     }
+
+    pub fn save(&mut self, _: &Save, _window: &mut Window, cx: &mut Context<Self>) {
+        /*
+         * Ctrl+S handler. Delegates to AppState::save_active_tab and logs any error
+         * to stderr — a future iteration should surface the error in the UI.
+         */
+        self.state.update(cx, |s, _cx| {
+            if let Err(e) = s.save_active_tab() {
+                eprintln!("[save] {}", e);
+            }
+        });
+        cx.notify();
+    }
 }
 
 impl Render for MainWindow {
@@ -106,6 +118,7 @@ impl Render for MainWindow {
             // Wire up global action handlers for this window
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::save))
             .size_full()
             .flex()
             .flex_col()
