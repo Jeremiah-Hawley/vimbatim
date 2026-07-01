@@ -4,6 +4,7 @@ mod tab_bar;
 mod app_toolbar;
 mod formatting_ribbon;
 mod text_editor;
+mod auto_scroll;
 mod file_explorer;
 mod settings_modal;
 mod main_window;
