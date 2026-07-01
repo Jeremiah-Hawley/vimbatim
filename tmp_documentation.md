@@ -498,3 +498,223 @@ the specific gap this follow-up targeted.
   limitation as every prior mouse-interaction task. **This is implemented,
   not confirmed** — the scroll-down-and-hold test above is the one thing
   that would actually confirm it, and it hasn't been run.
+
+---
+
+## Task C: Undo/Redo (vim_mode branch)
+
+Implements Task C from `notes/vim_todo.md` — a per-tab undo/redo stack,
+the prerequisite for vim's `u` / `Ctrl+r` (spec 5.5), done before vim
+Normal-mode commands as the todo document specifies.
+
+### What Was Built
+
+**`src/state.rs`:**
+- Added `undo_stack: Vec<String>`, `redo_stack: Vec<String>`, and
+  `last_edit_at: Option<Instant>` to `Tab` (spec 4.5's undo stack is
+  content-only, not a richer struct — cursor position is *not*
+  snapshotted). Wired into both `Tab::new_empty` and `Tab::from_path`, and
+  the `#[cfg(test)] make_state` helper.
+- `push_undo_snapshot()` (private) — pushes `content.clone()` onto the
+  active tab's undo stack before a mutation, coalescing rapid edits within
+  a 300ms window (`UNDO_COALESCE_WINDOW`) into a single undo step by
+  skipping the push entirely when the previous push was recent enough — so
+  typing a whole word costs one Ctrl+Z, not one per keystroke. Any push
+  clears the redo stack (a new edit invalidates whatever future those redo
+  entries pointed to). Capped at 200 entries (`UNDO_STACK_CAP`), dropping
+  the oldest snapshot once exceeded.
+- `delete_selection_raw()` (private) — the actual selection-deletion
+  mutation, split out from the now-public-facing `delete_selection()` so
+  `insert_char`/`insert_str`/`backspace` can delegate to it internally
+  *without* triggering a second, redundant undo push — those three already
+  push their own snapshot up front, capturing the true pre-edit state
+  (selection included) in one step rather than splitting "selection
+  deleted" and "character inserted" into two separate undo steps.
+- `insert_char`, `insert_str`, `backspace`, `delete_selection` (public) all
+  now push an undo snapshot before mutating — but only when a mutation will
+  actually happen: `backspace` at document start and `delete_selection`
+  with no active selection are true no-ops and correctly push nothing, so
+  Ctrl+Z never lands on an empty step. `insert_str("")` (e.g. pasting empty
+  clipboard content) returns immediately for the same reason.
+- `undo()` / `redo()` — pop from one stack, push the content being
+  replaced onto the other. Since only `content` is snapshotted, the cursor
+  is *not* restored to its exact pre-edit byte offset (that information was
+  never kept) — instead it's clamped into the restored content's bounds and
+  onto its nearest valid char boundary via the new `clamp_to_char_boundary`
+  free function, since the old offset may not even be a valid boundary in
+  the restored text. Both clear the active selection, mark the tab
+  modified, and reset `last_edit_at` to `None` so the very next edit can't
+  coalesce backwards into whatever was on the stack before the undo/redo.
+
+**`src/text_editor.rs`:**
+- Wired `Ctrl+Z` (undo), `Ctrl+Y` (redo), and `Ctrl+Shift+Z` (the common
+  alternate redo binding alongside Ctrl+Y) into the existing Ctrl-modifier
+  branch of `handle_key_down`, alongside copy/cut/paste/select-all. No new
+  global `KeyBinding` registration needed in `main.rs` — like `c`/`x`/`v`/
+  `a`, these arrive as raw key events with `modifiers.control` set and are
+  handled directly in the Ctrl-combo match.
+
+### Verification
+
+- `cargo check`: clean (only the pre-existing dead-code warnings for
+  vim-only motions/text-object helpers not wired to any key yet).
+- `cargo test`: 160 passed, 0 failed (156 in the bin crate incl. 24 new for
+  this task, 4 in `tests/parse_testing.rs`). All 24 new tests are pure
+  `AppState`/free-function tests requiring no GPUI context — coalescing is
+  tested deterministically by rewinding a tab's `last_edit_at` field
+  directly rather than sleeping in the test, so the suite stays fast.
+- `./run.sh`: builds and reaches window creation; same headless-sandbox EGL
+  limitation as every prior task in this document
+  (`MESA: error: ZINK: failed to choose pdev`) — Ctrl+Z/Y/Shift+Z could not
+  be exercised interactively here. Confirm on a machine with a working
+  display: type a burst of text (should undo as one step), pause 300ms+ and
+  type more (should be a separate undo step), and undo/redo/undo again to
+  confirm the stacks swap correctly.
+
+## Task D: Vim Mode Switching + Indicator
+
+Implements `notes/vim_todo.md` Task D: the Normal/Insert/Visual/VisualLine/
+Command mode-entry/exit table from `notes/editor_instructions.md` §5.1, plus
+a mode indicator.
+
+**`src/state.rs`:**
+- Added `VimMode` enum (`Normal`/`Insert`/`Visual`/`VisualLine`/`Command`,
+  `#[default] Normal`), and `vim_mode: VimMode` + `vim_command_buf: String`
+  fields on `Tab` (wired into `Tab::new_empty`, `Tab::from_path`, and the
+  `make_state` test helper). Added `vim_enabled: bool` on `AppState`,
+  hardcoded `true` in `AppState::new()` — wiring `settings.conf`'s `vim`
+  flag into this (spec §2.3) remains an open, separate gap, not touched by
+  this task.
+- `vim_command_buf` is added now (needed by Task E's count prefixes and
+  Task H's command text) but Task D itself never writes to it — Command
+  mode's keystroke accumulation was deliberately left out (see below).
+- Ten mode-transition methods on `AppState`, one per spec 5.1 table row:
+  `vim_enter_insert_before_cursor` (`i`), `vim_enter_insert_line_start`
+  (`I`, via `move_line_first_nonblank` — vim's `^`, not literal byte 0),
+  `vim_enter_insert_after_cursor` (`a`, via `move_right`),
+  `vim_enter_insert_line_end` (`A`, via `move_line_end`),
+  `vim_open_line_below` (`o`), `vim_open_line_above` (`O`),
+  `vim_enter_visual` (`v`, selects the character under the cursor —
+  zero-width at document end), `vim_enter_visual_line` (`V`, selects the
+  current line including its trailing `\n` when one exists),
+  `vim_enter_command` (`:`), and `vim_exit_to_normal` (shared by every
+  "-> Normal" transition in the table). `o`/`O` both insert their newline
+  via `insert_char`, reusing Task C's undo-stack push as required by the
+  task spec. `O` needs one extra correction `o` doesn't: `insert_char`
+  always advances the cursor past what it inserted, which for `O` (newline
+  inserted *before* the existing line) leaves the cursor one line too far
+  forward — the method resets `tab.cursor` back to the byte offset it
+  captured before inserting.
+- `handle_vim_key(&mut self, key: &str, shift: bool, key_char: Option<&str>) -> bool`
+  dispatches on the active tab's `vim_mode` to one of three private
+  sub-handlers, returning whether the key was consumed:
+  - `handle_vim_normal_key` — matches Task D's mode-switch keys, plus a
+    `':'` check described below. Deliberately lets named navigation keys
+    (`left`/`right`/`up`/`down`/`home`/`end`) fall through (returns
+    `false`) so the editor stays usable for moving around before Task E's
+    real vim motions exist — safe in Normal mode specifically because
+    there's no active selection a plain cursor move could corrupt.
+    Everything else is swallowed (returns `true` without inserting text),
+    matching real vim's Normal mode never falling through to text
+    insertion for an unrecognized key.
+  - `handle_vim_visual_key` — used for both Visual and VisualLine. Swallows
+    every key unconditionally (unlike Normal mode) since letting navigation
+    fall through here would clear the selection via `move_left`/etc.'s
+    selection-clearing side effect instead of extending it. Only
+    implements the exact exits spec 5.1 lists: lowercase `v` closes
+    Visual, shifted `V` closes VisualLine — real vim's additional
+    Visual<->VisualLine direct-switch behavior (pressing the *other* key
+    switches variant instead of exiting) isn't in the spec table and is
+    out of scope here; the mismatched key/shift combination is just a
+    no-op.
+  - `handle_vim_command_key` — Escape or Enter both exit to Normal without
+    executing anything; every other key is swallowed. This is the one
+    place this task deliberately implements less than the literal task
+    text's example indicator string might suggest: no keystroke
+    accumulation into `vim_command_buf`. Reason: composing correct command
+    text requires distinguishing shifted-punctuation characters (`%`, `/`,
+    etc.) from their unshifted base key, which is Task H's problem — a
+    partial buffer that silently mangled those characters would look done
+    while being subtly broken, which is worse than an honest stub.
+- **`:` detection and a pre-existing app-wide gap it surfaced:** GPUI's
+  `Keystroke.key` field reports the *unshifted* base glyph printed on the
+  physical key — for the semicolon key, `key` is `";"` whether or not
+  shift is held. The actual shifted character, when GPUI supplies one
+  directly, comes via `Keystroke.key_char: Option<String>` (confirmed by
+  reading the vendored `gpui` crate's `keystroke.rs`, not previously used
+  anywhere in this codebase). Since this hadn't been confirmed against a
+  real keyboard at the time of writing, `handle_vim_normal_key`'s `:` match
+  checks *both*: `(key == ";" && shift) || key_char == Some(":")` — robust
+  to either behavior GPUI might actually exhibit. Tracing this also
+  confirmed a **pre-existing, not-introduced-here gap**: the plain-text
+  insertion arm in `handle_key_down` (`k if k.chars().count() == 1 => ...`)
+  only maps shift to uppercase for alphabetic characters; there is no
+  shifted-punctuation mapping anywhere in the app, so typing `%`, `!`,
+  `@`, `"`, etc. into document content does not currently produce the
+  shifted character. Worth fixing generally (probably by using `key_char`
+  when present) before Task H needs full command-text fidelity — `:%s/foo/
+  bar/g` requires a correct `%`.
+
+**`src/text_editor.rs`:**
+- `handle_key_down` gained a vim-routing block, positioned after the
+  Ctrl-combo branch (which still returns unconditionally and is unaffected)
+  and before the existing Up/Down visual-row handling and the main
+  plain-editor match. Reads `vim_enabled` and the active tab's `vim_mode`
+  once via `self.state.read(cx)`. In Insert mode, only Escape is
+  intercepted here (routed to `vim_exit_to_normal`) since nothing else in
+  the plain-editor path below handles Escape at all; every other key falls
+  through unchanged. In the other four modes, every key routes through
+  `state.handle_vim_key(key, shift, key_char)` first; when it returns
+  `true` the function returns immediately (already fully handled), when it
+  returns `false` (Normal-mode navigation) execution continues down into
+  the same Up/Down check and match block the plain editor uses.
+- `render()` restructured: the top-level element returned used to be the
+  scrollable/focusable editor div itself. It's now a `flex_col` wrapper
+  holding two `flex_col` siblings — the scrollable editor div (unchanged
+  internally, still the one `.track_scroll(&self.scroll_handle)` tracks)
+  and a new fixed-height mode-indicator div below it, showing
+  `-- INSERT --` / `-- VISUAL --` / `-- VISUAL LINE --` / `-- COMMAND --`,
+  or an empty string for Normal mode / vim disabled (spec 5.1: "nothing
+  shown for Normal"). The indicator div is always present at a fixed
+  height rather than conditionally added/removed, so switching modes
+  doesn't resize (and force a re-wrap of) the editor's own viewport.
+  `.flex_1()`/`.min_w_0()`/`.min_h_0()` moved from the old top-level div to
+  the new wrapper, since the wrapper is now what sits in `main_window.rs`'s
+  flex row; the inner scrollable div keeps its own `.flex_1()` to claim the
+  wrapper's remaining vertical space after the indicator.
+  - **Deliberately not** nested inside the scrollable div, despite the
+    task text's literal wording ("inside the outer div... after the line
+    children") — that wording predates the wrap-system rework earlier in
+    this branch. Nesting it inside would make the indicator scroll with
+    content and shrink/grow `scroll_handle.bounds()`/`max_offset()` every
+    time the mode changed, since both are derived from that div's own
+    child content plus its box size. As a sibling instead, `scroll_handle`
+    still tracks only the scrollable div, and GPUI's own layout
+    recomputes that div's `.bounds()` correctly reflecting the reduced
+    viewport height (indicator's height subtracted) automatically —
+    `scroll_to_cursor` needed no code changes for this.
+
+### Verification
+
+- `cargo check`: clean (only pre-existing dead-code warnings for
+  vim-motion-prep functions from Tasks A-C not yet wired to any key, plus
+  the newly-added `VimMode` variants/fields not yet used by anything beyond
+  Task D — expected, since Tasks E-I aren't implemented).
+- `cargo test`: 194 passed, 0 failed (190 in the bin crate, incl. 34 new
+  for this task: 17 for the ten mode-transition methods (including boundary
+  cases — `o`/`O` on the first/last line and on an empty document) and 17
+  for `handle_vim_key`'s dispatch across all five modes; 4 in
+  `tests/parse_testing.rs`).
+- `./run.sh`: launched and ran for 5s without a panic or crash (same
+  headless-sandbox EGL/MESA warnings as every prior task in this document —
+  `MESA: error: ZINK: failed to choose pdev`), confirming the `render()`
+  layout restructure doesn't break at runtime. **Not visually verified** —
+  no screenshot capability was available to confirm the indicator actually
+  renders the right text at the right position, or that scrolling still
+  feels correct with the slightly-shrunk viewport. Confirm on a machine
+  with a working display: press `i`/`Escape`, `v`/`Escape`, `V`/`Escape`,
+  `:`/`Escape` and check the indicator text at each step; confirm the
+  cursor still tracks correctly near the bottom edge of a scrolled long
+  document (Task B/C's scroll-margin fix depends on `scroll_handle.bounds()`
+  being correct post-restructure, which is reasoned through above but
+  untested on real hardware).

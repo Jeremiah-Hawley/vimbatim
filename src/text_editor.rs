@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::auto_scroll::AutoScroller;
-use crate::state::AppState;
+use crate::state::{AppState, VimMode};
 
 /// Approximate monospace glyph width, used only to convert a mouse click's
 /// pixel X position into a character column within its row. This is an
@@ -245,6 +245,19 @@ impl TextEditor {
                     self.state.update(cx, |state, _cx| state.select_all());
                     cx.notify();
                 }
+                "z" => {
+                    // Ctrl+Z: undo. Ctrl+Shift+Z: redo (common alternate
+                    // binding alongside Ctrl+Y) (spec 4.5).
+                    self.state.update(cx, |state, _cx| {
+                        if ks.modifiers.shift { state.redo() } else { state.undo() }
+                    });
+                    cx.notify();
+                }
+                "y" => {
+                    // Ctrl+Y: redo (spec 4.5).
+                    self.state.update(cx, |state, _cx| state.redo());
+                    cx.notify();
+                }
                 // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
                 // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just
                 // moving (spec 4.3). Plain (unmodified) arrow/Home/End are handled below.
@@ -279,6 +292,44 @@ impl TextEditor {
         }
 
         let key = ks.key.as_str();
+
+        // Vim mode routing (Task D). Insert mode behaves like the plain
+        // editor below except for Escape, which nothing in the plain-editor
+        // match block otherwise handles. The other four modes route through
+        // handle_vim_key first; it returns false only for Normal-mode
+        // navigation keys it deliberately lets fall through (see its own
+        // doc comment) — everything else it returns true for is fully
+        // handled here and shouldn't reach the plain-editor logic below.
+        let (vim_enabled, vim_mode) = {
+            let state = self.state.read(cx);
+            let mode = state.tabs.get(state.active_tab).map(|t| t.vim_mode).unwrap_or_default();
+            (state.vim_enabled, mode)
+        };
+        if vim_enabled {
+            if vim_mode == VimMode::Insert {
+                if key == "escape" {
+                    self.state.update(cx, |state, _cx| state.vim_exit_to_normal());
+                    cx.notify();
+                    self.scroll_to_cursor(cx);
+                    return;
+                }
+                // else: fall through to the plain-editor handling below.
+            } else {
+                let key_char = ks.key_char.as_deref();
+                let consumed = self.state.update(cx, |state, cx| {
+                    let handled = state.handle_vim_key(key, ks.modifiers.shift, key_char);
+                    if handled { cx.notify(); }
+                    handled
+                });
+                if consumed {
+                    cx.notify();
+                    self.scroll_to_cursor(cx);
+                    return;
+                }
+                // else: a Normal-mode navigation key fell through — continue
+                // below to the same handling the plain editor uses.
+            }
+        }
 
         // Up/Down move by *visual* row (not logical line) so wrapped lines'
         // continuation rows are reachable — handled separately from the
@@ -356,6 +407,19 @@ impl Render for TextEditor {
             .get(state.active_tab)
             .and_then(|t| t.selection)
             .map(|(a, f)| (a.min(f), a.max(f)));
+        // Mode indicator text (spec 5.1) — None for Normal mode or when vim
+        // mode is off, matching "nothing shown for Normal".
+        let mode_indicator_text: Option<&'static str> = if state.vim_enabled {
+            state.tabs.get(state.active_tab).and_then(|t| match t.vim_mode {
+                VimMode::Normal => None,
+                VimMode::Insert => Some("-- INSERT --"),
+                VimMode::Visual => Some("-- VISUAL --"),
+                VimMode::VisualLine => Some("-- VISUAL LINE --"),
+                VimMode::Command => Some("-- COMMAND --"),
+            })
+        } else {
+            None
+        };
         let _ = state;
 
         let is_focused = self.focus_handle.is_focused(window);
@@ -382,13 +446,29 @@ impl Render for TextEditor {
         let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
         let cursor_visual_row = is_focused.then(|| visual_row_for_line_col(&rows, cursor_line, cursor_col));
 
+        // Outer wrapper: takes the same slot in main_window's flex row the
+        // scrollable editor div used to occupy directly (`.flex_1()`,
+        // `.min_w_0()`, `.min_h_0()` all moved here from that div below), and
+        // stacks [scrollable editor, mode indicator] as siblings in a column.
+        // The indicator must be a *sibling* of the scrollable div, not nested
+        // inside it — nesting it inside would make it scroll with content and
+        // perturb `scroll_handle.bounds()`/`max_offset()`, which
+        // `scroll_to_cursor` and the wrap math both depend on reflecting only
+        // the editor's own viewport.
         div()
-            // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
-            // scroll position per unique element ID (requires Stateful<Div>).
-            .id("text-editor")
-            .key_context("TextEditor")
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::handle_key_down))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                div()
+                    // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
+                    // scroll position per unique element ID (requires Stateful<Div>).
+                    .id("text-editor")
+                    .key_context("TextEditor")
+                    .track_focus(&self.focus_handle)
+                    .on_key_down(cx.listener(Self::handle_key_down))
             // Clicking the editor area claims keyboard focus and moves the
             // cursor to the clicked position (spec 4.1 click-to-position).
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -445,6 +525,15 @@ impl Render for TextEditor {
             }))
             .flex_1()
             .min_w_0()
+            // Critical (see main_window.rs's `min_h_0` comment for the same
+            // pattern): this div is now a flex_1 child on a flex_col's main
+            // axis (its parent wrapper, added by this task) rather than a
+            // cross-axis-stretched flex_row child like before — on the main
+            // axis a flex item's default min-height is its content size, so
+            // without this a document taller than the viewport could grow
+            // the div past the wrapper's allocated height instead of
+            // scrolling internally.
+            .min_h_0()
             .bg(rgb(0x1e1e1e))
             .overflow_y_scroll()
             // Prevent long lines from expanding the editor div beyond its flex_1 allocation.
@@ -522,6 +611,20 @@ impl Render for TextEditor {
                             .min_h(px(LINE_HEIGHT_PX))
                             .child(content_el)
                     }))
+            ) // closes the lines-container .child(...)
+            ) // closes the scrollable-editor .child(...) on the wrapper
+            .child(
+                // Mode indicator (spec 5.1) — a sibling below the scrollable
+                // editor div, at a fixed height so switching modes doesn't
+                // resize (and re-wrap) the editor's own viewport.
+                div()
+                    .h(px(LINE_HEIGHT_PX))
+                    .px(px(16.0))
+                    .bg(rgb(0x1e1e1e))
+                    .font_family("monospace")
+                    .text_sm()
+                    .text_color(rgb(0xd4d4d4))
+                    .child(mode_indicator_text.unwrap_or("")),
             )
     }
 }

@@ -1,7 +1,29 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::docx_parser::{DocxDocument, create_new_docx, parse_docx};
+
+/// Rapid edits within this window of the previous undo-stack push are
+/// coalesced into the same undo step (spec 4.5), so e.g. typing a whole
+/// word doesn't need one Ctrl+Z per character.
+const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(300);
+/// Maximum number of snapshots kept on a tab's undo stack (spec 4.5).
+const UNDO_STACK_CAP: usize = 200;
+
+/// The vim mode a tab's editing state is currently in (spec 5.1). `Insert`
+/// behaves like the plain (non-vim) editor; the other four modes swallow
+/// keystrokes that aren't part of their own command grammar rather than
+/// letting them fall through to text insertion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VimMode {
+    #[default]
+    Normal,
+    Insert,
+    Visual,
+    VisualLine,
+    Command,
+}
 
 /// A single editor tab, representing either an unsaved "new" tab or an opened .docx file.
 #[derive(Clone, Debug)]
@@ -21,6 +43,25 @@ pub struct Tab {
     /// Anchor is where the selection started; focus tracks the cursor.
     /// Normalise to (min, max) before any range operation. `None` means no selection.
     pub selection: Option<(usize, usize)>,
+    /// Snapshots of `content` taken before each edit, most recent last.
+    /// `undo()` pops from here onto `redo_stack`. Capped at UNDO_STACK_CAP.
+    pub undo_stack: Vec<String>,
+    /// Snapshots of `content` that `undo()` has moved past, most recent
+    /// last. `redo()` pops from here back onto `undo_stack`. Cleared
+    /// whenever a new edit is made, since it invalidates that history.
+    pub redo_stack: Vec<String>,
+    /// When the most recent undo-stack push happened, used to coalesce a
+    /// burst of rapid edits (e.g. typing) into a single undo step rather
+    /// than one per keystroke. `None` means no edit has been made yet, or
+    /// the coalescing window was deliberately broken (e.g. by an undo/redo).
+    pub last_edit_at: Option<Instant>,
+    /// The tab's current vim mode. Only meaningful when `AppState.vim_enabled`
+    /// is true; unused otherwise.
+    pub vim_mode: VimMode,
+    /// In-progress `:command` text while `vim_mode == Command`. Not yet
+    /// populated by Task D (entry/exit only) — reserved for Task H's
+    /// command parsing and Task E's count-prefix handling.
+    pub vim_command_buf: String,
 }
 
 impl Tab {
@@ -38,6 +79,11 @@ impl Tab {
             document: None,
             cursor: 0,
             selection: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit_at: None,
+            vim_mode: VimMode::Normal,
+            vim_command_buf: String::new(),
         }
     }
 
@@ -61,6 +107,11 @@ impl Tab {
             document: None,
             cursor: 0,
             selection: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit_at: None,
+            vim_mode: VimMode::Normal,
+            vim_command_buf: String::new(),
         }
     }
 }
@@ -112,6 +163,11 @@ pub struct AppState {
     pub settings_visible: bool,
     pub working_directory: PathBuf,
     pub file_tree: Vec<FileNode>,
+    /// Whether vim keybindings are active. Hardcoded to `true` for now —
+    /// wiring this to settings.conf's `[KEYBINDS] vim` flag (spec 2.3) is a
+    /// separate, explicitly deferred gap, not part of the Task A-I vim mode
+    /// breakdown.
+    pub vim_enabled: bool,
 }
 
 impl AppState {
@@ -135,6 +191,7 @@ impl AppState {
             settings_visible: false,
             working_directory,
             file_tree,
+            vim_enabled: true,
         }
     }
 
@@ -263,14 +320,65 @@ impl AppState {
         }
     }
 
+    fn push_undo_snapshot(&mut self) {
+        /*
+         * Pushes the active tab's current `content` onto its undo stack
+         * before a mutation, so `undo()` can later restore it. Rapid edits
+         * within UNDO_COALESCE_WINDOW of the previous push are coalesced
+         * into the same undo step (spec 4.5) by skipping the push entirely
+         * — the snapshot already on top of the stack still reflects "before
+         * this whole burst of typing", which is what one undo should revert
+         * to. Any new edit clears the redo stack, since it invalidates the
+         * futures those redo entries pointed to. Capped at UNDO_STACK_CAP,
+         * dropping the oldest snapshot once exceeded.
+         */
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        let now = Instant::now();
+        let within_coalesce_window = tab.last_edit_at
+            .map(|t| now.duration_since(t) < UNDO_COALESCE_WINDOW)
+            .unwrap_or(false);
+        tab.last_edit_at = Some(now);
+        if within_coalesce_window {
+            return;
+        }
+        tab.undo_stack.push(tab.content.clone());
+        if tab.undo_stack.len() > UNDO_STACK_CAP {
+            tab.undo_stack.remove(0);
+        }
+        tab.redo_stack.clear();
+    }
+
+    fn delete_selection_raw(&mut self) {
+        /*
+         * The actual selection-deletion mutation, without pushing an undo
+         * snapshot. Used internally by insert_char/insert_str/backspace,
+         * which already push their own snapshot capturing the true pre-edit
+         * state (selection included) before delegating here — pushing again
+         * here would create a spurious intermediate undo step between "text
+         * with selection" and "text with selection deleted, before the new
+         * character lands".
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if let Some((a, f)) = tab.selection.take() {
+                let (start, end) = (a.min(f), a.max(f));
+                tab.content.drain(start..end);
+                tab.cursor    = start;
+                tab.is_modified = true;
+            }
+        }
+    }
+
     pub fn insert_char(&mut self, ch: char) {
         /*
          * Inserts a character at the cursor position and advances the cursor.
          * If a selection is active it is deleted first, mirroring the behaviour
-         * a user expects when typing over highlighted text.
+         * a user expects when typing over highlighted text. Pushes an undo
+         * snapshot before either happens, so one undo restores the pre-edit
+         * text (selection included) in a single step.
          */
+        self.push_undo_snapshot();
         if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
-            self.delete_selection();
+            self.delete_selection_raw();
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.content.insert(tab.cursor, ch);
@@ -283,14 +391,18 @@ impl AppState {
         /*
          * Deletes the character immediately before the cursor. If a selection is
          * active the whole selection is deleted instead, leaving the cursor at the
-         * start of the deleted range.
+         * start of the deleted range. Pushes an undo snapshot before any actual
+         * mutation — not before the at-document-start no-op check, so a no-op
+         * backspace doesn't create an empty undo step.
          */
         if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
-            self.delete_selection();
+            self.delete_selection(); // already pushes its own undo snapshot
             return;
         }
+        let at_document_start = self.tabs.get(self.active_tab).map(|t| t.cursor == 0).unwrap_or(true);
+        if at_document_start { return; }
+        self.push_undo_snapshot();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            if tab.cursor == 0 { return; }
             // Walk back one char boundary
             let prev = tab.content[..tab.cursor]
                 .char_indices().last().map(|(i, _)| i).unwrap_or(0);
@@ -302,18 +414,58 @@ impl AppState {
 
     pub fn delete_selection(&mut self) {
         /*
-         * Drains the byte range covered by the active selection from `content`
-         * and repositions the cursor at the range start. Clears the selection.
-         * No-op when `selection` is `None`.
+         * Public entry point for deleting the active selection as its own
+         * standalone edit (e.g. Cut, or a future Delete key) — pushes an
+         * undo snapshot first (only when there's actually a selection to
+         * delete, so a no-op call doesn't create an empty undo step), then
+         * delegates to the raw deletion. Clears the selection. No-op when
+         * `selection` is `None`.
          */
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            if let Some((a, f)) = tab.selection.take() {
-                let (start, end) = (a.min(f), a.max(f));
-                tab.content.drain(start..end);
-                tab.cursor    = start;
-                tab.is_modified = true;
-            }
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.push_undo_snapshot();
         }
+        self.delete_selection_raw();
+    }
+
+    pub fn undo(&mut self) {
+        /*
+         * Restores the most recent undo snapshot as the active tab's
+         * content, pushing the content being replaced onto the redo stack
+         * so `redo()` can restore it. No-op when there's nothing to undo.
+         *
+         * Only `content` is snapshotted (spec 4.5's undo_stack is
+         * `Vec<String>`), so the cursor isn't restored to its exact
+         * pre-edit position — it's clamped into the restored content's
+         * bounds and onto its nearest valid char boundary instead, since
+         * the old byte offset may no longer even be one.
+         */
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        let Some(previous) = tab.undo_stack.pop() else { return };
+        let current = std::mem::replace(&mut tab.content, previous);
+        tab.redo_stack.push(current);
+        tab.selection = None;
+        tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
+        tab.is_modified = true;
+        // Break the coalescing window so the next edit doesn't merge into
+        // whatever was on top of the undo stack before this undo.
+        tab.last_edit_at = None;
+    }
+
+    pub fn redo(&mut self) {
+        /*
+         * The undo counterpart: restores the most recently undone content
+         * from the redo stack, pushing the content being replaced back onto
+         * the undo stack. No-op when there's nothing to redo. Cursor
+         * handling mirrors `undo()`.
+         */
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        let Some(next) = tab.redo_stack.pop() else { return };
+        let current = std::mem::replace(&mut tab.content, next);
+        tab.undo_stack.push(current);
+        tab.selection = None;
+        tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
+        tab.is_modified = true;
+        tab.last_edit_at = None;
     }
 
     pub fn copy_selection(&self) -> Option<String> {
@@ -347,10 +499,14 @@ impl AppState {
          * Inserts a string at the current cursor position, replacing any active
          * selection first. Advances the cursor past the inserted text.
          * Mirrors insert_char but handles the multi-char payloads that clipboard
-         * paste produces.
+         * paste produces. An empty string is a true no-op (returns before
+         * pushing an undo snapshot) — otherwise pasting empty clipboard
+         * content would create an undo step that changes nothing.
          */
+        if text.is_empty() { return; }
+        self.push_undo_snapshot();
         if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
-            self.delete_selection();
+            self.delete_selection_raw();
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.content.insert_str(tab.cursor, text);
@@ -695,6 +851,234 @@ impl AppState {
          */
         self.file_tree = scan_directory(&self.working_directory);
     }
+
+    // ── vim mode transitions (spec 5.1) ─────────────────────────────────────────
+
+    pub fn vim_enter_insert_before_cursor(&mut self) {
+        /*
+         * 'i' — enters Insert mode at the current cursor position, unchanged.
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.vim_mode = VimMode::Insert;
+            tab.selection = None;
+        }
+    }
+
+    pub fn vim_enter_insert_line_start(&mut self) {
+        /*
+         * 'I' — moves to the line's first non-blank character (vim's `^`
+         * semantics, not literal byte 0 of the line) before entering Insert.
+         */
+        self.move_line_first_nonblank();
+        self.vim_enter_insert_before_cursor();
+    }
+
+    pub fn vim_enter_insert_after_cursor(&mut self) {
+        /*
+         * 'a' — moves one character right (clamped at document end) before
+         * entering Insert, so typed text lands after the character the
+         * cursor was on rather than before it.
+         */
+        self.move_right();
+        self.vim_enter_insert_before_cursor();
+    }
+
+    pub fn vim_enter_insert_line_end(&mut self) {
+        /*
+         * 'A' — moves to the end of the current line before entering Insert.
+         */
+        self.move_line_end();
+        self.vim_enter_insert_before_cursor();
+    }
+
+    pub fn vim_open_line_below(&mut self) {
+        /*
+         * 'o' — moves to the end of the current line and inserts a newline
+         * there via insert_char (undo-tracked per Task C), which naturally
+         * leaves the cursor on the new blank line created below.
+         */
+        self.move_line_end();
+        self.insert_char('\n');
+        self.vim_enter_insert_before_cursor();
+    }
+
+    pub fn vim_open_line_above(&mut self) {
+        /*
+         * 'O' — moves to the start of the current line and inserts a
+         * newline immediately before it (undo-tracked via insert_char),
+         * then pulls the cursor back onto the new blank line. insert_char
+         * always advances the cursor past what it inserted, which for 'O'
+         * lands it at the start of the old line now pushed down a row —
+         * one line too far, unlike 'o' where that's exactly where we want
+         * to end up.
+         */
+        self.move_line_start();
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let new_line_start = tab.cursor;
+        self.insert_char('\n');
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.cursor = new_line_start;
+        }
+        self.vim_enter_insert_before_cursor();
+    }
+
+    pub fn vim_enter_visual(&mut self) {
+        /*
+         * 'v' — character-wise Visual mode, selecting the single character
+         * under the cursor (matching real vim's immediate 1-char selection
+         * on entry). Degenerates to a zero-width selection at document end,
+         * where there's no character under the cursor.
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.vim_mode = VimMode::Visual;
+            let end = char_right(&tab.content, tab.cursor);
+            tab.selection = Some((tab.cursor, end));
+        }
+    }
+
+    pub fn vim_enter_visual_line(&mut self) {
+        /*
+         * 'V' — line-wise Visual mode, selecting the whole current line
+         * including its trailing newline when one exists, so a future
+         * line-wise operator acts on the complete line.
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.vim_mode = VimMode::VisualLine;
+            let start = line_start(&tab.content, tab.cursor);
+            let end = line_end(&tab.content, tab.cursor);
+            let end_with_newline = if end < tab.content.len() { end + 1 } else { end };
+            tab.selection = Some((start, end_with_newline));
+        }
+    }
+
+    pub fn vim_enter_command(&mut self) {
+        /*
+         * ':' — enters Command mode. Actual command text capture/parsing/
+         * dispatch (spec 5.7) is Task H's job; this handles only the entry
+         * transition.
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.vim_mode = VimMode::Command;
+        }
+    }
+
+    pub fn vim_exit_to_normal(&mut self) {
+        /*
+         * Escape (from Insert/Visual/VisualLine/Command), or the Visual/
+         * VisualLine toggle-off key — every "-> Normal" transition in spec
+         * 5.1's table shares this one method.
+         */
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.vim_mode = VimMode::Normal;
+            tab.selection = None;
+            tab.vim_command_buf.clear();
+        }
+    }
+
+    pub fn handle_vim_key(&mut self, key: &str, shift: bool, key_char: Option<&str>) -> bool {
+        /*
+         * Top-level vim key dispatcher, called by text_editor.rs for every
+         * keystroke while `vim_enabled` is true and the active tab isn't in
+         * Insert mode (Insert falls through to plain-editor handling by the
+         * caller, except for Escape which it checks separately). Returns
+         * true when the key was consumed, false when the caller should fall
+         * through to its own (non-vim) handling instead.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return false };
+        match tab.vim_mode {
+            VimMode::Normal => self.handle_vim_normal_key(key, shift, key_char),
+            VimMode::Visual | VimMode::VisualLine => {
+                self.handle_vim_visual_key(key, shift);
+                true
+            }
+            VimMode::Command => {
+                self.handle_vim_command_key(key);
+                true
+            }
+            VimMode::Insert => false,
+        }
+    }
+
+    fn handle_vim_normal_key(&mut self, key: &str, shift: bool, key_char: Option<&str>) -> bool {
+        /*
+         * Handles Normal-mode key presses. Only Task D's mode-switch keys
+         * are implemented here — Task E adds real vim motions/operators.
+         * Named navigation keys (arrow keys, Home/End) are deliberately let
+         * through (return false) so the editor stays usable for moving
+         * around before Task E lands; a plain cursor move can't corrupt
+         * anything since Normal mode has no active selection to
+         * accidentally clear. Everything else — in particular single
+         * printable characters — is swallowed: real vim's Normal mode never
+         * lets an unrecognized keystroke fall through to text insertion,
+         * whether or not that specific command exists yet.
+         *
+         * ':' detection checks both the unshifted base key GPUI reports in
+         * `key` (";" with shift held) and `key_char` (the actual shifted
+         * character, when GPUI supplies it), since which of the two
+         * reliably carries shifted punctuation hasn't been confirmed
+         * against a real keyboard yet.
+         */
+        let is_colon = (key == ";" && shift) || key_char == Some(":");
+        if is_colon {
+            self.vim_enter_command();
+            return true;
+        }
+        match (key, shift) {
+            ("i", false) => { self.vim_enter_insert_before_cursor(); true }
+            ("i", true)  => { self.vim_enter_insert_line_start(); true }
+            ("a", false) => { self.vim_enter_insert_after_cursor(); true }
+            ("a", true)  => { self.vim_enter_insert_line_end(); true }
+            ("o", false) => { self.vim_open_line_below(); true }
+            ("o", true)  => { self.vim_open_line_above(); true }
+            ("v", false) => { self.vim_enter_visual(); true }
+            ("v", true)  => { self.vim_enter_visual_line(); true }
+            ("left", _) | ("right", _) | ("up", _) | ("down", _) | ("home", _) | ("end", _) => false,
+            _ => true,
+        }
+    }
+
+    fn handle_vim_visual_key(&mut self, key: &str, shift: bool) {
+        /*
+         * Visual/VisualLine consume every key (the caller always treats
+         * this mode as handled) since letting navigation fall through here
+         * would clear the active selection via move_left/right/etc.'s
+         * selection-clearing behaviour, corrupting the selection instead of
+         * extending it — unlike Normal mode, which has no selection to
+         * protect. Real selection-extending motions are Task E/G's job.
+         *
+         * Only the exact exits spec 5.1 lists are implemented: lowercase
+         * 'v' closes Visual, shifted 'V' closes VisualLine. Real vim also
+         * lets 'v' and 'V' switch directly between the two Visual variants
+         * without returning to Normal — that's not in the spec table and is
+         * out of scope here, so the mismatched key/shift combination is
+         * just swallowed as a no-op.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let mode = tab.vim_mode;
+        if key == "escape" {
+            self.vim_exit_to_normal();
+            return;
+        }
+        match (mode, key, shift) {
+            (VimMode::Visual, "v", false) => self.vim_exit_to_normal(),
+            (VimMode::VisualLine, "v", true) => self.vim_exit_to_normal(),
+            _ => {}
+        }
+    }
+
+    fn handle_vim_command_key(&mut self, key: &str) {
+        /*
+         * Task D implements only the entry/exit half of Command mode —
+         * actual `:`-command text capture, parsing, and dispatch (spec 5.7)
+         * is Task H's job. Escape discards and Enter both return to Normal
+         * without executing anything; every other key is swallowed rather
+         * than falling through to text insertion, which would be actively
+         * wrong for Command mode.
+         */
+        if key == "escape" || key == "enter" {
+            self.vim_exit_to_normal();
+        }
+    }
 }
 
 /// Recursively scans `dir` and builds a tree of FileNodes containing only .docx
@@ -765,6 +1149,22 @@ fn extend_selection(tab: &mut Tab, new_cursor: usize) {
     let anchor = tab.selection.map(|(a, _)| a).unwrap_or(tab.cursor);
     tab.selection = Some((anchor, new_cursor));
     tab.cursor = new_cursor;
+}
+
+fn clamp_to_char_boundary(content: &str, byte: usize) -> usize {
+    /*
+     * Clamps an arbitrary byte offset (e.g. a cursor position carried over
+     * from before an undo/redo swapped in different content) to `content`'s
+     * length and onto the nearest valid UTF-8 char boundary at or before it
+     * — the offset may point past the end of the new content, or land
+     * mid-character if the swap changed what's at that byte position.
+     */
+    let byte = byte.min(content.len());
+    if content.is_char_boundary(byte) {
+        byte
+    } else {
+        (0..byte).rev().find(|&i| content.is_char_boundary(i)).unwrap_or(0)
+    }
 }
 
 fn char_left(content: &str, cursor: usize) -> usize {
@@ -1021,6 +1421,11 @@ mod tests {
                 document: None,
                 cursor,
                 selection,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                last_edit_at: None,
+                vim_mode: VimMode::Normal,
+                vim_command_buf: String::new(),
             }],
             active_tab: 0,
             next_tab_id: 1,
@@ -1028,6 +1433,7 @@ mod tests {
             settings_visible: false,
             working_directory: std::path::PathBuf::from("."),
             file_tree: vec![],
+            vim_enabled: true,
         };
         state
     }
@@ -1580,5 +1986,498 @@ mod tests {
         state.extend_selection_to_line_col(0, 0);
         assert_eq!(state.tabs[0].selection, Some((0, 0)));
         assert_eq!(state.tabs[0].cursor, 0);
+    }
+
+    // ── clamp_to_char_boundary ───────────────────────────────────────────────
+
+    #[test]
+    fn test_clamp_to_char_boundary_already_valid_is_unchanged() {
+        assert_eq!(clamp_to_char_boundary("hello", 3), 3);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_past_end_clamps_to_len() {
+        assert_eq!(clamp_to_char_boundary("hi", 99), 2);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_mid_multibyte_char_walks_back() {
+        // "café" — 'é' is 2 bytes, spanning byte offsets 3..5. Offset 4 sits
+        // inside it and must walk back to 3, the char's own start.
+        assert_eq!(clamp_to_char_boundary("café", 4), 3);
+    }
+
+    #[test]
+    fn test_clamp_to_char_boundary_zero_is_always_valid() {
+        assert_eq!(clamp_to_char_boundary("", 0), 0);
+    }
+
+    // ── undo / redo ──────────────────────────────────────────────────────────
+
+    /// Rewinds the active tab's `last_edit_at` far enough into the past that
+    /// the next edit's `push_undo_snapshot` call will not coalesce with it —
+    /// lets tests control coalescing deterministically without sleeping.
+    fn break_coalesce_window(state: &mut AppState) {
+        if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+            tab.last_edit_at = Some(Instant::now() - UNDO_COALESCE_WINDOW - Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn test_insert_char_pushes_undo_snapshot() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        assert_eq!(state.tabs[0].undo_stack, vec!["ab".to_string()]);
+    }
+
+    #[test]
+    fn test_rapid_inserts_coalesce_into_one_undo_step() {
+        // Two inserts with no time passing between them (the normal case for
+        // fast typing) must land as ONE undo step, not two.
+        let mut state = make_state("a", 1, None);
+        state.insert_char('b');
+        state.insert_char('c');
+        assert_eq!(state.tabs[0].undo_stack, vec!["a".to_string()]);
+        assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_inserts_outside_coalesce_window_are_separate_undo_steps() {
+        let mut state = make_state("a", 1, None);
+        state.insert_char('b');
+        break_coalesce_window(&mut state);
+        state.insert_char('c');
+        assert_eq!(state.tabs[0].undo_stack, vec!["a".to_string(), "ab".to_string()]);
+    }
+
+    #[test]
+    fn test_undo_restores_previous_content() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        assert_eq!(state.tabs[0].content, "abc");
+        state.undo();
+        assert_eq!(state.tabs[0].content, "ab");
+    }
+
+    #[test]
+    fn test_undo_clears_selection_and_marks_modified() {
+        let mut state = make_state("ab", 2, Some((0, 1)));
+        state.tabs[0].undo_stack.push("ab".to_string());
+        state.undo();
+        assert!(state.tabs[0].selection.is_none());
+        assert!(state.tabs[0].is_modified);
+    }
+
+    #[test]
+    fn test_undo_clamps_cursor_into_shorter_restored_content() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c'); // content = "abc", cursor = 3
+        state.undo();
+        // Restored content is "ab" (len 2); cursor must not remain at 3.
+        assert_eq!(state.tabs[0].content, "ab");
+        assert!(state.tabs[0].cursor <= state.tabs[0].content.len());
+        assert!(state.tabs[0].content.is_char_boundary(state.tabs[0].cursor));
+    }
+
+    #[test]
+    fn test_undo_with_empty_stack_is_noop() {
+        let mut state = make_state("abc", 3, None);
+        state.undo();
+        assert_eq!(state.tabs[0].content, "abc");
+        assert_eq!(state.tabs[0].cursor, 3);
+    }
+
+    #[test]
+    fn test_undo_pushes_onto_redo_stack() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        state.undo();
+        assert_eq!(state.tabs[0].redo_stack, vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn test_redo_restores_undone_content() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        state.undo();
+        assert_eq!(state.tabs[0].content, "ab");
+        state.redo();
+        assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_redo_with_empty_stack_is_noop() {
+        let mut state = make_state("abc", 3, None);
+        state.redo();
+        assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_new_edit_after_undo_clears_redo_stack() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        state.undo();
+        assert!(!state.tabs[0].redo_stack.is_empty());
+        break_coalesce_window(&mut state);
+        state.insert_char('d');
+        assert!(state.tabs[0].redo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_undo_stack_capped_at_200() {
+        let mut state = make_state("", 0, None);
+        for _ in 0..250 {
+            state.insert_char('x');
+            break_coalesce_window(&mut state); // force every insert onto its own step
+        }
+        assert_eq!(state.tabs[0].undo_stack.len(), 200);
+    }
+
+    #[test]
+    fn test_backspace_pushes_undo_snapshot() {
+        let mut state = make_state("abc", 3, None);
+        state.backspace();
+        assert_eq!(state.tabs[0].undo_stack, vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn test_backspace_noop_at_document_start_does_not_push_undo() {
+        let mut state = make_state("abc", 0, None);
+        state.backspace();
+        assert!(state.tabs[0].undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_backspace_over_selection_pushes_one_undo_step() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        state.backspace();
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn test_delete_selection_pushes_undo_snapshot() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        state.delete_selection();
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn test_delete_selection_noop_does_not_push_undo() {
+        let mut state = make_state("hello world", 5, None);
+        state.delete_selection();
+        assert!(state.tabs[0].undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_insert_str_pushes_undo_snapshot() {
+        let mut state = make_state("hello", 5, None);
+        state.insert_str(" world");
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn test_insert_str_empty_does_not_push_undo() {
+        let mut state = make_state("hello", 5, None);
+        state.insert_str("");
+        assert!(state.tabs[0].undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_insert_str_replacing_selection_pushes_one_undo_step() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        state.insert_str("goodbye");
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+    }
+
+    // ── vim mode-entry transitions (Task D) ─────────────────────────────────────
+
+    #[test]
+    fn test_vim_enter_insert_before_cursor_sets_mode_and_preserves_cursor() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_enter_insert_before_cursor();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+        assert_eq!(state.tabs[0].cursor, 2);
+    }
+
+    #[test]
+    fn test_vim_enter_insert_before_cursor_clears_selection() {
+        let mut state = make_state("hello", 2, Some((0, 2)));
+        state.vim_enter_insert_before_cursor();
+        assert_eq!(state.tabs[0].selection, None);
+    }
+
+    #[test]
+    fn test_vim_enter_insert_line_start_moves_to_first_nonblank() {
+        let mut state = make_state("  hello", 5, None);
+        state.vim_enter_insert_line_start();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+        assert_eq!(state.tabs[0].cursor, 2);
+    }
+
+    #[test]
+    fn test_vim_enter_insert_after_cursor_moves_right() {
+        let mut state = make_state("hello", 0, None);
+        state.vim_enter_insert_after_cursor();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+        assert_eq!(state.tabs[0].cursor, 1);
+    }
+
+    #[test]
+    fn test_vim_enter_insert_after_cursor_clamps_at_document_end() {
+        let mut state = make_state("hi", 2, None);
+        state.vim_enter_insert_after_cursor();
+        assert_eq!(state.tabs[0].cursor, 2);
+    }
+
+    #[test]
+    fn test_vim_enter_insert_line_end_moves_to_line_end() {
+        let mut state = make_state("hello\nworld", 0, None);
+        state.vim_enter_insert_line_end();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+        assert_eq!(state.tabs[0].cursor, 5); // byte offset of the '\n'
+    }
+
+    #[test]
+    fn test_vim_open_line_below_creates_new_line_and_places_cursor_on_it() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_open_line_below();
+        assert_eq!(state.tabs[0].content, "hello\n");
+        assert_eq!(state.tabs[0].cursor, 6);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn test_vim_open_line_below_pushes_undo_snapshot() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_open_line_below();
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn test_vim_open_line_below_on_last_line_of_multiline_doc() {
+        let mut state = make_state("first\nsecond", 8, None);
+        state.vim_open_line_below();
+        assert_eq!(state.tabs[0].content, "first\nsecond\n");
+        assert_eq!(state.tabs[0].cursor, 13);
+    }
+
+    #[test]
+    fn test_vim_open_line_below_on_empty_document() {
+        let mut state = make_state("", 0, None);
+        state.vim_open_line_below();
+        assert_eq!(state.tabs[0].content, "\n");
+        assert_eq!(state.tabs[0].cursor, 1);
+    }
+
+    #[test]
+    fn test_vim_open_line_above_inserts_before_current_line() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_open_line_above();
+        assert_eq!(state.tabs[0].content, "\nhello");
+        assert_eq!(state.tabs[0].cursor, 0);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn test_vim_open_line_above_pushes_undo_snapshot() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_open_line_above();
+        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn test_vim_open_line_above_on_second_line() {
+        let mut state = make_state("first\nsecond", 8, None);
+        state.vim_open_line_above();
+        assert_eq!(state.tabs[0].content, "first\n\nsecond");
+        assert_eq!(state.tabs[0].cursor, 6);
+    }
+
+    #[test]
+    fn test_vim_open_line_above_on_empty_document() {
+        let mut state = make_state("", 0, None);
+        state.vim_open_line_above();
+        assert_eq!(state.tabs[0].content, "\n");
+        assert_eq!(state.tabs[0].cursor, 0);
+    }
+
+    #[test]
+    fn test_vim_enter_visual_selects_char_under_cursor() {
+        let mut state = make_state("hello", 1, None);
+        state.vim_enter_visual();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Visual);
+        assert_eq!(state.tabs[0].selection, Some((1, 2)));
+    }
+
+    #[test]
+    fn test_vim_enter_visual_at_document_end_zero_width_selection() {
+        let mut state = make_state("hi", 2, None);
+        state.vim_enter_visual();
+        assert_eq!(state.tabs[0].selection, Some((2, 2)));
+    }
+
+    #[test]
+    fn test_vim_enter_visual_line_selects_whole_line_including_newline() {
+        let mut state = make_state("first\nsecond", 2, None); // on "first"
+        state.vim_enter_visual_line();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::VisualLine);
+        assert_eq!(state.tabs[0].selection, Some((0, 6))); // "first\n"
+    }
+
+    #[test]
+    fn test_vim_enter_visual_line_on_last_line_no_trailing_newline() {
+        let mut state = make_state("first\nsecond", 8, None);
+        state.tabs[0].cursor = 8; // on "second"
+        state.vim_enter_visual_line();
+        // "second" is the last line and has no trailing '\n' to include.
+        assert_eq!(state.tabs[0].selection, Some((6, 12)));
+    }
+
+    #[test]
+    fn test_vim_enter_command_sets_mode() {
+        let mut state = make_state("hello", 2, None);
+        state.vim_enter_command();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Command);
+    }
+
+    #[test]
+    fn test_vim_exit_to_normal_clears_selection_and_mode() {
+        let mut state = make_state("hello", 2, Some((0, 2)));
+        state.tabs[0].vim_mode = VimMode::Visual;
+        state.vim_exit_to_normal();
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+        assert_eq!(state.tabs[0].selection, None);
+    }
+
+    // ── handle_vim_key dispatch (Task D) ─────────────────────────────────────────
+
+    #[test]
+    fn test_handle_vim_key_normal_i_enters_insert() {
+        let mut state = make_state("hello", 0, None);
+        let handled = state.handle_vim_key("i", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn test_handle_vim_key_normal_colon_via_shift_semicolon_enters_command() {
+        let mut state = make_state("hello", 0, None);
+        let handled = state.handle_vim_key(";", true, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Command);
+    }
+
+    #[test]
+    fn test_handle_vim_key_normal_colon_via_key_char_enters_command() {
+        // Covers the case where GPUI reports the shifted character directly
+        // via key_char instead of (or in addition to) the base key + shift.
+        let mut state = make_state("hello", 0, None);
+        let handled = state.handle_vim_key(";", false, Some(":"));
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Command);
+    }
+
+    #[test]
+    fn test_handle_vim_key_normal_navigation_falls_through() {
+        let mut state = make_state("hello", 2, None);
+        let handled = state.handle_vim_key("left", false, None);
+        assert!(!handled);
+        // handle_vim_key itself must not move the cursor when it declines
+        // to consume the key — the caller applies the plain-editor movement.
+        assert_eq!(state.tabs[0].cursor, 2);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_vim_key_normal_unmapped_printable_is_swallowed() {
+        let mut state = make_state("hello", 2, None);
+        let handled = state.handle_vim_key("q", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].content, "hello"); // not inserted as text
+    }
+
+    #[test]
+    fn test_handle_vim_key_insert_mode_returns_false() {
+        let mut state = make_state("hello", 2, None);
+        state.tabs[0].vim_mode = VimMode::Insert;
+        let handled = state.handle_vim_key("x", false, None);
+        assert!(!handled);
+    }
+
+    #[test]
+    fn test_handle_vim_key_visual_escape_exits_to_normal() {
+        let mut state = make_state("hello", 2, Some((2, 3)));
+        state.tabs[0].vim_mode = VimMode::Visual;
+        let handled = state.handle_vim_key("escape", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+        assert_eq!(state.tabs[0].selection, None);
+    }
+
+    #[test]
+    fn test_handle_vim_key_visual_v_exits_to_normal() {
+        let mut state = make_state("hello", 2, Some((2, 3)));
+        state.tabs[0].vim_mode = VimMode::Visual;
+        let handled = state.handle_vim_key("v", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_vim_key_visual_shift_v_is_swallowed_without_mode_change() {
+        // Switching Visual -> VisualLine on shift-V isn't in spec 5.1's
+        // table and is out of scope for Task D; it should be swallowed,
+        // not fall through to text insertion, but also not change mode.
+        let mut state = make_state("hello", 2, Some((2, 3)));
+        state.tabs[0].vim_mode = VimMode::Visual;
+        let handled = state.handle_vim_key("v", true, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Visual);
+    }
+
+    #[test]
+    fn test_handle_vim_key_visual_line_shift_v_exits_to_normal() {
+        let mut state = make_state("hello", 2, Some((0, 5)));
+        state.tabs[0].vim_mode = VimMode::VisualLine;
+        let handled = state.handle_vim_key("v", true, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_vim_key_visual_line_plain_v_is_noop() {
+        let mut state = make_state("hello", 2, Some((0, 5)));
+        state.tabs[0].vim_mode = VimMode::VisualLine;
+        let handled = state.handle_vim_key("v", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::VisualLine);
+    }
+
+    #[test]
+    fn test_handle_vim_key_command_escape_exits_to_normal() {
+        let mut state = make_state("hello", 2, None);
+        state.tabs[0].vim_mode = VimMode::Command;
+        let handled = state.handle_vim_key("escape", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_vim_key_command_enter_exits_to_normal() {
+        let mut state = make_state("hello", 2, None);
+        state.tabs[0].vim_mode = VimMode::Command;
+        let handled = state.handle_vim_key("enter", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn test_handle_vim_key_command_other_key_is_swallowed_no_mode_change() {
+        let mut state = make_state("hello", 2, None);
+        state.tabs[0].vim_mode = VimMode::Command;
+        let handled = state.handle_vim_key("x", false, None);
+        assert!(handled);
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Command);
+        assert_eq!(state.tabs[0].content, "hello"); // not inserted as text
     }
 }
