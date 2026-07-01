@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, Window};
 
 use crate::state::AppState;
-use crate::text_editor::line_col_from_mouse_position;
+use crate::text_editor::{document_lines, line_col_from_mouse_position, visual_rows_for_viewport};
 
 /// How close a click-drag has to get to the top/bottom of the viewport
 /// before auto-scroll kicks in.
@@ -62,7 +62,6 @@ pub struct AutoScroller {
     scroll_handle: ScrollHandle,
     state: Entity<AppState>,
     last_mouse_position: Rc<Cell<Point<Pixels>>>,
-    num_lines: Rc<Cell<usize>>,
     running: Rc<Cell<bool>>,
 }
 
@@ -82,22 +81,20 @@ impl AutoScroller {
             scroll_handle,
             state,
             last_mouse_position: Rc::new(Cell::new(Point::default())),
-            num_lines: Rc::new(Cell::new(1)),
             running: Rc::new(Cell::new(false)),
         }
     }
 
-    pub fn notify(&self, position: Point<Pixels>, num_lines: usize, window: &mut Window) {
+    pub fn notify(&self, position: Point<Pixels>, window: &mut Window) {
         /*
          * Call on every `on_mouse_move` while a drag is active. Records the
-         * latest mouse position and line count (used by ticks that fire
-         * with no new mouse event), and starts the per-frame tick loop if
-         * the position is within the edge trigger zone and a loop isn't
-         * already running — an already-running loop picks up the new
-         * position on its own on the next tick, so this doesn't re-arm.
+         * latest mouse position (used by ticks that fire with no new mouse
+         * event), and starts the per-frame tick loop if the position is
+         * within the edge trigger zone and a loop isn't already running —
+         * an already-running loop picks up the new position on its own on
+         * the next tick, so this doesn't re-arm.
          */
         self.last_mouse_position.set(position);
-        self.num_lines.set(num_lines);
         if self.running.get() { return; }
         let bounds = self.scroll_handle.bounds();
         let delta = auto_scroll_delta(
@@ -159,7 +156,10 @@ impl AutoScroller {
         self.scroll_handle.set_offset(point(current.x, px(new_y)));
 
         let scroll_y = self.scroll_handle.offset().y.as_f32();
-        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, self.num_lines.get());
+        let content = self.state.read(cx).active_content().to_string();
+        let lines = document_lines(&content);
+        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
+        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);
             cx.notify();

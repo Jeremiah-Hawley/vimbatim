@@ -4,14 +4,24 @@ use gpui::*;
 use crate::auto_scroll::AutoScroller;
 use crate::state::AppState;
 
-/// Approximate monospace glyph metrics for the editor's `text_sm()`
-/// monospace font (14px), used only to convert a mouse click's pixel
-/// position into a character column/line. This is an estimate (0.6× font
-/// size, the typical monospace advance width), not real glyph shaping —
-/// precise hit-testing would require rendering lines through GPUI's
-/// InteractiveText/ShapedLine APIs instead of plain divs, which is a larger
-/// rework than click-to-position alone justifies right now.
+/// Approximate monospace glyph width, used only to convert a mouse click's
+/// pixel X position into a character column within its row. This is an
+/// estimate (0.6× font size, the typical monospace advance width), not real
+/// glyph shaping — precise X hit-testing would require rendering lines
+/// through GPUI's InteractiveText/ShapedLine APIs instead of plain divs,
+/// which is a larger rework than click-to-position alone justifies right
+/// now. Word-wrap decisions do *not* use this — see `char_width_fn`, which
+/// measures each character's real rendered width instead, since a single
+/// uniform estimate is wrong for narrow glyphs like '.' or '-' and folds
+/// lines dominated by them far earlier than their actual on-screen width
+/// would require.
 const CHAR_WIDTH_PX: f32 = 8.4;
+/// The editor's `text_sm()` resolves to 0.875rem, i.e. 14px at GPUI's
+/// default 16px rem_size (this app never overrides rem_size). Used to query
+/// real glyph widths for word-wrap via `TextSystem::layout_width`, which
+/// needs an explicit font size rather than reading it from render()'s
+/// ambient text style.
+const FONT_SIZE_PX: f32 = 14.0;
 /// Matches the `.min_h(px(20.0))` set on each line div in render().
 const LINE_HEIGHT_PX: f32 = 20.0;
 /// Matches the `.p(px(16.0))` set on the outer editor div in render().
@@ -67,16 +77,22 @@ impl TextEditor {
 
     fn scroll_to_cursor(&self, cx: &Context<Self>) {
         /*
-         * Scrolls vertically so the cursor line stays at least
-         * `SCROLL_MARGIN_LINES` lines inside the visible viewport. Called
+         * Scrolls vertically so the cursor's visual row stays at least
+         * `SCROLL_MARGIN_LINES` rows inside the visible viewport. Called
          * after every key event that could move the cursor.
+         *
+         * A wrapped logical line spans several visual rows, so the cursor's
+         * document-space Y position is resolved via the same
+         * `document_lines`/`build_visual_rows`/`visual_row_for_line_col`
+         * pipeline `render()` and `line_col_from_mouse_position` use —
+         * keeping all three in agreement about where each row actually sits.
          *
          * GPUI scroll offsets are ≤ 0: 0 means scrolled to the top, and
          * more-negative values mean the document has been scrolled further down.
          *
          * All positions here are in the same "content space" that
-         * `line_col_from_mouse_position` uses: line `i`'s top sits at
-         * `i * LINE_HEIGHT_PX`, with no padding baked into per-line offsets —
+         * `line_col_from_mouse_position` uses: visual row `i`'s top sits at
+         * `i * LINE_HEIGHT_PX`, with no padding baked into per-row offsets —
          * padding is only ever a one-time inset when converting to/from
          * screen space. `bounds().size.height` is the div's full border-box
          * height, which includes the top *and* bottom padding, so the actual
@@ -96,8 +112,16 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let cursor_line    = self.state.read(cx).cursor_line_col().0;
-        let cursor_top     = cursor_line as f32 * LINE_HEIGHT_PX;
+        let state = self.state.read(cx);
+        let content = state.active_content().to_string();
+        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let _ = state;
+
+        let lines = document_lines(&content);
+        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+        let visual_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
+
+        let cursor_top     = visual_row as f32 * LINE_HEIGHT_PX;
         let cursor_bottom  = cursor_top + LINE_HEIGHT_PX;
         let margin         = SCROLL_MARGIN_LINES * LINE_HEIGHT_PX;
 
@@ -122,6 +146,51 @@ impl TextEditor {
             let new_y = (viewport_h - margin - cursor_bottom).clamp(-max_y.max(0.0), 0.0);
             self.scroll_handle.set_offset(point(offset.x, px(new_y)));
         }
+    }
+
+    fn move_cursor_visual_row(&self, cx: &mut Context<Self>, delta: isize, extend: bool) {
+        /*
+         * Moves the cursor to the visual row `delta` rows above/below its
+         * current one (-1/+1 for Up/Down), preserving its on-screen column
+         * rather than its logical-line column.
+         *
+         * Without this, pressing Up from the row directly below a wrapped
+         * line would jump to the very first character of the line above
+         * (using that *logical* line's column), skipping right past its
+         * wrapped continuation rows entirely — landing on the wrong visual
+         * spot on screen. This rebuilds the same row table `render()`
+         * paints from, so "the row above" here always matches what's
+         * actually drawn one row up on screen.
+         *
+         * No-op past the first/last visual row. `extend` selects between
+         * `set_cursor_from_line_col` (Up/Down) and
+         * `extend_selection_to_line_col` (Shift+Up/Down), mirroring every
+         * other motion's plain/extending pair.
+         */
+        let state = self.state.read(cx);
+        let content = state.active_content().to_string();
+        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let _ = state;
+
+        let lines = document_lines(&content);
+        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+
+        let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
+        let (_, row_start, _) = rows[current_row];
+        let col_in_row = cursor_col - row_start;
+
+        let Some((target_line, target_col)) = visual_row_step(&rows, current_row, col_in_row, delta) else {
+            return; // no-op past the first/last visual row
+        };
+
+        self.state.update(cx, |state, cx| {
+            if extend {
+                state.extend_selection_to_line_col(target_line, target_col);
+            } else {
+                state.set_cursor_from_line_col(target_line, target_col);
+            }
+            cx.notify();
+        });
     }
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -210,6 +279,18 @@ impl TextEditor {
         }
 
         let key = ks.key.as_str();
+
+        // Up/Down move by *visual* row (not logical line) so wrapped lines'
+        // continuation rows are reachable — handled separately from the
+        // match below since it needs the current viewport's wrap layout,
+        // not just a plain AppState mutation.
+        if key == "up" || key == "down" {
+            let delta = if key == "up" { -1 } else { 1 };
+            self.move_cursor_visual_row(cx, delta, ks.modifiers.shift);
+            self.scroll_to_cursor(cx);
+            return;
+        }
+
         let consumed = self.state.update(cx, |state, cx| {
             match key {
                 "backspace" => { state.backspace(); cx.notify(); true }
@@ -219,8 +300,6 @@ impl TextEditor {
                 // Shift+<key> extends the selection instead of moving plainly (spec 4.3).
                 "left"      => { if ks.modifiers.shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
                 "right"     => { if ks.modifiers.shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
-                "up"        => { if ks.modifiers.shift { state.extend_up() } else { state.move_up() }; cx.notify(); true }
-                "down"      => { if ks.modifiers.shift { state.extend_down() } else { state.move_down() }; cx.notify(); true }
                 "home"      => { if ks.modifiers.shift { state.extend_line_start() } else { state.move_line_start() }; cx.notify(); true }
                 "end"       => { if ks.modifiers.shift { state.extend_line_end() } else { state.move_line_end() }; cx.notify(); true }
                 k if k.chars().count() == 1 => {
@@ -246,10 +325,16 @@ impl Render for TextEditor {
         /*
          * Renders the editor as a focusable, scrollable column.
          *
-         * Content is split on '\n' so each line is its own div — this preserves
-         * blank lines and avoids GPUI collapsing inline text across newlines.
+         * Content is split on '\n' into logical lines, then each logical
+         * line is word-wrapped into one or more fixed-height visual rows via
+         * `build_visual_rows` — this is what actually fixes long lines
+         * running off the right edge instead of wrapping. One div is
+         * painted per visual row, not per logical line, which keeps every
+         * row exactly `LINE_HEIGHT_PX` tall so click-to-position and
+         * scroll-to-cursor's pixel math (which assume a fixed row height)
+         * stay correct even when lines wrap.
          *
-         * The line `tab.cursor` actually points into is rendered as three
+         * The row `tab.cursor` actually points into is rendered as three
          * inline spans (text before / cursor cell / text after) so the cursor
          * marker sits at the real character position, rather than always
          * trailing the last line regardless of where the cursor is.
@@ -275,21 +360,27 @@ impl Render for TextEditor {
 
         let is_focused = self.focus_handle.is_focused(window);
 
-        let lines: Vec<String> = if content.is_empty() {
-            vec![String::new()]
-        } else {
-            content.split('\n').map(|l| l.to_string()).collect()
-        };
+        let lines = document_lines(&content);
+        let line_chars: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
 
-        let num_lines = lines.len();
-        // Byte offset of each line's start within `content`, needed to test
-        // `selection` (a document-wide byte range) against each line.
+        // Byte offset of each logical line's start within `content`, needed
+        // to test `selection` (a document-wide byte range) against each line.
         let mut line_byte_starts: Vec<usize> = Vec::with_capacity(lines.len());
-        let mut offset = 0;
+        let mut byte_offset = 0;
         for l in &lines {
-            line_byte_starts.push(offset);
-            offset += l.len() + 1; // +1 for the '\n' the split() consumed
+            line_byte_starts.push(byte_offset);
+            byte_offset += l.len() + 1; // +1 for the '\n' the split() consumed
         }
+
+        // Word-wrap each logical line into fixed-height visual rows so long
+        // lines reflow within the viewport instead of running off the right
+        // edge. Using the viewport's own current bounds (not a hardcoded
+        // width) keeps wrapping correct across window resizes. Click/drag
+        // hit-testing and scroll-to-cursor rebuild this exact same row table
+        // (via the same helper functions) so all three always agree on
+        // where each row's boundaries fall.
+        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+        let cursor_visual_row = is_focused.then(|| visual_row_for_line_col(&rows, cursor_line, cursor_col));
 
         div()
             // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
@@ -304,7 +395,10 @@ impl Render for TextEditor {
                 this.focus_handle.clone().focus(window, cx);
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, num_lines);
+                let content = this.state.read(cx).active_content().to_string();
+                let lines = document_lines(&content);
+                let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows);
                 this.state.update(cx, |state, cx| {
                     state.set_cursor_from_line_col(line, col);
                     cx.notify();
@@ -326,12 +420,15 @@ impl Render for TextEditor {
                 if !ev.dragging() { return; }
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, num_lines);
+                let content = this.state.read(cx).active_content().to_string();
+                let lines = document_lines(&content);
+                let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows);
                 this.state.update(cx, |state, cx| {
                     state.extend_selection_to_line_col(line, col);
                     cx.notify();
                 });
-                this.auto_scroller.notify(ev.position, num_lines, window);
+                this.auto_scroller.notify(ev.position, window);
                 cx.notify();
             }))
             // Stop any in-progress auto-scroll loop on mouse-up, whether the
@@ -363,8 +460,8 @@ impl Render for TextEditor {
                 div()
                     .flex()
                     .flex_col()
-                    // w_full constrains each line to the editor width so text wraps
-                    // rather than extending off-screen to the right.
+                    // w_full constrains each row to the editor width so wrapped
+                    // rows all line up under one another.
                     .w_full()
                     // Placeholder shown on an empty, unsaved tab
                     .when(is_new_tab, |d| {
@@ -376,21 +473,53 @@ impl Render for TextEditor {
                                 .child("Open a file from the sidebar, or start typing…"),
                         )
                     })
-                    // One div per line of content; render_line overlays the
-                    // cursor marker and/or selection highlight on whichever
-                    // lines they actually touch.
-                    .children(lines.iter().enumerate().map(|(i, line)| {
-                        let line_cursor_col = (i == cursor_line && is_focused).then_some(cursor_col);
-                        let line_selection = selection.and_then(|(s, e)| {
-                            selection_span_for_line(line, line_byte_starts[i], s, e)
-                        });
-                        let content_el = render_line(line, line_cursor_col, line_selection);
+                    // One div per visual row (a wrapped logical line spans
+                    // several); render_line overlays the cursor marker and/or
+                    // selection highlight on whichever rows they actually touch.
+                    .children(rows.iter().enumerate().map(|(visual_idx, &(li, row_start, row_end))| {
+                        let chars = &line_chars[li];
+                        let row_text: String = chars[row_start..row_end].iter().collect();
+
+                        // `.then(|| ...)` (lazy), not `.then_some(...)` — the latter's
+                        // argument is a plain value, evaluated eagerly *before* the
+                        // bool is even checked. With `then_some`, `cursor_col - row_start`
+                        // was computed for every row regardless of the condition, and
+                        // underflowed (panicked) on any row whose row_start exceeded the
+                        // cursor's column — i.e. almost any row that isn't the cursor's own.
+                        let row_cursor_col = (cursor_visual_row == Some(visual_idx))
+                            .then(|| cursor_col - row_start);
+
+                        // Clip the logical line's selection char-range (if any) down
+                        // to this row's own [row_start, row_end) sub-range, then
+                        // rebase it to be relative to the row instead of the line.
+                        let row_selection = selection
+                            .and_then(|(s, e)| selection_span_for_line(&lines[li], line_byte_starts[li], s, e))
+                            .and_then(|(sel_start, sel_end)| {
+                                let clipped_start = sel_start.max(row_start);
+                                let clipped_end = sel_end.min(row_end);
+                                // Same eager-vs-lazy pitfall as row_cursor_col above: use
+                                // `.then(|| ...)` since clipped_end can be < row_start when
+                                // the selection doesn't reach this row, which would
+                                // underflow `clipped_end - row_start` if evaluated eagerly.
+                                (clipped_start < clipped_end)
+                                    .then(|| (clipped_start - row_start, clipped_end - row_start))
+                            });
+
+                        let content_el = render_line(&row_text, row_cursor_col, row_selection);
                         div()
                             .font_family("monospace")
                             .text_sm()
                             .text_color(rgb(0xd4d4d4))
-                            // min_h keeps empty lines visually present
-                            .min_h(px(20.0))
+                            // Locks this row's height so wrapping stays fully
+                            // decided by `wrap_line_into_rows` up front — nowrap
+                            // stops GPUI from *also* word-wrapping this row's text
+                            // internally if CHAR_WIDTH_PX's monospace estimate
+                            // ever slightly overshoots the real glyph width, which
+                            // would otherwise grow this div past one row and break
+                            // the fixed-row-height assumption click/scroll math relies on.
+                            .whitespace_nowrap()
+                            // min_h keeps empty rows visually present
+                            .min_h(px(LINE_HEIGHT_PX))
                             .child(content_el)
                     }))
             )
@@ -440,6 +569,210 @@ fn render_line(line: &str, cursor_col: Option<usize>, selection: Option<(usize, 
     div().flex().flex_row().children(spans).into_any_element()
 }
 
+fn usable_wrap_width(viewport_width_px: f32) -> f32 {
+    /*
+     * Computes how many pixels of width are available for wrapping text,
+     * given the current viewport pixel width. Subtracts the left+right
+     * content padding so it matches the actual usable text area (mirrors
+     * CONTENT_PADDING_PX's use elsewhere).
+     *
+     * Returns a sentinel of `f32::MAX` when the viewport hasn't been laid
+     * out yet (width <= 0, which happens on the very first frame before
+     * `scroll_handle.bounds()` has real numbers) so lines render unwrapped
+     * for that one frame instead of collapsing to almost nothing.
+     */
+    let usable = viewport_width_px - 2.0 * CONTENT_PADDING_PX;
+    if usable <= 0.0 { f32::MAX } else { usable }
+}
+
+fn char_width_fn(cx: &App, font: Font) -> impl Fn(char) -> f32 {
+    /*
+     * Builds a closure that returns a character's real, rendered pixel
+     * width for `font` at `FONT_SIZE_PX`, backed by GPUI's own
+     * `TextSystem::layout_width` (the same glyph-shaping measurement GPUI
+     * itself uses to paint text, cached internally per character).
+     *
+     * This replaces the old approach of assuming every character is
+     * `CHAR_WIDTH_PX` wide for wrap purposes: that uniform estimate is
+     * systematically wrong for narrow glyphs like '.' or '-', which render
+     * much thinner than the average — folding lines dominated by them
+     * (e.g. citation ellipses, en-dashes) far earlier than their actual
+     * on-screen width warrants.
+     *
+     * The returned closure owns its own `Arc<TextSystem>` clone (cheap —
+     * it's a refcount bump) and a resolved `FontId`, so it doesn't borrow
+     * `cx` and can be passed freely into the pure wrap functions below.
+     */
+    let text_system = cx.text_system().clone();
+    let font_id = text_system.resolve_font(&font);
+    move |c: char| text_system.layout_width(font_id, px(FONT_SIZE_PX), c).as_f32()
+}
+
+pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_width_px: f32) -> Vec<(usize, usize, usize)> {
+    /*
+     * Convenience wrapper combining `char_width_fn` + `usable_wrap_width` +
+     * `build_visual_rows` — the single entry point every cx-having call
+     * site (render, click/drag hit-testing, scroll-to-cursor, Up/Down,
+     * auto-scroll) uses to build the row table, so they can never disagree
+     * about wrap width or glyph metrics.
+     */
+    let width_of = char_width_fn(cx, font("monospace"));
+    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &width_of)
+}
+
+fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &impl Fn(char) -> f32) -> Vec<(usize, usize)> {
+    /*
+     * Word-wraps one logical line's characters into visual rows whose
+     * accumulated real glyph width (via `width_of`) stays within
+     * `wrap_width_px`, breaking at the last space within budget when one
+     * exists, or hard-breaking mid-word when a single word exceeds the
+     * budget on its own. The space a word-boundary break lands on is
+     * consumed (not repeated as a leading space on the next row), matching
+     * normal word-wrap behaviour.
+     *
+     * Pure and independent of any real font/GPUI context — callers supply
+     * `width_of`, so this stays unit-testable with synthetic width
+     * functions (see the tests below for one that exercises variable-width
+     * characters directly).
+     *
+     * Always returns at least one row, even for an empty line, so every
+     * logical line still occupies its own visual slot — this is what lets
+     * click/scroll math treat "row index" as a stable, always-present
+     * coordinate.
+     */
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut rows = Vec::new();
+    let mut row_start = 0;
+    while row_start < chars.len() {
+        let mut width = 0.0f32;
+        let mut i = row_start;
+        let mut last_space: Option<usize> = None;
+        while i < chars.len() {
+            let char_width = width_of(chars[i]);
+            // `i > row_start` forces at least one character onto every row,
+            // even one whose width alone exceeds the budget — otherwise a
+            // very narrow viewport (or a single unusually wide glyph) could
+            // produce a zero-width row and loop forever.
+            if width + char_width > wrap_width_px && i > row_start {
+                break;
+            }
+            width += char_width;
+            if chars[i] == ' ' && i > row_start {
+                last_space = Some(i);
+            }
+            i += 1;
+        }
+        if i >= chars.len() {
+            rows.push((row_start, chars.len()));
+            break;
+        }
+        let row_end = last_space.unwrap_or(i);
+        rows.push((row_start, row_end));
+        // Skip the space itself when we broke on one, so it doesn't reappear
+        // as a leading character on the next row.
+        row_start = if last_space.is_some() { row_end + 1 } else { row_end };
+    }
+    rows
+}
+
+fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &impl Fn(char) -> f32) -> Vec<(usize, usize, usize)> {
+    /*
+     * Flattens every logical line into an ordered list of visual rows, each
+     * tagged with its owning logical line index and its [start, end) char
+     * range within that line. Shared by rendering (which paints one
+     * fixed-height div per row) and click/scroll math (which maps pixel
+     * positions to/from this same row table) so all three always agree on
+     * where each row's boundaries fall.
+     */
+    let mut rows = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, width_of) {
+            rows.push((li, start, end));
+        }
+    }
+    rows
+}
+
+fn visual_row_for_line_col(rows: &[(usize, usize, usize)], logical_line: usize, char_col: usize) -> usize {
+    /*
+     * Finds the visual row that a (logical_line, char_col) cursor position
+     * belongs to.
+     *
+     * A column sitting exactly at a row's end is ambiguous, and is resolved
+     * differently depending on *why* the row ended:
+     *   - Hard break (a long word forced mid-word, no space consumed): the
+     *     next row starts exactly where this one ends, so the column is
+     *     redirected to the *start* of that next row — matching how text
+     *     editors visually carry the cursor onto the next wrapped row
+     *     rather than trailing behind the break.
+     *   - Soft break (`wrap_line_into_rows` consumed a space at the wrap
+     *     point): the next row starts one character *past* this row's end,
+     *     leaving a one-character gap for the consumed space. A column
+     *     equal to this row's end is the space itself — not a valid
+     *     position on the next row — so it stays here, trailing the last
+     *     visible character. (Redirecting it forward regardless of this gap
+     *     was the original bug: the next row's `row_start` could then
+     *     exceed `char_col`, underflowing any `char_col - row_start` a
+     *     caller computed downstream.)
+     *   - Last row of the line: there's no next row to redirect to, so it
+     *     stays here regardless.
+     */
+    let mut last_row_of_line = 0;
+    for (idx, &(li, start, end)) in rows.iter().enumerate() {
+        if li != logical_line { continue; }
+        last_row_of_line = idx;
+        if char_col >= start && char_col < end {
+            return idx;
+        }
+        if char_col == end {
+            let next_is_contiguous = rows.get(idx + 1)
+                .map(|&(next_li, next_start, _)| next_li == li && next_start == end)
+                .unwrap_or(false);
+            if !next_is_contiguous {
+                return idx;
+            }
+            // else: a hard break — fall through so the next iteration's
+            // `char_col >= start && char_col < end` check picks it up.
+        }
+    }
+    last_row_of_line
+}
+
+fn visual_row_step(rows: &[(usize, usize, usize)], current_row: usize, col_in_row: usize, delta: isize) -> Option<(usize, usize)> {
+    /*
+     * Steps `delta` visual rows away from `current_row` (-1/+1 for Up/Down),
+     * carrying `col_in_row` — the cursor's on-screen column within its
+     * current row — over onto the target row, clamped to that row's own
+     * width if it's narrower. Returns `None` past the first/last visual row,
+     * i.e. Up on the first row or Down on the last, matching the no-op
+     * behaviour of every other boundary motion in this editor.
+     */
+    let target_row = current_row as isize + delta;
+    if target_row < 0 || target_row as usize >= rows.len() {
+        return None;
+    }
+    let (target_line, target_row_start, target_row_end) = rows[target_row as usize];
+    let target_col = target_row_start + col_in_row.min(target_row_end - target_row_start);
+    Some((target_line, target_col))
+}
+
+pub(crate) fn document_lines(content: &str) -> Vec<String> {
+    /*
+     * Splits document content into logical lines on '\n', matching the model
+     * used throughout rendering and click/scroll math. An empty document is
+     * still one (empty) line so the editor always has somewhere to place
+     * the cursor.
+     */
+    if content.is_empty() {
+        vec![String::new()]
+    } else {
+        content.split('\n').map(|l| l.to_string()).collect()
+    }
+}
+
 fn column_for_x(x: f32, char_width: f32) -> usize {
     /*
      * Converts an x pixel offset (relative to the start of the text, i.e.
@@ -451,29 +784,38 @@ fn column_for_x(x: f32, char_width: f32) -> usize {
     (x / char_width).round() as usize
 }
 
-fn line_for_y(y: f32, line_height: f32, num_lines: usize) -> usize {
+fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
     /*
      * Converts a y pixel offset (relative to the start of the text) into a
-     * 0-indexed line number, clamped to `num_lines - 1` so a click below
-     * the last line still lands on it rather than panicking on an
-     * out-of-range line index.
+     * 0-indexed visual row number, clamped to `num_rows - 1` so a click
+     * below the last row still lands on it rather than panicking on an
+     * out-of-range row index.
      */
-    if line_height <= 0.0 || num_lines == 0 { return 0; }
+    if line_height <= 0.0 || num_rows == 0 { return 0; }
     if y <= 0.0 { return 0; }
-    ((y / line_height) as usize).min(num_lines - 1)
+    ((y / line_height) as usize).min(num_rows - 1)
 }
 
 pub(crate) fn line_col_from_mouse_position(
     position: Point<Pixels>,
     content_bounds: Bounds<Pixels>,
     scroll_offset_y: f32,
-    num_lines: usize,
+    rows: &[(usize, usize, usize)],
 ) -> (usize, usize) {
     /*
-     * Converts a window-space mouse position into a (line, char_column)
-     * pair, via `column_for_x`/`line_for_y`. Shared by on_mouse_down (plain
-     * click) and on_mouse_move (click-drag) so the two can never disagree
-     * about where a given pixel position maps to.
+     * Converts a window-space mouse position into a (logical_line,
+     * char_column) pair. Shared by on_mouse_down (plain click) and
+     * on_mouse_move (click-drag, including `AutoScroller`'s edge-scroll
+     * ticks) so all three can never disagree about where a given pixel
+     * position maps to.
+     *
+     * Takes the same visual-row table `render()` paints from (built via
+     * `visual_rows_for_viewport`, which needs a live GPUI context for real
+     * glyph-width measurement) rather than rebuilding it internally — this
+     * function itself stays plain and cx-free. A pixel Y is first resolved
+     * to a *visual* row (a wrapped logical line spans several) and only
+     * then translated back to the logical (line, column) pair that
+     * `AppState` understands.
      *
      * `content_bounds` is the editor's fixed viewport box — GPUI's own
      * layout bounds for the tracked div (`ScrollHandle::bounds()`), which
@@ -488,9 +830,12 @@ pub(crate) fn line_col_from_mouse_position(
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
     let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
-    let col  = column_for_x(local_x, CHAR_WIDTH_PX);
-    let line = line_for_y(local_y, LINE_HEIGHT_PX, num_lines);
-    (line, col)
+    let col_in_row = column_for_x(local_x, CHAR_WIDTH_PX);
+    let visual_row = line_for_y(local_y, LINE_HEIGHT_PX, rows.len());
+
+    let (logical_line, row_start, row_end) = rows[visual_row];
+    let col = row_start + col_in_row.min(row_end - row_start);
+    (logical_line, col)
 }
 
 fn selection_span_for_line(line: &str, line_byte_start: usize, sel_start: usize, sel_end: usize) -> Option<(usize, usize)> {
@@ -591,7 +936,11 @@ mod tests {
     // attribute macro (for async GPUI tests) that shadows std's `#[test]` and
     // sends the test-attribute expansion into infinite recursion if it's in
     // scope here.
-    use super::{column_for_x, line_for_y, selection_span_for_line, line_segments, SegmentStyle};
+    use super::{
+        column_for_x, line_for_y, selection_span_for_line, line_segments, SegmentStyle,
+        usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
+        visual_row_step, document_lines,
+    };
 
     #[test]
     fn test_column_for_x_zero_is_first_column() {
@@ -760,5 +1109,209 @@ mod tests {
     #[test]
     fn test_line_segments_empty_line_with_cursor() {
         assert_eq!(line_segments(0, Some(0), None), vec![(0, 0, SegmentStyle::Cursor)]);
+    }
+
+    // ── usable_wrap_width ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_usable_wrap_width_basic() {
+        assert_eq!(usable_wrap_width(100.0), 68.0); // 100 - 2*16
+    }
+
+    #[test]
+    fn test_usable_wrap_width_unlaid_out_viewport_is_unbounded() {
+        // width <= 0 happens before the scroll handle's first layout pass.
+        assert_eq!(usable_wrap_width(0.0), f32::MAX);
+        assert_eq!(usable_wrap_width(-5.0), f32::MAX);
+    }
+
+    // ── wrap_line_into_rows ─────────────────────────────────────────────────────
+    // Tests use a uniform 8.0px-per-char width function to exercise the wrap
+    // algorithm itself (spacing/hard-break logic), independent of any real
+    // font metrics — see the dedicated variable-width test below for the
+    // narrow-vs-wide-glyph behaviour this was rewritten to fix.
+
+    #[test]
+    fn test_wrap_line_into_rows_empty_line_is_one_row() {
+        assert_eq!(wrap_line_into_rows(&[], 80.0, &|_| 8.0), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_fits_in_one_row() {
+        let chars: Vec<char> = "hello".chars().collect();
+        assert_eq!(wrap_line_into_rows(&chars, 80.0, &|_| 8.0), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_breaks_on_word_boundary() {
+        // "hello world" (11 chars) at 8px/char, budget=64px covers "hello wo"
+        // (8 chars); last space within budget is at index 5, so row 1 is
+        // [0,5)="hello", the space at 5 is consumed, row 2 starts at 6: "world".
+        let chars: Vec<char> = "hello world".chars().collect();
+        assert_eq!(wrap_line_into_rows(&chars, 64.0, &|_| 8.0), vec![(0, 5), (6, 11)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_hard_breaks_long_word() {
+        // No spaces at all within budget -> hard break exactly at the pixel
+        // budget (32px / 8px-per-char = 4 chars per row).
+        let chars: Vec<char> = "abcdefghij".chars().collect();
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &|_| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_exact_multiple_of_width() {
+        let chars: Vec<char> = "abcdefgh".chars().collect();
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &|_| 8.0), vec![(0, 4), (4, 8)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_trailing_space_at_break_not_repeated() {
+        // Two words separated by exactly one space at the wrap point: the
+        // space must not reappear as a leading character on the next row.
+        let chars: Vec<char> = "aaaa bbbb".chars().collect();
+        let rows = wrap_line_into_rows(&chars, 40.0, &|_| 8.0);
+        for (start, end) in &rows {
+            let text: String = chars[*start..*end].iter().collect();
+            assert!(!text.starts_with(' '), "row {:?} starts with a space", text);
+        }
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_forces_progress_when_single_char_exceeds_budget() {
+        // A viewport (or a single unusually wide glyph) narrower than one
+        // character's width must still advance one character per row rather
+        // than looping forever or producing an empty row.
+        let chars: Vec<char> = "ab".chars().collect();
+        let rows = wrap_line_into_rows(&chars, 10.0, &|_| 100.0);
+        assert_eq!(rows, vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_narrow_chars_pack_more_per_row_than_a_uniform_estimate_would() {
+        // This is the actual bug: a uniform per-character width estimate
+        // folds lines of narrow glyphs (like '.' or '-') far earlier than
+        // their real on-screen width warrants. With a real per-char width
+        // function, 20 narrow (2px) dots should fit 10 to a row within a
+        // 20px budget — a uniform 8px/char estimate would have wrapped
+        // after only 2.
+        let chars: Vec<char> = vec!['.'; 20];
+        let width_of = |c: char| if c == '.' { 2.0 } else { 8.0 };
+        let rows = wrap_line_into_rows(&chars, 20.0, &width_of);
+        assert_eq!(rows[0], (0, 10));
+    }
+
+    // ── build_visual_rows / document_lines ──────────────────────────────────
+
+    #[test]
+    fn test_document_lines_empty_content_is_one_empty_line() {
+        assert_eq!(document_lines(""), vec![String::new()]);
+    }
+
+    #[test]
+    fn test_document_lines_splits_on_newline() {
+        assert_eq!(document_lines("a\nb\nc"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_build_visual_rows_one_row_per_short_line() {
+        let lines = document_lines("hi\nthere");
+        let rows = build_visual_rows(&lines, 800.0, &|_| 8.0);
+        assert_eq!(rows, vec![(0, 0, 2), (1, 0, 5)]);
+    }
+
+    #[test]
+    fn test_build_visual_rows_wraps_long_line_into_multiple_rows() {
+        let lines = document_lines("hello world");
+        let rows = build_visual_rows(&lines, 64.0, &|_| 8.0);
+        assert_eq!(rows, vec![(0, 0, 5), (0, 6, 11)]);
+    }
+
+    // ── visual_row_for_line_col ──────────────────────────────────────────────
+
+    #[test]
+    fn test_visual_row_for_line_col_within_first_row() {
+        // Line 0 wraps into rows [(0,5), (6,11)]; col 2 is inside the first.
+        let rows = vec![(0, 0, 5), (0, 6, 11)];
+        assert_eq!(visual_row_for_line_col(&rows, 0, 2), 0);
+    }
+
+    #[test]
+    fn test_visual_row_for_line_col_hard_break_boundary_lands_on_next_row_start() {
+        // Rows are CONTIGUOUS (row 0 ends at 4, row 1 starts at 4) — a hard
+        // mid-word break, no space consumed. col 4 should be carried onto
+        // the start of row 1, matching how text editors visually continue
+        // the cursor onto the next wrapped row rather than trailing behind.
+        let rows = vec![(0, 0, 4), (0, 4, 8)];
+        assert_eq!(visual_row_for_line_col(&rows, 0, 4), 1);
+    }
+
+    #[test]
+    fn test_visual_row_for_line_col_soft_break_boundary_stays_on_current_row() {
+        // Row 0 ends at 5, but row 1 starts at 6 (not 5) — a one-character
+        // gap for the space `wrap_line_into_rows` consumed at the break.
+        // col 5 *is* that consumed space, not a position on row 1, so it
+        // must stay on row 0 (trailing the last visible character) rather
+        // than being redirected to row 1's row_start (6) — redirecting it
+        // was the original bug: row_start(6) > char_col(5) underflowed any
+        // `char_col - row_start` a caller computed downstream.
+        let rows = vec![(0, 0, 5), (0, 6, 11)];
+        assert_eq!(visual_row_for_line_col(&rows, 0, 5), 0);
+    }
+
+    #[test]
+    fn test_visual_row_for_line_col_true_end_of_line_stays_on_last_row() {
+        // col 11 is the true end of the (single) logical line — no next row
+        // exists, so it must resolve to the line's last row.
+        let rows = vec![(0, 0, 5), (0, 6, 11)];
+        assert_eq!(visual_row_for_line_col(&rows, 0, 11), 1);
+    }
+
+    #[test]
+    fn test_visual_row_for_line_col_second_logical_line() {
+        let rows = vec![(0, 0, 5), (1, 0, 3)];
+        assert_eq!(visual_row_for_line_col(&rows, 1, 1), 1);
+    }
+
+    // ── visual_row_step ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_visual_row_step_up_into_wrapped_continuation_row() {
+        // Line 0 wraps into two rows: [0,5) and [6,11) ("hello"/"world").
+        // Line 1 is short: [0,3). Standing at the start of line 1 (row 2,
+        // col 0) and pressing Up must land on line 0's *second* row (the
+        // wrapped continuation), not jump to the very start of line 0.
+        let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
+        assert_eq!(visual_row_step(&rows, 2, 0, -1), Some((0, 6)));
+    }
+
+    #[test]
+    fn test_visual_row_step_down_into_wrapped_continuation_row() {
+        let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
+        assert_eq!(visual_row_step(&rows, 0, 3, 1), Some((0, 9)));
+    }
+
+    #[test]
+    fn test_visual_row_step_preserves_screen_column() {
+        let rows = vec![(0, 0, 10), (1, 0, 10)];
+        assert_eq!(visual_row_step(&rows, 0, 4, 1), Some((1, 4)));
+    }
+
+    #[test]
+    fn test_visual_row_step_clamps_to_shorter_target_row() {
+        let rows = vec![(0, 0, 10), (1, 0, 3)];
+        assert_eq!(visual_row_step(&rows, 0, 8, 1), Some((1, 3)));
+    }
+
+    #[test]
+    fn test_visual_row_step_up_past_first_row_is_none() {
+        let rows = vec![(0, 0, 5)];
+        assert_eq!(visual_row_step(&rows, 0, 2, -1), None);
+    }
+
+    #[test]
+    fn test_visual_row_step_down_past_last_row_is_none() {
+        let rows = vec![(0, 0, 5)];
+        assert_eq!(visual_row_step(&rows, 0, 2, 1), None);
     }
 }
