@@ -41,8 +41,43 @@ impl TextEditor {
          */
         let ks = &event.keystroke;
 
-        // Pass Ctrl / platform-modifier combos to the global action dispatcher
+        // Handle the Ctrl/platform combos that belong to the editor; let the
+        // rest bubble to the global action dispatcher (Ctrl+S, Ctrl+T, etc.).
         if ks.modifiers.control || ks.modifiers.platform {
+            match ks.key.as_str() {
+                "c" => {
+                    // Copy: read-only — use entity.read so no update closure needed.
+                    let text = self.state.read(cx).copy_selection();
+                    if let Some(text) = text {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                }
+                "x" => {
+                    // Cut: delete selection inside update, write result to clipboard.
+                    let text = self.state.update(cx, |state, cx| {
+                        let result = state.cut_selection();
+                        if result.is_some() { cx.notify(); }
+                        result
+                    });
+                    if let Some(text) = text {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        cx.notify();
+                    }
+                }
+                "v" => {
+                    // Paste: read clipboard on outer cx first, then insert inside update.
+                    if let Some(item) = cx.read_from_clipboard() {
+                        if let Some(text) = item.text() {
+                            self.state.update(cx, |state, cx| {
+                                state.insert_str(&text);
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }
+                    }
+                }
+                _ => {} // Ctrl+S, Ctrl+T, Ctrl+W, etc. handled by global actions
+            }
             return;
         }
 

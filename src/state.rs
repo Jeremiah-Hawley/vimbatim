@@ -14,6 +14,13 @@ pub struct Tab {
     /// Parsed docx document retained for lossless round-trip save. `None` for
     /// brand-new tabs that have never been saved or for files that failed to parse.
     pub document: Option<Arc<DocxDocument>>,
+    /// Byte offset into `content` where the cursor currently sits.
+    /// Always points to a valid UTF-8 char boundary.
+    pub cursor: usize,
+    /// Active text selection as (anchor, focus) byte offsets.
+    /// Anchor is where the selection started; focus tracks the cursor.
+    /// Normalise to (min, max) before any range operation. `None` means no selection.
+    pub selection: Option<(usize, usize)>,
 }
 
 impl Tab {
@@ -29,6 +36,8 @@ impl Tab {
             content: String::new(),
             is_modified: false,
             document: None,
+            cursor: 0,
+            selection: None,
         }
     }
 
@@ -50,6 +59,8 @@ impl Tab {
             content: String::new(),
             is_modified: false,
             document: None,
+            cursor: 0,
+            selection: None,
         }
     }
 }
@@ -254,22 +265,96 @@ impl AppState {
 
     pub fn insert_char(&mut self, ch: char) {
         /*
-         * Appends a character to the content of the currently active tab and
-         * marks that tab as modified. This is the primary path for typed text input.
+         * Inserts a character at the cursor position and advances the cursor.
+         * If a selection is active it is deleted first, mirroring the behaviour
+         * a user expects when typing over highlighted text.
          */
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection();
+        }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.content.push(ch);
+            tab.content.insert(tab.cursor, ch);
+            tab.cursor += ch.len_utf8();
             tab.is_modified = true;
         }
     }
 
     pub fn backspace(&mut self) {
         /*
-         * Removes the last character from the active tab's content (i.e., basic
-         * backspace behaviour). Marks the tab as modified.
+         * Deletes the character immediately before the cursor. If a selection is
+         * active the whole selection is deleted instead, leaving the cursor at the
+         * start of the deleted range.
+         */
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection();
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if tab.cursor == 0 { return; }
+            // Walk back one char boundary
+            let prev = tab.content[..tab.cursor]
+                .char_indices().last().map(|(i, _)| i).unwrap_or(0);
+            tab.content.remove(prev);
+            tab.cursor = prev;
+            tab.is_modified = true;
+        }
+    }
+
+    pub fn delete_selection(&mut self) {
+        /*
+         * Drains the byte range covered by the active selection from `content`
+         * and repositions the cursor at the range start. Clears the selection.
+         * No-op when `selection` is `None`.
          */
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.content.pop();
+            if let Some((a, f)) = tab.selection.take() {
+                let (start, end) = (a.min(f), a.max(f));
+                tab.content.drain(start..end);
+                tab.cursor    = start;
+                tab.is_modified = true;
+            }
+        }
+    }
+
+    pub fn copy_selection(&self) -> Option<String> {
+        /*
+         * Returns the selected text as an owned String, or None when there is no
+         * active selection. Does not modify state; safe to call via entity.read(cx).
+         */
+        let tab = self.tabs.get(self.active_tab)?;
+        let (a, f) = tab.selection?;
+        let (start, end) = (a.min(f), a.max(f));
+        Some(tab.content[start..end].to_string())
+    }
+
+    pub fn cut_selection(&mut self) -> Option<String> {
+        /*
+         * Extracts the selected text, deletes it, and returns the text so the
+         * caller can write it to the clipboard. Returns None when there is no
+         * selection. Delegates deletion to delete_selection so cursor/is_modified
+         * logic stays in one place.
+         */
+        let tab = self.tabs.get(self.active_tab)?;
+        let (a, f) = tab.selection?;
+        let (start, end) = (a.min(f), a.max(f));
+        let text = tab.content[start..end].to_string();
+        self.delete_selection();
+        Some(text)
+    }
+
+    pub fn insert_str(&mut self, text: &str) {
+        /*
+         * Inserts a string at the current cursor position, replacing any active
+         * selection first. Advances the cursor past the inserted text.
+         * Mirrors insert_char but handles the multi-char payloads that clipboard
+         * paste produces.
+         */
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection();
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.content.insert_str(tab.cursor, text);
+            tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.is_modified = true;
         }
     }
@@ -345,4 +430,103 @@ pub fn scan_directory(dir: &PathBuf) -> Vec<FileNode> {
     nodes.extend(dirs);
     nodes.extend(files);
     nodes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal AppState with one tab whose content, cursor, and
+    /// selection are set to the given values. Avoids touching the filesystem
+    /// or GPUI context.
+    fn make_state(content: &str, cursor: usize, selection: Option<(usize, usize)>) -> AppState {
+        let state = AppState {
+            tabs: vec![Tab {
+                id: 0,
+                title: "test".into(),
+                file_path: None,
+                content: content.to_string(),
+                is_modified: false,
+                document: None,
+                cursor,
+                selection,
+            }],
+            active_tab: 0,
+            next_tab_id: 1,
+            sidebar_visible: false,
+            settings_visible: false,
+            working_directory: std::path::PathBuf::from("."),
+            file_tree: vec![],
+        };
+        state
+    }
+
+    // ── copy_selection ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_copy_selection_basic() {
+        let state = make_state("hello world", 5, Some((0, 5)));
+        assert_eq!(state.copy_selection(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_copy_selection_backward() {
+        // anchor > focus (reversed selection) — should still return correct text
+        let state = make_state("hello world", 0, Some((5, 0)));
+        assert_eq!(state.copy_selection(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_copy_selection_no_selection() {
+        let state = make_state("hello world", 0, None);
+        assert_eq!(state.copy_selection(), None);
+    }
+
+    // ── cut_selection ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cut_selection_basic() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        let text = state.cut_selection();
+        assert_eq!(text, Some("hello".to_string()));
+        assert_eq!(state.tabs[0].content, " world");
+        assert_eq!(state.tabs[0].cursor, 0);
+        assert!(state.tabs[0].selection.is_none());
+    }
+
+    #[test]
+    fn test_cut_selection_no_selection() {
+        let mut state = make_state("hello world", 5, None);
+        let text = state.cut_selection();
+        assert_eq!(text, None);
+        assert_eq!(state.tabs[0].content, "hello world"); // unchanged
+    }
+
+    // ── insert_str ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_insert_str_no_selection() {
+        let mut state = make_state("hello", 5, None);
+        state.insert_str(" world");
+        assert_eq!(state.tabs[0].content, "hello world");
+        assert_eq!(state.tabs[0].cursor, 11);
+    }
+
+    #[test]
+    fn test_insert_str_replaces_selection() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        state.insert_str("goodbye");
+        assert_eq!(state.tabs[0].content, "goodbye world");
+        assert_eq!(state.tabs[0].cursor, 7);
+        assert!(state.tabs[0].selection.is_none());
+    }
+
+    #[test]
+    fn test_insert_str_empty() {
+        // Inserting an empty string is a no-op (no crash, content unchanged).
+        let mut state = make_state("hello", 5, None);
+        state.insert_str("");
+        assert_eq!(state.tabs[0].content, "hello");
+        assert_eq!(state.tabs[0].cursor, 5);
+    }
 }
