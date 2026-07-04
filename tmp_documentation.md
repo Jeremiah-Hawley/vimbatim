@@ -673,15 +673,26 @@ a mode indicator.
   holding two `flex_col` siblings — the scrollable editor div (unchanged
   internally, still the one `.track_scroll(&self.scroll_handle)` tracks)
   and a new fixed-height mode-indicator div below it, showing
-  `-- INSERT --` / `-- VISUAL --` / `-- VISUAL LINE --` / `-- COMMAND --`,
-  or an empty string for Normal mode / vim disabled (spec 5.1: "nothing
-  shown for Normal"). The indicator div is always present at a fixed
-  height rather than conditionally added/removed, so switching modes
-  doesn't resize (and force a re-wrap of) the editor's own viewport.
+  `-- NORMAL --` / `-- INSERT --` / `-- VISUAL --` / `-- VISUAL LINE --` /
+  `-- COMMAND --`, or an empty string when vim mode is off entirely. Spec
+  5.1 literally says "nothing shown for Normal" — deviated from that
+  (per explicit user request after the initial Task D pass) since a blank
+  indicator can't distinguish "vim on, Normal mode" from "vim off", both of
+  which otherwise render identically. The indicator div is always present
+  at a fixed height rather than conditionally added/removed, so switching
+  modes doesn't resize (and force a re-wrap of) the editor's own viewport.
   `.flex_1()`/`.min_w_0()`/`.min_h_0()` moved from the old top-level div to
   the new wrapper, since the wrapper is now what sits in `main_window.rs`'s
   flex row; the inner scrollable div keeps its own `.flex_1()` to claim the
-  wrapper's remaining vertical space after the indicator.
+  wrapper's remaining vertical space after the indicator, and also needs
+  its own `.min_h_0()` (added alongside its existing `.flex_1()`/
+  `.min_w_0()`) — it went from a cross-axis-stretched flex_row child (fixed
+  height guaranteed) to a main-axis flex_1 child of the new flex_col
+  wrapper, where a flex item's default min-height is its *content* size;
+  without this, a document taller than the viewport could grow the div past
+  the wrapper's allocated height instead of scrolling internally, exactly
+  the failure mode `main_window.rs:140`'s own `min_h_0` comment describes
+  for the same pattern one level up.
   - **Deliberately not** nested inside the scrollable div, despite the
     task text's literal wording ("inside the outer div... after the line
     children") — that wording predates the wrap-system rework earlier in
@@ -718,3 +729,924 @@ a mode indicator.
   document (Task B/C's scroll-margin fix depends on `scroll_handle.bounds()`
   being correct post-restructure, which is reasoned through above but
   untested on real hardware).
+
+### Mode indicator follow-up: Normal mode now shows `-- NORMAL --`
+
+Per explicit user request after the initial Task D pass, deviated further
+from spec 5.1's literal "nothing shown for Normal": the indicator now shows
+`-- NORMAL --` in Normal mode instead of an empty string, since a blank
+indicator couldn't distinguish "vim on, Normal mode" from "vim off
+entirely" — both rendered identically. `src/text_editor.rs`'s
+`mode_indicator_text` match arm changed from `VimMode::Normal => None` to
+`VimMode::Normal => "-- NORMAL --"` (the whole match's return type dropped
+the `Option` wrapper on the match arms accordingly, keeping only the outer
+`if state.vim_enabled { ... } else { None }` as the option boundary).
+`cargo check`/`cargo test`: unaffected (194 passed).
+
+## Task E (pass 1 of 2): Vim Motions — Pure Text Motions
+
+Implements the text-navigation half of `notes/vim_todo.md` Task E / spec
+5.2's motion table. Deliberately split into two passes (flagged explicitly
+by the advisor consulted before starting): this pass covers every motion
+that's pure text math over `AppState`/`Tab.content`, fully unit-testable
+without a GPUI context. **Pass 2** — `H`/`M`/`L`, `Ctrl+D`/`U`/`F`/`B`,
+`zz`/`zt`/`zb` — needs live viewport/scroll state that only exists in
+`text_editor.rs`'s `ScrollHandle`, is architecturally a different shape of
+work, and is largely unverifiable in this sandbox (no display) — **not yet
+implemented**, tracked as its own follow-up. `%` (spec 5.2: "future:
+matching bracket/paren") is explicitly out of scope per the spec itself.
+
+**`src/state.rs`:**
+- Added `last_find: Option<(char, char)>` to `Tab` (variant + target char,
+  spec §2.2), wired into both constructors and `make_state`.
+- `vim_command_buf` (added empty/inert in Task D) now does real work: it
+  holds an optional leading run of digit characters (a `[count]` prefix)
+  followed by an optional single trailing "pending trigger" character for a
+  two-keystroke command still awaiting its second key (`g` awaiting a
+  second `g`, or `f`/`F`/`t`/`T` awaiting a target). New free function
+  `split_vim_command_buf(buf: &str) -> (Option<usize>, Option<char>)`
+  parses this out (pure, unit-tested); `AppState::take_vim_count()` (pub —
+  needed by `text_editor.rs`'s j/k, see below) and `vim_pending_trigger()`
+  (pub, same reason) expose it; `push_vim_command_buf_char`/
+  `clear_vim_command_buf` (private) mutate it.
+- **Stale-count-leak fix:** every mode-transition method that enters a new
+  mode (`vim_enter_insert_before_cursor`, `vim_enter_visual`,
+  `vim_enter_visual_line`, `vim_enter_command`) now clears
+  `vim_command_buf` on entry. Without this, a count typed in Normal mode
+  (e.g. `3`) then abandoned by switching modes (`v`, `i`, etc.) would sit in
+  the buffer and silently apply to an unrelated motion pressed after
+  returning to Normal mode later — Task D never hit this since it never
+  gave the buffer real content to leak.
+- **Word motions (`w`/`b`/`e` already existed; added `W`/`B`/`E`):**
+  `word_forward`/`word_end`/`word_backward` refactored to thin wrappers
+  over new `*_classified(content, pos, classify: fn(char) -> CharClass)`
+  functions, parameterized on the classifier instead of hardcoding
+  `char_class`. New `big_word_class` (whitespace vs. everything else, no
+  word/punctuation split) drives new `word_forward_big`/`word_end_big`/
+  `word_backward_big`, exposed as `AppState::move_word_forward_big`/
+  `move_word_end_big`/`move_word_backward_big` (`W`/`E`/`B`). The refactor
+  changed no observable behavior — all pre-existing `w`/`b`/`e` tests still
+  pass unmodified.
+- **Paragraph motions (`{`/`}`, new):** `is_blank_line` + `paragraph_forward`/
+  `paragraph_backward` free functions (a paragraph boundary is a
+  zero-length line) + `AppState::move_paragraph_forward`/
+  `move_paragraph_backward`. Both always search strictly past the current
+  line, even when the cursor already sits on a blank line — matching vim,
+  `}`/`{` never stay put.
+- **Find-char motions (`f`/`F`/`t`/`T` + `;`/`,`, new):**
+  `find_char_forward`/`find_char_backward`/`till_char_forward`/
+  `till_char_backward` free functions (line-scoped — never cross a `\n`) +
+  `resolve_find` dispatcher + `AppState::move_find_char_forward`/
+  `_backward`/`move_till_char_forward`/`_backward` (all delegate to a
+  private `apply_find(kind, target, remember)`) + `repeat_last_find` (`;`)
+  /`repeat_last_find_reverse` (`,`). A failed find (target not on the
+  line) is a true no-op — cursor doesn't move *and* `last_find` isn't
+  updated, so `;` can't be left repeating a search that never actually
+  landed anywhere. `;`/`,` themselves never update `last_find` — repeating
+  leaves the original find remembered, so `;` after a `,` still repeats the
+  *original* direction (verified by
+  `test_repeat_last_find_reverse_after_reverse_still_repeats_original`).
+  `apply_find` nudges the search start one character further in the search
+  direction when repeating a `t`/`T` specifically (not `f`/`F`, which don't
+  need it) — without this, `;` after a `t` would immediately re-find the
+  same adjacent match it already stopped before and no-op forever; real vim
+  has this same nudge.
+- **`gg`/`G`/`N`+`gg`/`NG` (new):** no new method — composed from the
+  existing `move_to_line` + `move_line_first_nonblank` directly in the
+  dispatcher (see below), correcting `move_to_line`'s literal-column-0
+  landing to vim's real first-non-blank semantics. `gg` with no count goes
+  to line 1; `G` with no count goes to the *last* line via
+  `move_to_line(usize::MAX)`, which `line_offset`'s existing clamp-on-
+  overrun logic already handles correctly (breaks out as soon as it hits
+  the real last line, not a `usize::MAX`-iteration loop).
+- **`handle_vim_normal_key` rewritten** as a 3-state dispatcher (full
+  reasoning in its own doc comment): (1) if a two-keystroke command is
+  already pending, this key completes or abandons it — checked *first* so
+  e.g. a pending `f` correctly treats `;` as a literal target character
+  instead of the `:` check below hijacking it; (2) no pending command, but
+  this key starts/extends a `[count]` digit prefix or starts a new
+  two-keystroke command; (3) a complete single-key command, consuming
+  whatever count was accumulated. `$`/`^`/`{`/`}` (shifted number/bracket
+  keys) are checked *before* state 2's digit accumulation specifically
+  because their unshifted base keys (`"4"`, `"6"`) are themselves valid
+  count digits — a real bug caught by `cargo test`, not just reasoning:
+  `test_handle_vim_key_normal_dollar_via_key_char` initially failed because
+  `"4"` was being swallowed as a count digit before ever reaching the `$`
+  check. Deviations worth flagging explicitly (not bugs, deliberate scope
+  choices):
+  - Count is **not** applied to `$`/`^` — real vim's `2$` means "end of the
+    *next* line," which isn't implemented; `2$` here just goes to the end
+    of the current line, same as plain `$`.
+  - `j`/`k` are **not** matched in this dispatcher at all — see
+    `text_editor.rs` below. `Shift+J`/`Shift+K` fall into the same j/k path
+    (no shift check), so they currently move like plain `j`/`k` rather than
+    being unmapped — deliberate: real vim's `J` (join lines) and `K` aren't
+    implemented, and making them fall through instead would leak a literal
+    "J"/"K" character into the document via the plain-editor insertion arm
+    (traced and confirmed during review — the `("j",_)|("k",_) => false` arm
+    in state 3 exists specifically so this doesn't happen for `j`/`k`
+    themselves, but adding a shift-guard would re-open exactly that leak).
+  - `Escape` while a find is pending abandons the pending find and returns
+    to a clean Normal state, without inserting anything — falls out
+    naturally from `vim_find_target_char` returning `None` for the
+    multi-character `"escape"` key name, rather than needing special-case
+    code.
+
+**`src/text_editor.rs`:**
+- `handle_key_down`'s vim-routing `else` branch (Normal/Visual/VisualLine/
+  Command) gained a `j`/`k` special case *before* the `handle_vim_key` call:
+  when `vim_mode == Normal` and no two-keystroke command is pending
+  (`state.vim_pending_trigger().is_none()`), `j`/`k` are resolved via
+  `take_vim_count()` + a loop over the existing `move_cursor_visual_row`
+  (the same visual-row-aware movement Up/Down arrows already use), instead
+  of going through `AppState::handle_vim_key` at all. Reused rather than
+  reimplemented in `state.rs` because visual-row movement needs the current
+  viewport's wrap layout — GPUI context `state.rs`'s pure methods don't
+  have.
+  - **Deliberate UX choice, not strict vim semantics:** real vim's `j`/`k`
+    move by *logical* line, wrapping is a display-only concern. This app
+    reuses the same visual-row movement the arrow keys already use instead,
+    so `j`/`k` don't jump over a wrapped paragraph's continuation rows —
+    matching how the rest of this editor already treats wrapped lines, at
+    the cost of deviating from vim's literal logical-line `j`/`k`. Flagged
+    per the pattern established for other deliberate spec deviations in
+    this document.
+  - The `vim_pending_trigger().is_none()` guard exists so a pending `f`/`t`
+    still correctly treats a `j`/`k` keypress as its target character
+    (`fj`) rather than this special case intercepting it as a motion first.
+
+### Verification
+
+- `cargo check`: clean (only pre-existing dead-code warnings for
+  not-yet-wired vim-prep functions from earlier tasks).
+- `cargo test`: 256 passed, 0 failed (all in the bin crate: 46 new tests for
+  this task — word/WORD motions, paragraph motions, find-char motions +
+  repeat, and the full dispatcher rewrite including the count/pending-
+  trigger state machine, the `$`/digit-collision regression, and the
+  stale-count-leak fix — plus the 210 carried over from Tasks A-D unchanged;
+  4 in `tests/parse_testing.rs`). Every new pure function/method has direct
+  test coverage; manual byte-offset traces were done by hand for the
+  paragraph and find-char tests before running them, and all matched.
+- **`j`/`k` is the one piece of this task with no automated test** — the
+  `take_vim_count`/`vim_pending_trigger` logic it depends on is fully
+  tested, but the `text_editor.rs` wiring itself needs a GPUI context this
+  test suite doesn't spin up. `./run.sh` launched and ran 5s without a
+  panic (same sandbox EGL/MESA warnings as every prior task), confirming no
+  startup-time breakage, but this doesn't exercise keypresses. **Needs
+  manual verification on a machine with a working display**, specifically:
+  plain `j`/`k`; `3j`/`3k` (count actually loops); `fj` (must find a
+  literal `j` character and *not* move down — the pending-trigger guard);
+  and `gg`/`G` (composed from existing, already-tested primitives, but
+  never exercised through the live dispatcher before now).
+- Reminder for context: `vim_enabled` is still hardcoded `true` in
+  `AppState::new()` (§2.3's config-wiring gap, unaddressed since Task D) —
+  the app boots straight into vim Normal mode, where typing does nothing
+  until `i`/`a`/`o`/etc. is pressed. Not new to this task, but worth
+  restating since Task E is what makes Normal mode's motions actually do
+  something for the first time.
+
+## Task E (pass 2 of 2): Command Echo, Visual-Mode Motions, Remaining Motions, Macros
+
+Closes out Task E / spec 5.2's viewport-relative motions plus several
+adjacent gaps the user flagged directly: a visible command/count buffer,
+Visual mode actually doing something (spec 5.6), the `_` motion, `H`/`M`/`L`,
+and `q`/`@` macro recording/replay (user-requested directly, not part of
+`editor_instructions.md`). `Ctrl+D`/`U`/`F`/`B` and
+`zz`/`zt`/`zb` remain out of scope — not requested this pass, tracked
+separately if wanted later.
+
+### Command/count buffer echo
+
+`text_editor.rs`'s `render()` now reads the active tab's `vim_command_buf`
+(when non-empty and mode is Normal/Visual/VisualLine) and appends it,
+space-separated, to the mode-indicator line — so a half-typed `3f` or `g`
+is visible next to `-- NORMAL --` instead of silently pending.
+
+### `$`/`^`/`{`/`}`/`:` detection fix (real-hardware bug)
+
+Pass 1's `$` detection (`key_char == Some("$")` or `key == "4" && shift`)
+did nothing on real hardware. Root cause: this app's GPUI/WSLg/X11 backend
+sometimes reports the shifted symbol **directly** in `key` (e.g. `key ==
+"$"` for a literal Shift+4), contradicting the vendored `Keystroke` docs.
+New free function `matches_shifted_symbol` in `state.rs` checks all three
+possible reporting forms and is now used for `$`/`^`/`{`/`}`/`:` uniformly.
+Regression tests added for each ("reported directly as symbol" case) plus a
+negative test confirming a plain `4` digit isn't misdetected as `$`.
+
+### Visual-mode motion extension (spec 5.6)
+
+Visual mode previously had zero functionality beyond entry/exit. `state.rs`
+now has a shared `handle_vim_motion_key(key, shift, key_char, extend) ->
+Option<bool>` containing the *entire* Normal-mode count/pending-trigger
+state machine and motion table; `extend: false` (Normal) moves the cursor,
+`extend: true` (Visual/VisualLine) grows the selection via the same
+resolved target through a new `apply_vim_motion`/`extend_selection` path.
+`handle_vim_normal_key` and the rewritten `handle_vim_visual_key` (now
+returns `bool`, takes `key_char`) both route through it. Also fixed a bug
+caught by this pass's own tests (not user-reported): `vim_enter_visual`/
+`vim_enter_visual_line` set `tab.selection` but never `tab.cursor`, so the
+visible cursor and any following motion's starting point stayed at the
+pre-Visual position instead of the selection's far edge.
+
+### `_` motion and `H`/`M`/`L`
+
+`_` (first non-blank of the `[count]`-th line down) is pure text math —
+new free function `underscore_motion` in `state.rs`, wired into the shared
+dispatcher like every other pass-1 motion. `H`/`M`/`L` (top/middle/bottom
+of the *visible* viewport) are viewport-relative: `text_editor.rs` computes
+the visible row range from `scroll_handle.offset()`/`.bounds()` and the
+existing visual-row layout pipeline, resolves it down to a plain logical
+line number, then hands off to a new GPUI-context-free `AppState::
+vim_move_to_line_first_nonblank(line, extend)` — mirroring the existing
+j/k split between GPUI-bound row math and pure line-targeting.
+
+### Macro recording/replay (`q` / `@` — user-requested, not in the spec)
+
+`editor_instructions.md` has no macro section (§5.8 "Vim Registers" covers
+only yank/paste registers, not macros) — `q`/`@` were requested directly by
+the user ("q/@ macros, etc.") and implemented as an addition beyond the
+written spec.
+
+- **Recording (`q`/`q<register>`)** lives entirely in `AppState`
+  (`state.rs`), no GPUI context needed: `vim_macro_recording: Option<(char,
+  Vec<RecordedVimKey>)>` holds the in-progress capture, `vim_macros:
+  HashMap<char, Vec<RecordedVimKey>>` holds saved recordings.
+  `handle_vim_normal_key` checks for a pending `q<register>` completion or a
+  bare `q` (start if idle, stop-and-save if recording) *before* the shared
+  motion dispatcher, but only when `vim_pending_trigger().is_none()` — so
+  `fq` still resolves as "find the literal character `q`", not a macro
+  command. Reachable from Visual mode too (it shares the same dispatcher
+  entry), a deliberate, minor scope widening beyond what was asked.
+- **Replay (`@<register>`/`@@`)** lives entirely in `text_editor.rs`
+  (Normal mode only — a deliberate scope narrowing, since replaying a
+  logical-line-relative macro from mid-selection has unclear semantics and
+  wasn't asked for) because it needs to re-enter GPUI-context-dependent key
+  handling (`j`/`k`/`H`/`M`/`L`) that `AppState` can't reach on its own.
+  `handle_key_down` was split into `process_key`/`process_key_ctrl_combo`/
+  `process_key_plain` specifically so replay can call `process_key` in a
+  loop with a recorded `(key, shift, key_char)` triple, exactly re-running
+  the same dispatch a live keystroke takes. The register's keys are read
+  and cloned *before* the replay loop starts, with that borrow released
+  first — each `process_key` call does its own `state.update`/`read`, and
+  GPUI panics if one of those runs while another is already open on the
+  same entity.
+- **Recording capture** wraps every non-Ctrl keystroke (`process_key`
+  checks `vim_is_recording_macro()` before and after dispatching to
+  `process_key_plain`, recording the key only if recording was already
+  active *before* and is *still* active *after* — which naturally excludes
+  the `q`/register keystrokes that start a recording and the `q` that ends
+  one, while still capturing Insert-mode text typed mid-recording, since
+  the wrap is around the whole dispatch, not just the vim-specific branch).
+- `3@a` (count-repeat replay) is **not implemented** — real vim supports
+  it, but it wasn't asked for and was flagged as an optional, skippable
+  extra during design review; `@a` always replays exactly once.
+
+### Known Limitations
+
+- **Resolved**: `q`/`@` macros were initially reported as not working on
+  real hardware. Root-cause investigation (see `superpowers:systematic-
+  debugging`-guided session) confirmed via GPUI's actual X11 source
+  (`gpui_linux/src/linux/platform.rs`, `keystroke_from_xkb`) that the
+  shifted-symbol-reported-directly behavior `matches_shifted_symbol` was
+  built to handle is real and consistent — `Keysym::at => "@"`,
+  `Keysym::less => "<"`, etc. — and that macro's control flow was correct
+  against that confirmed behavior. Asking the user what they'd actually
+  observed revealed the true issue: **the functionality worked; there was
+  just no visual feedback** on the mode-indicator line while `q`/`@`
+  sequences were pending or a recording was active — because
+  `vim_macro_record_pending`/`macro_at_pending`/the active-recording state
+  deliberately live in fields separate from `vim_command_buf` (to avoid
+  colliding with its own pending-trigger grammar), and the pending-command
+  echo built in this pass only ever read `vim_command_buf`. Fixed by
+  extending that echo to also reflect these fields — see the dedicated
+  "Mode-Indicator Feedback Fix" section further down, added after Task G.
+- `@<register>` replay only intercepts in Normal mode; Visual-mode `@`
+  falls through to the shared motion dispatcher and is silently swallowed
+  (no crash, just a no-op).
+- Macro playback doesn't preserve Ctrl/Cmd-modified keystrokes — if one was
+  recorded (unusual; Ctrl combos are app-global shortcuts, not part of
+  vim's own keystroke stream), replay reruns it as a plain, unmodified key
+  instead. Deliberate, narrow scope decision, not a bug.
+- `Ctrl+D`/`U`/`F`/`B` (half/full-page scroll) and `zz`/`zt`/`zb` (re-center
+  cursor in viewport) remain unimplemented — never part of this pass's
+  request.
+
+### Verification
+
+- `cargo check`: clean (only pre-existing dead-code warnings for
+  not-yet-wired vim-prep functions, unrelated to this pass).
+- `cargo test`: 290 passed, 0 failed, up from 256 at the end of pass 1 (34
+  new tests: command-buf echo has no direct tests of its own since it's a
+  `render()` string concern, covered instead by the underlying
+  `vim_command_buf` tests already in place; ~17 for Visual-mode motion
+  extension including the `vim_enter_visual`/`vim_enter_visual_line`
+  cursor-fix regressions; 8 for `_`/`vim_move_to_line_first_nonblank`; 6 for
+  macro recording start/stop/capture/register-collision-with-pending-find).
+- **`H`/`M`/`L`'s viewport-row math and all of `@` replay have no automated
+  tests** — both live in `text_editor.rs` and need a live GPUI context/
+  `ScrollHandle` this test suite doesn't spin up, same limitation already
+  noted for `j`/`k` in pass 1. `./run.sh`/`timeout 5 ./target/debug/
+  vimbatim` launched and ran the full timeout without a panic (same
+  sandbox EGL/MESA warnings as every prior task) after every change in this
+  pass, confirming no startup-time breakage, but this doesn't exercise
+  keypresses. **Needs manual verification on a machine with a working
+  display**, specifically: `H`/`M`/`L` after scrolling partway through a
+  long document; `q a <keys> q` then `@ a` reproducing those keys exactly;
+  `@@` repeating the last-replayed register; `q` while already recording
+  correctly stops rather than starting a nested recording; and a macro
+  recorded across an Insert-mode excursion (`qa` → `i` → type text →
+  `Escape` → `q`) replaying the typed text correctly.
+
+## Task F: Vim Operators + Text Objects
+
+Implements `notes/editor_instructions.md` §5.3 (operators) and §5.4 (text
+objects). **Unit-tested and self-consistent, but NOT hardware-verified** —
+unlike earlier tasks in this document, this one is flagged explicitly as
+such rather than marked plain "Done", because the macro feature (previous
+section) was marked done after the same kind of unit-test-only coverage
+and turned out broken on real hardware. Task F carries a real, narrower
+version of that same risk — see "Hardware verification" below before
+trusting this beyond the test suite.
+
+### Architecture: `MotionKind` and the resolve/apply split
+
+The foundational change, done first and validated with an advisor before
+building operators on top of it: `handle_vim_motion_key` (Task E's shared
+Normal/Visual motion dispatcher) was split into a thin wrapper plus a new
+`resolve_vim_motion(&mut self, key, shift, key_char) -> MotionResolution`,
+which resolves a keystroke to a target position *and* a `MotionKind`
+(`ExclusiveChar`/`InclusiveChar`/`Linewise` — vim's own `:help exclusive`/
+`inclusive`/`linewise`) without applying it anywhere. `MotionKind` is the
+piece a bare `usize` target loses: `dw` and `de` must produce different
+ranges from the same cursor position even when they'd otherwise look
+similar, and only the kind distinguishes them. Three consumers now share
+one motion table: Normal-mode cursor movement, Visual-mode selection
+extension (both via `handle_vim_motion_key`, unchanged from Task E), and
+Task F's operators (via `resolve_vim_motion` directly). This refactor was
+mechanical enough that all 301 pre-existing tests passed unchanged
+immediately after it, confirmed before any operator code was written.
+
+One quirk preserved carefully: Normal mode's historical "let `left`/
+`right`/`home`/`end` fall through to the plain editor" convenience is now
+implemented as a check in the thin wrapper *before* calling
+`resolve_vim_motion` — the resolver itself always resolves those four keys
+locally (as h/l/0/$ equivalents), since operators need a real target for
+`dh`/`d<end>`/etc. and have no such fallthrough concept.
+
+### Operators: `d`/`y`/`c` + `dd`/`yy`/`cc`, `>`/`<` + `>>`/`<<`, `gU`/`gu`
+
+- **Pending-operator state**: new `Tab.vim_pending_operator: Option<char>`
+  (plus `vim_pending_text_object_prefix: Option<bool>` for the `i`/`a`
+  stage — see below), deliberately *not* reusing `vim_command_buf`'s
+  pending-trigger mechanism (used by `f`/`g`/etc.) since an operator
+  pressed key does not behave like a motion trigger — `handle_vim_normal_key`
+  checks it first, ahead of even the macro `q`/`@` check, so a pending `d`
+  correctly claims the *next* keystroke (e.g. `d` then `q` abandons `d`
+  rather than starting macro recording into register `q` — a regression
+  this session's own tests caught and fixed via ordering, not a
+  hypothetical).
+- **`complete_vim_operator`** resolves, in order: (1) a pending text-object
+  prefix, (2) the doubled-operator case (same key pressed again — `dd`/
+  `yy`/`cc`/`>>`/`<<`), (3) an `i`/`a` prefix starting a text object, (4)
+  otherwise delegates to `resolve_vim_motion`. Its `MotionKind::Linewise`
+  vs `ExclusiveChar`/`InclusiveChar` result becomes the operator's range
+  via `vim_operator_motion_range`/`vim_operator_doubled_range`; `c` gets a
+  documented special case (linewise change excludes the trailing newline,
+  emptying the line in place rather than deleting it, matching real vim);
+  `>`/`<` get a similar override forcing `Linewise` regardless of the
+  motion's own kind (vim's own rule — `>w` indents the *line*, even though
+  `w` is charwise), which `gU`/`gu` deliberately do **not** share (they
+  respect the motion's real kind, so `gUw` only uppercases the word).
+- **Registers**: minimal, write-only `AppState.registers: HashMap<char,
+  String>` — `d`/`c` write to `'"'`, `y` writes to both `'"'` and `'0'`.
+  No `"a`-prefix register selection, no `+` clipboard routing, and nothing
+  reads a register back yet (`p`/`P` paste is Task H) — pulling forward
+  only the minimum slice of Task H's register design that operators need.
+- **`gU`/`gu`** are two-keystroke commands (`g` + `u`, disambiguated by
+  `shift` on the second key, same convention as every other letter in this
+  file) intercepted in `handle_vim_normal_key` *before*
+  `handle_vim_motion_key` would otherwise claim the second key as `gg`'s
+  (failed) pending completion and silently abandon it. Internally
+  represented as operator ids `'U'`/`'u'` (not `'g'`) since the actual
+  operator identity isn't known until the second key arrives.
+- **Indent (`>`/`<`)**: no shiftwidth setting exists anywhere in this app,
+  so a literal tab is the indent unit (matching the plain editor's own Tab
+  key), and unindent removes one leading tab if present, else up to 4
+  leading spaces — a stand-in for "one shiftwidth" of space-indented
+  content, not an exact match to any configured width.
+- **Scope limits, all deliberate and documented in code comments**:
+  count-*before*-an-operator (`3dd`) isn't supported, only count-*after*
+  (`d3w`) or count-*between* a doubled operator's two keys (`d2d`) —
+  combining both would need multiplying two separate counts, deliberately
+  deferred. `dj`/`dk`/`d<up>`/`d<down>` (and the `>`/`gU` equivalents)
+  don't work — `j`/`k` always resolve to `MotionResolution::NeedsGpui`
+  (no viewport context in `AppState`), so they cleanly abandon a pending
+  operator rather than doing nothing useful; **this is the same class of
+  gap the advisor caught for macros** (`d@`/`dj` bypassing
+  `complete_vim_operator` entirely via `text_editor.rs`'s j/k/H/M/L/`@`
+  interceptions) — fixed by adding a `vim_pending_operator()` guard
+  alongside the existing `vim_pending_trigger()` one at all three
+  interception sites, *before* any operator code was called done. `gUU`/
+  `guu` (doubled-key form of the case operators) isn't implemented — the
+  generic doubled-key check assumes an unshifted single-char key, which
+  doesn't fit `gU`'s second keystroke; abandons cleanly rather than
+  misfiring.
+
+### Text objects: `iw`/`aw`, `is`/`as`, `ip`/`ap`, quotes, brackets
+
+All five resolvers are free functions returning `Option<(usize, usize)>`
+(`text_object_word` returns a plain tuple — it degenerates to a
+zero-width object rather than failing), dispatched by
+`resolve_vim_text_object` from a target character resolved via the
+existing `vim_find_target_char` (reused rather than duplicated, so
+shifted-punctuation object keys like `"`/`(`/`{` get the same robust
+detection `f`/`F`/`t`/`T` targets already have).
+
+- `iw`/`aw`: contiguous run of the same `CharClass` (word/punctuation/
+  whitespace — reusing Task E's own word-motion classification) as the
+  character under the cursor; `aw` additionally swallows one adjacent
+  whitespace run, trailing preferred, falling back to leading.
+- `is`/`as`: **simplified** sentence boundary — ends at the first `.`/`!`/
+  `?` followed by whitespace or end-of-content, with no handling of
+  abbreviations, decimal numbers, or quote/paren-wrapped punctuation. A
+  documented simplification of vim's own more elaborate sentence grammar,
+  chosen because precise sentence detection is the least load-bearing text
+  object for this app's actual use case (debate-card editing leans much
+  harder on word/paragraph/quote/bracket objects).
+- `ip`/`ap`: reuses `is_blank_line` (the same paragraph-boundary
+  definition `{`/`}` already use) — contiguous run of lines sharing the
+  cursor line's blank/non-blank status; `ap` swallows one adjacent block
+  of the *opposite* status, trailing preferred, falling back to leading —
+  the same inclusion pattern as `aw`, one level up.
+- `i"`/`a"`, `i'`/`a'`: **current line only** (matching real vim — quote
+  objects never cross lines), picks the first quote pair that contains or
+  starts at/after the cursor.
+- Brackets (`i(`/`a(`, `i[`/`a[`, `i{`/`a{`, either half of the pair
+  selects the same region): unlike quotes, these search the **whole
+  document** and are nesting-aware via a single forward scan with a stack
+  of open positions — among all matched pairs enclosing the cursor, the
+  smallest is the innermost, matching real vim. Unmatched brackets are
+  ignored rather than erroring.
+
+**Known gap, not fixed**: `>`/`<`'s forced-linewise override lives in
+`vim_operator_motion_range` (the motion path) but the text-object path
+(`resolve_vim_text_object`) always builds an `ExclusiveChar` range — so
+`>iw` would insert a tab mid-line instead of indenting, rather than being
+rejected or redirected. Not fixed because it's a nonsensical command in
+practice (nobody actually types `>iw`); `>ip`/`>ap` — the combinations
+that matter — work correctly since paragraph ranges are already
+line-aligned by construction.
+
+### Verification
+
+- `cargo check`: clean (only pre-existing dead-code warnings, unrelated to
+  this task).
+- `cargo test`: 345 passed, 0 failed, up from 290 at the end of Task E
+  (55 new tests spanning the `MotionKind`/`resolve_vim_motion` split, every
+  operator × several motion kinds, `dd`/`yy`/`cc` and their counted forms,
+  every text object's inner/around variant plus a couple of edge cases
+  each, `>>`/`<<`/`gU`/`gu`, and regression tests for both bugs an advisor
+  review caught before they shipped: the `d`-then-`q` macro-collision
+  ordering, and the `dj`/`d@`-bypasses-the-operator gap in
+  `text_editor.rs`'s GPUI-bound key interceptions).
+- **Hardware verification checklist, in priority order** (none of this is
+  exercised by the test suite — GPUI isn't spun up in tests). Update: the
+  `matches_shifted_symbol` risk flagged below for `>>`/`<<` turned out to
+  be unfounded — root-cause investigation of the (mis-)reported macro
+  breakage confirmed via GPUI's actual X11 source that this detection
+  mechanism is sound (see Task E pass 2's Known Limitations); `>>`/`<<`
+  should work correctly by the same confirmed mechanism. Left as the first
+  item to check anyway, since it's still unexercised by the test suite:
+  1. `>>` and `<<` — `matches_shifted_symbol` (shift+`.`/shift+`,`) is now
+     confirmed sound against GPUI's actual `keystroke_from_xkb` source
+     (`Keysym::greater => ">"`, `Keysym::less => "<"`, matching this
+     helper's checks exactly), but still worth a quick real-keystroke
+     confirmation since nothing in this task has been.
+  2. `dw` vs `de` from the same cursor position — must produce visibly
+     different results (the entire point of `MotionKind`).
+  3. `dd`/`yy`/`cc`, plus `d2d` (count between doubled keys) and `d3w`
+     (count after the operator).
+  4. `ciw`/`di(`/`ci"` — the text-object completions whose *object*
+     character is shifted punctuation (`"`/`(`), the second-highest
+     shifted-symbol reporting risk in this task after `>>`/`<<`.
+  5. `gUw`/`guiw` — confirm charwise (only the word changes), not the
+     whole line.
+  6. `dj`/`dk` — confirm they're a clean no-op (operator abandoned,
+     content unchanged), not a dangling operator that misfires on the
+     *next* keystroke (the exact bug the advisor caught and this session
+     fixed before it could ship).
+
+## Task G: Visual-Mode Operators
+
+Closes out Task G (spec 5.6) — the motion-extension half was already done
+in Task E pass 2; this adds the operator row: `d`/`x`, `y`, `c`, `>`, `<`,
+`~` (toggle case), `gU`, `gu`, and `o` (swap selection ends). A separate
+`notes/editor_instructions.md` §11 "Optional Features" section was added
+first, at the user's direction, to record one explicit scope decision:
+using a text object (`iw`, `i"`, etc.) to directly set the Visual
+selection (real vim's `viw`) is **not** in spec 5.6's table and was left
+out of this pass — tracked there (§11.1) as an optional fast-follow, not
+built.
+
+### Architecture: immediate execution, not a pending sequence
+
+Unlike Normal mode's operators (Task F), which start a *pending* sequence
+waiting for a motion/text-object/doubled-key, Visual-mode operators act
+**immediately** on the selection that already exists — there's no
+"waiting for the next key" state to manage. `handle_vim_visual_key` gained
+three checks, all placed before the shared motion dispatcher:
+
+1. `gU`/`gu` — checked first (mirroring Task F's identical ordering
+   concern): a pending `g` (from `gg`) would otherwise let
+   `handle_vim_motion_key` claim the following `u`/`U` as `gg`'s failed
+   completion and silently abandon it.
+2. The rest of the operator set (`resolve_vim_visual_operator_key`, a new
+   free function reusing `matches_shifted_symbol` for `>`/`<`/`~`'s
+   shifted-punctuation detection) and `o`.
+3. Both (2) are gated on `vim_pending_trigger().is_none()` — **a real
+   regression this session's own pre-existing test suite caught**: `f`
+   then `d` (find target `'d'`) was misfiring as "start the delete
+   operator" before this guard was added, since the new operator check ran
+   ahead of `handle_vim_motion_key`'s own pending-find completion. Same
+   collision class the advisor flagged for Task F's Normal-mode operators
+   and macros — caught here by `cargo test` failing immediately, not
+   shipped and found later.
+
+`vim_visual_operator_range(operator) -> Option<(usize, usize, MotionKind)>`
+resolves the active selection into the range an operator needs — the
+Visual-mode counterpart to Task F's `vim_operator_motion_range`, except
+the range is already given by the selection rather than built from a
+cursor/target pair. `VisualLine` selections are always linewise; so are
+`>`/`<` even from a plain (charwise) `Visual` selection (vim's own rule —
+indent always affects whole lines). `c` on a linewise range excludes the
+trailing newline, matching Normal mode's `cc` (empties the line in place).
+The line-aligned bounds are recomputed from the selection's current
+min/max rather than trusted to already sit on line boundaries, since
+`VisualLine`'s selection is only guaranteed line-aligned at entry — a
+charwise motion extending it afterward isn't specially re-snapped (a
+separate, pre-existing gap, not fixed here; being defensive here is what
+keeps this method correct regardless).
+
+`execute_vim_visual_operator(operator)` runs the operator and returns to
+Normal mode afterward via `vim_exit_to_normal` — except `c`, which already
+transitions to Insert mode on its own (reusing Task F's
+`execute_vim_operator_range`, unchanged), so calling `vim_exit_to_normal`
+afterward would wrongly revert that. `~` (no Normal-mode equivalent exists
+yet — that's Task I's single-character `~`) gets its own small
+`toggle_case_vim_range`, since it flips each character's case
+independently rather than pushing everything one direction like `gU`/`gu`.
+
+`o` (`vim_visual_swap_ends`) just swaps the selection's anchor/focus and
+moves the cursor to the new focus — the highlighted range itself doesn't
+change, and it stays in Visual mode (doesn't execute anything or exit).
+
+### Verification
+
+- `cargo check`: clean (only pre-existing dead-code warnings, unrelated).
+- `cargo test`: 359 passed, 0 failed, up from 345 at the end of Task F (14
+  new tests: every operator in both Visual and VisualLine modes,
+  `>`/`<`'s forced-linewise-even-from-charwise-selection rule, `gU`'s
+  charwise-not-linewise distinction, `~`, `o`, and the `f`-then-`d`
+  regression above).
+- **No automated tests for the actual GPUI-bound keystroke path** — same
+  limitation as Tasks E/F, this suite never spins up a live GPUI event
+  loop. `>`/`<`'s Visual-mode entry points reuse the same
+  `matches_shifted_symbol`-based detection Task F's `>>`/`<<` use, which
+  a later root-cause investigation confirmed sound against GPUI's actual
+  X11 source (see Task E pass 2's Known Limitations) — so this is no
+  longer an open risk the way it was when this task was first written,
+  but still worth a real-keystroke pass since nothing here has had one.
+  `./run.sh`/`timeout 5 ./target/debug/vimbatim` launched and ran the full
+  timeout without a panic after every change in this task, confirming no
+  startup-time breakage only. **Needs manual verification**, in priority
+  order: `d`/`x`/`y`/`c` on both a charwise and a `VisualLine` selection;
+  `gU`/`gu`/`~` (shifted-`~` specifically); `>`/`<` in Visual mode; `o`
+  after extending a selection in both directions; and the `f`-then-`d`
+  (or any pending find) interaction, confirming the fix actually holds on
+  a live keyboard, not just in this test suite.
+
+## Mode-Indicator Feedback Fix (post–Task G)
+
+Root-cause investigation of the "`q`/`@` macros are broken" report (using
+`superpowers:systematic-debugging`) traced the actual GPUI X11 source
+(`gpui_linux/src/linux/platform.rs`'s `keystroke_from_xkb`, from the
+vendored `zed` git dependency) rather than continuing to guess. Confirmed
+facts from that source: the keysym table really does map shifted
+punctuation directly to the resolved symbol (`Keysym::at => "@"`,
+`Keysym::less => "<"`, `Keysym::greater => ">"`, `Keysym::asciitilde =>
+"~"` — exactly matching every `matches_shifted_symbol` call site in this
+codebase), and GPUI *deliberately* clears `modifiers.shift` for symbol
+keys ("we only include shift for upper-case letters... not for numbers
+and symbols") — a real quirk, but one `matches_shifted_symbol`'s first
+check (`key == symbol`, independent of `shift`) already tolerates. Tracing
+the full `q`→register→content→`q`→`@`→register control flow against this
+confirmed behavior turned up no logic bug.
+
+Asking the user what they'd actually observed (rather than continuing to
+guess) resolved it: **the functionality was working correctly** — the
+only problem was the mode-indicator line showing no feedback while a
+`q`/`@` sequence was pending or a recording was active. Root cause: Task
+E pass 2's pending-command echo (`pending_command_text` in
+`text_editor.rs`) only ever read `Tab.vim_command_buf`, but the pending
+states Task F/G added afterward (`vim_pending_operator`,
+`vim_pending_text_object_prefix`, and macros' own
+`vim_macro_record_pending`/`macro_at_pending`) all deliberately live in
+*separate* fields — precisely to avoid colliding with `vim_command_buf`'s
+own count/pending-trigger grammar (see `start_vim_operator`'s doc
+comment) — so the echo never saw them.
+
+**Fix**: two new `AppState` accessors, `vim_recording_register() ->
+Option<char>` and `vim_macro_record_pending() -> bool` (mirroring
+`vim_is_recording_macro()`, which already existed), and
+`pending_command_text`'s composition extended to append: a pending
+operator character (plus its `i`/`a` text-object prefix, if any), a
+pending `q` or `@` waiting for its register, and — for the whole duration
+of an active recording, not just the initial keystroke, matching real
+vim's own status-line behavior — `[recording @<register>]`.
+
+This was a **feedback gap, not a functional bug** — `d`/`y`/`c`/`>`/`<`/
+`gU`/`gu`/text objects/macros all worked before this fix; the fix only
+makes their in-progress state visible. No behavior change to any
+operator, motion, or macro logic.
+
+### Verification
+
+- `cargo check`: clean.
+- `cargo test`: 361 passed, 0 failed, up from 359 (2 new tests for the two
+  accessors).
+- The indicator string construction itself has no direct test (it's a
+  `render()` concern, same as the original Task E pass 2 echo) — covered
+  indirectly via the two new accessor tests plus every existing
+  operator/macro test that already exercises the underlying state these
+  accessors read. `timeout 5 ./target/debug/vimbatim` launched and ran
+  the full timeout without a panic.
+- **Still needs real-keyboard confirmation** that the indicator actually
+  renders these strings correctly in the live UI (font, spacing,
+  `[recording @x]` not clipping) — this sandbox has no working display.
+
+## Task H: Command Mode (`:`) + Registers
+
+Implements spec §5.7 (Command mode) and §5.8 (registers) in full. Six
+sub-tasks, each TDD'd independently; 392 tests passing (up from 382 at the
+end of Task G's `/simplify` pass).
+
+### Command-mode text capture (`src/state.rs`)
+
+Task D left Command mode entry/exit only. Added a new, dedicated
+`tab.vim_command_line: String` field — deliberately *not* a reuse of
+`vim_command_buf`, since that buffer has its own digit+single-trailing-
+trigger-char parser (`split_vim_command_buf`) that arbitrary text like
+`%s/foo/bar/g` would break; the same collision-avoidance reasoning Task F
+used to keep `vim_pending_operator` in its own field.
+
+`handle_vim_command_key` now: discards and exits on `Escape`; dispatches
+via `dispatch_vim_command` then exits on `Enter`; pops the last character
+(or exits to Normal if already empty, matching real vim) on `Backspace`;
+and otherwise resolves the keystroke to a literal character via
+`vim_find_target_char` — the same resolver already proven correct for
+shifted punctuation (f/F/t/T targets, macro registers) on this GPUI
+backend, which sidesteps the separately-tracked "shifted punctuation
+doesn't type right anywhere in the app" gap for this one feature without
+needing to fix it app-wide.
+
+The mode indicator (`text_editor.rs`) now shows `:<command_line>` while in
+Command mode, and appends a new `tab.vim_command_error` (see below) in any
+mode until the next `:` is opened — mirroring real vim's persistent error
+line.
+
+### Command dispatcher (`dispatch_vim_command`, `src/state.rs`)
+
+Every command in spec §5.7:
+
+- `:w`/`:wa` — `save_active_tab`/loop `save_tab(idx)` (the latter is a new
+  index-taking core `save_active_tab` now wraps, so `:wa` doesn't need to
+  juggle `active_tab`).
+- `:q` — refuses with `E37: No write since last change` (set into
+  `vim_command_error`) if the active tab is modified; `:q!` force-closes
+  regardless. **Scope decision, confirmed with the user before
+  implementing**: spec §5.7 literally says "prompt if unsaved", but real
+  vim doesn't pop a confirmation dialog by default — it just refuses with
+  an error unless `:q!` overrides it. Implementing the error-refusal
+  behavior matches real vim and needed no new prompt/modal UI; building an
+  actual confirm dialog was the rejected alternative.
+- `:wq`/`:x` — save then close. Both behave identically (`save_tab`
+  already no-ops when `!is_modified`, which is exactly `:x`'s "only write
+  if there were changes" semantics — no special-casing needed).
+- `:e <path>` — resolves relative to `working_directory`, calls the
+  existing `open_file`.
+- `:set vim`/`:set novim` — toggles `vim_enabled`.
+- `:<n>` — jumps to line `n` (1-indexed) via the existing
+  `vim_move_to_line_first_nonblank`.
+- `:%s/pattern/replacement/[g][i]` — `dispatch_vim_substitute`, using the
+  `regex` crate (already a dependency). Per-line: without `g`, only the
+  first match per line is replaced (`Regex::replace`), matching real vim's
+  default; `i` prepends `(?i)` to the pattern for case-insensitivity. A bad
+  pattern sets `vim_command_error` instead of panicking.
+- `:noh` — accepted but a documented no-op; nothing to clear until Task I
+  builds search highlighting.
+- Anything else sets `vim_command_error` to `E492: Not an editor command:
+  <cmd>`.
+
+### Registers (§5.8, `src/state.rs` + `src/text_editor.rs`)
+
+The `HashMap<char, String>` on `AppState` (from Task F, write-only until
+now) is read from as well as written to:
+
+- **`"<register>` prefix syntax**: `tab.vim_pending_register_select: bool`
+  arms on a bare `"`; the next keystroke (`a`-`z`, `0`, `+`) selects
+  `tab.vim_selected_register: Option<char>`, a *one-shot* selection
+  consumed by `take_vim_selected_register` the next time a register-
+  writing (`d`/`y`/`c`) or register-reading (`p`/`P`) action runs. Checked
+  in `handle_vim_normal_key` and `handle_vim_visual_key` via a shared
+  `try_handle_vim_register_prefix`, in the same "claims its key before
+  anything else gets a chance" position as the existing macro-register-
+  pending check — same pattern, different trigger key, no collision.
+- **Write path**: `write_vim_register(text, also_yank)` replaces the old
+  direct `registers.insert('"', ...)` calls in `execute_vim_operator_range`
+  — always writes `'"'` (and `'0'` for yanks), plus the selected named
+  register if one was given, mirroring real vim's "named register writes
+  always also update the unnamed one" behavior. Visual mode's operators
+  already route through `execute_vim_operator_range`, so register support
+  there came for free — only the prefix-detection needed adding.
+- **`p`/`P` paste**: new `vim_paste_register(before: bool)`. Linewise vs.
+  charwise is read directly off the register text — "does it end with
+  `\n`" — rather than tracked as separate state, since every linewise
+  operator range already ends with a trailing newline by construction
+  (`linewise_bounds_for_operator`). Linewise pastes as a new line below
+  (`p`)/above (`P`) the cursor's line, landing on the first non-blank;
+  charwise inserts right after (`p`)/at (`P`) the cursor, landing on the
+  last pasted character (via `char_indices` for UTF-8 safety, never raw
+  byte arithmetic).
+- **`'+'` clipboard register**: stored in `registers` like any other named
+  register — `state.rs` stays entirely GPUI-unaware. `text_editor.rs`
+  handles both directions, mirroring the existing Ctrl+C/V clipboard
+  pattern: before dispatching a `p`/`P` keystroke, if
+  `state.vim_selected_register() == Some('+')` (a new peeking accessor,
+  non-consuming — distinct from the internal consuming
+  `take_vim_selected_register`), it reads `cx.read_from_clipboard()` and
+  stages the text into register `'+'` via a new `set_register` setter, so
+  the ordinary paste path then just works unmodified. In the write
+  direction, `execute_vim_operator_range` stages written text into a new
+  `AppState.pending_clipboard_sync: Option<String>` mailbox whenever the
+  target register was `'+'`; `text_editor.rs` drains it
+  (`take_pending_clipboard_sync`) right after every vim keystroke and
+  pushes it onto the OS clipboard via `cx.write_to_clipboard`.
+
+### Verification
+
+- `cargo check`/`cargo build`: clean.
+- `cargo test`: 392 passed, 0 failed, up from 382 (31 new tests across all
+  six sub-tasks: command-mode capture, the dispatcher's ~15 commands,
+  `:%s` substitution's flag combinations, register-prefix selection and
+  one-shot consumption, and all four paste variants).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: the `'+'` clipboard round-trip
+  (`cx.read_from_clipboard`/`cx.write_to_clipboard`) and the mode
+  indicator's live rendering of `:command` text and `vim_command_error`
+  strings have no GPUI test harness in this sandbox (no `test-support`
+  feature wired in, no working display) — needs a real-keyboard pass.
+
+## Task I: Remaining Normal-Mode Commands + `.` Repeat
+
+Implements the rest of spec §5.5 not already covered by earlier tasks:
+`x`/`X`/`r<char>`/`R`/`s`/`S`/`~`/`.`/`J`/`/`/`?`/`n`/`N`/`*`/`#`/`Ctrl+o`/
+`Ctrl+i`. Six sub-tasks, each TDD'd independently; 435 tests passing (up
+from 427 at the end of Task H).
+
+### x/X/s/S/~/J (`src/state.rs`, `src/text_editor.rs`)
+
+Convenience single-key commands reusing existing operator machinery:
+`vim_delete_char_forward`/`_backward` (`x`/`X`, clamped to the current
+line so they never delete a trailing newline), `vim_substitute_char`/
+`_line` (`s`/`S`, `x`/line-clear + `vim_enter_insert_before_cursor`),
+`vim_toggle_case_char` (`~`, reuses Task G's `toggle_case_vim_range`),
+`vim_join_lines` (`J`, collapses the next line's leading spaces/tabs to a
+single space).
+
+**Real bug found and fixed along the way**: `text_editor.rs`'s `j`/`k`
+visual-row-movement interception (built for Task E) checked `key == "j" ||
+key == "k"` without checking `shift` — meaning `J` (shift+j, "join lines")
+would have been silently swallowed as "move down one line" before ever
+reaching `handle_vim_key`. Caught by writing `J`'s own test before the
+fix existed to make it pass. Fixed by adding `&& !shift` to that
+interception's guard.
+
+### r<char> (`src/state.rs`)
+
+A one-shot `tab.vim_pending_replace: bool`, mirroring the existing
+macro-register-pending pattern, checked at the same priority as a pending
+operator (must claim its next keystroke unconditionally). Doesn't touch
+any register — matches real vim.
+
+### R — Replace mode (`src/state.rs`, `src/text_editor.rs`)
+
+**Scope decision, confirmed with the user before implementing** (this
+section of `vim_todo.md` flagged a real spec gap — `editor_instructions.md`
+never defines a Replace mode): added a real `VimMode::Replace` variant
+rather than treating `R` as out of scope. Typing overwrites the character
+under the cursor (falling back to `insert_char`, i.e. appending, once the
+cursor reaches the line's end — matches real vim's ability to extend a
+line's length in Replace mode). `Backspace` moves the cursor back without
+restoring the overwritten character — a documented simplification (real
+vim tracks per-position originals).
+
+### Search mode: `/`, `?`, `n`, `N`, `*`, `#` (`src/state.rs`, `src/text_editor.rs`)
+
+A new `VimMode::Search`. Rather than duplicating Command mode's text
+capture, extracted a shared `capture_vim_line_input` state machine (an
+enum `VimLineInput { Consumed, Dispatch(String), Cancelled }`) that both
+`handle_vim_command_key` and the new `handle_vim_search_key` call —
+`Escape`/`Enter`/`Backspace`/character-capture are identical between the
+two modes; only what happens with the finished text differs (dispatched
+as a command vs. a search). `dispatch_vim_search`/`jump_to_search_match_from`
+implement a minimal `content.find`/`rfind`-with-wraparound (not a regex
+search — a full inline find-bar with highlighting is spec §4.6 territory,
+explicitly out of scope here). `AppState.last_search: Option<(String,
+bool)>` remembers the pattern+direction for `n`/`N` (`N` reverses it).
+`*`/`#` extract the word under the cursor via Task F's `text_object_word`,
+searching from just past/before its bounds so the word the cursor is
+already standing in doesn't match itself.
+
+### Jump list: `Ctrl+o`/`Ctrl+i` (`src/state.rs`, `src/text_editor.rs`)
+
+A per-tab back/forward stack pair (`vim_jump_back`/`vim_jump_forward:
+Vec<usize>`, the same shape as `undo_stack`/`redo_stack`). Rather than
+special-casing every "large jump" command individually, the push check
+lives in the single application point *every* Normal-mode motion already
+passes through — `apply_vim_motion` — comparing the old and new cursor's
+line numbers (via a new `line_index_for` helper) and pushing whenever the
+delta exceeds one line. This automatically covers `gg`/`G`/`:<n>`/every
+search dispatch (all of which call `apply_vim_motion` internally) with no
+per-call-site wiring. Visual-mode selection extension never pushes.
+
+### `.` repeat (`src/state.rs`, `src/text_editor.rs`)
+
+The most involved piece. `AppState.last_change: Option<VimChange>`, a
+semantic enum:
+
+```rust
+enum VimChange {
+    Operator(char, Vec<RecordedVimKey>),
+    OperatorInsert(char, Vec<RecordedVimKey>, String),
+    Insertion(String),
+}
+```
+
+Deliberately **not** a raw full-keystroke-sequence replay (unlike macros)
+— storing the operator char plus just its *completion* keystrokes means
+`.` can call `start_vim_operator`/`complete_vim_operator` programmatically
+at the new cursor position and let the existing motion/text-object
+resolution machinery re-resolve fresh, which is what makes `dw` at a new
+position correctly delete a *different* word rather than replaying a
+stale byte range.
+
+Capture mechanics:
+- `start_vim_operator` begins a `vim_change_recording: Vec<RecordedVimKey>`
+  for every operator except `y` (yanking isn't a "change").
+  `text_editor.rs`'s `process_key` appends each keystroke to it *before*
+  dispatch (unlike macro recording's after-the-fact check — the keystroke
+  that *completes* the operator must still be captured).
+- `execute_vim_operator_range` commits the recording to `last_change` once
+  the operator actually runs — except `c`, which stashes it in
+  `vim_pending_change_before_insert` instead, since the Insert session it
+  leads into needs to be combined into the same change (real vim's `.`
+  after `cw<text><Esc>` repeats both the deletion and the retyped text).
+  The `NotAMotion`/`NeedsGpui` abandon path in `complete_vim_operator`
+  discards the recording instead of committing it.
+- `vim_enter_insert_before_cursor` (the single choke point every Insert
+  entry — `i`/`I`/`a`/`A`/`o`/`O`/`c` — funnels through) starts a
+  `vim_insertion_recording: String`; `insert_char`/`insert_str`/`backspace`
+  append/pop it. `vim_exit_to_normal` commits it on exit from Insert mode,
+  combining with `vim_pending_change_before_insert` if present.
+
+**Scope limitation, matching this section's original guidance** ("i/a/c-
+style insertions... don't try to replay arbitrary multi-command
+sequences"): `o`/`O` also start an insertion recording (since they share
+the same entry point), but replaying it via `.` inserts the text inline
+rather than reopening a new line first — real vim's `.` after `o<text>
+<Esc>` needs to remember *that a line was opened*, not just what was
+typed, which this design doesn't capture. Documented rather than silently
+wrong.
+
+**A real regression caught by the test suite before shipping**: the first
+version of `clear_vim_pending_operator` discarded `vim_change_recording`
+unconditionally — but that function runs on *every* operator-completion
+path (success *and* abandonment), always *before*
+`execute_vim_operator_range`, which needs the recording still intact to
+commit it. Every successful operator would have silently failed to set
+`last_change`. Fixed by moving the discard to specifically the
+`NotAMotion`/`NeedsGpui` abandon branch in `complete_vim_operator`, leaving
+`clear_vim_pending_operator` itself untouched.
+
+### Verification
+
+- `cargo check`/`cargo build`: clean.
+- `cargo test`: 435 passed, 0 failed, up from 427 (43 new tests across all
+  six sub-tasks).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: `R`/Search mode's live indicator rendering,
+  and the real-keyboard feel of `.` repeat, have no GPUI test harness in
+  this sandbox — needs a real-keyboard pass, same caveat as every other
+  UI-facing piece this session.

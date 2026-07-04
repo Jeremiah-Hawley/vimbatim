@@ -394,114 +394,224 @@ tests, all passing.
   `.bounds()` off the tracked scroll handle, which GPUI recomputes
   automatically for the shrunk viewport.
 
-### Task E — Vim motions (Normal mode)
+### Task E — Vim motions (Normal mode) — **Done (both passes)**
 
-Files: `src/state.rs`
+Files: `src/state.rs`, `src/text_editor.rs`. See `tmp_documentation.md`'s
+"Task E (pass 1 of 2)" and "Task E (pass 2 of 2)" sections for the full
+writeups; 290 tests passing as of pass 2's completion (up from 256 at the
+end of pass 1).
+
+Pass 2 also picked up several things the user asked for directly, beyond
+this task's original scope: a visible command/count buffer next to the
+mode indicator, Visual mode actually extending the selection via motions
+(the pure-motion half of Task G — see that section below, still open for
+Visual-mode *operators*), and `q`/`@` macro recording/replay (not in
+`editor_instructions.md` at all — an addition beyond the written spec).
+Macros were initially reported as broken on real hardware; root-cause
+investigation (post–Task G) found the functionality actually worked — the
+only real gap was the mode indicator giving no visual feedback while a
+`q`/`@` sequence was pending. See `tmp_documentation.md`'s "Mode-Indicator
+Feedback Fix" section for the full story and the fix.
 
 Implement the full motion table in `notes/editor_instructions.md` §5.2,
 built on Task A's primitives plus new ones this table needs that Task A
 didn't require: `w`/`W`/`b`/`B`/`e`/`E` (word vs WORD — WORD is
-whitespace-delimited only, word additionally breaks on punctuation),
-`{`/`}` (paragraph = blank-line-delimited block), `f`/`F`/`t`/`T` +
-`;`/`,` repeat (store `last_find` per tab per §2.2), `H`/`M`/`L` (viewport-
-relative — requires knowing the visible line range, which the current
-`TextEditor` doesn't track; add a `visible_line_range` or scroll-offset
-field if one doesn't already exist from GPUI's `overflow_y_scroll()`
-scroll handle), `Ctrl+D`/`Ctrl+U`/`Ctrl+F`/`Ctrl+B` (half/full page scroll),
-`zz`/`zt`/`zb` (scroll without moving cursor line-relative position).
+whitespace-delimited only, word additionally breaks on punctuation).
+**Done.** `{`/`}` (paragraph = blank-line-delimited block). **Done.**
+`f`/`F`/`t`/`T` + `;`/`,` repeat (store `last_find` per tab per §2.2).
+**Done**, including real vim's repeat-nudge for `t`/`T` (`;` after a `t`
+skips the already-adjacent match instead of no-op'ing). `gg`/`G`/`NG`.
+**Done** — corrected to vim's real first-non-blank landing (not literal
+column 0), composed from `move_to_line` + `move_line_first_nonblank`
+rather than a new method. `h`/`l`/`w`/`b`/`e`/`0`/`^`/`$`/count prefixes.
+**Done** — full 3-state dispatcher rewrite in `handle_vim_normal_key`
+(digit accumulation, pending two-keystroke commands, single-key dispatch).
+`j`/`k`. **Done**, but deliberately *not* vim's logical-line semantics —
+reuses this app's existing visual-row-aware movement (same as the arrow
+keys) so they don't skip a wrapped paragraph's continuation rows, a
+conscious UX call for this heavily-wrapping-prose app, flagged in
+`tmp_documentation.md`.
+
+`H`/`M`/`L` (viewport-relative — top/middle/bottom of the *visible*
+viewport). **Done in pass 2** — `text_editor.rs` resolves the visible row
+range from `scroll_handle.offset()`/`.bounds()`, then hands off to a
+GPUI-context-free `AppState::vim_move_to_line_first_nonblank`. `_` (first
+non-blank of the `[count]`-th line down). **Done in pass 2** — pure text
+math, `underscore_motion`.
+
+**Still not implemented:** `Ctrl+D`/`Ctrl+U`/`Ctrl+F`/`Ctrl+B` (half/full
+page scroll), `zz`/`zt`/`zb` (scroll without moving cursor line-relative
+position) — never requested in either pass, tracked here if wanted later.
+`%` (spec 5.2: "future: matching bracket/paren") is out of scope per the
+spec itself.
 
 Count prefixes (`3w`, `5j`) accumulate digits into `tab.vim_command_buf`
 before the motion key arrives; parse and clear the buffer once a
-non-digit key completes the command.
+non-digit key completes the command. **Done** — see `split_vim_command_buf`/
+`take_vim_count` in `tmp_documentation.md`. Note one implemented deviation:
+count is *not* applied to `$`/`^` (real vim's `2$` means "end of the next
+line," not implemented here — `2$` just goes to the end of the current
+line).
 
-### Task F — Vim operators + text objects
-
-Files: `src/state.rs`
-
-Implement `notes/editor_instructions.md` §5.3 and §5.4. Pattern is
-`[count]operator[count]motion` or `[count]operator[i/a][object]`. Reuse
-`vim_command_buf` for accumulating the operator+count+motion sequence
-before executing. `dd`/`yy`/`cc` (doubled operator = current line) are a
-special case — detect operator key pressed twice in a row with nothing but
-a count in between.
-
-`d`/`x` write to the default register (see Task H) before deleting; `y`
-writes to both `"` and `0`.
-
-`c` deletes then transitions `vim_mode` to `Insert` (reuse Task D's
-transition, not a separate code path).
-
-Text objects (`iw`, `aw`, `is`, `as`, `ip`, `ap`, `i"`, `a"`, `i'`, `a'`,
-`i(`/`i)`, `i[`/`i]`, `i{`/`i}` and their `a` variants) each need a
-`(start, end)` byte-range resolver against `tab.content` and
-`tab.cursor` — write these as free functions returning
-`Option<(usize, usize)>` so they're independently testable without an
-`AppState` in scope, following the existing convention of pure functions
-plus thin state glue (compare `scan_directory` at `src/state.rs:384-433`,
-which is a free function called from an `AppState` method).
-
-### Task G — Visual / VisualLine mode
+### Task F — Vim operators + text objects — **Done, unit-tested only (not hardware-verified)**
 
 Files: `src/state.rs`
 
-Spec §5.6. Motions in this mode extend `tab.selection` instead of moving an
-unselected cursor (reuse Task B's selection-extend logic). Operators act on
-`tab.selection` instead of resolving a motion/text-object range first.
-`o` swaps which end of the selection the cursor is on.
+Implements `notes/editor_instructions.md` §5.3 and §5.4. Full writeup in
+`tmp_documentation.md`'s "Task F" section; 345 tests passing (up from 290).
+Everything here is unit-tested but was never exercised through a live
+GPUI event loop when first written. A post–Task G root-cause
+investigation (see `tmp_documentation.md`'s "Mode-Indicator Feedback Fix")
+traced GPUI's actual X11 source and confirmed `matches_shifted_symbol` —
+which `>>`/`<<` depend on — is sound; the `q`/`@` macro report that
+originally motivated the caution here turned out to be a missing UI
+feedback issue, not a functional bug. Still worth a real-keystroke pass
+since nothing in this task has had one — see Task F's own "Hardware
+verification checklist".
 
-### Task H — Command mode (`:`) + registers
+Delivered: `d`/`y`/`c` operators + `dd`/`yy`/`cc` doubled-key current-line
+forms; `>`/`<` indent/unindent + `>>`/`<<`; `gU`/`gu` case-change
+operators; all of §5.4's text objects (`iw`/`aw`, `is`/`as`, `ip`/`ap`,
+`i"`/`a"`, `i'`/`a'`, brackets `(`/`[`/`{` and their `a` variants) as pure
+free functions returning `Option<(usize, usize)>`. `d`/`c` write to
+register `"`; `y` writes to both `"` and `0` (a minimal, write-only slice
+of Task H's register design pulled forward — no `"a` prefix syntax, no
+`+` clipboard, no `p`/`P` paste yet).
+
+**Deviations from this original plan, decided during implementation**:
+count is supported *after* an operator (`d3w`) or *between* a doubled
+operator's two keys (`d2d`), but *not before* the operator (`3dd` doesn't
+work) — combining both would need multiplying two separate counts,
+deliberately deferred rather than reusing `vim_command_buf` for the whole
+sequence as originally sketched here (a pending operator is tracked as its
+own `Tab.vim_pending_operator`/`vim_pending_text_object_prefix` fields
+instead, since `vim_command_buf`'s existing pending-trigger grammar
+couldn't cleanly represent "waiting for either a motion, a doubled key, or
+an `i`/`a` prefix" without colliding with `f`/`g`'s own pending-trigger
+completion). `dj`/`dk`/`d<up>`/`d<down>` (and their `>`/`gU` equivalents)
+are a documented gap — `j`/`k` need GPUI viewport context no part of this
+system has.
+
+### Task G — Visual / VisualLine mode — **Done, unit-tested only (not hardware-verified)**
 
 Files: `src/state.rs`
 
-- Command-mode keystrokes append to `tab.vim_command_buf` (rendered in the
-  mode-indicator line from Task D, e.g. `:%s/foo/bar/g`); `Enter` parses and
-  dispatches, `Escape` discards and returns to Normal.
-- Implement every command in spec §5.7. `:%s/pattern/replacement/[g][i]`
-  needs a regex — `regex` is already a dependency (`Cargo.toml:14`), reuse
-  it rather than hand-rolling substitution.
-- `:e <path>` calls the existing `AppState::open_file` (`src/state.rs:152`).
-  `:w`/`:wq`/`:x` call the existing `AppState::save_active_tab`
-  (`src/state.rs:174`). `:q`/`:q!`/`:wq` call the existing
-  `AppState::close_tab` (`src/state.rs:210`) — don't reimplement
-  open/save/close, just dispatch to what's already there.
-- Registers (§5.8): `HashMap<char, String>` on `AppState` per §2.2.
-  `"ay`/`"ap` prefix syntax: a leading `"<letter>` before an operator/paste
-  key selects the register for that one operation, then reverts to `"`
-  (default). `"+y`/`"+p` route through `cx.write_to_clipboard` /
-  `cx.read_from_clipboard`, same APIs already used for Ctrl+C/V
-  (`src/text_editor.rs:52`, `:69`) — this needs a `cx` handle, so register
-  dispatch for `+` specifically has to happen in `text_editor.rs`, not
-  purely in `state.rs` like the other registers.
+Spec §5.6, both halves now implemented. Full writeup in
+`tmp_documentation.md`'s "Task G" section; 359 tests passing (up from
+345 at the end of Task F).
 
-### Task I — Remaining Normal-mode commands + `.` repeat
+Motions in this mode extend `tab.selection` instead of moving an
+unselected cursor — done as part of Task E pass 2: `handle_vim_key`'s
+Normal-mode motion dispatcher (`handle_vim_motion_key`) was made shared
+between Normal and Visual/VisualLine via an `extend: bool` parameter,
+rather than duplicating the motion table.
 
-Files: `src/state.rs`
+Operators (`d`/`x`, `y`, `c`, `>`, `<`, `~`, `gU`, `gu`) act on
+`tab.selection` immediately (no pending-sequence state needed, unlike Task
+F's Normal-mode operators — the selection already exists) and reuse Task
+F's `execute_vim_operator_range` where possible. `o` swaps which end of
+the selection the cursor is on. Unit-tested but not exercised through a
+live GPUI event loop; `>`/`<`'s `matches_shifted_symbol` dependency was
+confirmed sound against GPUI's actual X11 source during the mode-indicator
+root-cause investigation (see `tmp_documentation.md`'s "Mode-Indicator
+Feedback Fix") — still worth a real-keystroke pass since nothing here has
+had one.
+
+**Explicit scope decision, recorded in `notes/editor_instructions.md` §11.1
+("Optional Features")**: text objects (`iw`, `i"`, etc.) directly setting
+the Visual selection (real vim's `viw`) is not in spec 5.6's table and was
+left out of this pass as an optional, not-yet-built fast-follow.
+
+### Task H — Command mode (`:`) + registers — **Done**
+
+Files: `src/state.rs`, `src/text_editor.rs`
+
+Full writeup in `tmp_documentation.md`'s "Task H" section; 392 tests passing
+(up from 382 at the end of Task G's `/simplify` pass).
+
+- Command-mode keystrokes append to a new, dedicated `tab.vim_command_line`
+  — deliberately *not* `vim_command_buf` (that buffer has its own
+  digit+single-trigger-char parser, `split_vim_command_buf`, not built for
+  arbitrary text like `%s/foo/bar/g`; same reasoning Task F used to keep
+  `vim_pending_operator` separate from it). Characters resolve via
+  `vim_find_target_char`, reusing the resolver already proven correct for
+  shifted punctuation on this GPUI backend, sidestepping the app-wide
+  shift-punctuation gap for this feature. `Enter` dispatches via
+  `dispatch_vim_command` then returns to Normal; `Escape` discards;
+  `Backspace` deletes the last char or exits to Normal if already empty.
+- Every command in spec §5.7 is implemented, including
+  `:%s/pattern/replacement/[g][i]` via the `regex` crate (per-line, first
+  match unless `g`; `i` flag via `(?i)`). `:noh` is accepted but a
+  documented no-op — nothing to clear until Task I's search highlighting
+  exists.
+- **Scope decision**: `:q`'s spec text says "prompt if unsaved". Real vim
+  doesn't pop a confirmation dialog by default — it refuses with an error
+  (`E37: No write since last change`) unless `:q!` forces it. Implemented
+  that way (via a new `tab.vim_command_error: Option<String>`, shown in the
+  mode indicator) rather than building new modal/prompt UI; confirmed with
+  the user before implementing.
+- `:e <path>`/`:w`/`:wq`/`:x`/`:wa`/`:q`/`:q!` dispatch to the existing
+  `open_file`/`save_active_tab`/`close_tab` — `save_active_tab` was split
+  into an index-taking `save_tab(idx)` core so `:wa` can loop every tab.
+- Registers (§5.8): the `HashMap<char, String>` on `AppState` from Task F is
+  now read from as well as written to. `"<letter>`/`"+`/`"0`/`"\"` prefix
+  syntax (`tab.vim_pending_register_select` + `vim_selected_register`, a
+  one-shot selection consumed by the next `d`/`y`/`c`/`p`/`P`, same pattern
+  as the existing macro-register-pending flow) works in both Normal and
+  Visual mode. `p`/`P` added, using "does the register text end with `\n`"
+  as the linewise-vs-charwise signal — free, since every linewise operator
+  range already ends with a trailing newline by construction. `'+'` is
+  stored in `registers` like any other named register; `text_editor.rs`
+  mirrors it to/from the real OS clipboard around dispatch (peeking
+  `vim_selected_register() == Some('+')` before a `p`/`P` to read the
+  clipboard in, draining a `pending_clipboard_sync` mailbox after any
+  keystroke to push a `"+y`/`"+d`/`"+c` out) — the only two places this
+  needed a GPUI `cx`, mirroring the existing Ctrl+C/V pattern.
+
+### Task I — Remaining Normal-mode commands + `.` repeat — **Done**
+
+Files: `src/state.rs`, `src/text_editor.rs`
+
+Full writeup in `tmp_documentation.md`'s "Task I" section; 435 tests
+passing (up from 427 at the end of Task H).
 
 Spec §5.5's list minus what earlier tasks already cover (`u`/`Ctrl+r` from
-Task C, `p`/`P` from Task H's registers). Remaining: `x`/`X`/`r<char>`/`R`/
-`s`/`S`/`~`/`.`/`>>`/`<<`/`J`/`/`/`?`/`n`/`N`/`*`/`#`/`Ctrl+o`/`Ctrl+i`.
+Task C, `>>`/`<<` from Task F, `p`/`P` from Task H's registers). Implemented:
+`x`/`X`/`r<char>`/`R`/`s`/`S`/`~`/`.`/`J`/`/`/`?`/`n`/`N`/`*`/`#`/`Ctrl+o`/
+`Ctrl+i`.
 
-**Spec gap:** `R` ("enter Replace mode (overwrite characters)") has no
-corresponding variant in the `VimMode` enum defined at spec §5.1/§2.1 above
-— `editor_instructions.md` never defines Replace-mode entry/exit or an
-indicator string for it. Either add a `Replace` variant (overwrite-in-place
-semantics, `Escape` back to Normal, indicator `-- REPLACE --` to match the
-`-- INSERT --` convention) or treat `R` as out of scope and say so in the
-commit — don't silently implement it as a `c$`-style delete+insert, since
-that changes clipboard/register content differently from a real overwrite.
+**`R` (Replace mode) — user decision: added a real `VimMode::Replace`**
+variant (overwrite-in-place semantics, `Escape` back to Normal, `--
+REPLACE --` indicator), rather than treating it as out of scope. Backspace
+moves the cursor back but doesn't restore the overwritten character (a
+documented simplification vs. real vim's per-position undo tracking).
 
-- `/` and `?` reuse the byte-offset search you'd build for Task 4.6's
-  find-bar if that's been done — if not, a minimal `content.find(pattern)`
-  /`rfind` wrapped with wraparound is sufficient for `n`/`N`/`*`/`#`; a full
-  inline find-bar UI is section 4.6 territory and out of scope here.
-- `Ctrl+o`/`Ctrl+i` need a jump list — `Vec<usize>` of cursor positions on
-  `AppState` or per-`Tab`, pushed on any "large" motion (`gg`, `G`, `f`-style
-  searches, `:` line jumps); exact push heuristics aren't specified upstream,
-  match real vim's behavior (push before any jump that moves the cursor more
-  than one line) if it's ambiguous.
-- `.` replays `last_change` (§2.2) — scope this to operator + motion/text-object
-  changes and `i`/`a`/`c`-style insertions (replay the exact inserted text);
-  don't try to replay arbitrary multi-command sequences.
+**`/`/`?`/`n`/`N`/`*`/`#`**: a new `VimMode::Search`, sharing the exact
+text-capture state machine Task H built for `:` (extracted into a shared
+`capture_vim_line_input` helper so the two don't duplicate escape/
+backspace/char-capture logic) — dispatches to a minimal `content.find`/
+`rfind`-with-wraparound (plain substring, not regex, per this section's
+original guidance). `*`/`#` extract the word under the cursor via Task F's
+`text_object_word` as the literal search text.
+
+**`Ctrl+o`/`Ctrl+i`**: a per-tab jump-list back/forward stack pair
+(`vim_jump_back`/`vim_jump_forward: Vec<usize>`, same shape as
+`undo_stack`/`redo_stack`), pushed to from the single application point
+every Normal-mode motion already goes through (`apply_vim_motion`) whenever
+a motion crosses more than one line — covers `gg`/`G`/`:<n>`/searches
+automatically without special-casing each call site.
+
+**`.` repeat**: `AppState.last_change: Option<VimChange>`, a semantic enum
+(`Operator(char, Vec<RecordedVimKey>)` / `OperatorInsert(..., String)` /
+`Insertion(String)`) rather than raw keystroke replay of the *entire*
+sequence — re-invokes `start_vim_operator`/`complete_vim_operator` with the
+stored completion keystrokes at the *new* cursor position (correctly
+re-resolving `dw`-style motions fresh each time), and replays typed text
+via `insert_str` for `i`/`a`/`c`-style insertions. `y` never starts a
+recording (yanking isn't a "change"). `o`/`O`-opened insertions are
+captured as plain text too, but replaying them via `.` inserts inline
+rather than reopening a new line — an explicitly out-of-scope
+simplification (this section's original guidance only promised `i`/`a`/`c`).
 
 ---
 

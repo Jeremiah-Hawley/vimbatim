@@ -581,3 +581,24 @@ Implement in this order so each phase produces a working, testable state:
 10. **Find/replace** — inline bar
 11. **File dialogs** — new file, open, save-as
 12. **Polish** — modified indicator in tab title, save error UI, vim registers
+
+---
+
+## 11. Optional Features
+
+Not required by the sections above — real vim behaviors worth having, but
+out of scope for the corresponding required task unless explicitly picked
+up. Each entry names the task it would extend.
+
+### 11.1 Text objects as Visual-mode motions (extends 5.6 / Task G)
+
+Section 5.6's table only specifies "all Normal motions extend selection"
+plus its own operator row (`d`/`x`, `y`, `c`, `>`, `<`, `~`, `gU`, `gu`,
+`o`) — it does not specify using a text object (`iw`, `i"`, `ip`, etc.,
+spec 5.4) to directly set or extend the Visual selection while already in
+Visual mode. Real vim supports this (`viw` while in Visual mode selects
+the inner word under the cursor, replacing whatever selection existed).
+Not required for Task G; a small addition on top of the text-object
+resolvers Task F already built (`resolve_vim_text_object`) if picked up
+later — each resolver already returns the exact `(start, end)` range
+Visual mode would set `tab.selection` to.

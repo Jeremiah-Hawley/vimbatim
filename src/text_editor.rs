@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::auto_scroll::AutoScroller;
-use crate::state::{AppState, VimMode};
+use crate::state::{matches_shifted_symbol, vim_find_target_char, AppState, VimMode};
 
 /// Approximate monospace glyph width, used only to convert a mouse click's
 /// pixel X position into a character column within its row. This is an
@@ -57,6 +57,12 @@ pub struct TextEditor {
     /// Drives continuous scrolling while a click-drag sits near the top/
     /// bottom edge of the viewport — see `auto_scroll::AutoScroller`.
     auto_scroller: AutoScroller,
+    /// True right after a bare `@` was pressed in Normal mode, waiting for
+    /// the register character that completes `@<register>` (user-requested
+    /// macro replay — not part of editor_instructions.md). Kept here rather
+    /// than in `AppState` since resolving it triggers `replay_macro`, which
+    /// needs this struct's GPUI context.
+    macro_at_pending: bool,
 }
 
 impl TextEditor {
@@ -72,7 +78,7 @@ impl TextEditor {
         let focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
         let auto_scroller = AutoScroller::new(scroll_handle.clone(), state.clone());
-        TextEditor { state, focus_handle, scroll_handle, auto_scroller }
+        TextEditor { state, focus_handle, scroll_handle, auto_scroller, macro_at_pending: false }
     }
 
     fn scroll_to_cursor(&self, cx: &Context<Self>) {
@@ -195,104 +201,166 @@ impl TextEditor {
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         /*
-         * Dispatches raw key-down events to the AppState so text content is updated.
-         *
-         * Platform-modifier (Ctrl/Cmd) combinations are deliberately passed through
-         * so global actions (toggle-settings, new-tab, etc.) can fire normally.
-         * Only pure character input, space, enter, tab, and backspace are consumed.
-         * scroll_to_cursor is called at every exit point so the cursor line stays
-         * visible regardless of which key moved it.
+         * Dispatches raw key-down events to `process_key`, which does the
+         * actual work — split out so macro replay (`@<register>`, a
+         * user-requested feature not part of editor_instructions.md) can
+         * re-invoke the exact same dispatch for a recorded keystroke
+         * without a real `KeyDownEvent` to hand it.
          */
         let ks = &event.keystroke;
+        self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), cx);
+    }
 
-        // Handle the Ctrl/platform combos that belong to the editor; let the
-        // rest bubble to the global action dispatcher (Ctrl+S, Ctrl+T, etc.).
-        if ks.modifiers.control || ks.modifiers.platform {
-            match ks.key.as_str() {
-                "c" => {
-                    // Copy: read-only — use entity.read so no update closure needed.
-                    let text = self.state.read(cx).copy_selection();
-                    if let Some(text) = text {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
-                }
-                "x" => {
-                    // Cut: delete selection inside update, write result to clipboard.
-                    let text = self.state.update(cx, |state, cx| {
-                        let result = state.cut_selection();
-                        if result.is_some() { cx.notify(); }
-                        result
-                    });
-                    if let Some(text) = text {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        cx.notify();
-                    }
-                }
-                "v" => {
-                    // Paste: read clipboard on outer cx first, then insert inside update.
-                    if let Some(item) = cx.read_from_clipboard() {
-                        if let Some(text) = item.text() {
-                            self.state.update(cx, |state, cx| {
-                                state.insert_str(&text);
-                                cx.notify();
-                            });
-                            cx.notify();
-                        }
-                    }
-                }
-                "a" => {
-                    // Ctrl+A: select all (spec 4.3).
-                    self.state.update(cx, |state, _cx| state.select_all());
-                    cx.notify();
-                }
-                "z" => {
-                    // Ctrl+Z: undo. Ctrl+Shift+Z: redo (common alternate
-                    // binding alongside Ctrl+Y) (spec 4.5).
-                    self.state.update(cx, |state, _cx| {
-                        if ks.modifiers.shift { state.redo() } else { state.undo() }
-                    });
-                    cx.notify();
-                }
-                "y" => {
-                    // Ctrl+Y: redo (spec 4.5).
-                    self.state.update(cx, |state, _cx| state.redo());
-                    cx.notify();
-                }
-                // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
-                // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just
-                // moving (spec 4.3). Plain (unmodified) arrow/Home/End are handled below.
-                "left" => {
-                    self.state.update(cx, |state, _cx| {
-                        if ks.modifiers.shift { state.extend_word_backward() } else { state.move_word_backward() }
-                    });
-                    cx.notify();
-                }
-                "right" => {
-                    self.state.update(cx, |state, _cx| {
-                        if ks.modifiers.shift { state.extend_word_forward() } else { state.move_word_forward() }
-                    });
-                    cx.notify();
-                }
-                "home" => {
-                    self.state.update(cx, |state, _cx| {
-                        if ks.modifiers.shift { state.extend_doc_start() } else { state.move_doc_start() }
-                    });
-                    cx.notify();
-                }
-                "end" => {
-                    self.state.update(cx, |state, _cx| {
-                        if ks.modifiers.shift { state.extend_doc_end() } else { state.move_doc_end() }
-                    });
-                    cx.notify();
-                }
-                _ => {} // Ctrl+S, Ctrl+T, Ctrl+W, etc. handled by global actions
-            }
-            self.scroll_to_cursor(cx);
+    fn process_key(&mut self, key: &str, shift: bool, control: bool, platform: bool, key_char: Option<&str>, cx: &mut Context<Self>) {
+        /*
+         * The actual key-handling logic `handle_key_down` used to contain
+         * directly, now parameterized so both a live `KeyDownEvent` and a
+         * replayed macro keystroke (which has no `KeyDownEvent` to unpack)
+         * funnel through the same path.
+         *
+         * Platform-modifier (Ctrl/Cmd) combinations are deliberately passed
+         * through so global actions (toggle-settings, new-tab, etc.) can
+         * fire normally — and deliberately excluded from macro-recording
+         * capture below, an explicit scope decision (macros cover vim's
+         * own keystroke stream, not app-global shortcuts).
+         * Only pure character input, space, enter, tab, and backspace are
+         * consumed. scroll_to_cursor is called at every exit point so the
+         * cursor line stays visible regardless of which key moved it.
+         */
+        if control || platform {
+            self.process_key_ctrl_combo(key, shift, cx);
             return;
         }
 
-        let key = ks.key.as_str();
+        // Macro recording capture (user-requested `q`/`@` macros, not part
+        // of the written spec): record this keystroke iff a
+        // recording was already active *before* dispatch and is *still*
+        // active *after* — excluding the `q<register>` pair that starts a
+        // recording (not yet active beforehand) and the bare `q` that ends
+        // one (no longer active afterward), so only the macro's actual
+        // content is captured.
+        let was_recording = self.state.read(cx).vim_is_recording_macro();
+        // `.`-repeat change capture (spec 5.5) — unlike macro recording,
+        // this appends *before* dispatch, since the keystroke that
+        // completes the operator (ending the recording) must still be
+        // captured; see `vim_is_recording_change`'s doc comment.
+        if self.state.read(cx).vim_is_recording_change() {
+            self.state.update(cx, |state, _cx| state.record_change_key(key, shift, key_char));
+        }
+        self.process_key_plain(key, shift, key_char, cx);
+        if was_recording && self.state.read(cx).vim_is_recording_macro() {
+            self.state.update(cx, |state, _cx| state.record_macro_key(key, shift, key_char));
+        }
+    }
 
+    fn process_key_ctrl_combo(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
+        /*
+         * Handles Ctrl/Cmd-modified keystrokes — split out of `process_key`
+         * so its early `return` doesn't also need to skip macro-recording
+         * capture (Ctrl combos are app-global shortcuts, not part of vim's
+         * own keystroke stream, and are never recorded into a macro).
+         */
+        match key {
+            "c" => {
+                // Copy: read-only — use entity.read so no update closure needed.
+                let text = self.state.read(cx).copy_selection();
+                if let Some(text) = text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            "x" => {
+                // Cut: delete selection inside update, write result to clipboard.
+                let text = self.state.update(cx, |state, cx| {
+                    let result = state.cut_selection();
+                    if result.is_some() { cx.notify(); }
+                    result
+                });
+                if let Some(text) = text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    cx.notify();
+                }
+            }
+            "v" => {
+                // Paste: read clipboard on outer cx first, then insert inside update.
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        self.state.update(cx, |state, cx| {
+                            state.insert_str(&text);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }
+                }
+            }
+            "a" => {
+                // Ctrl+A: select all (spec 4.3).
+                self.state.update(cx, |state, _cx| state.select_all());
+                cx.notify();
+            }
+            "z" => {
+                // Ctrl+Z: undo. Ctrl+Shift+Z: redo (common alternate
+                // binding alongside Ctrl+Y) (spec 4.5).
+                self.state.update(cx, |state, _cx| {
+                    if shift { state.redo() } else { state.undo() }
+                });
+                cx.notify();
+            }
+            "y" => {
+                // Ctrl+Y: redo (spec 4.5).
+                self.state.update(cx, |state, _cx| state.redo());
+                cx.notify();
+            }
+            "o" => {
+                // Ctrl+O: jump list back (spec 5.5).
+                self.state.update(cx, |state, _cx| state.vim_jump_backward());
+                cx.notify();
+                self.scroll_to_cursor(cx);
+            }
+            "i" => {
+                // Ctrl+I: jump list forward (spec 5.5).
+                self.state.update(cx, |state, _cx| state.vim_jump_forward());
+                cx.notify();
+                self.scroll_to_cursor(cx);
+            }
+            // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
+            // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just
+            // moving (spec 4.3). Plain (unmodified) arrow/Home/End are handled below.
+            "left" => {
+                self.state.update(cx, |state, _cx| {
+                    if shift { state.extend_word_backward() } else { state.move_word_backward() }
+                });
+                cx.notify();
+            }
+            "right" => {
+                self.state.update(cx, |state, _cx| {
+                    if shift { state.extend_word_forward() } else { state.move_word_forward() }
+                });
+                cx.notify();
+            }
+            "home" => {
+                self.state.update(cx, |state, _cx| {
+                    if shift { state.extend_doc_start() } else { state.move_doc_start() }
+                });
+                cx.notify();
+            }
+            "end" => {
+                self.state.update(cx, |state, _cx| {
+                    if shift { state.extend_doc_end() } else { state.move_doc_end() }
+                });
+                cx.notify();
+            }
+            _ => {} // Ctrl+S, Ctrl+T, Ctrl+W, etc. handled by global actions
+        }
+        self.scroll_to_cursor(cx);
+    }
+
+    fn process_key_plain(&mut self, key: &str, shift: bool, key_char: Option<&str>, cx: &mut Context<Self>) {
+        /*
+         * Handles every non-Ctrl/Cmd keystroke: vim-mode routing plus the
+         * plain-editor fallback. Split out of `process_key` so macro
+         * recording can wrap this call without also capturing Ctrl combos
+         * (handled separately by `process_key_ctrl_combo`).
+         */
         // Vim mode routing (Task D). Insert mode behaves like the plain
         // editor below except for Escape, which nothing in the plain-editor
         // match block otherwise handles. The other four modes route through
@@ -315,12 +383,136 @@ impl TextEditor {
                 }
                 // else: fall through to the plain-editor handling below.
             } else {
-                let key_char = ks.key_char.as_deref();
-                let consumed = self.state.update(cx, |state, cx| {
-                    let handled = state.handle_vim_key(key, ks.modifiers.shift, key_char);
+                // 'j'/'k' need the current viewport's wrap layout (GPUI
+                // context `handle_vim_key` doesn't have), so they're
+                // special-cased here rather than dispatched through
+                // AppState — mirroring how plain Up/Down are handled below,
+                // and reusing the same visual-row-aware movement so j/k
+                // feel identical to the arrow keys on this app's wrapped
+                // content rather than vim's logical-line semantics (a
+                // deliberate UX choice for this heavily-wrapping app).
+                // Intercepted in Normal mode (moves the cursor) and Visual/
+                // VisualLine (extends the selection, spec 5.6) with no
+                // pending find/gg trigger *and* no pending `d`/`y`/`c`
+                // operator — otherwise 'j'/'k' must reach `handle_vim_key`
+                // so a pending `f`/`t` can treat them as a target character
+                // (e.g. completing `fj`), or a pending operator can abandon
+                // itself cleanly via `complete_vim_operator` (without this,
+                // `dj` would silently move the cursor via
+                // `move_cursor_visual_row` below and leave `d` dangling for
+                // the *next* keystroke to complete instead). Also gated on
+                // `!shift` (Task I) — shift+j is `J` (join lines, spec
+                // 5.5), a completely different command that must reach
+                // `handle_vim_key` instead of being swallowed as "move down".
+                let no_pending_trigger = self.state.read(cx).vim_pending_trigger().is_none()
+                    && self.state.read(cx).vim_pending_operator().is_none();
+                let is_visual = matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
+                if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger && !shift && (key == "j" || key == "k") {
+                    let count = self.state.update(cx, |state, _cx| state.take_vim_count()).unwrap_or(1);
+                    let delta: isize = if key == "k" { -1 } else { 1 };
+                    for _ in 0..count {
+                        self.move_cursor_visual_row(cx, delta, is_visual);
+                    }
+                    self.scroll_to_cursor(cx);
+                    return;
+                }
+
+                // H/M/L: top/middle/bottom of the *visible* viewport (spec
+                // 5.2) — needs the live scroll offset and visual-row
+                // layout, same GPUI-context reason as j/k above. Resolves
+                // down to a plain logical line number and hands off to
+                // `vim_move_to_line_first_nonblank`, which doesn't need to
+                // know anything about viewports.
+                if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger
+                    && shift && matches!(key, "h" | "m" | "l")
+                {
+                    let content = self.state.read(cx).active_content().to_string();
+                    let lines = document_lines(&content);
+                    let bounds = self.scroll_handle.bounds();
+                    let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
+                    if !rows.is_empty() {
+                        let viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+                        let offset = self.scroll_handle.offset();
+                        let top_row = ((-offset.y.as_f32()) / LINE_HEIGHT_PX).floor().max(0.0) as usize;
+                        let top_row = top_row.min(rows.len() - 1);
+                        let visible_count = ((viewport_h / LINE_HEIGHT_PX).floor().max(1.0)) as usize;
+                        let bottom_row = (top_row + visible_count.saturating_sub(1)).min(rows.len() - 1);
+                        let target_row = match key {
+                            "h" => top_row,
+                            "l" => bottom_row,
+                            "m" => top_row + (bottom_row - top_row) / 2,
+                            _ => unreachable!(),
+                        };
+                        let target_line = rows[target_row].0;
+                        self.state.update(cx, |state, cx| {
+                            state.vim_move_to_line_first_nonblank(target_line, is_visual);
+                            cx.notify();
+                        });
+                        cx.notify();
+                        self.scroll_to_cursor(cx);
+                        return;
+                    }
+                }
+
+                // `@`/`@<register>`/`@@` macro replay (user-requested, not
+                // part of editor_instructions.md) — kept entirely here
+                // rather than in `AppState::handle_vim_key`
+                // since replaying re-enters `process_key` with full GPUI
+                // context, which `AppState` doesn't have. Normal-mode only
+                // (unlike `q` recording start/stop, which — being purely
+                // state bookkeeping with no GPUI dependency — lives in
+                // `AppState` and is reachable from Visual mode too via the
+                // shared dispatcher; narrowing replay to Normal mode is a
+                // deliberate, documented scope limit for this pass).
+                if vim_mode == VimMode::Normal && no_pending_trigger {
+                    if self.macro_at_pending {
+                        self.macro_at_pending = false;
+                        if let Some(register) = vim_find_target_char(key, shift, key_char) {
+                            let register = if register == '@' {
+                                self.state.read(cx).vim_last_macro_register
+                            } else {
+                                Some(register)
+                            };
+                            if let Some(register) = register {
+                                self.replay_macro(register, cx);
+                            }
+                        }
+                        self.scroll_to_cursor(cx);
+                        return;
+                    }
+                    if matches_shifted_symbol(key, shift, key_char, "2", "@") {
+                        self.macro_at_pending = true;
+                        return;
+                    }
+                }
+
+                // `"+p`/`"+P` (spec 5.8's clipboard register, read
+                // direction): `state.rs` can't reach the OS clipboard
+                // itself, so when the `+` register is about to be pasted
+                // from, read it here (this is the only layer with `cx`)
+                // and stage it into the register the ordinary,
+                // GPUI-unaware paste path already knows how to read.
+                if (key == "p") && self.state.read(cx).vim_selected_register() == Some('+') {
+                    if let Some(item) = cx.read_from_clipboard() {
+                        if let Some(text) = item.text() {
+                            self.state.update(cx, |state, _cx| state.set_register('+', text.to_string()));
+                        }
+                    }
+                }
+
+                let (consumed, clipboard_sync) = self.state.update(cx, |state, cx| {
+                    let handled = state.handle_vim_key(key, shift, key_char);
                     if handled { cx.notify(); }
-                    handled
+                    (handled, state.take_pending_clipboard_sync())
                 });
+                // `"+y`/`"+d`/`"+c` (write direction): mirrors the read
+                // direction above — `execute_vim_operator_range` stages the
+                // text in `pending_clipboard_sync` when the `+` register
+                // was targeted; this is the only place with `cx` to
+                // actually push it onto the OS clipboard.
+                if let Some(text) = clipboard_sync {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
                 if consumed {
                     cx.notify();
                     self.scroll_to_cursor(cx);
@@ -334,10 +526,16 @@ impl TextEditor {
         // Up/Down move by *visual* row (not logical line) so wrapped lines'
         // continuation rows are reachable — handled separately from the
         // match below since it needs the current viewport's wrap layout,
-        // not just a plain AppState mutation.
+        // not just a plain AppState mutation. Extends instead of moving
+        // when Shift is held (the plain editor's own convention) OR vim is
+        // in Visual/VisualLine mode — reached here (rather than being
+        // handled above) precisely when vim's own j/k branch let Up/Down
+        // fall through, which requires extending too or it would silently
+        // clear the active selection via a plain, non-extending move.
         if key == "up" || key == "down" {
+            let vim_visual = vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
             let delta = if key == "up" { -1 } else { 1 };
-            self.move_cursor_visual_row(cx, delta, ks.modifiers.shift);
+            self.move_cursor_visual_row(cx, delta, shift || vim_visual);
             self.scroll_to_cursor(cx);
             return;
         }
@@ -349,14 +547,14 @@ impl TextEditor {
                 "space"     => { state.insert_char(' '); cx.notify(); true }
                 "tab"       => { state.insert_char('\t'); cx.notify(); true }
                 // Shift+<key> extends the selection instead of moving plainly (spec 4.3).
-                "left"      => { if ks.modifiers.shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
-                "right"     => { if ks.modifiers.shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
-                "home"      => { if ks.modifiers.shift { state.extend_line_start() } else { state.move_line_start() }; cx.notify(); true }
-                "end"       => { if ks.modifiers.shift { state.extend_line_end() } else { state.move_line_end() }; cx.notify(); true }
+                "left"      => { if shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
+                "right"     => { if shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
+                "home"      => { if shift { state.extend_line_start() } else { state.move_line_start() }; cx.notify(); true }
+                "end"       => { if shift { state.extend_line_end() } else { state.move_line_end() }; cx.notify(); true }
                 k if k.chars().count() == 1 => {
                     let mut ch = k.chars().next().unwrap();
                     // Apply shift for uppercase; GPUI gives lowercase key names
-                    if ks.modifiers.shift && ch.is_alphabetic() {
+                    if shift && ch.is_alphabetic() {
                         ch = ch.to_uppercase().next().unwrap_or(ch);
                     }
                     state.insert_char(ch);
@@ -368,6 +566,28 @@ impl TextEditor {
         });
         if consumed { cx.notify(); }
         self.scroll_to_cursor(cx);
+    }
+
+    fn replay_macro(&mut self, register: char, cx: &mut Context<Self>) {
+        /*
+         * Replays a recorded macro (`@<register>`) by feeding
+         * its captured keystrokes back through `process_key` one at a
+         * time, in order — the same function a live keypress reaches, so
+         * replay re-triggers the exact same mode-aware routing (Insert/
+         * Normal/Visual, motions, H/M/L, j/k, etc.) a real keystroke would.
+         *
+         * The key vector is read and cloned *before* the loop starts, with
+         * that borrow fully released before any `process_key` call — each
+         * of those does its own `self.state.update`/`read`, and GPUI
+         * panics if one of those runs while another is still open on the
+         * same entity, which would happen if this loop were written inside
+         * a `self.state.update(...)` closure instead.
+         */
+        self.state.update(cx, |state, _cx| { state.vim_last_macro_register = Some(register); });
+        let Some(keys) = self.state.read(cx).macro_keys(register) else { return };
+        for k in keys {
+            self.process_key(&k.key, k.shift, false, false, k.key_char.as_deref(), cx);
+        }
     }
 }
 
@@ -407,19 +627,85 @@ impl Render for TextEditor {
             .get(state.active_tab)
             .and_then(|t| t.selection)
             .map(|(a, f)| (a.min(f), a.max(f)));
-        // Mode indicator text (spec 5.1) — None for Normal mode or when vim
-        // mode is off, matching "nothing shown for Normal".
+        // Mode indicator text. Deviates from spec 5.1's literal "nothing
+        // shown for Normal" — showing `-- NORMAL --` removes the ambiguity
+        // between "vim is on and in Normal mode" and "vim mode is off
+        // entirely", both of which otherwise render an identical blank
+        // indicator strip.
         let mode_indicator_text: Option<&'static str> = if state.vim_enabled {
-            state.tabs.get(state.active_tab).and_then(|t| match t.vim_mode {
-                VimMode::Normal => None,
-                VimMode::Insert => Some("-- INSERT --"),
-                VimMode::Visual => Some("-- VISUAL --"),
-                VimMode::VisualLine => Some("-- VISUAL LINE --"),
-                VimMode::Command => Some("-- COMMAND --"),
+            state.tabs.get(state.active_tab).map(|t| match t.vim_mode {
+                VimMode::Normal => "-- NORMAL --",
+                VimMode::Insert => "-- INSERT --",
+                VimMode::Visual => "-- VISUAL --",
+                VimMode::VisualLine => "-- VISUAL LINE --",
+                VimMode::Command => "-- COMMAND --",
+                VimMode::Replace => "-- REPLACE --",
+                VimMode::Search => "-- SEARCH --",
             })
         } else {
             None
         };
+        // Echoes every in-progress "waiting for the next key" state next
+        // to the mode label — not just `vim_command_buf`'s own count/
+        // pending-trigger grammar (`3f`), but also the pending states
+        // Task F/G added afterward that deliberately live in *separate*
+        // fields rather than `vim_command_buf` (to avoid colliding with
+        // its existing grammar — see e.g. `start_vim_operator`'s doc
+        // comment): a pending `d`/`y`/`c`/`>`/`<`/`gU`/`gu` operator, an
+        // `i`/`a` text-object prefix after one, and `q`/`@` macro
+        // record/replay's own pending-register state. Concretely, this
+        // string is a UI-only concern — it's built by concatenating
+        // whichever of these happen to be active; the underlying
+        // functionality (recording, replaying, running operators) already
+        // worked correctly without it, confirmed by testing after this
+        // fix was requested — this closes a *feedback* gap, not a
+        // functional one, matching what "no visual on the command mode
+        // line" while everything actually worked turned out to mean.
+        // Also shows "recording @<register>" for the whole duration of an
+        // active recording (real vim does this too), not just the initial
+        // `q<register>` keystroke. In Command mode (Task H), shows the
+        // live `:command` text instead of the Normal/Visual pending-state
+        // echo, since the two are mutually exclusive by construction (only
+        // one `vim_mode` is active at a time). A `vim_command_error` from
+        // the last dispatched command (e.g. `:q` refused on unsaved
+        // changes, or an unrecognized command) is appended in any mode
+        // until the next `:` is opened, matching real vim's persistent
+        // error line.
+        let pending_command_text: Option<String> = state
+            .tabs
+            .get(state.active_tab)
+            .map(|t| {
+                let mut buf = if t.vim_mode == VimMode::Command {
+                    format!(":{}", t.vim_command_line)
+                } else if t.vim_mode == VimMode::Search {
+                    let prefix = if t.vim_search_direction { '/' } else { '?' };
+                    format!("{prefix}{}", t.vim_command_line)
+                } else {
+                    let mut buf = t.vim_command_buf.clone();
+                    if let Some(operator) = t.vim_pending_operator {
+                        buf.push(operator);
+                        if let Some(inner) = t.vim_pending_text_object_prefix {
+                            buf.push(if inner { 'i' } else { 'a' });
+                        }
+                    }
+                    if state.vim_macro_record_pending() {
+                        buf.push('q');
+                    }
+                    if self.macro_at_pending {
+                        buf.push('@');
+                    }
+                    if let Some(register) = state.vim_recording_register() {
+                        buf.push_str(&format!(" [recording @{register}]"));
+                    }
+                    buf
+                };
+                if let Some(err) = &t.vim_command_error {
+                    if !buf.is_empty() { buf.push(' '); }
+                    buf.push_str(err);
+                }
+                buf
+            })
+            .filter(|buf| !buf.is_empty());
         let _ = state;
 
         let is_focused = self.focus_handle.is_focused(window);
@@ -613,10 +899,18 @@ impl Render for TextEditor {
                     }))
             ) // closes the lines-container .child(...)
             ) // closes the scrollable-editor .child(...) on the wrapper
-            .child(
+            .child({
                 // Mode indicator (spec 5.1) — a sibling below the scrollable
                 // editor div, at a fixed height so switching modes doesn't
-                // resize (and re-wrap) the editor's own viewport.
+                // resize (and re-wrap) the editor's own viewport. The
+                // in-progress command/count buffer (e.g. "3f"), when
+                // present, is appended after the mode label on the same
+                // line, matching real vim's bottom-right pending-keys echo.
+                let mut line = mode_indicator_text.unwrap_or("").to_string();
+                if let Some(pending) = &pending_command_text {
+                    if !line.is_empty() { line.push(' '); }
+                    line.push_str(pending);
+                }
                 div()
                     .h(px(LINE_HEIGHT_PX))
                     .px(px(16.0))
@@ -624,8 +918,8 @@ impl Render for TextEditor {
                     .font_family("monospace")
                     .text_sm()
                     .text_color(rgb(0xd4d4d4))
-                    .child(mode_indicator_text.unwrap_or("")),
-            )
+                    .child(line)
+            })
     }
 }
 
