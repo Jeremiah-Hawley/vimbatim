@@ -1,4 +1,5 @@
 mod docx_parser;
+mod document_ops;
 mod state;
 mod tab_bar;
 mod app_toolbar;

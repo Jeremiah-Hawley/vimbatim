@@ -2,6 +2,8 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::auto_scroll::AutoScroller;
+use crate::docx_parser::{Paragraph, Run};
+use crate::document_ops::{paragraph_run_char_spans, FormatOp};
 use crate::state::{matches_shifted_symbol, vim_find_target_char, AppState, VimMode};
 
 /// Approximate monospace glyph width, used only to convert a mouse click's
@@ -31,6 +33,26 @@ const CONTENT_PADDING_PX: f32 = 16.0;
 /// cursor comes within this many lines of the viewport edge, rather than
 /// waiting until the cursor line itself is already clipped.
 const SCROLL_MARGIN_LINES: f32 = 3.0;
+/// A literal, well-known monospace family name rather than the generic
+/// CSS-style alias `"monospace"`. GPUI's font matching (`cosmic_text`'s
+/// `load_family`) filters real system fonts by an *exact string* match
+/// against each font file's own embedded family name — no font ever
+/// declares its family as literally "monospace", so that name always
+/// missed and fell through to GPUI's hardcoded fallback stack, which
+/// resolves each candidate at default weight/style, discarding any
+/// requested bold/italic before it ever reaches font matching. Separately,
+/// `find_best_match` short-circuits (`candidates.len() == 1 => Ok(0)`)
+/// without checking weight/style whenever the resolved family has only one
+/// loaded face — together these silently dropped every bold/italic
+/// request. "DejaVu Sans Mono" ships with separate Book/Bold/Oblique/Bold
+/// Oblique faces under one family name on essentially all Linux/WSL
+/// systems, giving `find_best_match` real candidates to choose between.
+const FONT_FAMILY: &str = "DejaVu Sans Mono";
+/// The editor's default (un-styled) text color, matching the literal used
+/// at each row/placeholder `.text_color(rgb(0xd4d4d4))` call site — used by
+/// `apply_run_style` as the "effective" text color when a run has no
+/// explicit `color` override, to decide whether a highlight needs darkening.
+const DEFAULT_TEXT_COLOR_HEX: u32 = 0xd4d4d4;
 
 /// The main document editing area.
 ///
@@ -321,6 +343,27 @@ impl TextEditor {
                 self.state.update(cx, |state, _cx| state.vim_jump_forward());
                 cx.notify();
                 self.scroll_to_cursor(cx);
+            }
+            "b" => {
+                // Ctrl+B: bold (rich-text formatting plan, Phase 2 — common
+                // shortcut alongside the ribbon's own Bold button).
+                self.state.update(cx, |state, cx| {
+                    state.apply_formatting_to_selection(FormatOp::Bold(true));
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            "u" => {
+                // Ctrl+U: underline. Ctrl+I is deliberately *not* wired to
+                // italic here (the conventional shortcut) — it's already
+                // real vim's own `Ctrl+I` (jump list forward, spec 5.5,
+                // wired above) and shouldn't be overwritten; italic stays
+                // ribbon-only, a documented scope limit.
+                self.state.update(cx, |state, cx| {
+                    state.apply_formatting_to_selection(FormatOp::Underline(true));
+                    cx.notify();
+                });
+                cx.notify();
             }
             // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
             // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just
@@ -614,6 +657,10 @@ impl Render for TextEditor {
          */
         let state = self.state.read(cx);
         let content = state.active_content().to_string();
+        // Rich-text formatting (Phase 1): each logical line is exactly one
+        // paragraph (§1 of formatting_todo.md), so `paragraphs[i]` gives
+        // `lines[i]`'s formatting runs directly — no separate lookup needed.
+        let paragraphs: Vec<Paragraph> = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let is_new_tab = state
             .tabs
             .get(state.active_tab)
@@ -844,7 +891,7 @@ impl Render for TextEditor {
                             div()
                                 .text_sm()
                                 .text_color(rgb(0x555555))
-                                .font_family("monospace")
+                                .font_family(FONT_FAMILY)
                                 .child("Open a file from the sidebar, or start typing…"),
                         )
                     })
@@ -880,11 +927,52 @@ impl Render for TextEditor {
                                     .then(|| (clipped_start - row_start, clipped_end - row_start))
                             });
 
-                        let content_el = render_line(&row_text, row_cursor_col, row_selection);
-                        div()
-                            .font_family("monospace")
+                        // Rich-text formatting (Phase 1): clip this logical
+                        // line's paragraph run boundaries down to this row's
+                        // own [row_start, row_end) sub-range, same rebasing
+                        // pattern as `row_selection` above — a wrapped row
+                        // only needs to know about the runs it actually spans.
+                        let row_run_spans: Vec<(usize, usize, usize)> = paragraphs
+                            .get(li)
+                            .map(|p| paragraph_run_char_spans(p))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|(rs, re, run_idx)| {
+                                let clipped_start = rs.max(row_start);
+                                let clipped_end = re.min(row_end);
+                                (clipped_start < clipped_end)
+                                    .then(|| (clipped_start - row_start, clipped_end - row_start, run_idx))
+                            })
+                            .collect();
+
+                        let content_el = render_line(
+                            &row_text,
+                            row_cursor_col,
+                            row_selection,
+                            &row_run_spans,
+                            paragraphs.get(li),
+                        );
+                        // Heading styles (spec 6.5): a paragraph-wide default
+                        // that per-run formatting (bold/size/etc., applied
+                        // inside `content_el`'s own children) still overrides
+                        // for the specific characters it covers, since GPUI's
+                        // text style cascades to children and a child's own
+                        // call wins. NOTE: a heading's larger font size can
+                        // visually overflow this row's fixed `LINE_HEIGHT_PX`
+                        // — row height doesn't adjust for it, since that
+                        // height feeds click/scroll pixel math built for a
+                        // uniform row size; needs real-hardware verification
+                        // (this sandbox has no display) to see how it looks.
+                        let heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
+                        let row_div = div()
+                            .font_family(FONT_FAMILY)
                             .text_sm()
-                            .text_color(rgb(0xd4d4d4))
+                            .text_color(rgb(0xd4d4d4));
+                        let row_div = match heading_font_size_px(heading) {
+                            Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
+                            None => row_div,
+                        };
+                        row_div
                             // Locks this row's height so wrapping stays fully
                             // decided by `wrap_line_into_rows` up front — nowrap
                             // stops GPUI from *also* word-wrapping this row's text
@@ -915,7 +1003,7 @@ impl Render for TextEditor {
                     .h(px(LINE_HEIGHT_PX))
                     .px(px(16.0))
                     .bg(rgb(0x1e1e1e))
-                    .font_family("monospace")
+                    .font_family(FONT_FAMILY)
                     .text_sm()
                     .text_color(rgb(0xd4d4d4))
                     .child(line)
@@ -923,47 +1011,216 @@ impl Render for TextEditor {
     }
 }
 
-fn render_line(line: &str, cursor_col: Option<usize>, selection: Option<(usize, usize)>) -> AnyElement {
+fn render_line(
+    line: &str,
+    cursor_col: Option<usize>,
+    selection: Option<(usize, usize)>,
+    run_spans: &[(usize, usize, usize)],
+    para: Option<&Paragraph>,
+) -> AnyElement {
     /*
-     * Renders one line of text, splitting it into styled spans wherever the
-     * cursor and/or selection touch it, via `line_segments`. Falls back to a
-     * single plain-text child when neither applies, matching the cheap path
-     * every other (untouched) line already takes.
+     * Renders one (visual-row-clipped) line of text. Splits into
+     * `(run_start, run_end, run_idx)` chunks per the paragraph's formatting
+     * runs (spec 6.2, rich-text formatting plan Phase 1), then further
+     * splits *within* each chunk via the existing `line_segments` wherever
+     * the cursor and/or selection touch it — the two concerns are
+     * orthogonal (which run a character's formatting comes from vs.
+     * whether it's under the cursor/selection), so composing them as an
+     * outer-run/inner-cursor split avoids needing one function that
+     * understands both at once.
+     *
+     * Falls back to a single plain-text child when there's exactly one run
+     * and no cursor/selection touches this row, matching the cheap path
+     * every untouched line already took before formatting existed. An
+     * empty `run_spans` (formatting not available for this row, e.g. a
+     * brand-new tab with no parsed paragraphs) is treated as one big
+     * unformatted run spanning the whole line, so cursor/selection
+     * rendering never silently breaks when formatting data is absent.
      */
     let chars: Vec<char> = line.chars().collect();
-    let segments = line_segments(chars.len(), cursor_col, selection);
 
-    if let [(start, end, SegmentStyle::Plain)] = segments.as_slice() {
-        if *start == 0 && *end == chars.len() {
+    if cursor_col.is_none() && selection.is_none() {
+        if run_spans.is_empty() {
             return line.to_string().into_any_element();
+        }
+        if let [(start, end, run_idx)] = run_spans {
+            if *start == 0 && *end == chars.len() {
+                let run = para.and_then(|p| p.runs.get(*run_idx));
+                if run.is_none() {
+                    return line.to_string().into_any_element();
+                }
+                return apply_run_style(div(), run).child(line.to_string()).into_any_element();
+            }
         }
     }
 
-    let spans: Vec<AnyElement> = segments
+    let effective_spans: Vec<(usize, usize, usize)> = if run_spans.is_empty() {
+        vec![(0, chars.len(), usize::MAX)]
+    } else {
+        run_spans.to_vec()
+    };
+
+    let spans: Vec<AnyElement> = effective_spans
         .into_iter()
-        .map(|(start, end, style)| {
-            // A zero-width segment only ever occurs for the cursor sitting
-            // past the last character (end of line) — render it as a
-            // single space so the highlighted cell still has visible width.
-            let text: String = if start == end {
-                " ".to_string()
-            } else {
-                chars[start..end].iter().collect()
-            };
-            match style {
-                SegmentStyle::Cursor => div()
-                    .bg(rgb(0xd4d4d4))
-                    .text_color(rgb(0x1e1e1e))
-                    .child(text)
-                    .into_any_element(),
-                // #264F78 at ~50% opacity, per spec 6.4's selection-highlight color.
-                SegmentStyle::Selection => div().bg(rgba(0x264F7880)).child(text).into_any_element(),
-                SegmentStyle::Plain => text.into_any_element(),
-            }
+        .flat_map(|(run_start, run_end, run_idx)| {
+            let run = para.and_then(|p| p.runs.get(run_idx));
+            let sub_len = run_end - run_start;
+            let sub_cursor = cursor_col.filter(|&c| c >= run_start && c <= run_end).map(|c| c - run_start);
+            let sub_selection = selection.and_then(|(s, e)| {
+                let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
+                (clipped_start < clipped_end).then(|| (clipped_start - run_start, clipped_end - run_start))
+            });
+            let segments = line_segments(sub_len, sub_cursor, sub_selection);
+            segments
+                .into_iter()
+                .map(|(start, end, style)| {
+                    // A zero-width segment only ever occurs for the cursor
+                    // sitting past the last character (end of line) — render
+                    // it as a single space so the highlighted cell still has
+                    // visible width.
+                    let text: String = if start == end {
+                        " ".to_string()
+                    } else {
+                        chars[run_start + start..run_start + end].iter().collect()
+                    };
+                    render_segment(text, run, style)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
     div().flex().flex_row().children(spans).into_any_element()
+}
+
+fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyElement {
+    /*
+     * Applies the run's formatting first, then layers the cursor/selection
+     * overlay on top — each of GPUI's style calls simply overwrites the
+     * previous value for that field (confirmed against `Styled`'s own
+     * implementation), so applying the overlay's `.bg()`/`.text_color()`
+     * *after* the run's own correctly makes it win, matching real editors
+     * drawing the cursor/selection on top of a highlight rather than
+     * underneath it.
+     */
+    let el = apply_run_style(div(), run);
+    let el = match style {
+        SegmentStyle::Cursor => el.bg(rgb(0xd4d4d4)).text_color(rgb(0x1e1e1e)),
+        // #264F78 at ~50% opacity, per spec 6.4's selection-highlight color.
+        SegmentStyle::Selection => el.bg(rgba(0x264F7880)),
+        SegmentStyle::Plain => el,
+    };
+    el.child(text).into_any_element()
+}
+
+fn apply_run_style(el: Div, run: Option<&Run>) -> Div {
+    /*
+     * Maps a `Run`'s fields onto GPUI style calls per spec 6.2 (extended
+     * with italic/font/color, rich-text formatting plan Phase 1's scope
+     * decision). `run: None` (formatting data unavailable for this
+     * position) leaves `el` untouched, rendering as plain text.
+     */
+    let Some(run) = run else { return el };
+    let mut el = el;
+    if run.bold { el = el.font_weight(FontWeight::BOLD); }
+    if run.italic { el = el.italic(); }
+    if run.underline { el = el.underline(); }
+    if run.highlight {
+        let base_hex = highlight_color_hex(&run.highlight_color);
+        let text_hex = run.color.as_deref()
+            .and_then(|c| u32::from_str_radix(c, 16).ok())
+            .unwrap_or(DEFAULT_TEXT_COLOR_HEX);
+        // Word darkens light highlights under light text in dark mode so
+        // the text stays legible (e.g. white text on yellow highlight is
+        // otherwise unreadable) — this app is always dark-themed, so the
+        // check is unconditional rather than gated on a light/dark toggle.
+        let highlight_hex = if is_light_color(base_hex) && is_light_color(text_hex) {
+            darken_for_light_text(base_hex)
+        } else {
+            base_hex
+        };
+        el = el.bg(rgb(highlight_hex));
+    }
+    if run.size > 0 {
+        el = el.text_size(px(run.size as f32 / 2.0));
+    }
+    if let Some(font) = &run.font {
+        el = el.font_family(font.clone());
+    }
+    if let Some(color) = &run.color {
+        if let Ok(value) = u32::from_str_radix(color, 16) {
+            el = el.text_color(rgb(value));
+        }
+    }
+    el
+}
+
+fn highlight_color_hex(name: &str) -> u32 {
+    /*
+     * Maps Word's highlight color names to their GPUI hex value (spec
+     * 6.2's 15-entry table, plus a fallback for anything unrecognized).
+     */
+    match name {
+        "yellow" => 0xFFD700,
+        "green" => 0x00FF00,
+        "cyan" => 0x00FFFF,
+        "magenta" => 0xFF00FF,
+        "red" => 0xFF0000,
+        "darkBlue" => 0x00008B,
+        "darkCyan" => 0x008B8B,
+        "darkGreen" => 0x006400,
+        "darkMagenta" => 0x8B008B,
+        "darkRed" => 0x8B0000,
+        "darkYellow" => 0x8B8B00,
+        "darkGray" => 0xA9A9A9,
+        "lightGray" => 0xD3D3D3,
+        "black" => 0x000000,
+        "white" => 0xFFFFFF,
+        _ => 0x888888,
+    }
+}
+
+fn relative_luminance(hex: u32) -> f32 {
+    /*
+     * Standard perceived-luminance weighting (ITU-R BT.709 coefficients),
+     * used to decide whether a color reads as "light" (spec: bug fix,
+     * darken highlight under light text, matching Word's dark-mode
+     * behavior).
+     */
+    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+    let b = (hex & 0xFF) as f32 / 255.0;
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn is_light_color(hex: u32) -> bool {
+    relative_luminance(hex) > 0.5
+}
+
+fn darken_for_light_text(hex: u32) -> u32 {
+    /*
+     * Scales each channel down uniformly (preserving hue) so a light
+     * highlight color stops washing out light-colored text on top of it.
+     */
+    const SCALE: f32 = 0.4;
+    let r = (((hex >> 16) & 0xFF) as f32 * SCALE) as u32;
+    let g = (((hex >> 8) & 0xFF) as f32 * SCALE) as u32;
+    let b = ((hex & 0xFF) as f32 * SCALE) as u32;
+    (r << 16) | (g << 8) | b
+}
+
+fn heading_font_size_px(heading: u8) -> Option<f32> {
+    /*
+     * Spec 6.5's heading-level font size table. `None` for `heading == 0`
+     * (body text — no override).
+     */
+    match heading {
+        0 => None,
+        1 => Some(24.0),
+        2 => Some(20.0),
+        3 => Some(18.0),
+        4..=6 => Some(16.0),
+        _ => Some(14.0), // 7-9
+    }
 }
 
 fn usable_wrap_width(viewport_width_px: f32) -> f32 {
@@ -1013,7 +1270,7 @@ pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_widt
      * auto-scroll) uses to build the row table, so they can never disagree
      * about wrap width or glyph metrics.
      */
-    let width_of = char_width_fn(cx, font("monospace"));
+    let width_of = char_width_fn(cx, font(FONT_FAMILY));
     build_visual_rows(lines, usable_wrap_width(viewport_width_px), &width_of)
 }
 
@@ -1336,7 +1593,8 @@ mod tests {
     use super::{
         column_for_x, line_for_y, selection_span_for_line, line_segments, SegmentStyle,
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
-        visual_row_step, document_lines,
+        visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
+        relative_luminance, is_light_color, darken_for_light_text,
     };
 
     #[test]
@@ -1710,5 +1968,113 @@ mod tests {
     fn test_visual_row_step_down_past_last_row_is_none() {
         let rows = vec![(0, 0, 5)];
         assert_eq!(visual_row_step(&rows, 0, 2, 1), None);
+    }
+
+    // ── highlight_color_hex / heading_font_size_px ──────────────────────────
+
+    #[test]
+    fn test_highlight_color_hex_known_names() {
+        assert_eq!(highlight_color_hex("yellow"), 0xFFD700);
+        assert_eq!(highlight_color_hex("green"), 0x00FF00);
+        assert_eq!(highlight_color_hex("black"), 0x000000);
+        assert_eq!(highlight_color_hex("white"), 0xFFFFFF);
+    }
+
+    #[test]
+    fn test_highlight_color_hex_unknown_name_falls_back() {
+        assert_eq!(highlight_color_hex("nonexistent"), 0x888888);
+    }
+
+    #[test]
+    fn test_heading_font_size_body_text_has_no_override() {
+        assert_eq!(heading_font_size_px(0), None);
+    }
+
+    #[test]
+    fn test_heading_font_size_levels_1_through_3_each_distinct() {
+        assert_eq!(heading_font_size_px(1), Some(24.0));
+        assert_eq!(heading_font_size_px(2), Some(20.0));
+        assert_eq!(heading_font_size_px(3), Some(18.0));
+    }
+
+    #[test]
+    fn test_heading_font_size_levels_4_to_6_share_one_size() {
+        assert_eq!(heading_font_size_px(4), Some(16.0));
+        assert_eq!(heading_font_size_px(5), Some(16.0));
+        assert_eq!(heading_font_size_px(6), Some(16.0));
+    }
+
+    #[test]
+    fn test_heading_font_size_levels_7_to_9_share_one_size() {
+        assert_eq!(heading_font_size_px(7), Some(14.0));
+        assert_eq!(heading_font_size_px(9), Some(14.0));
+    }
+
+    // ── relative_luminance / is_light_color / darken_for_light_text ────────
+
+    #[test]
+    fn test_relative_luminance_white_is_one() {
+        assert!((relative_luminance(0xFFFFFF) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_relative_luminance_black_is_zero() {
+        assert!((relative_luminance(0x000000) - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_relative_luminance_yellow_is_high() {
+        // 0.2126*1 + 0.7152*1 + 0.0722*0 = 0.9278
+        assert!((relative_luminance(0xFFFF00) - 0.9278).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_is_light_color_white_is_light() {
+        assert!(is_light_color(0xFFFFFF));
+    }
+
+    #[test]
+    fn test_is_light_color_black_is_not_light() {
+        assert!(!is_light_color(0x000000));
+    }
+
+    #[test]
+    fn test_is_light_color_yellow_highlight_is_light() {
+        assert!(is_light_color(highlight_color_hex("yellow")));
+    }
+
+    #[test]
+    fn test_is_light_color_dark_blue_highlight_is_not_light() {
+        assert!(!is_light_color(highlight_color_hex("darkBlue")));
+    }
+
+    #[test]
+    fn test_darken_for_light_text_reduces_each_channel() {
+        let darkened = darken_for_light_text(0xFFD700); // yellow highlight
+        let r = (darkened >> 16) & 0xFF;
+        let g = (darkened >> 8) & 0xFF;
+        let b = darkened & 0xFF;
+        assert!(r < 0xFF);
+        assert!(g < 0xD7);
+        assert!(b < 0x01 || b == 0);
+    }
+
+    #[test]
+    fn test_darken_for_light_text_preserves_hue_ratio() {
+        // Darkening scales channels uniformly, so a pure-red channel stays
+        // proportionally larger than a zero channel.
+        let darkened = darken_for_light_text(0xFFFF00);
+        let r = (darkened >> 16) & 0xFF;
+        let g = (darkened >> 8) & 0xFF;
+        let b = darkened & 0xFF;
+        assert!(r > 0);
+        assert!(g > 0);
+        assert_eq!(b, 0);
+    }
+
+    #[test]
+    fn test_darken_for_light_text_result_is_no_longer_light() {
+        assert!(is_light_color(0xFFD700));
+        assert!(!is_light_color(darken_for_light_text(0xFFD700)));
     }
 }

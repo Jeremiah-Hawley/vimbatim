@@ -1,10 +1,22 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::document_ops::FormatOp;
+use crate::state::AppState;
+
 /// Formatting operations mirroring the Verbatim debate-speech Word extension.
 ///
-/// Each variant corresponds to one ribbon button. The TextEditor will eventually
-/// implement action handlers for these; until then buttons stub to console output.
+/// Each variant corresponds to one ribbon button. MARKUP/CLEAN/SIZE actions
+/// are wired to real `apply_formatting_to_selection` calls (rich-text
+/// formatting plan, Phase 2) via `to_format_op`. CARD STYLES/STRUCTURE
+/// remain a `println!` stub — **documented, out-of-scope gap**: they aren't
+/// character formatting at all (they're paragraph-level named styles and
+/// structural markers), and `editor_instructions.md` never defines what a
+/// named card style actually looks like or what a "block marker" inserts
+/// beyond the button labels themselves. Wiring them would mean inventing
+/// that design from scratch rather than implementing a written spec —
+/// deferred, same as `vim_todo.md`'s documented `R` (Replace mode) gap was
+/// before it got its own explicit design decision.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum FormatAction {
@@ -16,6 +28,7 @@ pub enum FormatAction {
     PocketCite, // Citation line in pocket format
     // ── Run-level markup ────────────────────────────────────────────────────
     Underline,       // Sub-mark: underline key words to read in round
+    Italic,          // Italic emphasis (extended scope beyond spec 7.1's literal button list)
     HighlightYellow, // Primary in-round read mark
     HighlightGreen,  // Best-evidence emphasis mark
     RemoveHighlight, // Strip all highlight from selection
@@ -27,6 +40,39 @@ pub enum FormatAction {
     // ── Size utilities ──────────────────────────────────────────────────────
     Shrink,     // Decrement font size by one step
     NormalSize, // Reset to default card body size
+}
+
+impl FormatAction {
+    /// Maps this action to the `FormatOp` `apply_formatting_to_selection`
+    /// understands, or `None` for the still-stubbed CARD STYLES/STRUCTURE
+    /// actions (see this enum's own doc comment).
+    ///
+    /// `Shrink`/`NormalSize`'s point sizes should come from
+    /// `settings.conf`'s `small_size`/`large_size` fields (spec 7.1) —
+    /// those aren't wired into `AppState` yet (a separate, pre-existing,
+    /// already-tracked gap — settings.conf's `vim` flag has the same
+    /// problem), so these use reasonable fixed defaults instead
+    /// (documented here, not silently invented) until that wiring exists.
+    fn to_format_op(&self) -> Option<FormatOp> {
+        match self {
+            FormatAction::Underline => Some(FormatOp::Underline(true)),
+            FormatAction::Italic => Some(FormatOp::Italic(true)),
+            FormatAction::HighlightYellow => Some(FormatOp::Highlight(Some("yellow".to_string()))),
+            FormatAction::HighlightGreen => Some(FormatOp::Highlight(Some("green".to_string()))),
+            FormatAction::RemoveHighlight => Some(FormatOp::Highlight(None)),
+            FormatAction::Bold => Some(FormatOp::Bold(true)),
+            FormatAction::Clean => Some(FormatOp::ClearAll),
+            FormatAction::Shrink => Some(FormatOp::FontSize(20)),     // 10pt, in half-points
+            FormatAction::NormalSize => Some(FormatOp::FontSize(24)), // 12pt, in half-points
+            FormatAction::Tag
+            | FormatAction::Cite
+            | FormatAction::Body
+            | FormatAction::Pocket
+            | FormatAction::PocketCite
+            | FormatAction::OpenBlock
+            | FormatAction::CloseBlock => None,
+        }
+    }
 }
 
 /// Visual accent applied to a button's background and foreground colours.
@@ -57,16 +103,19 @@ struct RibbonBtn {
 /// Layout mirrors the Verbatim Word macro ribbon used in competitive policy
 /// and parliamentary debate to format evidence cards and speech documents.
 /// The ribbon height is fixed at 52 px to accommodate category labels above buttons.
-pub struct FormattingRibbon;
+pub struct FormattingRibbon {
+    state: Entity<AppState>,
+}
 
 impl FormattingRibbon {
-    pub fn new() -> Self {
+    pub fn new(state: Entity<AppState>) -> Self {
         /*
-         * No owned state required. The ribbon renders purely from static button
-         * definitions and does not need to observe AppState until formatting
-         * actions are wired to the TextEditor's selection-aware API.
+         * Buttons call into the shared AppState to actually apply
+         * formatting (rich-text formatting plan, Phase 2), matching how
+         * every other view (TabBar, AppToolbar, FileExplorer,
+         * SettingsModal) holds the same shared entity.
          */
-        FormattingRibbon
+        FormattingRibbon { state }
     }
 
     /// Returns the (background_hex, foreground_hex) colour pair for a button theme.
@@ -89,7 +138,7 @@ impl FormattingRibbon {
     }
 
     /// Renders a labelled ribbon group: a small category header above a row of buttons.
-    fn render_group(label: &'static str, btns: Vec<RibbonBtn>) -> impl IntoElement {
+    fn render_group(label: &'static str, btns: Vec<RibbonBtn>, cx: &mut Context<Self>) -> impl IntoElement {
         /*
          * Builds a flex-col div containing:
          *   1. A tiny all-caps category label in muted gray (e.g. "CARD STYLES")
@@ -100,11 +149,19 @@ impl FormattingRibbon {
          *
          * All string data in RibbonBtn is &'static, so no heap allocations are
          * needed for labels or the on_click closure capture.
+         *
+         * A button whose action maps to a real `FormatOp` (MARKUP/CLEAN/
+         * SIZE) calls `apply_formatting_to_selection` via `cx.listener`,
+         * same pattern every other view's clickable elements already use.
+         * One that doesn't (`to_format_op` returns `None` — CARD STYLES/
+         * STRUCTURE, this enum's own doc comment explains why) keeps the
+         * original `println!` stub.
          */
         let button_els: Vec<_> = btns.into_iter().map(|btn| {
             let (bg, fg) = Self::btn_colors(btn.theme);
             // &'static str is Copy, so this moves into the closure without borrowing.
             let tip = btn.tooltip;
+            let op = btn.action.to_format_op();
             div()
                 .id(btn.id)
                 .flex()
@@ -120,10 +177,18 @@ impl FormattingRibbon {
                 .border_1()
                 .border_color(rgb(0x505050))
                 .mr(px(3.0))
-                .on_click(move |_ev, _window, _cx| {
-                    // Stub: print tooltip until TextEditor gains a formatting API.
-                    println!("[Ribbon] {}", tip);
-                })
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    match &op {
+                        Some(op) => {
+                            this.state.update(cx, |s, cx| {
+                                s.apply_formatting_to_selection(op.clone());
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }
+                        None => println!("[Ribbon] {}", tip),
+                    }
+                }))
                 .child(btn.label)
         }).collect();
 
@@ -163,7 +228,7 @@ impl FormattingRibbon {
 }
 
 impl Render for FormattingRibbon {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         /*
          * Renders the full ribbon as one 52 px horizontal bar divided into five
          * labelled groups separated by 1 px vertical lines.
@@ -196,7 +261,7 @@ impl Render for FormattingRibbon {
                 RibbonBtn { id: "fmt-body",    label: "Body",     tooltip: "Body — card body text",      action: FormatAction::Body,       theme: BtnTheme::Default  },
                 RibbonBtn { id: "fmt-pkt",     label: "Pkt",      tooltip: "Pocket — condensed format",  action: FormatAction::Pocket,     theme: BtnTheme::Default  },
                 RibbonBtn { id: "fmt-pktcite", label: "Pkt Cite", tooltip: "Pocket Cite",                action: FormatAction::PocketCite, theme: BtnTheme::Cite     },
-            ]))
+            ], cx))
             .child(Self::separator())
             // ── MARKUP ─────────────────────────────────────────────────────
             .child(Self::render_group("MARKUP", vec![
@@ -204,24 +269,72 @@ impl Render for FormattingRibbon {
                 RibbonBtn { id: "fmt-hly",  label: "HLt",  tooltip: "Yellow highlight (in-round)",    action: FormatAction::HighlightYellow, theme: BtnTheme::YellowHL },
                 RibbonBtn { id: "fmt-hlg",  label: "HLg",  tooltip: "Green highlight (best evid.)",   action: FormatAction::HighlightGreen,  theme: BtnTheme::GreenHL  },
                 RibbonBtn { id: "fmt-bold", label: "Bold", tooltip: "Bold",                           action: FormatAction::Bold,            theme: BtnTheme::Default  },
-            ]))
+                RibbonBtn { id: "fmt-italic", label: "Ital", tooltip: "Italic",                        action: FormatAction::Italic,          theme: BtnTheme::Default  },
+            ], cx))
             .child(Self::separator())
             // ── CLEAN ──────────────────────────────────────────────────────
             .child(Self::render_group("CLEAN", vec![
                 RibbonBtn { id: "fmt-rmhl",  label: "Rm HL", tooltip: "Remove highlight from selection", action: FormatAction::RemoveHighlight, theme: BtnTheme::Default },
                 RibbonBtn { id: "fmt-clean", label: "Clean", tooltip: "Remove all character formatting", action: FormatAction::Clean,           theme: BtnTheme::Default },
-            ]))
+            ], cx))
             .child(Self::separator())
             // ── STRUCTURE ──────────────────────────────────────────────────
             .child(Self::render_group("STRUCTURE", vec![
                 RibbonBtn { id: "fmt-openblk",  label: "Open Blk",  tooltip: "Open speech block",  action: FormatAction::OpenBlock,  theme: BtnTheme::Default },
                 RibbonBtn { id: "fmt-closeblk", label: "Close Blk", tooltip: "Close speech block", action: FormatAction::CloseBlock, theme: BtnTheme::Default },
-            ]))
+            ], cx))
             .child(Self::separator())
             // ── SIZE ───────────────────────────────────────────────────────
             .child(Self::render_group("SIZE", vec![
                 RibbonBtn { id: "fmt-shrink", label: "Shrink", tooltip: "Decrease font size by one step", action: FormatAction::Shrink,     theme: BtnTheme::Default },
                 RibbonBtn { id: "fmt-norm",   label: "Normal", tooltip: "Reset to standard font size",    action: FormatAction::NormalSize, theme: BtnTheme::Default },
-            ]))
+            ], cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Import only the item under test, not `super::*` — this file has
+    // `use gpui::*;` at module scope, and gpui exports its own `test`
+    // attribute macro that shadows std's `#[test]` if it's in scope here
+    // (same issue text_editor.rs's test module documents).
+    use super::{FormatAction, FormatOp};
+
+    #[test]
+    fn test_markup_actions_map_to_format_ops() {
+        assert_eq!(FormatAction::Bold.to_format_op(), Some(FormatOp::Bold(true)));
+        assert_eq!(FormatAction::Italic.to_format_op(), Some(FormatOp::Italic(true)));
+        assert_eq!(FormatAction::Underline.to_format_op(), Some(FormatOp::Underline(true)));
+        assert_eq!(
+            FormatAction::HighlightYellow.to_format_op(),
+            Some(FormatOp::Highlight(Some("yellow".to_string())))
+        );
+        assert_eq!(
+            FormatAction::HighlightGreen.to_format_op(),
+            Some(FormatOp::Highlight(Some("green".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_clean_actions_map_to_format_ops() {
+        assert_eq!(FormatAction::RemoveHighlight.to_format_op(), Some(FormatOp::Highlight(None)));
+        assert_eq!(FormatAction::Clean.to_format_op(), Some(FormatOp::ClearAll));
+    }
+
+    #[test]
+    fn test_size_actions_map_to_format_ops() {
+        assert_eq!(FormatAction::Shrink.to_format_op(), Some(FormatOp::FontSize(20)));
+        assert_eq!(FormatAction::NormalSize.to_format_op(), Some(FormatOp::FontSize(24)));
+    }
+
+    #[test]
+    fn test_card_style_and_structure_actions_are_unmapped() {
+        assert_eq!(FormatAction::Tag.to_format_op(), None);
+        assert_eq!(FormatAction::Cite.to_format_op(), None);
+        assert_eq!(FormatAction::Body.to_format_op(), None);
+        assert_eq!(FormatAction::Pocket.to_format_op(), None);
+        assert_eq!(FormatAction::PocketCite.to_format_op(), None);
+        assert_eq!(FormatAction::OpenBlock.to_format_op(), None);
+        assert_eq!(FormatAction::CloseBlock.to_format_op(), None);
     }
 }

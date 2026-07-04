@@ -1650,3 +1650,296 @@ commit it. Every successful operator would have silently failed to set
   and the real-keyboard feel of `.` repeat, have no GPUI test harness in
   this sandbox — needs a real-keyboard pass, same caveat as every other
   UI-facing piece this session.
+
+## Rich Text Formatting — Phase 1 (Display + Format-Sync Infrastructure)
+
+Full plan in `notes/formatting_todo.md`. All of vim_todo.md's Tasks A-I
+were done first; this is a separate feature area (spec §6/§7) planned via
+`superpowers:brainstorming` with three explicit scope decisions confirmed
+with the user: (1) two-phase build, Phase 1 (this) before Phase 2
+(editing operations); (2) attribute scope extended beyond the literal spec
+text to include italic/font-family/color, not just bold/underline/
+highlight/size; (3) Phase 2's formatting operations will target
+`tab.selection`, vim-mode-aware. Seven sub-tasks, each TDD'd
+independently; 490 tests passing (up from 435 at the end of Task I).
+
+### Data model refactor (`src/docx_parser.rs`, `src/state.rs`)
+
+`DocxDocument` (which bundled `paragraphs` inside an `Arc`, deliberately
+non-`Clone` for cheap sharing) couldn't support the core requirement of
+this feature — mutating paragraphs on every keystroke. Split into:
+`DocxOrigin { raw_zip, preamble, sect_pr }` (still `Arc`-wrapped, genuinely
+immutable for a tab's lifetime) and a new, always-populated
+`Tab.paragraphs: Vec<Paragraph>` (live, mutated in sync with every edit).
+`parse_docx` now returns `(Vec<Paragraph>, DocxOrigin)`. `Run` gained
+`italic: bool`, `font: Option<String>`, `color: Option<String>` (docx hex),
+plus `Clone`/`PartialEq` derives (needed for undo/redo snapshots).
+`default_paragraphs()` (one empty paragraph, one default run) is the
+starting state for tabs with no parsed docx.
+
+### Parser extension (`src/docx_parser.rs`)
+
+`apply_run_prop` gained `<w:i>` → italic, `<w:rFonts w:ascii="...">` →
+font (East Asian/complex-script overrides out of scope), `<w:color
+w:val="...">` → color (`"auto"` treated as absent). `rebuild_document_xml`
+re-emits all three. First tests ever written directly against
+`docx_parser.rs`'s internals (`parse_document_xml`/`rebuild_document_xml`
+had none before) — hand-built minimal XML fixtures, round-trip assertions.
+
+### `resolve_position` (`src/document_ops.rs`, new file)
+
+The core primitive: resolves a byte offset into `content` into
+`(paragraph_index, run_index, char_offset)` against the live `paragraphs`.
+Paragraph boundaries are exactly line boundaries (confirmed from
+`paragraphs_to_plain_text`'s own join-by-`\n` behavior — no soft-break
+ambiguity to resolve). A position landing exactly at a paragraph/run
+boundary resolves to the *end of the earlier* one, not the start of the
+next — so typing right before a paragraph break continues that
+paragraph's formatting rather than adopting the next one's.
+
+### Choke-point mutation sync (`src/state.rs`, `src/document_ops.rs`)
+
+`sync_insert_char`/`sync_insert_str`/`sync_delete_range` (plus
+`split_paragraph_at` and `merge_adjacent_same_format_runs`, all in
+`document_ops.rs`) wired into the small set of functions every higher-level
+edit already funnels through: `insert_char`, `insert_str`, `backspace`,
+`delete_selection_raw`, and — since `indent_vim_range`/`change_case_vim_range`/
+`toggle_case_vim_range`/`delete_vim_range` all already call
+`replace_vim_range` — that single function covers `d`/`c`/`x`/`s`/`>`/`</gU`/
+`gu`/`~`/`r`/`J` at once. `vim_paste_register` (raw `content.insert_str`
+calls, bypassing the choke points) needed its own explicit sync calls.
+`dispatch_vim_substitute` (`:%s`) is a documented scope limit: a regex
+substitution has no clean per-character mapping back to original runs, so
+only paragraphs whose text actually changed get replaced with a single
+default run — untouched paragraphs keep their formatting exactly.
+Adjacent same-format runs are merged after every deletion (otherwise
+repeated edits would accumulate more and more needlessly-split runs).
+
+### Undo/redo integration (`src/state.rs`)
+
+`undo_stack`/`redo_stack` changed from `Vec<String>` to
+`Vec<(String, Vec<Paragraph>)>` — paired snapshots, so undo can't restore
+old text while leaving stale/shifted formatting attached to it. Every
+pre-existing undo/redo test needed migrating from comparing
+`tab.undo_stack` directly to a new `undo_contents()`/`redo_contents()` test
+helper that extracts just the content half (most of those tests predate
+this feature and only care about content, not formatting).
+
+### Rendering (`src/text_editor.rs`)
+
+Replaced uniform per-line styling with per-run styling via GPUI's
+`Styled` trait (`font_weight`/`italic`/`underline`/`bg`/`text_size`/
+`font_family`/`text_color` — all confirmed to exist directly on `Div`,
+so no need to introduce GPUI's separate `TextRun`/`StyledText` API
+alongside this codebase's existing div-per-segment rendering style).
+The real integration risk (flagged explicitly in the plan before writing
+any code): formatting-run boundaries and the *existing*
+cursor/selection-overlay splitting (`line_segments`, unchanged) both want
+to split the same line into spans. Resolved by composing them as an outer
+run-level split (via new `paragraph_run_char_spans`, char-column space to
+match `line_segments`' existing coordinate system) with `line_segments`
+called *within* each run's own sub-range — the two concerns stay
+orthogonal instead of needing one function that understands both.
+`highlight_color_hex` (spec 6.2's 15-entry table) and
+`heading_font_size_px` (spec 6.5) are both pure and unit-tested directly;
+the actual GPUI div-building is smoke-tested only (`timeout 5
+./target/debug/vimbatim`), consistent with every other rendering-adjacent
+piece this session, since this sandbox has no display. **Known
+open risk, not yet hardware-verified**: a heading's larger font size could
+visually overflow the fixed `LINE_HEIGHT_PX` every row's click/scroll pixel
+math assumes — row height doesn't adjust for it.
+
+### Save integration — the actual bug fix (`src/state.rs`, `src/docx_parser.rs`)
+
+`save_tab` now saves `tab.paragraphs` directly via `DocxOrigin::save`
+(renamed from the old `DocxDocument::save`) instead of regenerating plain
+unstyled paragraphs from `content` via the now-deleted
+`save_from_content`/`content_to_paragraphs`. This is the fix for
+`editor_instructions.md` line 82's named simplification ("open preserves
+formatting read-only; any edit produces plain paragraphs on save") — an
+edited, loaded docx now keeps its formatting on save. `create_new_docx`
+was also changed to take `&[Paragraph]` instead of `&str`, so a brand-new
+tab's formatting (once Phase 2 exists) round-trips too; its one other call
+site (`file_explorer.rs`'s "new file" button) updated to pass
+`default_paragraphs()`.
+
+### Verification
+
+- `cargo check`/`cargo build`: clean.
+- `cargo test`: 490 passed, 0 failed, up from 435 (55 new tests: parser
+  round-trips, `resolve_position`/sync-primitive unit tests, choke-point
+  integration tests asserting `tab.paragraphs` stays correct through real
+  editor operations — not just `tab.content` — undo/redo pairing, and the
+  two pure rendering-helper functions).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: the actual visual rendering (bold looking
+  bold, highlight colors, heading sizes, the cursor/selection-over-
+  formatting layering) has no GPUI test harness in this sandbox — needs a
+  real-keyboard/real-display pass, same caveat as every other UI-facing
+  piece this session.
+
+## Rich Text Formatting — Phase 2 (Formatting Editing Operations)
+
+Full plan in `notes/formatting_todo.md`. Builds directly on Phase 1's
+synced-`paragraphs` model. Two open questions the plan document flagged
+explicitly (not guessed at) were resolved with the user before
+implementing: (1) the no-selection case implements a real pending-format-
+for-next-typing mechanism, not a no-op; (2) CARD STYLES/STRUCTURE stayed
+explicitly out of scope (documented gap, same pattern as `vim_todo.md`'s
+`R` gap) — only MARKUP/CLEAN/SIZE got wired. Four sub-tasks; 512 tests
+passing (up from 490 at the end of Phase 1).
+
+### `apply_formatting` core + `FormatOp` (`src/document_ops.rs`)
+
+`FormatOp` (`Bold`/`Italic`/`Underline`/`Highlight`/`FontSize`/
+`FontFamily`/`Color`/`ClearAll`) and `apply_formatting(paragraphs, start,
+end, op)` per spec 7.2. Splits runs at both boundaries first (`split_run_
+at_position`, END before START so START's already-resolved indices don't
+get invalidated by a run being inserted ahead of it), then re-walks every
+run's absolute byte range and formats whichever ones fall fully inside
+`[start, end)` — simpler and more robust than trying to track exactly
+which indices the two splits shifted. Reuses Phase 1's `merge_adjacent_
+same_format_runs` afterward so formatting a range that happens to match
+its neighbors' styling doesn't leave needlessly-fragmented runs behind.
+
+### Selection-target dispatch + pending format (`src/state.rs`)
+
+`apply_formatting_to_selection(op)`: with an active selection, applies
+`op` directly (its own undo snapshot, paired content+paragraphs per Phase
+1). With no selection, arms/disarms a new `Tab.pending_format: Option<
+FormatOp>` instead — pressing the *same* action again while already
+pending turns it back off (a toggle button's usual behavior). `insert_char`
+consumes it: after each typed character, if `pending_format` is `Some`,
+applies it to that character's exact range. It persists across multiple
+keystrokes (not just one character) until explicitly toggled off again.
+**Documented simplification**: a single slot, not a set — arming a second
+format while one is already pending replaces it (real Word can have
+several pending toggles at once, e.g. bold *and* italic simultaneously;
+this can only have one). Only `insert_char` consults it — `insert_str`
+(paste) does not.
+
+### Ribbon UI (`src/formatting_ribbon.rs`)
+
+**Real discovery, not assumed**: this file already existed in full — the
+CARD STYLES/MARKUP/CLEAN/STRUCTURE/SIZE button layout, `FormatAction` enum,
+and all rendering were already built; only every button's `on_click`
+was a `println!` stub. `FormatAction::to_format_op()` maps the character-
+formatting actions (Und/HLt/HLg/Bold/Rm HL/Clean/Shrink/Normal, plus a new
+Ital button added for the italic scope extension) to a `FormatOp`,
+`None` for the still-stubbed CARD STYLES/STRUCTURE actions. `render_group`
+now takes `cx: &mut Context<Self>` and uses `cx.listener` (the same
+pattern every other clickable view element in this codebase already uses)
+to call `apply_formatting_to_selection` for mapped actions, falling back
+to the original stub for unmapped ones. `FormattingRibbon` gained a
+`state: Entity<AppState>` field (didn't have one at all before) and its
+constructor signature changed accordingly — `main_window.rs` updated.
+`Shrink`/`Normal`'s point sizes use fixed defaults (10pt/12pt) rather than
+`settings.conf`'s `small_size`/`large_size` fields, since those were never
+wired into `AppState` in the first place — a separate, pre-existing gap
+(same class as the `vim` flag never being read at startup), not silently
+expanded here. Font-family and color pickers (the other two extended-scope
+attributes) are not yet in the ribbon — a real UI primitive this codebase
+has no precedent for, deferred rather than built hastily.
+
+### Keyboard shortcuts (`src/text_editor.rs`)
+
+`Ctrl+B` (Bold) and `Ctrl+U` (Underline) alongside the ribbon, in
+`process_key_ctrl_combo`. **`Ctrl+I` is deliberately not italic** — the
+conventional shortcut collides with real vim's own `Ctrl+I` (jump list
+forward, spec 5.5, added in Task I), which takes priority since it's
+existing, tested vim functionality; italic stays ribbon-only.
+
+### Verification
+
+- `cargo check`/`cargo build`: clean.
+- `cargo test`: 512 passed, 0 failed, up from 490 (22 new tests: `apply_
+  formatting`'s split/merge/multi-paragraph behavior, `apply_formatting_
+  to_selection`'s selection and pending-format paths including the toggle-
+  on/toggle-off/replace cases, and the ribbon's `FormatAction`→`FormatOp`
+  mapping).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: clicking ribbon buttons, the shortcuts, and
+  pending-format's visual feedback (there is none yet — no UI indicator
+  shows a pending format is armed, unlike vim mode's own indicator line)
+  have no GPUI test harness in this sandbox — needs a real mouse/keyboard
+  pass. The missing pending-format indicator is itself worth flagging as a
+  small, real UX gap for a future pass.
+
+All of `notes/formatting_todo.md`'s planned work (Phases 1 and 2) is now
+complete.
+
+## Rich-text formatting bug fixes (post-hardware-testing)
+
+Three issues reported after real-hardware testing of the above feature,
+investigated via `systematic-debugging` (root cause traced through the
+actual vendored GPUI/cosmic-text/fontdb source before any fix, not guessed
+by analogy) and fixed:
+
+### 1. Bold/Italic weren't visible
+
+**Root cause**: `text_editor.rs` requested the font family `"monospace"` —
+a generic CSS-style alias, not any real font file's own declared family
+name. GPUI's `cosmic_text_system.rs::load_family` filters real system
+fonts by an *exact literal string match* against each font's embedded
+family metadata, so `"monospace"` never matches directly. Additionally
+(and independent of the above), `find_best_match`'s
+`if candidates.len() == 1 { return Ok(0); }` short-circuit skips
+weight/style matching entirely whenever the resolved family has only one
+loaded face — silently returning that one face regardless of the
+requested bold/italic. Together, this explains why `.bg()`-based styling
+(highlight, cursor, selection) worked while `.font_weight()`/`.italic()`
+didn't: only the latter depends on more than one face actually resolving.
+**Fix**: added `FONT_FAMILY = "DejaVu Sans Mono"` (a literal, real font
+family name that ships with separate Book/Bold/Oblique/Bold Oblique faces
+on essentially all Linux/WSL systems) and replaced all 4 hardcoded
+`"monospace"` call sites with it, so `find_best_match` has real candidates
+to choose between. **Not independently hardware-verified** — this
+sandbox has no display; needs a real run to confirm bold/italic now
+render and that regular text still looks correct/monospaced.
+
+### 2. Highlight (and Bold/Italic/Underline) didn't toggle off on re-click
+
+**Root cause**: not a data bug — `RemoveHighlight`'s
+`FormatOp::Highlight(None)` mapping was already correct and tested.
+`apply_formatting_to_selection` simply had no toggle-detection logic for
+the has-a-selection path (only the no-selection/`pending_format` path
+toggled) — every ribbon markup button unconditionally re-applied its "on"
+state even when the whole selection was already in it, unlike a toolbar
+button's expected press-again-to-release behavior.
+**Fix**: added `is_uniformly_active(paragraphs, start, end, &op)` and
+`toggled_off(&op)` to `document_ops.rs` — the former reads whether every
+run touching `[start, end)` is already in `op`'s "on" state (checking
+highlight *color* equality, not just presence, so clicking green on
+yellow-highlighted text still applies green rather than toggling it off);
+the latter maps `Bold/Italic/Underline/Highlight`'s "on" variant to its
+"off" one. `apply_formatting_to_selection` now applies `toggled_off(&op)`
+instead of `op` when the selection is already uniform.
+
+### 3. White text on a light highlight (e.g. yellow) was illegible
+
+New feature request, not a bug: darken a highlight color when both it and
+the effective text color are perceptually light, matching Word's own
+dark-mode highlight behavior. Added `relative_luminance` (BT.709
+0.2126/0.7152/0.0722 weighting), `is_light_color` (luminance > 0.5), and
+`darken_for_light_text` (scales each RGB channel by 0.4, preserving hue)
+to `text_editor.rs`. Wired into `apply_run_style`'s highlight branch: the
+effective text color is `run.color` if set, else the editor's default
+`0xd4d4d4`; if both it and the resolved highlight color are light, the
+highlight is darkened before being applied via `.bg()`. Unconditional
+(not gated on a light/dark-mode setting) since this app has no such
+toggle and is always dark-themed.
+
+### Verification
+
+- `cargo build`: clean, same 6 pre-existing dead-code warnings as before
+  this change (none new).
+- `cargo test`: 530 passed, 0 failed, up from 512 (18 new tests: luminance/
+  toggle-detection pure-function tests plus one state.rs integration test
+  for the toggle-off path).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: the font-family fix (item 1) and the visual
+  appearance of the darkened highlight (item 3) both need a real display
+  to confirm — this sandbox cannot render GPUI's window.

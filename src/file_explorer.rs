@@ -4,7 +4,7 @@ use gpui::*;
 use std::path::PathBuf;
 
 use crate::docx_parser::create_new_docx;
-use crate::state::{AppState, FileNode};
+use crate::state::{AppState, FileNode, default_paragraphs};
 
 /// The collapsible file explorer sidebar shown on the right side of the window.
 ///
@@ -44,7 +44,7 @@ impl FileExplorer {
         let path = dir.join(&name);
 
         // Write a valid minimal .docx so the file can be parsed and saved immediately.
-        if let Err(e) = create_new_docx("", &path) {
+        if let Err(e) = create_new_docx(&default_paragraphs(), &path) {
             eprintln!("[FileExplorer] failed to create {}: {}", path.display(), e);
             return;
         }

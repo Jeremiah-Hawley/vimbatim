@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::docx_parser::{DocxDocument, create_new_docx, parse_docx};
+use crate::docx_parser::{DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
+use crate::document_ops::{apply_formatting, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 
 /// Rapid edits within this window of the previous undo-stack push are
 /// coalesced into the same undo step (spec 4.5), so e.g. typing a whole
@@ -103,9 +104,31 @@ pub struct Tab {
     pub file_path: Option<PathBuf>,
     pub content: String,
     pub is_modified: bool,
-    /// Parsed docx document retained for lossless round-trip save. `None` for
-    /// brand-new tabs that have never been saved or for files that failed to parse.
-    pub document: Option<Arc<DocxDocument>>,
+    /// The tab's live, editable formatted content (rich-text formatting
+    /// plan, Phase 1) — always has at least one paragraph with one run,
+    /// even for a brand-new tab with no file. Kept in sync with `content`
+    /// by every content-mutation function once Phase 1 Task 4 lands;
+    /// until then this mirrors `content` only at load time.
+    pub paragraphs: Vec<Paragraph>,
+    /// Save-time constants (original ZIP bytes, XML preamble/sectPr) needed
+    /// to write `paragraphs` back out as a real .docx. `None` for brand-new
+    /// tabs that have never been associated with a real docx file, or for
+    /// files that failed to parse — `create_new_docx` handles that case at
+    /// save time instead. Immutable for the tab's lifetime, so still cheap
+    /// to share via `Arc` (see `DocxOrigin`'s own doc comment for why this
+    /// is no longer bundled with `paragraphs` the way the old
+    /// `DocxDocument` was).
+    pub docx_origin: Option<Arc<DocxOrigin>>,
+    /// A formatting toggle (spec 7) armed with no active selection, per
+    /// spec 7's own intro: "or (if no selection) toggles the property for
+    /// subsequent typing". Consumed by `insert_char`, which applies it to
+    /// each newly-typed character — persists across multiple keystrokes
+    /// until the same action is triggered again (an explicit toggle-off),
+    /// not just for one character. A single slot (not a set): arming a
+    /// different op while one is already pending replaces it, a documented
+    /// simplification — real Word can have several pending toggles at
+    /// once (bold *and* italic), this can only have one.
+    pub pending_format: Option<FormatOp>,
     /// Byte offset into `content` where the cursor currently sits.
     /// Always points to a valid UTF-8 char boundary.
     pub cursor: usize,
@@ -113,13 +136,17 @@ pub struct Tab {
     /// Anchor is where the selection started; focus tracks the cursor.
     /// Normalise to (min, max) before any range operation. `None` means no selection.
     pub selection: Option<(usize, usize)>,
-    /// Snapshots of `content` taken before each edit, most recent last.
-    /// `undo()` pops from here onto `redo_stack`. Capped at UNDO_STACK_CAP.
-    pub undo_stack: Vec<String>,
-    /// Snapshots of `content` that `undo()` has moved past, most recent
-    /// last. `redo()` pops from here back onto `undo_stack`. Cleared
-    /// whenever a new edit is made, since it invalidates that history.
-    pub redo_stack: Vec<String>,
+    /// Snapshots of `(content, paragraphs)` taken before each edit, most
+    /// recent last. `undo()` pops from here onto `redo_stack`. Capped at
+    /// UNDO_STACK_CAP. Paired together (rich-text formatting plan, Phase 1)
+    /// so undo can't restore old text while leaving stale/shifted-wrong
+    /// formatting attached to it.
+    pub undo_stack: Vec<(String, Vec<Paragraph>)>,
+    /// Snapshots of `(content, paragraphs)` that `undo()` has moved past,
+    /// most recent last. `redo()` pops from here back onto `undo_stack`.
+    /// Cleared whenever a new edit is made, since it invalidates that
+    /// history.
+    pub redo_stack: Vec<(String, Vec<Paragraph>)>,
     /// When the most recent undo-stack push happened, used to coalesce a
     /// burst of rapid edits (e.g. typing) into a single undo step rather
     /// than one per keystroke. `None` means no edit has been made yet, or
@@ -192,6 +219,14 @@ pub struct Tab {
     pub vim_jump_forward: Vec<usize>,
 }
 
+/// A single empty paragraph containing one default (unformatted) run — the
+/// starting state for `Tab.paragraphs` before any docx has been parsed into
+/// it. Never `vec![]`: every rich-text-aware function assumes at least one
+/// paragraph and run always exist.
+pub fn default_paragraphs() -> Vec<Paragraph> {
+    vec![Paragraph { runs: vec![Run::default()], heading: 0 }]
+}
+
 impl Tab {
     pub fn new_empty(id: usize) -> Self {
         /*
@@ -204,7 +239,9 @@ impl Tab {
             file_path: None,
             content: String::new(),
             is_modified: false,
-            document: None,
+            paragraphs: default_paragraphs(),
+            docx_origin: None,
+            pending_format: None,
             cursor: 0,
             selection: None,
             undo_stack: Vec::new(),
@@ -243,7 +280,9 @@ impl Tab {
             file_path: Some(path),
             content: String::new(),
             is_modified: false,
-            document: None,
+            paragraphs: default_paragraphs(),
+            docx_origin: None,
+            pending_format: None,
             cursor: 0,
             selection: None,
             undo_stack: Vec::new(),
@@ -451,16 +490,18 @@ impl AppState {
          * If the file is already open, switches to the existing tab instead.
          *
          * When `parse_docx` fails (e.g., the file is corrupt or a 0-byte placeholder),
-         * the tab still opens with empty content and `document = None`.
+         * the tab still opens with empty content and `docx_origin = None`
+         * (`paragraphs` stays at its default single empty paragraph/run).
          */
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
             self.active_tab = idx;
             return;
         }
         let mut tab = Tab::from_path(self.next_tab_id, path.clone());
-        if let Ok(doc) = parse_docx(&path) {
-            tab.content  = doc.to_plain_text();
-            tab.document = Some(Arc::new(doc));
+        if let Ok((paragraphs, origin)) = parse_docx(&path) {
+            tab.content = paragraphs_to_plain_text(&paragraphs);
+            tab.paragraphs = paragraphs;
+            tab.docx_origin = Some(Arc::new(origin));
         }
         self.next_tab_id += 1;
         self.tabs.push(tab);
@@ -479,14 +520,21 @@ impl AppState {
 
     fn save_tab(&mut self, idx: usize) -> Result<(), String> {
         /*
-         * Saves the tab at `idx` to its associated file path.
+         * Saves the tab at `idx` to its associated file path, from the
+         * live, formatting-synced `paragraphs` (rich-text formatting plan,
+         * Phase 1 Task 7) — the fix for the long-standing "editing a
+         * loaded docx destroys its formatting on save" simplification
+         * (`editor_instructions.md` line 82), since `paragraphs` now stays
+         * accurate through every edit (Phase 1 Task 4) instead of being
+         * regenerated from scratch as plain unstyled runs.
          *
-         * When `document` is `Some`: uses `save_from_content` so the original
-         * docx structure (styles, images) is preserved and only the body text
-         * is replaced.
+         * When `docx_origin` is `Some`: uses it as the template (original
+         * ZIP bytes, XML preamble/sectPr) so styles/images/fonts survive
+         * untouched.
          *
-         * When `document` is `None` (file created fresh inside vimbatim): uses
-         * `create_new_docx` to write a valid minimal docx from scratch.
+         * When `docx_origin` is `None` (file created fresh inside
+         * vimbatim): uses `create_new_docx` to write a valid minimal docx
+         * from scratch.
          *
          * Tabs with no file path (plain "New Tab") are silently skipped — there
          * is nowhere to write to yet.
@@ -499,12 +547,12 @@ impl AppState {
         if !tab.is_modified {
             return Ok(());
         }
-        let content  = tab.content.clone();
-        let document = tab.document.clone();
-        match document {
-            Some(doc) => doc.save_from_content(&content, &path)
+        let paragraphs = tab.paragraphs.clone();
+        let origin = tab.docx_origin.clone();
+        match origin {
+            Some(origin) => origin.save(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
-            None => create_new_docx(&content, &path)
+            None => create_new_docx(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
         }
         if let Some(tab) = self.tabs.get_mut(idx) {
@@ -590,7 +638,7 @@ impl AppState {
         if within_coalesce_window {
             return;
         }
-        tab.undo_stack.push(tab.content.clone());
+        tab.undo_stack.push((tab.content.clone(), tab.paragraphs.clone()));
         if tab.undo_stack.len() > UNDO_STACK_CAP {
             tab.undo_stack.remove(0);
         }
@@ -610,6 +658,7 @@ impl AppState {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             if let Some((a, f)) = tab.selection.take() {
                 let (start, end) = (a.min(f), a.max(f));
+                sync_delete_range(&mut tab.paragraphs, start, end);
                 tab.content.drain(start..end);
                 tab.cursor    = start;
                 tab.is_modified = true;
@@ -629,10 +678,25 @@ impl AppState {
         if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
             self.delete_selection_raw();
         }
+        let mut inserted_range = None;
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_insert_char(&mut tab.paragraphs, tab.cursor, ch);
             tab.content.insert(tab.cursor, ch);
+            let start = tab.cursor;
             tab.cursor += ch.len_utf8();
             tab.is_modified = true;
+            inserted_range = Some((start, tab.cursor));
+        }
+        // A pending format (spec 7: armed with no selection, per
+        // `apply_formatting_to_selection`) applies to every character typed
+        // until the same action is triggered again — not just this one.
+        if let Some((start, end)) = inserted_range {
+            let pending = self.tabs.get(self.active_tab).and_then(|t| t.pending_format.clone());
+            if let Some(op) = pending {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    apply_formatting(&mut tab.paragraphs, start, end, op);
+                }
+            }
         }
         if let Some(rec) = self.vim_insertion_recording.as_mut() {
             rec.push(ch);
@@ -658,6 +722,7 @@ impl AppState {
             // Walk back one char boundary
             let prev = tab.content[..tab.cursor]
                 .char_indices().last().map(|(i, _)| i).unwrap_or(0);
+            sync_delete_range(&mut tab.paragraphs, prev, tab.cursor);
             tab.content.remove(prev);
             tab.cursor = prev;
             tab.is_modified = true;
@@ -682,22 +747,65 @@ impl AppState {
         self.delete_selection_raw();
     }
 
+    pub fn apply_formatting_to_selection(&mut self, op: FormatOp) {
+        /*
+         * Spec 7.2's entry point for a ribbon button or formatting
+         * shortcut. With an active selection, applies `op` to it directly
+         * (pushing its own undo snapshot, paired content+paragraphs per
+         * Phase 1) — unless the whole selection is already uniformly in
+         * that state, in which case it toggles off instead (bug fix:
+         * Word's toolbar buttons toggle off on re-click; re-applying
+         * `Bold(true)` to already-bold text was previously a no-op).  With
+         * no selection, arms/disarms `pending_format` instead (spec 7's
+         * "toggle the property for subsequent typing"), consumed by
+         * `insert_char` — pressing the *same* action again while it's
+         * already pending turns it back off, matching a toggle button's
+         * usual press-again-to-release behavior.
+         */
+        let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
+        match selection {
+            Some((a, f)) => {
+                let (start, end) = (a.min(f), a.max(f));
+                self.push_undo_snapshot();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let effective_op = if is_uniformly_active(&tab.paragraphs, start, end, &op) {
+                        toggled_off(&op)
+                    } else {
+                        op
+                    };
+                    apply_formatting(&mut tab.paragraphs, start, end, effective_op);
+                    tab.is_modified = true;
+                }
+            }
+            None => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if tab.pending_format.as_ref() == Some(&op) {
+                        tab.pending_format = None;
+                    } else {
+                        tab.pending_format = Some(op);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn undo(&mut self) {
         /*
-         * Restores the most recent undo snapshot as the active tab's
-         * content, pushing the content being replaced onto the redo stack
-         * so `redo()` can restore it. No-op when there's nothing to undo.
+         * Restores the most recent undo snapshot's `(content, paragraphs)`
+         * pair as the active tab's, pushing the pair being replaced onto
+         * the redo stack so `redo()` can restore it. No-op when there's
+         * nothing to undo.
          *
-         * Only `content` is snapshotted (spec 4.5's undo_stack is
-         * `Vec<String>`), so the cursor isn't restored to its exact
-         * pre-edit position — it's clamped into the restored content's
-         * bounds and onto its nearest valid char boundary instead, since
-         * the old byte offset may no longer even be one.
+         * The cursor isn't part of the snapshot, so it isn't restored to
+         * its exact pre-edit position — it's clamped into the restored
+         * content's bounds and onto its nearest valid char boundary
+         * instead, since the old byte offset may no longer even be one.
          */
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         let Some(previous) = tab.undo_stack.pop() else { return };
-        let current = std::mem::replace(&mut tab.content, previous);
-        tab.redo_stack.push(current);
+        let current_content = std::mem::replace(&mut tab.content, previous.0);
+        let current_paragraphs = std::mem::replace(&mut tab.paragraphs, previous.1);
+        tab.redo_stack.push((current_content, current_paragraphs));
         tab.selection = None;
         tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
         tab.is_modified = true;
@@ -708,15 +816,16 @@ impl AppState {
 
     pub fn redo(&mut self) {
         /*
-         * The undo counterpart: restores the most recently undone content
-         * from the redo stack, pushing the content being replaced back onto
-         * the undo stack. No-op when there's nothing to redo. Cursor
-         * handling mirrors `undo()`.
+         * The undo counterpart: restores the most recently undone
+         * `(content, paragraphs)` pair from the redo stack, pushing the
+         * pair being replaced back onto the undo stack. No-op when
+         * there's nothing to redo. Cursor handling mirrors `undo()`.
          */
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         let Some(next) = tab.redo_stack.pop() else { return };
-        let current = std::mem::replace(&mut tab.content, next);
-        tab.undo_stack.push(current);
+        let current_content = std::mem::replace(&mut tab.content, next.0);
+        let current_paragraphs = std::mem::replace(&mut tab.paragraphs, next.1);
+        tab.undo_stack.push((current_content, current_paragraphs));
         tab.selection = None;
         tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
         tab.is_modified = true;
@@ -764,6 +873,7 @@ impl AppState {
             self.delete_selection_raw();
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_insert_str(&mut tab.paragraphs, tab.cursor, text);
             tab.content.insert_str(tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.is_modified = true;
@@ -2274,11 +2384,13 @@ impl AppState {
             };
             let needs_leading_newline = insert_at == tab.content.len() && !tab.content.is_empty() && !tab.content.ends_with('\n');
             let insertion = if needs_leading_newline { format!("\n{}", text) } else { text };
+            sync_insert_str(&mut tab.paragraphs, insert_at, &insertion);
             tab.content.insert_str(insert_at, &insertion);
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
             tab.cursor = first_nonblank(&tab.content, landing_start);
         } else {
             let at = if before { tab.cursor } else { char_right(&tab.content, tab.cursor) };
+            sync_insert_str(&mut tab.paragraphs, at, &text);
             tab.content.insert_str(at, &text);
             let last_char_start = text.char_indices().last().map(|(i, _)| i).unwrap_or(0);
             tab.cursor = at + last_char_start;
@@ -2607,6 +2719,12 @@ impl AppState {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return String::new() };
         let original = tab.content[start..end].to_string();
         let replacement = transform(&original);
+        // Every operator that rewrites a range this way (d/c/x/s/>/</gU/gu/
+        // ~/r/J) gets its formatting kept in sync for free via this one
+        // choke point — reduces to the same delete+insert primitives every
+        // other mutation site uses.
+        sync_delete_range(&mut tab.paragraphs, start, end);
+        sync_insert_str(&mut tab.paragraphs, start, &replacement);
         tab.content.replace_range(start..end, &replacement);
         tab.selection = None;
         tab.is_modified = true;
@@ -2789,23 +2907,27 @@ impl AppState {
             self.vim_exit_to_normal();
             return true;
         }
-        match (mode, key, shift) {
-            (VimMode::Visual, "v", false) => { self.vim_exit_to_normal(); return true; }
-            (VimMode::VisualLine, "v", true) => { self.vim_exit_to_normal(); return true; }
-            _ => {}
-        }
 
         // A pending `f`/`F`/`t`/`T`/`g` trigger must win over these checks
         // — e.g. `f` then `d` must complete as "find target 'd'", not
-        // misfire as starting the delete operator — the same collision
-        // class the advisor flagged for Normal mode's macro/operator
-        // checks, caught here by this test suite's own pre-existing `f`
-        // regression test rather than shipping unverified. `gU`/`gu`'s own
-        // check (`is_pending_g_case_trigger`, shared with Normal mode) is
+        // misfire as starting the delete operator (and in Visual mode,
+        // `f` then `v` must complete as "find target 'v'", not misfire as
+        // exiting visual mode) — the same collision class the advisor
+        // flagged for Normal mode's macro/operator checks, caught here by
+        // this test suite's own pre-existing regression test rather than
+        // shipping unverified. `gU`/`gu`'s own check
+        // (`is_pending_g_case_trigger`, shared with Normal mode) is
         // narrower (only fires when `g` specifically is pending) and must
         // stay *ahead* of `handle_vim_motion_key`, which would otherwise
         // silently claim `u` as `gg`'s failed completion first.
         let pending_trigger = self.vim_pending_trigger();
+        if pending_trigger.is_none() {
+            match (mode, key, shift) {
+                (VimMode::Visual, "v", false) => { self.vim_exit_to_normal(); return true; }
+                (VimMode::VisualLine, "v", true) => { self.vim_exit_to_normal(); return true; }
+                _ => {}
+            }
+        }
         if self.is_pending_g_case_trigger(pending_trigger, key) {
             self.execute_vim_visual_operator(if shift { 'U' } else { 'u' });
             return true;
@@ -3184,15 +3306,28 @@ impl AppState {
         let re = regex::Regex::new(&pattern_src).map_err(|e| format!("E486: {}", e))?;
 
         let Some(tab) = self.tabs.get(self.active_tab) else { return Ok(()) };
-        let new_content = tab.content
-            .split('\n')
+        let old_lines: Vec<String> = tab.content.split('\n').map(|l| l.to_string()).collect();
+        let new_lines: Vec<String> = old_lines.iter()
             .map(|l| if global { re.replace_all(l, replacement).into_owned() } else { re.replace(l, replacement).into_owned() })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let new_content = new_lines.join("\n");
 
         if new_content != tab.content {
             self.push_undo_snapshot();
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                // Formatting sync scope limit (rich-text formatting plan,
+                // Phase 1): a regex substitution has no clean per-character
+                // mapping back to the original runs, so any paragraph whose
+                // text actually changed gets replaced with a single default
+                // (unformatted) run. Paragraphs the substitution didn't
+                // touch keep their existing runs exactly.
+                for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
+                    if old != new {
+                        if let Some(para) = tab.paragraphs.get_mut(i) {
+                            para.runs = vec![Run { text: new.clone(), ..Run::default() }];
+                        }
+                    }
+                }
                 tab.content = new_content;
                 tab.is_modified = true;
                 tab.cursor = tab.cursor.min(tab.content.len());
@@ -4245,7 +4380,9 @@ mod tests {
                 file_path: None,
                 content: content.to_string(),
                 is_modified: false,
-                document: None,
+                paragraphs: default_paragraphs(),
+                docx_origin: None,
+                pending_format: None,
                 cursor,
                 selection,
                 undo_stack: Vec::new(),
@@ -4296,6 +4433,132 @@ mod tests {
             state.record_change_key(key, shift, key_char);
         }
         state.handle_vim_key(key, shift, key_char);
+    }
+
+    // ── Rich text formatting Phase 1: default_paragraphs / Tab construction ────
+
+    #[test]
+    fn test_default_paragraphs_is_one_empty_paragraph_one_default_run() {
+        let paragraphs = default_paragraphs();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].heading, 0);
+        assert_eq!(paragraphs[0].runs.len(), 1);
+        assert_eq!(paragraphs[0].runs[0], Run::default());
+    }
+
+    #[test]
+    fn test_new_empty_tab_has_default_paragraphs_and_no_docx_origin() {
+        let tab = Tab::new_empty(0);
+        assert_eq!(tab.paragraphs, default_paragraphs());
+        assert!(tab.docx_origin.is_none());
+    }
+
+    /// Sets up a state whose tab has a *specific* multi-run/multi-paragraph
+    /// `paragraphs` structure (not the default single-run one `make_state`
+    /// builds), for testing that choke-point mutations keep `paragraphs`
+    /// in sync with `content` through real editor operations.
+    fn make_state_with_paragraphs(paragraphs: Vec<Paragraph>, cursor: usize) -> AppState {
+        let content = paragraphs_to_plain_text(&paragraphs);
+        let mut state = make_state(&content, cursor, None);
+        state.tabs[0].paragraphs = paragraphs;
+        state
+    }
+
+    // ── Rich text formatting Phase 1: choke-point mutation sync ─────────────
+
+    #[test]
+    fn test_insert_char_choke_point_keeps_paragraphs_synced() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "abc".into(), bold: true, ..Run::default() }],
+            heading: 0,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 1);
+        state.insert_char('X');
+        assert_eq!(state.tabs[0].content, "aXbc");
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "aXbc");
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_backspace_choke_point_keeps_paragraphs_synced() {
+        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0 }];
+        let mut state = make_state_with_paragraphs(paragraphs, 2);
+        state.backspace();
+        assert_eq!(state.tabs[0].content, "ac");
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "ac");
+    }
+
+    #[test]
+    fn test_delete_selection_choke_point_keeps_paragraphs_synced() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }, Run { text: " plain".into(), ..Run::default() }],
+            heading: 0,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((2, 6)); // deletes "ld p"
+        state.delete_selection();
+        assert_eq!(state.tabs[0].content, "bolain");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "bo");
+        assert!(runs[0].bold);
+        assert_eq!(runs[1].text, "lain");
+        assert!(!runs[1].bold);
+    }
+
+    #[test]
+    fn test_vim_dd_choke_point_keeps_paragraphs_synced() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0 },
+            Paragraph { runs: vec![run_plain("two")], heading: 0 },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.handle_vim_key("d", false, None);
+        state.handle_vim_key("d", false, None);
+        assert_eq!(state.tabs[0].content, "two");
+        assert_eq!(state.tabs[0].paragraphs.len(), 1);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "two");
+    }
+
+    #[test]
+    fn test_vim_paste_choke_point_keeps_paragraphs_synced() {
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0 }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.registers.insert('"', "XY".to_string());
+        state.handle_vim_key("p", false, None);
+        assert_eq!(state.tabs[0].content, "aXYbc");
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "aXYbc");
+    }
+
+    #[test]
+    fn test_dispatch_vim_substitute_only_touches_changed_paragraphs() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0 },
+            Paragraph { runs: vec![run_plain("untouched")], heading: 0 },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.dispatch_vim_command("%s/foo/baz/");
+        assert_eq!(state.tabs[0].content, "baz bar\nuntouched");
+        // changed paragraph loses formatting (documented scope limit)
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "baz bar");
+        assert!(!state.tabs[0].paragraphs[0].runs[0].bold);
+        // untouched paragraph is byte-for-byte unchanged
+        assert_eq!(state.tabs[0].paragraphs[1].runs[0].text, "untouched");
+    }
+
+    #[test]
+    fn test_insert_newline_via_enter_splits_paragraph_in_sync() {
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0 }];
+        let mut state = make_state_with_paragraphs(paragraphs, 2);
+        state.insert_char('\n');
+        assert_eq!(state.tabs[0].content, "he\nllo");
+        assert_eq!(state.tabs[0].paragraphs.len(), 2);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "he");
+        assert_eq!(state.tabs[0].paragraphs[1].runs[0].text, "llo");
+    }
+
+    fn run_plain(text: &str) -> Run {
+        Run { text: text.to_string(), ..Run::default() }
     }
 
     // ── copy_selection ────────────────────────────────────────────────────────
@@ -4883,11 +5146,23 @@ mod tests {
         }
     }
 
+    /// Extracts just the content half of each undo-stack snapshot — most
+    /// existing undo/redo tests predate the rich-text formatting plan's
+    /// paired `(content, paragraphs)` snapshot shape and only care about
+    /// the content side.
+    fn undo_contents(state: &AppState) -> Vec<String> {
+        state.tabs[0].undo_stack.iter().map(|(c, _)| c.clone()).collect()
+    }
+
+    fn redo_contents(state: &AppState) -> Vec<String> {
+        state.tabs[0].redo_stack.iter().map(|(c, _)| c.clone()).collect()
+    }
+
     #[test]
     fn test_insert_char_pushes_undo_snapshot() {
         let mut state = make_state("ab", 2, None);
         state.insert_char('c');
-        assert_eq!(state.tabs[0].undo_stack, vec!["ab".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["ab".to_string()]);
     }
 
     #[test]
@@ -4897,7 +5172,7 @@ mod tests {
         let mut state = make_state("a", 1, None);
         state.insert_char('b');
         state.insert_char('c');
-        assert_eq!(state.tabs[0].undo_stack, vec!["a".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["a".to_string()]);
         assert_eq!(state.tabs[0].content, "abc");
     }
 
@@ -4907,7 +5182,7 @@ mod tests {
         state.insert_char('b');
         break_coalesce_window(&mut state);
         state.insert_char('c');
-        assert_eq!(state.tabs[0].undo_stack, vec!["a".to_string(), "ab".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["a".to_string(), "ab".to_string()]);
     }
 
     #[test]
@@ -4922,7 +5197,7 @@ mod tests {
     #[test]
     fn test_undo_clears_selection_and_marks_modified() {
         let mut state = make_state("ab", 2, Some((0, 1)));
-        state.tabs[0].undo_stack.push("ab".to_string());
+        state.tabs[0].undo_stack.push(("ab".to_string(), default_paragraphs()));
         state.undo();
         assert!(state.tabs[0].selection.is_none());
         assert!(state.tabs[0].is_modified);
@@ -4952,7 +5227,7 @@ mod tests {
         let mut state = make_state("ab", 2, None);
         state.insert_char('c');
         state.undo();
-        assert_eq!(state.tabs[0].redo_stack, vec!["abc".to_string()]);
+        assert_eq!(redo_contents(&state), vec!["abc".to_string()]);
     }
 
     #[test]
@@ -4963,6 +5238,140 @@ mod tests {
         assert_eq!(state.tabs[0].content, "ab");
         state.redo();
         assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_undo_restores_paragraphs_not_just_content() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+            heading: 0,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 4);
+        state.insert_char('X'); // "boldX", paragraphs now ["boldX"] still bold
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "boldX");
+        state.undo();
+        assert_eq!(state.tabs[0].content, "bold");
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "bold");
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_redo_restores_paragraphs_not_just_content() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+            heading: 0,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 4);
+        state.insert_char('X');
+        state.undo();
+        state.redo();
+        assert_eq!(state.tabs[0].content, "boldX");
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "boldX");
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold);
+    }
+
+    // ── Rich text formatting Phase 2: apply_formatting_to_selection ─────────
+
+    #[test]
+    fn test_apply_formatting_to_active_selection() {
+        let paragraphs = vec![para_plain("hello world")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 5));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "hello");
+    }
+
+    #[test]
+    fn test_apply_formatting_to_selection_is_undoable() {
+        let paragraphs = vec![para_plain("hello")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 5));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        state.undo();
+        assert!(!state.tabs[0].paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_apply_formatting_to_selection_toggles_off_when_already_active() {
+        // Bug fix: re-clicking Bold on an already-bold selection should
+        // un-bold it, matching Word's toolbar toggle behavior, instead of
+        // being a no-op re-application.
+        let paragraphs = vec![para_plain("hello world")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 5));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold);
+        state.tabs[0].selection = Some((0, 5));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert!(!state.tabs[0].paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_apply_formatting_no_selection_arms_pending_format() {
+        let mut state = make_state("hello", 0, None);
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert_eq!(state.tabs[0].pending_format, Some(FormatOp::Bold(true)));
+    }
+
+    #[test]
+    fn test_apply_formatting_no_selection_same_op_again_disarms() {
+        let mut state = make_state("hello", 0, None);
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert_eq!(state.tabs[0].pending_format, None);
+    }
+
+    #[test]
+    fn test_apply_formatting_no_selection_different_op_replaces_pending() {
+        let mut state = make_state("hello", 0, None);
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        state.apply_formatting_to_selection(FormatOp::Italic(true));
+        assert_eq!(state.tabs[0].pending_format, Some(FormatOp::Italic(true)));
+    }
+
+    #[test]
+    fn test_pending_format_applies_to_newly_typed_chars() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("ab")], 2);
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        state.insert_char('X');
+        state.insert_char('Y');
+        assert_eq!(state.tabs[0].content, "abXY");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "ab");
+        assert!(!runs[0].bold);
+        assert_eq!(runs[1].text, "XY");
+        assert!(runs[1].bold);
+    }
+
+    #[test]
+    fn test_pending_format_stops_after_toggled_off() {
+        // Insert 'Y' at a position that doesn't touch the just-bolded 'X'
+        // run — typing immediately adjacent to an existing bold run would
+        // inherit its formatting regardless of `pending_format`'s state
+        // (the same "typed text takes on the format of whatever it's
+        // typed inside" rule every insert follows), which isn't what this
+        // test is checking.
+        let mut state = make_state_with_paragraphs(vec![para_plain("ab")], 1);
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        state.insert_char('X'); // "aXb", X is bold
+        state.apply_formatting_to_selection(FormatOp::Bold(true)); // toggle off
+        state.tabs[0].cursor = 0;
+        state.insert_char('Y'); // "YaXb", Y at the very start
+        assert_eq!(state.tabs[0].content, "YaXb");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "Ya");
+        assert!(!runs[0].bold);
+        assert_eq!(runs[1].text, "X");
+        assert!(runs[1].bold);
+        assert_eq!(runs[2].text, "b");
+        assert!(!runs[2].bold);
+    }
+
+    fn para_plain(text: &str) -> Paragraph {
+        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0 }
     }
 
     #[test]
@@ -4997,7 +5406,7 @@ mod tests {
     fn test_backspace_pushes_undo_snapshot() {
         let mut state = make_state("abc", 3, None);
         state.backspace();
-        assert_eq!(state.tabs[0].undo_stack, vec!["abc".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["abc".to_string()]);
     }
 
     #[test]
@@ -5011,14 +5420,14 @@ mod tests {
     fn test_backspace_over_selection_pushes_one_undo_step() {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.backspace();
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello world".to_string()]);
     }
 
     #[test]
     fn test_delete_selection_pushes_undo_snapshot() {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.delete_selection();
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello world".to_string()]);
     }
 
     #[test]
@@ -5032,7 +5441,7 @@ mod tests {
     fn test_insert_str_pushes_undo_snapshot() {
         let mut state = make_state("hello", 5, None);
         state.insert_str(" world");
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello".to_string()]);
     }
 
     #[test]
@@ -5046,7 +5455,7 @@ mod tests {
     fn test_insert_str_replacing_selection_pushes_one_undo_step() {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.insert_str("goodbye");
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello world".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello world".to_string()]);
     }
 
     // ── vim mode-entry transitions (Task D) ─────────────────────────────────────
@@ -5110,7 +5519,7 @@ mod tests {
     fn test_vim_open_line_below_pushes_undo_snapshot() {
         let mut state = make_state("hello", 2, None);
         state.vim_open_line_below();
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello".to_string()]);
     }
 
     #[test]
@@ -5142,7 +5551,7 @@ mod tests {
     fn test_vim_open_line_above_pushes_undo_snapshot() {
         let mut state = make_state("hello", 2, None);
         state.vim_open_line_above();
-        assert_eq!(state.tabs[0].undo_stack, vec!["hello".to_string()]);
+        assert_eq!(undo_contents(&state), vec!["hello".to_string()]);
     }
 
     #[test]
@@ -7665,5 +8074,21 @@ mod tests {
         assert_eq!(state.tabs[0].cursor, 3);
         assert_eq!(state.tabs[0].selection, Some((0, 3)));
         assert_eq!(state.tabs[0].vim_mode, VimMode::Visual); // not executed as an operator
+    }
+
+    #[test]
+    fn test_visual_pending_find_v_target_wins_over_exit_visual() {
+        // Bug: in Visual mode, `f` then `v` should complete the find with
+        // target 'v', not exit visual mode. The `v`-to-exit-visual logic
+        // must not run when a pending find trigger exists.
+        // Start at position 0 ('a'). vim_enter_visual moves cursor to 1 ('v')
+        // and creates selection (0, 1). Then `f` then `v` searches forward
+        // from position 1, finding the next 'v' at position 4.
+        let mut state = make_state("avcbvc", 0, None);
+        state.vim_enter_visual();
+        state.handle_vim_key("f", false, None);
+        assert!(state.handle_vim_key("v", false, None)); // complete find, target 'v'
+        assert_eq!(state.tabs[0].cursor, 4); // second 'v' is at index 4
+        assert_eq!(state.tabs[0].vim_mode, VimMode::Visual); // still in Visual, not exited
     }
 }

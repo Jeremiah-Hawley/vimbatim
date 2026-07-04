@@ -143,15 +143,18 @@ hold anything expensive; `raw_zip`, the actually-large field, lives on
 
 ---
 
-## 3. Phase 1 — Display + Format-Sync Infrastructure
+## 3. Phase 1 — Display + Format-Sync Infrastructure — **Done**
 
-### Task 1: Data model refactor (§2.1–2.3 above)
+Full writeup in `tmp_documentation.md`'s "Rich Text Formatting — Phase 1"
+section; 490 tests passing (up from 435 at the end of vim_todo.md's Task I).
+
+### Task 1 — Done: Data model refactor (§2.1–2.3 above)
 
 Files: `src/docx_parser.rs`, `src/state.rs`. Foundational — nothing else in
 Phase 1 can start until this lands and `cargo test` passes with the two
 existing `.document` call sites updated.
 
-### Task 2: Parser extension — italic/font/color
+### Task 2 — Done: Parser extension — italic/font/color
 
 Files: `src/docx_parser.rs`. Extend `parse_document_xml`'s per-run property
 handling (`apply_run_prop`, `:343+`) with `<w:i>` → `italic = true` (same
@@ -168,7 +171,7 @@ each new attribute (inline strings are fine, matching how existing parser
 tests are structured — check `tests/parse_testing.rs` for the pattern
 before adding new fixtures) and assert round-trip through parse → rebuild.
 
-### Task 3: Byte-offset ↔ (paragraph, run, char) resolution
+### Task 3 — Done: Byte-offset ↔ (paragraph, run, char) resolution
 
 Files: `src/docx_parser.rs` or a new `src/document_ops.rs` (recommended —
 `state.rs` is already large; this is a self-contained, pure-function
@@ -192,7 +195,7 @@ multi-byte UTF-8 character — should not occur if callers only ever pass
 already-validated char-boundary offsets, same invariant every vim-mode
 function already relies on).
 
-### Task 4: Choke-point mutation sync
+### Task 4 — Done: Choke-point mutation sync
 
 Files: `src/state.rs`. This is the largest task in Phase 1 — enumerate
 every function that mutates `tab.content` directly and give each a paired
@@ -228,14 +231,14 @@ after the edit, not just `tab.content` — this is the core regression
 surface for the whole feature and deserves the same TDD rigor Tasks A–I
 used throughout.
 
-### Task 5: Undo/redo integration
+### Task 5 — Done: Undo/redo integration
 
 Covered by §2.3 — listed here as its own checkable task since it touches
 `push_undo_snapshot` and both `undo()`/`redo()`'s restore logic
 (`src/state.rs`), which need to restore `tab.paragraphs` alongside
 `tab.content` on every pop.
 
-### Task 6: Rendering (`src/text_editor.rs`)
+### Task 6 — Done: Rendering (`src/text_editor.rs`)
 
 Replace the uniform per-line rendering with `StyledText::new(line_text)
 .with_runs(Vec<TextRun>)`, one call per paragraph/line. Build the
@@ -271,7 +274,7 @@ one plain run) and renders through the exact same path with no special
 casing needed, matching spec 6.1's "fall back to plain text" intent
 without actually needing a separate code path.
 
-### Task 7: Save integration — the actual bug fix
+### Task 7 — Done: Save integration — the actual bug fix
 
 Files: `src/state.rs` (`save_tab`), `src/docx_parser.rs`. `save_tab`
 currently branches on `tab.document` being `Some`/`None` to choose
@@ -288,13 +291,24 @@ now fixed, since it's been a known, named gap since Task H.
 
 ---
 
-## 4. Phase 2 — Formatting Editing Operations
+## 4. Phase 2 — Formatting Editing Operations — **Done**
+
+Full writeup in `tmp_documentation.md`'s "Rich Text Formatting — Phase 2"
+section; 512 tests passing (up from 490 at the end of Phase 1). Two open
+questions this section originally flagged were resolved with the user
+before implementing: (1) the no-selection case implements the full
+pending-format-for-next-typing mechanism (not a no-op); (2) CARD STYLES/
+STRUCTURE stayed out of scope, documented, same pattern as vim_todo.md's
+`R` gap — MARKUP/CLEAN/SIZE were wired instead. A real discovery during
+this phase: `formatting_ribbon.rs` already existed in full (not a stub
+as this document's own §1 table assumed) — only its `on_click` handlers
+needed wiring to `apply_formatting_to_selection`.
 
 Do not start until Phase 1 Task 7 is done, tested, and its own
 `tmp_documentation.md` entry is written — `apply_formatting` below is
 built directly on `tab.paragraphs` being reliably in sync.
 
-### Task 1: `apply_formatting` core
+### Task 1 — Done: `apply_formatting` core
 
 Files: `src/document_ops.rs` (or wherever Task 3 landed).
 
@@ -321,7 +335,7 @@ Task 3's module), then apply `op` to every run now fully contained in
 content+paragraphs snapshot) — formatting-only changes must be undoable
 same as text edits.
 
-### Task 2: Selection-target dispatch
+### Task 2 — Done: Selection-target dispatch
 
 Files: `src/state.rs`. A thin `apply_formatting_to_selection(op: FormatOp)`
 on `AppState` resolving `tab.selection` (works in Visual/VisualLine mode
@@ -337,7 +351,7 @@ Option<FormatOp>` consulted by `insert_char`) — decide at Phase 2's own
 kickoff whether it's in scope for this pass or deferred (no-op on empty
 selection) as its own follow-up.
 
-### Task 3: Ribbon UI (`src/formatting_ribbon.rs`)
+### Task 3 — Done: Ribbon UI (`src/formatting_ribbon.rs`)
 
 New file — currently doesn't exist. Build the CARD STYLES / MARKUP /
 CLEAN / STRUCTURE / SIZE groups per spec 7.1, plus (extended scope) an
@@ -361,7 +375,7 @@ and STRUCTURE as out of scope for this pass and ship MARKUP/CLEAN/SIZE
 only, documenting the gap the same way `vim_todo.md` documented the `R`
 Replace-mode gap rather than silently guessing at unspecified behavior.
 
-### Task 4: Keyboard shortcuts
+### Task 4 — Done: Keyboard shortcuts
 
 Files: `src/text_editor.rs` (`process_key_ctrl_combo`, the existing
 Ctrl-combo dispatch table Task I's jump-list wiring already extended).

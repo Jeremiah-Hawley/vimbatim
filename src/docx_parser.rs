@@ -10,14 +10,26 @@ use zip::write::SimpleFileOptions;
 /// A single formatting run within a paragraph — the smallest unit of text with
 /// consistent styling. Word documents split paragraphs into runs whenever
 /// formatting changes (e.g., switching from plain to bold text).
-#[derive(Debug, Default)]
+///
+/// Derives `Clone` so a tab's live `paragraphs` can be snapshotted into
+/// `undo_stack`/`redo_stack` alongside `content` (rich-text formatting plan,
+/// Phase 1) — none of these fields are expensive to clone.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Run {
     pub text: String,
     pub bold: bool,
+    /// `<w:i/>` (rich-text formatting plan, Phase 1).
+    pub italic: bool,
     pub underline: bool,
     pub highlight: bool,
     pub highlight_color: String,
     pub size: u16,
+    /// `<w:rFonts w:ascii="...">` — `None` means "inherit the document
+    /// default", same convention as `color` below.
+    pub font: Option<String>,
+    /// `<w:color w:val="RRGGBB">`, Word's own hex format. `None` (or
+    /// `w:val="auto"`, parsed the same as absent) means "inherit".
+    pub color: Option<String>,
     /// True when `xml:space="preserve"` is set on `<w:t>` — required to keep
     /// leading/trailing whitespace that XML parsers would otherwise strip.
     pub whitespace_preserve: bool,
@@ -25,91 +37,77 @@ pub struct Run {
 
 /// One paragraph of the document, composed of zero or more runs.
 /// `heading` is 0 for body text, or 1–9 mirroring Word's Heading 1–9 styles.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Paragraph {
     pub runs: Vec<Run>,
     pub heading: u8,
 }
 
-/// The in-memory representation of an open .docx file.
+/// The save-time constants needed to reconstruct a real .docx file around
+/// whatever a tab's live `paragraphs` currently holds. `raw_zip` is the
+/// original file's bytes, used as the template when saving — all ZIP
+/// entries except `word/document.xml` are copied verbatim, preserving
+/// images, styles, and embedded fonts. `preamble` and `sect_pr` are the
+/// fragments of `word/document.xml` that surround the body content.
 ///
-/// `paragraphs` is the parsed content. `raw_zip` is the original file's bytes
-/// and is used as the template when saving — all ZIP entries except
-/// `word/document.xml` are copied verbatim, preserving images, styles, and
-/// embedded fonts.  `preamble` and `sect_pr` are the fragments of
-/// `word/document.xml` that surround the body content; they are extracted once
-/// at parse time so the raw XML string does not need to be retained.
-///
-/// `DocxDocument` is always stored inside `Arc<DocxDocument>` in each `Tab`,
-/// so it intentionally does not derive `Clone` — callers bump the refcount
-/// rather than deep-copying.
+/// Deliberately holds nothing that changes during editing (unlike the old
+/// `DocxDocument`, which bundled `paragraphs` in here too) — a tab's
+/// `paragraphs` needs to mutate on every keystroke once the rich-text
+/// formatting plan's Phase 1 lands (span-sync across edits), which an
+/// `Arc`-wrapped, non-`Clone` bundle can't support. `DocxOrigin` itself
+/// stays immutable for the tab's lifetime, so it's still cheap to share via
+/// `Arc` exactly as before.
 #[derive(Debug)]
-pub struct DocxDocument {
-    pub paragraphs: Vec<Paragraph>,
+pub struct DocxOrigin {
     pub(crate) raw_zip: Vec<u8>,
     pub(crate) preamble: String,
     pub(crate) sect_pr: String,
 }
 
-impl DocxDocument {
-    /// Returns all paragraph text joined by newlines. This is the plain-text
-    /// content loaded into `tab.content` so the text editor can display it.
-    pub fn to_plain_text(&self) -> String {
+impl DocxOrigin {
+    /// Saves `paragraphs` back to `path` as a .docx file, using this
+    /// origin's preserved preamble/sectPr/raw ZIP as the template.
+    pub fn save(&self, paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         /*
-         * Each paragraph becomes one line.  Runs within a paragraph are
-         * concatenated without separators — the run boundary carries no
-         * semantic meaning in plain text.
-         */
-        self.paragraphs
-            .iter()
-            .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// Saves the document's current `paragraphs` back to `path` as a .docx
-    /// file. Use this when no edits have been made since the file was opened —
-    /// the parsed paragraph structure is serialised verbatim.
-    pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Generate the new XML from the in-memory paragraph model, then hand
+         * Generate the new XML from the given paragraph model, then hand
          * the bytes off to `write_docx`, which handles the ZIP round-trip.
          */
-        let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, &self.paragraphs);
+        let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, paragraphs);
         write_docx(&self.raw_zip, &new_xml, path)
     }
 
-    /// Saves `content` (the editor's plain-text string) back to `path` as a
-    /// .docx file.  Each newline in `content` becomes a paragraph boundary;
-    /// runs within each paragraph carry no formatting.  Use this when the user
-    /// has edited the file in the text editor since it was opened.
-    pub fn save_from_content(&self, content: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Convert the flat string into paragraphs (one per line), then rebuild
-         * the XML and write it.  Formatting from the original file is not
-         * preserved on paragraphs the user has edited — the editor currently
-         * operates on plain text.
-         */
-        let paragraphs = content_to_paragraphs(content);
-        let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, &paragraphs);
-        write_docx(&self.raw_zip, &new_xml, path)
-    }
+}
+
+/// Returns all paragraph text joined by newlines. This is the plain-text
+/// content loaded into `tab.content` so the text editor can display it.
+pub fn paragraphs_to_plain_text(paragraphs: &[Paragraph]) -> String {
+    /*
+     * Each paragraph becomes one line.  Runs within a paragraph are
+     * concatenated without separators — the run boundary carries no
+     * semantic meaning in plain text.
+     */
+    paragraphs
+        .iter()
+        .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Reads the .docx file at `path`, decompresses the ZIP, parses
-/// `word/document.xml`, and returns a `DocxDocument` ready to display and save.
+/// `word/document.xml`, and returns the parsed paragraphs plus the
+/// save-time `DocxOrigin` needed to write them back out.
 ///
 /// The raw ZIP bytes are retained in memory so that all non-document entries
 /// (styles, images, fonts, etc.) can be reproduced exactly on save without
 /// reprocessing.
-pub fn parse_docx(path: &Path) -> Result<DocxDocument, Box<dyn std::error::Error>> {
+pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn std::error::Error>> {
     /*
      * 1. Read the raw file bytes.
      * 2. Open the ZIP and extract word/document.xml as a string.
      * 3. Parse the XML into a Vec<Paragraph>.
      * 4. Pull the preamble and sectPr out of the raw XML for later serialisation.
-     * 5. Return the assembled DocxDocument, handing ownership of raw_zip so
-     *    no extra copy is needed.
+     * 5. Return the parsed paragraphs and the assembled DocxOrigin, handing
+     *    ownership of raw_zip so no extra copy is needed.
      */
     let raw_zip = std::fs::read(path)?;
     let cursor = std::io::Cursor::new(&raw_zip);
@@ -129,7 +127,7 @@ pub fn parse_docx(path: &Path) -> Result<DocxDocument, Box<dyn std::error::Error
     let preamble = extract_preamble(&document_xml).unwrap_or_else(fallback_preamble);
     let sect_pr = extract_sect_pr(&document_xml).unwrap_or("").to_string();
 
-    Ok(DocxDocument { paragraphs, raw_zip, preamble, sect_pr })
+    Ok((paragraphs, DocxOrigin { raw_zip, preamble, sect_pr }))
 }
 
 /// Writes `new_xml` into the .docx at `path`, replacing `word/document.xml`
@@ -349,6 +347,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
      */
     match e.name().as_ref() {
         b"w:b" => { run.bold = true; }
+        b"w:i" => { run.italic = true; }
         b"w:u" => { run.underline = true; }
         b"w:highlight" => {
             run.highlight = true;
@@ -367,27 +366,30 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
                 }
             }
         }
+        // Only `w:ascii` is read — East Asian/complex-script font overrides
+        // (`w:eastAsia`/`w:cs`) are out of scope (rich-text formatting plan,
+        // Phase 1).
+        b"w:rFonts" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"w:ascii" {
+                    run.font = Some(String::from_utf8_lossy(&attr.value).into_owned());
+                }
+            }
+        }
+        // `w:val="auto"` means "inherit the default" — treated the same as
+        // the attribute being absent, so `color` stays `None`.
+        b"w:color" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"w:val" {
+                    let val = String::from_utf8_lossy(&attr.value).into_owned();
+                    if val != "auto" {
+                        run.color = Some(val);
+                    }
+                }
+            }
+        }
         _ => {}
     }
-}
-
-/// Converts the editor's plain-text `content` string into a `Vec<Paragraph>`.
-/// Each newline boundary becomes a paragraph; each paragraph gets a single
-/// unstyled run.
-fn content_to_paragraphs(content: &str) -> Vec<Paragraph> {
-    /*
-     * The editor stores content as a flat string with '\n' line separators
-     * (matching the output of `to_plain_text`).  Splitting on '\n' gives one
-     * element per paragraph, including empty strings for blank lines, which
-     * become valid empty paragraphs in the output XML.
-     */
-    content
-        .split('\n')
-        .map(|line| Paragraph {
-            runs: vec![Run { text: line.to_string(), ..Run::default() }],
-            heading: 0,
-        })
-        .collect()
 }
 
 /// Serialises `paragraphs` back to a `word/document.xml` string, using
@@ -413,16 +415,24 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
         out.push_str("<w:p>");
         for run in &para.runs {
             out.push_str("<w:r>");
-            let has_props = run.bold || run.underline || run.highlight || run.size > 0;
+            let has_props = run.bold || run.italic || run.underline || run.highlight
+                || run.size > 0 || run.font.is_some() || run.color.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
                 if run.bold      { out.push_str("<w:b/>"); }
+                if run.italic    { out.push_str("<w:i/>"); }
                 if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
                 if run.highlight {
                     out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
                 }
                 if run.size > 0 {
                     out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
+                }
+                if let Some(font) = &run.font {
+                    out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
+                }
+                if let Some(color) = &run.color {
+                    out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
                 }
                 out.push_str("</w:rPr>");
             }
@@ -476,24 +486,24 @@ fn fallback_preamble() -> String {
 }
 
 /// Creates a brand-new minimal .docx file at `path` whose body contains
-/// `content` (newlines become paragraph boundaries). Unlike `save_from_content`,
-/// this does not require an existing file to use as a ZIP template — it builds
-/// the required ZIP entries from scratch.
+/// `paragraphs`. Unlike `DocxOrigin::save`, this does not require an
+/// existing file to use as a ZIP template — it builds the required ZIP
+/// entries from scratch.
 ///
 /// Word requires at minimum four entries in the ZIP:
 ///   `[Content_Types].xml`, `_rels/.rels`,
 ///   `word/document.xml`, `word/_rels/document.xml.rels`
-pub fn create_new_docx(content: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     /*
      * Build a minimal but fully spec-compliant .docx:
-     *  1. Encode `content` as plain-text paragraphs in `word/document.xml`.
+     *  1. Encode `paragraphs` (with whatever formatting they carry — rich-
+     *     text formatting plan, Phase 1) in `word/document.xml`.
      *  2. Write the required Open Packaging Convention manifest files.
      *  3. Use an atomic temp-file rename so an interrupted save does not leave
      *     a corrupt file at `path`.
      */
     let preamble = fallback_preamble();
-    let paragraphs = content_to_paragraphs(content);
-    let document_xml = rebuild_document_xml(&preamble, "", &paragraphs);
+    let document_xml = rebuild_document_xml(&preamble, "", paragraphs);
 
     let tmp_path = path.with_extension("docx.tmp");
     let tmp_file = std::fs::File::create(&tmp_path)?;
@@ -539,4 +549,118 @@ Target=\"word/document.xml\"/>\
 /// `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`.
 fn escape_xml_text(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wrap_run_xml(run_xml: &str) -> String {
+        format!(
+            "<w:document><w:body><w:p><w:r>{}<w:t>hi</w:t></w:r></w:p></w:body></w:document>",
+            run_xml
+        )
+    }
+
+    // ── italic/font/color parsing (rich-text formatting plan, Phase 1) ──────
+
+    #[test]
+    fn test_parses_italic_run_property() {
+        let xml = wrap_run_xml("<w:rPr><w:i/></w:rPr>");
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert!(paragraphs[0].runs[0].italic);
+    }
+
+    #[test]
+    fn test_parses_run_font_ascii_attribute() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:rFonts w:ascii="Georgia"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert_eq!(paragraphs[0].runs[0].font, Some("Georgia".to_string()));
+    }
+
+    #[test]
+    fn test_parses_run_color_value() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert_eq!(paragraphs[0].runs[0].color, Some("FF0000".to_string()));
+    }
+
+    #[test]
+    fn test_color_val_auto_is_treated_as_none() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="auto"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert_eq!(paragraphs[0].runs[0].color, None);
+    }
+
+    #[test]
+    fn test_run_without_new_properties_defaults_to_none() {
+        let xml = wrap_run_xml("");
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert!(!paragraphs[0].runs[0].italic);
+        assert_eq!(paragraphs[0].runs[0].font, None);
+        assert_eq!(paragraphs[0].runs[0].color, None);
+    }
+
+    // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
+
+    #[test]
+    fn test_rebuild_emits_italic() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), italic: true, ..Run::default() }],
+            heading: 0,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains("<w:i/>"));
+    }
+
+    #[test]
+    fn test_rebuild_emits_font_ascii() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), font: Some("Georgia".into()), ..Run::default() }],
+            heading: 0,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:rFonts w:ascii="Georgia"/>"#));
+    }
+
+    #[test]
+    fn test_rebuild_emits_color() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), color: Some("FF0000".into()), ..Run::default() }],
+            heading: 0,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:color w:val="FF0000"/>"#));
+    }
+
+    #[test]
+    fn test_rebuild_omits_rpr_entirely_when_no_properties_set() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("<w:rPr>"));
+    }
+
+    #[test]
+    fn test_italic_font_color_round_trip_through_parse_and_rebuild() {
+        let original = vec![Paragraph {
+            runs: vec![Run {
+                text: "hi".into(),
+                italic: true,
+                font: Some("Georgia".into()),
+                color: Some("00FF00".into()),
+                ..Run::default()
+            }],
+            heading: 0,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
+        // matching what parse_document_xml expects to find.
+        let reparsed = parse_document_xml(&xml).unwrap();
+        assert_eq!(reparsed[0].runs[0].italic, true);
+        assert_eq!(reparsed[0].runs[0].font, Some("Georgia".to_string()));
+        assert_eq!(reparsed[0].runs[0].color, Some("00FF00".to_string()));
+    }
 }

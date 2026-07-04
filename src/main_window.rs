@@ -39,7 +39,7 @@ impl MainWindow {
 
         let tab_bar           = cx.new(|_cx| TabBar::new(state.clone()));
         let app_toolbar       = cx.new(|_cx| AppToolbar::new(state.clone()));
-        let formatting_ribbon = cx.new(|_cx| FormattingRibbon::new());
+        let formatting_ribbon = cx.new(|_cx| FormattingRibbon::new(state.clone()));
         let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));
         let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
         let settings_modal    = cx.new(|_cx| SettingsModal::new(state.clone()));
