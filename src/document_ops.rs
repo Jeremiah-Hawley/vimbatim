@@ -103,9 +103,10 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     para_b_runs.extend(para.runs[run_idx + 1..].to_vec());
 
     let heading = para.heading;
-    // Preserve center alignment for card styles (Pocket/Hat/Block)
-    // These styles always have center alignment, so continue it on the new paragraph
-    let new_alignment = if para.alignment == Alignment::Center {
+    let alignment = para.alignment;
+    // Preserve center alignment for card styles (Pocket/Hat/Block) on both paragraphs
+    // These styles always have center alignment, so continue it on the new paragraph too
+    let new_alignment = if alignment == Alignment::Center {
         Alignment::Center
     } else {
         Alignment::default()
@@ -114,7 +115,7 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { runs: para_a_runs, heading, alignment: Alignment::default() },
+            Paragraph { runs: para_a_runs, heading, alignment },
             Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment },
         ],
     );
