@@ -4,21 +4,6 @@ use gpui::*;
 use crate::document_ops::FormatOp;
 use crate::state::AppState;
 
-fn open_url_in_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd").args(&["/C", "start", url]).spawn();
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum FormatAction {
@@ -222,10 +207,34 @@ impl FormattingRibbon {
                             // - Duplicate cite
                         }
                         FormatAction::OpenWiki => {
-                            open_url_in_browser("https://opencaselist.com/");
+                            let url = "https://opencaselist.com/";
+                            #[cfg(target_os = "macos")]
+                            {
+                                let _ = std::process::Command::new("open").arg(url).spawn();
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                            }
+                            #[cfg(target_os = "windows")]
+                            {
+                                let _ = std::process::Command::new("cmd").args(&["/C", "start", url]).spawn();
+                            }
                         }
                         FormatAction::OpenTabroom => {
-                            open_url_in_browser("https://www.tabroom.com/index/index.mhtml");
+                            let url = "https://www.tabroom.com/index/index.mhtml";
+                            #[cfg(target_os = "macos")]
+                            {
+                                let _ = std::process::Command::new("open").arg(url).spawn();
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                            }
+                            #[cfg(target_os = "windows")]
+                            {
+                                let _ = std::process::Command::new("cmd").args(&["/C", "start", url]).spawn();
+                            }
                         }
                         FormatAction::InvisibilityMode => {
                             st.update(cx, |state, _cx| {
