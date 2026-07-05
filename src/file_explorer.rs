@@ -214,6 +214,42 @@ impl Render for FileExplorer {
                             .flex()
                             .flex_row()
                             .gap(px(4.0))
+                            // Files button — toggles file explorer
+                            .child(
+                                div()
+                                    .id("files-btn")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(40.0))
+                                    .h(px(24.0))
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x858585))
+                                    .text_sm()
+                                    .on_click(cx.listener(|_this, _ev, _window, _cx| {
+                                        println!("Button pressed: Files");
+                                    }))
+                                    .child("Files"),
+                            )
+                            // Nav button — opens navigation menu (Phase 1 placeholder)
+                            .child(
+                                div()
+                                    .id("nav-btn")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .rounded(px(3.0))
+                                    .cursor_pointer()
+                                    .text_color(rgb(0x858585))
+                                    .text_sm()
+                                    .on_click(cx.listener(|_this, _ev, _window, _cx| {
+                                        println!("Button pressed: Nav");
+                                    }))
+                                    .child("Nav"),
+                            )
                             // Refresh button — re-scans the working directory so files
                             // created in external applications become visible without
                             // restarting vimbatim.
