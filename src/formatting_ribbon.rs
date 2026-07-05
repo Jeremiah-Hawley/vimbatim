@@ -155,6 +155,17 @@ impl FormattingRibbon {
                                 state.shrink_text();
                             });
                         }
+                        FormatAction::ChangeCase => {
+                            st.update(cx, |state, _cx| {
+                                // Default to Title case for now
+                                state.apply_case_to_selection(crate::case_converter::CaseType::Title);
+                            });
+                        }
+                        FormatAction::Strikethrough => {
+                            st.update(cx, |state, _cx| {
+                                state.toggle_strikethrough();
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::case_converter;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_formatting, apply_paragraph_alignment, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 
@@ -1124,6 +1125,37 @@ impl AppState {
                 }
             }
             None => {} // No-op when no selection
+        }
+    }
+
+    pub fn apply_case_to_selection(&mut self, case_type: case_converter::CaseType) {
+        /*
+         * Changes case of selected text. No-op when no selection.
+         */
+        let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
+        match selection {
+            Some((a, f)) => {
+                let (start, end) = (a.min(f), a.max(f));
+                self.push_undo_snapshot();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let mut cumulative = 0usize;
+                    for para in &mut tab.paragraphs {
+                        for run in &mut para.runs {
+                            let run_start = cumulative;
+                            let run_end = cumulative + run.text.len();
+                            if run_start >= start && run_end <= end {
+                                run.text = case_converter::apply_case(&run.text, case_type);
+                            }
+                            cumulative = run_end;
+                        }
+                        cumulative += 1;
+                    }
+                    tab.is_modified = true;
+                    // Update content to match
+                    tab.content = paragraphs_to_plain_text(&tab.paragraphs);
+                }
+            }
+            None => {}
         }
     }
 
