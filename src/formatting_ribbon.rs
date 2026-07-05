@@ -91,10 +91,28 @@ impl FormattingRibbon {
                 let st = state.clone();
                 cx.listener(move |_this, _ev, _window, cx| {
                     println!("Button pressed: {}", label_text);
-                    if let Some(op) = act.to_format_op() {
-                        st.update(cx, |state, _cx| {
-                            state.apply_formatting_to_selection(op);
-                        });
+                    match act {
+                        FormatAction::Paste => {
+                            if let Some(item) = cx.read_from_clipboard() {
+                                if let Some(text) = item.text() {
+                                    st.update(cx, |state, _cx| {
+                                        state.paste_text(&text);
+                                    });
+                                }
+                            }
+                        }
+                        FormatAction::Condense => {
+                            st.update(cx, |state, _cx| {
+                                state.condense_selection();
+                            });
+                        }
+                        _ => {
+                            if let Some(op) = act.to_format_op() {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(op);
+                                });
+                            }
+                        }
                     }
                 })
             })

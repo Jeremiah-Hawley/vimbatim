@@ -789,6 +789,58 @@ impl AppState {
         }
     }
 
+    pub fn paste_text(&mut self, text: &str) {
+        /*
+         * Inserts clipboard text at cursor or replaces selection.
+         * Mirrors insert_str but is called from ribbon button handler.
+         */
+        if text.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection_raw();
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_insert_str(&mut tab.paragraphs, tab.cursor, text);
+            tab.content.insert_str(tab.cursor, text);
+            tab.cursor += text.len();
+            tab.is_modified = true;
+        }
+    }
+
+    pub fn condense_selection(&mut self) {
+        /*
+         * Removes newlines from selected text and replaces with spaces.
+         * Only works on active selection; no-op if no selection.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let Some((a, f)) = tab.selection else { return };
+
+        let (start, end) = (a.min(f), a.max(f));
+        if start >= end {
+            return;
+        }
+
+        let selected_text = tab.content[start..end].to_string();
+        let condensed = selected_text.replace('\n', " ");
+
+        if condensed == selected_text {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, end);
+            tab.content.drain(start..end);
+            sync_insert_str(&mut tab.paragraphs, start, &condensed);
+            tab.content.insert_str(start, &condensed);
+            tab.cursor = start;
+            tab.selection = Some((start, start + condensed.len()));
+            tab.is_modified = true;
+        }
+    }
+
     pub fn undo(&mut self) {
         /*
          * Restores the most recent undo snapshot's `(content, paragraphs)`
