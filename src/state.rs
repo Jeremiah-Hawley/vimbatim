@@ -756,11 +756,9 @@ impl AppState {
          * that state, in which case it toggles off instead (bug fix:
          * Word's toolbar buttons toggle off on re-click; re-applying
          * `Bold(true)` to already-bold text was previously a no-op).  With
-         * no selection, arms/disarms `pending_format` instead (spec 7's
-         * "toggle the property for subsequent typing"), consumed by
-         * `insert_char` — pressing the *same* action again while it's
-         * already pending turns it back off, matching a toggle button's
-         * usual press-again-to-release behavior.
+         * no selection, applies formatting to the character under the cursor
+         * and also arms `pending_format` for subsequent typing, so formatting
+         * applies both retroactively and prospectively.
          */
         let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
         match selection {
@@ -771,15 +769,37 @@ impl AppState {
                     let effective_op = if is_uniformly_active(&tab.paragraphs, start, end, &op) {
                         toggled_off(&op)
                     } else {
-                        op
+                        op.clone()
                     };
                     apply_formatting(&mut tab.paragraphs, start, end, effective_op);
                     tab.is_modified = true;
                 }
             }
             None => {
+                let Some(tab) = self.tabs.get(self.active_tab) else { return };
+                let cursor = tab.cursor;
+                let content_len = tab.content.len();
+
+                // Check if pending format matches current op to decide toggle behavior
+                let should_toggle_off = tab.pending_format.as_ref() == Some(&op);
+
+                // Apply to character under cursor if not at end of document
+                if cursor < content_len {
+                    let next_char_boundary = char_right(&tab.content, cursor);
+                    let effective_op = if should_toggle_off {
+                        toggled_off(&op)
+                    } else {
+                        op.clone()
+                    };
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        apply_formatting(&mut tab.paragraphs, cursor, next_char_boundary, effective_op);
+                        tab.is_modified = true;
+                    }
+                }
+
+                // Update pending format (same toggle logic as before)
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                    if tab.pending_format.as_ref() == Some(&op) {
+                    if should_toggle_off {
                         tab.pending_format = None;
                     } else {
                         tab.pending_format = Some(op);
