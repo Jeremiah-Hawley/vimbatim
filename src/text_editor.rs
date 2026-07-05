@@ -1049,7 +1049,12 @@ fn render_line(
                 if run.is_none() {
                     return line.to_string().into_any_element();
                 }
-                return apply_run_style(div(), run).child(line.to_string()).into_any_element();
+                // Don't take the fast path if alignment is needed — fall through to normal rendering
+                use crate::docx_parser::Alignment;
+                let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
+                if !needs_alignment {
+                    return apply_run_style(div(), run).child(line.to_string()).into_any_element();
+                }
             }
         }
     }
