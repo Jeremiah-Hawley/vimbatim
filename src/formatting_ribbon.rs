@@ -195,6 +195,17 @@ impl FormattingRibbon {
                             // - Remove pilcrows
                             // - Select similar formatting
                         }
+                        FormatAction::CardMenu => {
+                            println!("Card Menu opened - options are placeholders for Phase 5");
+                            // Menu items:
+                            // - Condense, no pilcrows
+                            // - Condense, pilcrows
+                            // - Uncondensed
+                            // - Standardize highlighting
+                            // - Standardize highlighting with exception
+                            // - Auto emphasis first
+                            // - Duplicate cite
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
