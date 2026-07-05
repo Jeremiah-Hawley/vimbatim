@@ -1089,7 +1089,18 @@ fn render_line(
         })
         .collect();
 
-    div().flex().flex_row().children(spans).into_any_element()
+    let mut line_div = div().flex().flex_row().children(spans);
+    // Apply paragraph-level alignment if available (Phase 4.3)
+    if let Some(p) = para {
+        use crate::docx_parser::Alignment;
+        line_div = match p.alignment {
+            Alignment::Center => line_div.justify_center(),
+            Alignment::Right => line_div.justify_end(),
+            Alignment::Justify => line_div.justify_between(), // approximate for now
+            Alignment::Left => line_div.justify_start(),
+        };
+    }
+    line_div.into_any_element()
 }
 
 fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyElement {
