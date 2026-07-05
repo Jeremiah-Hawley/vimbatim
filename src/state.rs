@@ -417,6 +417,7 @@ pub struct AppState {
     pub paragraph_integrity: bool,
     pub pilcrows: bool,
     pub fold_all: bool,
+    pub invisibility_mode: bool,
 }
 
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
@@ -478,6 +479,7 @@ impl AppState {
             paragraph_integrity: false,
             pilcrows: false,
             fold_all: false,
+            invisibility_mode: false,
         }
     }
 
@@ -1191,6 +1193,14 @@ impl AppState {
          * shown as pilcrow characters (¶).
          */
         self.pilcrows = !self.pilcrows;
+    }
+
+    pub fn toggle_invisibility_mode(&mut self) {
+        /*
+         * Toggles invisibility mode. When on, only highlighted text,
+         * tags, and citations are shown.
+         */
+        self.invisibility_mode = !self.invisibility_mode;
     }
 
     pub fn apply_center_alignment(&mut self) {
@@ -4868,6 +4878,7 @@ mod tests {
             paragraph_integrity: false,
             pilcrows: false,
             fold_all: false,
+            invisibility_mode: false,
         };
         state
     }

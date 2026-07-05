@@ -227,6 +227,11 @@ impl FormattingRibbon {
                         FormatAction::OpenTabroom => {
                             open_url_in_browser("https://www.tabroom.com/index/index.mhtml");
                         }
+                        FormatAction::InvisibilityMode => {
+                            st.update(cx, |state, _cx| {
+                                state.toggle_invisibility_mode();
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
