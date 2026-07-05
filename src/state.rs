@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::case_converter;
+use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_formatting, apply_paragraph_alignment, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 
@@ -1157,6 +1158,14 @@ impl AppState {
             }
             None => {}
         }
+    }
+
+    pub fn apply_font_color(&mut self, color: color_picker::ColorChoice) {
+        /*
+         * Applies font color to selected text.
+         */
+        let hex_str = format!("{:06x}", color.hex_value());
+        self.apply_formatting_to_selection(FormatOp::Color(Some(hex_str)));
     }
 
     pub fn apply_center_alignment(&mut self) {

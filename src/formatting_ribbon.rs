@@ -142,7 +142,8 @@ impl FormattingRibbon {
                         }
                         FormatAction::FontColor => {
                             st.update(cx, |state, _cx| {
-                                state.cycle_text_color();
+                                // Default to Black for now
+                                state.apply_font_color(crate::color_picker::ColorChoice::Black);
                             });
                         }
                         FormatAction::HighlightColorSelect => {
