@@ -412,6 +412,9 @@ pub struct AppState {
     /// `VimChange::OperatorInsert` — real vim's `.` after `cw<text><Esc>`
     /// repeats both the deletion and the retyped text.
     vim_pending_change_before_insert: Option<(char, Vec<RecordedVimKey>)>,
+    pub paragraph_integrity: bool,
+    pub pilcrows: bool,
+    pub fold_all: bool,
 }
 
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
@@ -470,6 +473,9 @@ impl AppState {
             vim_change_recording: None,
             vim_insertion_recording: None,
             vim_pending_change_before_insert: None,
+            paragraph_integrity: false,
+            pilcrows: false,
+            fold_all: false,
         }
     }
 
@@ -4754,6 +4760,9 @@ mod tests {
             vim_change_recording: None,
             vim_insertion_recording: None,
             vim_pending_change_before_insert: None,
+            paragraph_integrity: false,
+            pilcrows: false,
+            fold_all: false,
         };
         state
     }
