@@ -150,6 +150,11 @@ impl FormattingRibbon {
                                 state.cycle_highlight_color();
                             });
                         }
+                        FormatAction::Shrink => {
+                            st.update(cx, |state, _cx| {
+                                state.shrink_text();
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {

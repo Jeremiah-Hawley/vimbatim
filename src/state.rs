@@ -1097,6 +1097,36 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Strikethrough(true));
     }
 
+    pub fn shrink_text(&mut self) {
+        /*
+         * Reduces font size of all non-underlined text in selection by 1 point.
+         * Finds runs without underline and decreases their size.
+         */
+        let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
+        match selection {
+            Some((a, f)) => {
+                let (start, end) = (a.min(f), a.max(f));
+                self.push_undo_snapshot();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let mut cumulative = 0usize;
+                    for para in &mut tab.paragraphs {
+                        for run in &mut para.runs {
+                            let run_start = cumulative;
+                            let run_end = cumulative + run.text.len();
+                            if run_start >= start && run_end <= end && !run.underline && run.size > 2 {
+                                run.size = run.size.saturating_sub(2); // 2 half-points = 1pt
+                            }
+                            cumulative = run_end;
+                        }
+                        cumulative += 1;
+                    }
+                    tab.is_modified = true;
+                }
+            }
+            None => {} // No-op when no selection
+        }
+    }
+
     pub fn apply_center_alignment(&mut self) {
         /*
          * Applies center alignment to all paragraphs overlapping the active
