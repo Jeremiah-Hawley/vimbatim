@@ -1101,9 +1101,17 @@ fn render_line(
         };
 
         // Check if any run has box_format (Pocket formatting)
+        // Wrap in full-width box container so box stays at full width while content is aligned
         let has_box = p.runs.iter().any(|r| r.box_format);
         if has_box {
-            line_div = line_div.border_1().border_color(rgb(0xd4d4d4)).px(px(8.0)).py(px(4.0));
+            return div()
+                .w_full()
+                .border_1()
+                .border_color(rgb(0xd4d4d4))
+                .px(px(8.0))
+                .py(px(4.0))
+                .child(line_div)
+                .into_any_element();
         }
     }
     line_div.into_any_element()
