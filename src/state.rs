@@ -841,6 +841,91 @@ impl AppState {
         }
     }
 
+    pub fn apply_bullet_list(&mut self) {
+        /*
+         * Adds bullet prefixes to each line in the selection.
+         * Replaces existing bullets if lines already have them.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let Some((a, f)) = tab.selection else { return };
+
+        let (start, end) = (a.min(f), a.max(f));
+        if start >= end { return }
+
+        let selected_text = tab.content[start..end].to_string();
+        let lines: Vec<&str> = selected_text.lines().collect();
+        if lines.is_empty() { return }
+
+        let bulleted: Vec<String> = lines.into_iter()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("• ") || trimmed.starts_with("- ") {
+                    trimmed.to_string()
+                } else {
+                    format!("• {}", trimmed)
+                }
+            })
+            .collect();
+
+        let new_text = bulleted.join("\n");
+        if new_text == selected_text { return }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, end);
+            tab.content.drain(start..end);
+            sync_insert_str(&mut tab.paragraphs, start, &new_text);
+            tab.content.insert_str(start, &new_text);
+            tab.is_modified = true;
+        }
+    }
+
+    pub fn apply_numbered_list(&mut self) {
+        /*
+         * Adds number prefixes to each line in the selection.
+         * Replaces existing numbers if lines already have them.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let Some((a, f)) = tab.selection else { return };
+
+        let (start, end) = (a.min(f), a.max(f));
+        if start >= end { return }
+
+        let selected_text = tab.content[start..end].to_string();
+        let lines: Vec<&str> = selected_text.lines().collect();
+        if lines.is_empty() { return }
+
+        let numbered: Vec<String> = lines.into_iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let trimmed = line.trim_start();
+                // Remove existing number prefix if present
+                let content = if let Some(pos) = trimmed.find(". ") {
+                    if pos < 4 && trimmed[..pos].chars().all(|c| c.is_numeric()) {
+                        trimmed[pos+2..].to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                } else {
+                    trimmed.to_string()
+                };
+                format!("{}. {}", i + 1, content)
+            })
+            .collect();
+
+        let new_text = numbered.join("\n");
+        if new_text == selected_text { return }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, end);
+            tab.content.drain(start..end);
+            sync_insert_str(&mut tab.paragraphs, start, &new_text);
+            tab.content.insert_str(start, &new_text);
+            tab.is_modified = true;
+        }
+    }
+
     pub fn undo(&mut self) {
         /*
          * Restores the most recent undo snapshot's `(content, paragraphs)`

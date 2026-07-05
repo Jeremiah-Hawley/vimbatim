@@ -124,6 +124,16 @@ impl FormattingRibbon {
                                 state.condense_selection();
                             });
                         }
+                        FormatAction::BulletList => {
+                            st.update(cx, |state, _cx| {
+                                state.apply_bullet_list();
+                            });
+                        }
+                        FormatAction::NumberedList => {
+                            st.update(cx, |state, _cx| {
+                                state.apply_numbered_list();
+                            });
+                        }
                         // Card styles: apply bold + custom font size
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
