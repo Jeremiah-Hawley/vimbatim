@@ -233,7 +233,7 @@ impl FormattingRibbon {
                             });
                         }
                         FormatAction::SwitchTabMenu => {
-                            st.read(cx, |state, _cx| {
+                            st.update(cx, |state, _cx| {
                                 let tabs = state.get_tab_titles();
                                 println!("Switch Tab Menu: {:?}", tabs);
                                 // UI for selecting tab would go here
