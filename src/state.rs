@@ -1203,6 +1203,15 @@ impl AppState {
         self.invisibility_mode = !self.invisibility_mode;
     }
 
+    pub fn get_tab_titles(&self) -> Vec<(usize, String)> {
+        /*
+         * Returns list of (index, title) for all open tabs.
+         */
+        self.tabs.iter().enumerate()
+            .map(|(idx, tab)| (idx, tab.title.clone()))
+            .collect()
+    }
+
     pub fn apply_center_alignment(&mut self) {
         /*
          * Applies center alignment to all paragraphs overlapping the active

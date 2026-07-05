@@ -232,6 +232,13 @@ impl FormattingRibbon {
                                 state.toggle_invisibility_mode();
                             });
                         }
+                        FormatAction::SwitchTabMenu => {
+                            st.read(cx, |state, _cx| {
+                                let tabs = state.get_tab_titles();
+                                println!("Switch Tab Menu: {:?}", tabs);
+                                // UI for selecting tab would go here
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
