@@ -945,12 +945,17 @@ impl Render for TextEditor {
                             })
                             .collect();
 
+                        // Check if previous paragraph also has box_format (for merging boxes)
+                        let prev_has_box = li > 0 && paragraphs.get(li - 1)
+                            .is_some_and(|p| p.runs.iter().any(|r| r.box_format));
+
                         let content_el = render_line(
                             &row_text,
                             row_cursor_col,
                             row_selection,
                             &row_run_spans,
                             paragraphs.get(li),
+                            prev_has_box,
                         );
                         // Heading styles (spec 6.5): a paragraph-wide default
                         // that per-run formatting (bold/size/etc., applied
@@ -1017,6 +1022,7 @@ fn render_line(
     selection: Option<(usize, usize)>,
     run_spans: &[(usize, usize, usize)],
     para: Option<&Paragraph>,
+    prev_has_box: bool,
 ) -> AnyElement {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
@@ -1110,14 +1116,21 @@ fn render_line(
         // Increased vertical padding to create visual separation between consecutive Pockets
         let has_box = p.runs.iter().any(|r| r.box_format);
         if has_box {
-            return div()
+            let mut box_div = div()
                 .w_full()
-                .border_1()
                 .border_color(rgb(0xd4d4d4))
                 .px(px(8.0))
                 .py(px(8.0))
-                .child(line_div)
-                .into_any_element();
+                .child(line_div);
+
+            // If previous line also has a box, merge them by removing top border
+            if prev_has_box {
+                box_div = box_div.border_b_1().border_l_1().border_r_1();
+            } else {
+                box_div = box_div.border_1();
+            }
+
+            return box_div.into_any_element();
         }
     }
     line_div.into_any_element()
