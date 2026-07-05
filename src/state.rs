@@ -7,6 +7,7 @@ use crate::case_converter;
 use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_formatting, apply_paragraph_alignment, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
+use crate::wikifi_export;
 
 /// Rapid edits within this window of the previous undo-stack push are
 /// coalesced into the same undo step (spec 4.5), so e.g. typing a whole
@@ -1220,6 +1221,28 @@ impl AppState {
          * two windows side-by-side.
          */
         self.split_view = !self.split_view;
+    }
+
+    pub fn wikify_current_tab(&mut self) -> std::io::Result<()> {
+        /*
+         * Exports current tab to markdown file with heading hierarchy.
+         * File is saved as document_name.md in same directory.
+         */
+        let tab = self.tabs.get(self.active_tab).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No active tab")
+        })?;
+
+        let markdown = wikifi_export::export_to_markdown(&tab.paragraphs, &tab.content);
+
+        if let Some(path) = &tab.file_path {
+            wikifi_export::save_markdown_file(path, &markdown)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Tab must be saved first"
+            ));
+        }
+        Ok(())
     }
 
     pub fn apply_center_alignment(&mut self) {

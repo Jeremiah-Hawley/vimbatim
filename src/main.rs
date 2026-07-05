@@ -9,6 +9,7 @@ mod auto_scroll;
 mod case_converter;
 mod color_picker;
 mod file_explorer;
+mod wikifi_export;
 mod settings_modal;
 mod main_window;
 

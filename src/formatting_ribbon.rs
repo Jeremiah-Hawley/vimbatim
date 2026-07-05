@@ -244,6 +244,14 @@ impl FormattingRibbon {
                                 state.toggle_split_view();
                             });
                         }
+                        FormatAction::Wikifi => {
+                            st.update(cx, |state, _cx| {
+                                match state.wikify_current_tab() {
+                                    Ok(_) => println!("Document exported to markdown"),
+                                    Err(e) => println!("Export failed: {}", e),
+                                }
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
