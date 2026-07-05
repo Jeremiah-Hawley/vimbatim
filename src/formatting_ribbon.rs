@@ -169,9 +169,12 @@ impl FormattingRibbon {
                                 });
                             }
                             // Pocket, Hat, and Block need center alignment (Phase 4.2)
+                            // Capture selection after formatting so we use the full formatted range
                             if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
                                 st.update(cx, |state, _cx| {
-                                    state.apply_center_alignment();
+                                    // Use the current selection which should still be active
+                                    let selection = state.tabs.get(state.active_tab).and_then(|t| t.selection);
+                                    state.apply_center_alignment_with_selection(selection);
                                 });
                             }
                         }

@@ -1089,6 +1089,15 @@ impl AppState {
          * Phase 4.2: Center-align card styles (Pocket, Hat, Block).
          */
         let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
+        self.apply_center_alignment_with_selection(selection);
+    }
+
+    pub fn apply_center_alignment_with_selection(&mut self, selection: Option<(usize, usize)>) {
+        /*
+         * Applies center alignment using an explicitly passed selection instead
+         * of reading from the current state. Used by button handlers that need
+         * to preserve the selection from before other formatting operations.
+         */
         let (start, end) = match selection {
             Some((a, f)) => (a.min(f), a.max(f)),
             None => {
