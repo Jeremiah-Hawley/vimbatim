@@ -182,6 +182,19 @@ impl FormattingRibbon {
                                 state.toggle_pilcrows();
                             });
                         }
+                        FormatAction::DocMenu => {
+                            println!("Doc Menu opened - options are placeholders for Phase 5");
+                            // Menu items:
+                            // - Fix Fake Tags
+                            // - Convert analytics to tags
+                            // - Fix Formatting Gaps
+                            // - Revert to default styles
+                            // - Remove emphasis
+                            // - Remove non highlighted underlining
+                            // - Remove blank lines
+                            // - Remove pilcrows
+                            // - Select similar formatting
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
