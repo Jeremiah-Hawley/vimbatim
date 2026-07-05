@@ -25,7 +25,6 @@ impl FormatAction {
             FormatAction::HighlightGreen => Some(FormatOp::Highlight(Some("green".to_string()))),
             FormatAction::RemoveHighlight => Some(FormatOp::Highlight(None)),
             FormatAction::Bold => Some(FormatOp::Bold(true)),
-            FormatAction::Strikethrough => Some(FormatOp::Strikethrough(true)),
             FormatAction::Clear => Some(FormatOp::ClearAll),
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
