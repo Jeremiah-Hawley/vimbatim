@@ -1168,6 +1168,16 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Color(Some(hex_str)));
     }
 
+    pub fn toggle_fold(&mut self) {
+        /*
+         * Toggles folding of all headings. When folded, only heading lines
+         * are shown; body text is hidden.
+         */
+        if let Some(_tab) = self.tabs.get(self.active_tab) {
+            self.fold_all = !self.fold_all;
+        }
+    }
+
     pub fn apply_center_alignment(&mut self) {
         /*
          * Applies center alignment to all paragraphs overlapping the active

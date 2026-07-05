@@ -167,6 +167,11 @@ impl FormattingRibbon {
                                 state.toggle_strikethrough();
                             });
                         }
+                        FormatAction::FoldToggle => {
+                            st.update(cx, |state, _cx| {
+                                state.toggle_fold();
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
