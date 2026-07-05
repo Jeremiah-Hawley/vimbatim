@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
-use crate::document_ops::{apply_formatting, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
+use crate::document_ops::{apply_formatting, apply_paragraph_alignment, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 
 /// Rapid edits within this window of the previous undo-stack push are
 /// coalesced into the same undo step (spec 4.5), so e.g. typing a whole
@@ -948,30 +948,160 @@ impl AppState {
 
     pub fn cycle_font_size(&mut self) {
         /*
-         * Cycles through preset font sizes: 12pt -> 18pt -> 24pt -> 12pt
+         * Cycles through preset font sizes: 24pt -> 32pt -> 48pt -> 24pt (in half-points).
+         * Detects the current size uniformly applied to selection, then advances to next.
          * Applies to selection or sets pending format if no selection.
-         * ponytail: simplified cycling; Phase 4 adds custom size input.
          */
-        let next_size = 36; // 18pt default; would cycle through [24, 36, 48] if tracking state
+        let tab = self.tabs.get(self.active_tab);
+        let selection = tab.and_then(|t| t.selection);
+
+        let current_size = if let Some((a, f)) = selection {
+            let (start, end) = (a.min(f), a.max(f));
+            tab.and_then(|t| {
+                // Check if all runs in range have same size
+                let mut uniform_size: Option<u16> = None;
+                for para in &t.paragraphs {
+                    let mut pos = 0;
+                    for run in &para.runs {
+                        let run_end = pos + run.text.len();
+                        if run_end > start && pos < end {
+                            if uniform_size.is_none() {
+                                uniform_size = Some(run.size);
+                            } else if uniform_size != Some(run.size) {
+                                return None; // not uniform
+                            }
+                        }
+                        pos = run_end;
+                    }
+                }
+                uniform_size
+            })
+        } else {
+            None
+        };
+
+        let next_size = match current_size {
+            Some(24) => 32,
+            Some(32) => 48,
+            Some(48) => 24,
+            _ => 24, // default to first size
+        };
+
         self.apply_formatting_to_selection(FormatOp::FontSize(next_size));
     }
 
     pub fn cycle_text_color(&mut self) {
         /*
-         * Applies yellow text color. Simplified for Phase 3;
-         * Phase 4 adds cycling through multiple colors.
-         * ponytail: color picker deferred to Phase 4.
+         * Cycles through preset text colors: yellow -> red -> blue -> yellow.
+         * Detects current color uniformly applied to selection, then advances.
+         * Applies to selection or sets pending format if no selection.
          */
-        self.apply_formatting_to_selection(FormatOp::Color(Some("ffff00".to_string())));
+        let tab = self.tabs.get(self.active_tab);
+        let selection = tab.and_then(|t| t.selection);
+
+        let current_color = if let Some((a, f)) = selection {
+            let (start, end) = (a.min(f), a.max(f));
+            tab.and_then(|t| {
+                // Check if all runs in range have same color
+                let mut uniform_color: Option<String> = None;
+                for para in &t.paragraphs {
+                    let mut pos = 0;
+                    for run in &para.runs {
+                        let run_end = pos + run.text.len();
+                        if run_end > start && pos < end {
+                            if uniform_color.is_none() {
+                                uniform_color = run.color.clone();
+                            } else if uniform_color != run.color {
+                                return None; // not uniform
+                            }
+                        }
+                        pos = run_end;
+                    }
+                }
+                uniform_color
+            })
+        } else {
+            None
+        };
+
+        let next_color = match current_color.as_deref() {
+            Some("ffff00") => "ff0000", // yellow -> red
+            Some("ff0000") => "0000ff", // red -> blue
+            Some("0000ff") => "ffff00", // blue -> yellow
+            _ => "ffff00", // default to yellow
+        };
+
+        self.apply_formatting_to_selection(FormatOp::Color(Some(next_color.to_string())));
     }
 
     pub fn cycle_highlight_color(&mut self) {
         /*
-         * Applies green highlight. Simplified for Phase 3;
-         * Phase 4 adds cycling through multiple colors.
-         * ponytail: color picker deferred to Phase 4.
+         * Cycles through preset highlight colors: yellow -> green -> blue -> yellow.
+         * Detects current highlight uniformly applied to selection, then advances.
+         * Applies to selection or sets pending format if no selection.
          */
-        self.apply_formatting_to_selection(FormatOp::Highlight(Some("green".to_string())));
+        let tab = self.tabs.get(self.active_tab);
+        let selection = tab.and_then(|t| t.selection);
+
+        let current_highlight = if let Some((a, f)) = selection {
+            let (start, end) = (a.min(f), a.max(f));
+            tab.and_then(|t| {
+                // Check if all runs in range have same highlight color
+                let mut uniform_highlight: Option<String> = None;
+                for para in &t.paragraphs {
+                    let mut pos = 0;
+                    for run in &para.runs {
+                        let run_end = pos + run.text.len();
+                        if run_end > start && pos < end {
+                            if run.highlight {
+                                if uniform_highlight.is_none() {
+                                    uniform_highlight = Some(run.highlight_color.clone());
+                                } else if uniform_highlight.as_ref() != Some(&run.highlight_color) {
+                                    return None; // not uniform
+                                }
+                            } else if uniform_highlight.is_some() {
+                                return None; // some have highlight, some don't
+                            }
+                        }
+                        pos = run_end;
+                    }
+                }
+                uniform_highlight
+            })
+        } else {
+            None
+        };
+
+        let next_color = match current_highlight.as_deref() {
+            Some("yellow") => "green",
+            Some("green") => "blue",
+            Some("blue") => "yellow",
+            _ => "yellow", // default to yellow
+        };
+
+        self.apply_formatting_to_selection(FormatOp::Highlight(Some(next_color.to_string())));
+    }
+
+    pub fn apply_center_alignment(&mut self) {
+        /*
+         * Applies center alignment to all paragraphs overlapping the active
+         * selection (or the paragraph containing the cursor, if no selection).
+         * Phase 4.2: Center-align card styles (Pocket, Hat, Block).
+         */
+        let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
+        let (start, end) = match selection {
+            Some((a, f)) => (a.min(f), a.max(f)),
+            None => {
+                let cursor = self.tabs.get(self.active_tab).map(|t| t.cursor).unwrap_or(0);
+                (cursor, cursor)
+            }
+        };
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            apply_paragraph_alignment(&mut tab.paragraphs, start, end, Alignment::Center);
+            tab.is_modified = true;
+        }
     }
 
     pub fn undo(&mut self) {

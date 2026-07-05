@@ -162,10 +162,16 @@ impl FormattingRibbon {
                                     state.apply_formatting_to_selection(FormatOp::FontSize(size));
                                 });
                             }
-                            // Hat and Block need underline; Pocket needs center align + box (Phase 4)
+                            // Hat and Block need underline
                             if matches!(act, FormatAction::Hat | FormatAction::Block) {
                                 st.update(cx, |state, _cx| {
                                     state.apply_formatting_to_selection(FormatOp::Underline(true));
+                                });
+                            }
+                            // Pocket, Hat, and Block need center alignment (Phase 4.2)
+                            if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_center_alignment();
                                 });
                             }
                         }

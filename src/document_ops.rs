@@ -293,6 +293,21 @@ fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usize, run_idx:
 /// considered active. Runs entirely outside `[start, end)` are ignored, so
 /// this reads the range's current state without mutating or splitting
 /// anything (unlike `apply_formatting`).
+/// Applies paragraph-level alignment to all paragraphs that overlap `[start, end)`.
+/// Any paragraph with content in the selection gets the new alignment;
+/// paragraphs entirely outside are unaffected.
+pub fn apply_paragraph_alignment(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize, alignment: Alignment) {
+    if start >= end { return; }
+    let (start_para, _, _) = resolve_position(paragraphs, start);
+    let (end_para, _, _) = resolve_position(paragraphs, end);
+
+    for idx in start_para..=end_para.min(paragraphs.len() - 1) {
+        if let Some(para) = paragraphs.get_mut(idx) {
+            para.alignment = alignment;
+        }
+    }
+}
+
 pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, op: &FormatOp) -> bool {
     if start >= end { return false; }
     let mut cumulative = 0usize;
