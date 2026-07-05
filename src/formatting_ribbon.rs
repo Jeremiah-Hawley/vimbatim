@@ -117,6 +117,7 @@ impl FormattingRibbon {
                                     st.update(cx, |state, _cx| {
                                         state.paste_text(&text);
                                     });
+                                    cx.notify();
                                 }
                             }
                         }
@@ -124,63 +125,75 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| {
                                 state.condense_selection();
                             });
+                            cx.notify();
                         }
                         FormatAction::BulletList => {
                             st.update(cx, |state, _cx| {
                                 state.apply_bullet_list();
                             });
+                            cx.notify();
                         }
                         FormatAction::NumberedList => {
                             st.update(cx, |state, _cx| {
                                 state.apply_numbered_list();
                             });
+                            cx.notify();
                         }
                         FormatAction::FontSize => {
                             st.update(cx, |state, _cx| {
                                 state.cycle_font_size();
                             });
+                            cx.notify();
                         }
                         FormatAction::FontColor => {
                             st.update(cx, |state, _cx| {
                                 // Default to Black for now
                                 state.apply_font_color(crate::color_picker::ColorChoice::Black);
                             });
+                            cx.notify();
                         }
                         FormatAction::HighlightColorSelect => {
                             st.update(cx, |state, _cx| {
                                 state.cycle_highlight_color();
                             });
+                            cx.notify();
                         }
                         FormatAction::Shrink => {
                             st.update(cx, |state, _cx| {
                                 state.shrink_text();
                             });
+                            cx.notify();
                         }
                         FormatAction::ChangeCase => {
                             st.update(cx, |state, _cx| {
                                 // Default to Title case for now
                                 state.apply_case_to_selection(crate::case_converter::CaseType::Title);
                             });
+                            cx.notify();
                         }
                         FormatAction::Strikethrough => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_strikethrough();
                             });
+                            cx.notify();
                         }
                         FormatAction::FoldToggle => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_fold();
                             });
+                            cx.notify();
                         }
                         FormatAction::ToggleParagraphIntegrity => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_paragraph_integrity();
                             });
+                            cx.notify();
                         }
                         FormatAction::TogglePilcrows => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_pilcrows();
                             });
+                            cx.notify();
                         }
                         FormatAction::DocMenu => {
                             println!("Doc Menu opened - options are placeholders for Phase 5");
@@ -240,6 +253,7 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| {
                                 state.toggle_invisibility_mode();
                             });
+                            cx.notify();
                         }
                         FormatAction::SwitchTabMenu => {
                             st.update(cx, |state, _cx| {
@@ -247,11 +261,13 @@ impl FormattingRibbon {
                                 println!("Switch Tab Menu: {:?}", tabs);
                                 // UI for selecting tab would go here
                             });
+                            cx.notify();
                         }
                         FormatAction::WindowSplit => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_split_view();
                             });
+                            cx.notify();
                         }
                         FormatAction::Wikifi => {
                             st.update(cx, |state, _cx| {
@@ -260,6 +276,7 @@ impl FormattingRibbon {
                                     Err(e) => println!("Export failed: {}", e),
                                 }
                             });
+                            cx.notify();
                         }
                         // Card styles: apply formatting per ribbon_instructions.md
                         // Apply to entire line, not just selection
@@ -306,12 +323,14 @@ impl FormattingRibbon {
                                     }
                                 }
                             });
+                            cx.notify();
                         }
                         _ => {
                             if let Some(op) = act.to_format_op() {
                                 st.update(cx, |state, _cx| {
                                     state.apply_formatting_to_selection(op);
                                 });
+                                cx.notify();
                             }
                         }
                     }
