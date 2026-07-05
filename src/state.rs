@@ -1185,6 +1185,14 @@ impl AppState {
         self.paragraph_integrity = !self.paragraph_integrity;
     }
 
+    pub fn toggle_pilcrows(&mut self) {
+        /*
+         * Toggles pilcrow display mode. When on, newlines are
+         * shown as pilcrow characters (¶).
+         */
+        self.pilcrows = !self.pilcrows;
+    }
+
     pub fn apply_center_alignment(&mut self) {
         /*
          * Applies center alignment to all paragraphs overlapping the active
