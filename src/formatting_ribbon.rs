@@ -45,7 +45,7 @@ impl FormatAction {
             FormatAction::Pocket => Some(52),   // 26pt
             FormatAction::Hat => Some(44),      // 22pt
             FormatAction::Block => Some(32),    // 16pt
-            FormatAction::Tag => Some(46),      // 23pt
+            FormatAction::Tag => Some(26),      // 13pt
             FormatAction::Cite => Some(26),     // 13pt
             _ => None,
         }
@@ -278,22 +278,30 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        // Card styles: apply formatting per ribbon_instructions.md
-                        // Apply to entire line, not just selection
+                        // Card styles and Clear: apply formatting to entire line, not just selection
                         // Pocket: bold, size, center, box
                         // Hat: bold, size, center, double underline
                         // Block: bold, size, center, underline
-                        // Tag/Cite: bold, size only
+                        // Tag: bold, size only
+                        // Clear: clear all formatting
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
-                        FormatAction::Tag | FormatAction::Cite => {
+                        FormatAction::Tag | FormatAction::Cite | FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
-                                // Apply bold to entire line
-                                if let Some(op) = act.to_format_op() {
-                                    state.apply_formatting_to_line(op);
+                                // Apply bold to entire line (not for Clear)
+                                if !matches!(act, FormatAction::Clear) {
+                                    if let Some(op) = act.to_format_op() {
+                                        state.apply_formatting_to_line(op);
+                                    }
                                 }
-                                // Apply font size to entire line
-                                if let Some(size) = act.card_style_size() {
-                                    state.apply_formatting_to_line(FormatOp::FontSize(size));
+                                // Apply font size to entire line (not for Clear)
+                                if !matches!(act, FormatAction::Clear) {
+                                    if let Some(size) = act.card_style_size() {
+                                        state.apply_formatting_to_line(FormatOp::FontSize(size));
+                                    }
+                                }
+                                // Clear all formatting from entire line
+                                if matches!(act, FormatAction::Clear) {
+                                    state.apply_formatting_to_line(FormatOp::ClearAll);
                                 }
                                 // Apply special formatting per card style to entire line
                                 if matches!(act, FormatAction::Pocket) {
