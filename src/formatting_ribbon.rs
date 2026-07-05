@@ -284,8 +284,9 @@ impl FormattingRibbon {
                         // Block: bold, size, center, underline
                         // Tag: bold, size only
                         // Clear: clear all formatting
+                        // (Cite applies to selection only, not handled here)
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
-                        FormatAction::Tag | FormatAction::Cite | FormatAction::Clear => {
+                        FormatAction::Tag | FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
                                 // Apply bold to entire line (not for Clear)
                                 if !matches!(act, FormatAction::Clear) {
