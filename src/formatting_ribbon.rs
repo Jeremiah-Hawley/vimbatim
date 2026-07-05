@@ -262,38 +262,48 @@ impl FormattingRibbon {
                             });
                         }
                         // Card styles: apply formatting per ribbon_instructions.md
+                        // Apply to entire line, not just selection
                         // Pocket: bold, size, center, box
                         // Hat: bold, size, center, double underline
                         // Block: bold, size, center, underline
                         // Tag/Cite: bold, size only
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
-                            // Combine all formatting into a single update to preserve selection
                             st.update(cx, |state, _cx| {
-                                // Capture selection at start of update
-                                let selection = state.tabs.get(state.active_tab).and_then(|t| t.selection);
-
-                                // Apply bold
+                                // Apply bold to entire line
                                 if let Some(op) = act.to_format_op() {
-                                    state.apply_formatting_to_selection(op);
+                                    state.apply_formatting_to_line(op);
                                 }
-                                // Apply font size
+                                // Apply font size to entire line
                                 if let Some(size) = act.card_style_size() {
-                                    state.apply_formatting_to_selection(FormatOp::FontSize(size));
+                                    state.apply_formatting_to_line(FormatOp::FontSize(size));
                                 }
-                                // Apply special formatting per card style
+                                // Apply special formatting per card style to entire line
                                 if matches!(act, FormatAction::Pocket) {
-                                    state.apply_formatting_to_selection(FormatOp::Box(true));
+                                    state.apply_formatting_to_line(FormatOp::Box(true));
                                 }
                                 if matches!(act, FormatAction::Hat) {
-                                    state.apply_formatting_to_selection(FormatOp::DoubleUnderline(true));
+                                    state.apply_formatting_to_line(FormatOp::DoubleUnderline(true));
                                 }
                                 if matches!(act, FormatAction::Block) {
-                                    state.apply_formatting_to_selection(FormatOp::Underline(true));
+                                    state.apply_formatting_to_line(FormatOp::Underline(true));
                                 }
-                                // Apply center alignment (for Pocket, Hat, Block)
+                                // Apply center alignment to entire line (for Pocket, Hat, Block)
                                 if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
-                                    state.apply_center_alignment_with_selection(selection);
+                                    // For alignment, we need to use the line range
+                                    let tab = state.tabs.get_mut(state.active_tab);
+                                    if let Some(t) = tab {
+                                        let cursor = t.cursor;
+                                        let line_start = t.content[..cursor]
+                                            .rfind('\n')
+                                            .map(|pos| pos + 1)
+                                            .unwrap_or(0);
+                                        let line_end = t.content[cursor..]
+                                            .find('\n')
+                                            .map(|pos| cursor + pos)
+                                            .unwrap_or(t.content.len());
+                                        state.apply_center_alignment_with_selection(Some((line_start, line_end)));
+                                    }
                                 }
                             });
                         }

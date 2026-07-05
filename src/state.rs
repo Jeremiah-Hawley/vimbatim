@@ -760,6 +760,43 @@ impl AppState {
         self.delete_selection_raw();
     }
 
+    pub fn apply_formatting_to_line(&mut self, op: FormatOp) {
+        /*
+         * Applies formatting to the entire line containing the cursor.
+         * Used for card styles (Pocket, Hat, Block) which should format
+         * the entire line, not just selected text.
+         */
+        let (line_start, line_end) = {
+            let Some(tab) = self.tabs.get(self.active_tab) else { return };
+            let cursor = tab.cursor;
+
+            // Find the start of the current line (after previous newline)
+            let line_start = tab.content[..cursor]
+                .rfind('\n')
+                .map(|pos| pos + 1)
+                .unwrap_or(0);
+
+            // Find the end of the current line (next newline or end of content)
+            let line_end = tab.content[cursor..]
+                .find('\n')
+                .map(|pos| cursor + pos)
+                .unwrap_or(tab.content.len());
+
+            (line_start, line_end)
+        };
+
+        self.push_undo_snapshot();
+
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        let effective_op = if is_uniformly_active(&tab.paragraphs, line_start, line_end, &op) {
+            toggled_off(&op)
+        } else {
+            op.clone()
+        };
+        apply_formatting(&mut tab.paragraphs, line_start, line_end, effective_op);
+        tab.is_modified = true;
+    }
+
     pub fn apply_formatting_to_selection(&mut self, op: FormatOp) {
         /*
          * Spec 7.2's entry point for a ribbon button or formatting
