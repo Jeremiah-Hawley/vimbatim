@@ -821,20 +821,19 @@ impl AppState {
         /*
          * Inserts clipboard text at cursor or replaces selection.
          * Mirrors insert_str but is called from ribbon button handler.
+         * Respects paragraph_integrity and pilcrows toggles.
          */
         if text.is_empty() {
             return;
         }
-        self.push_undo_snapshot();
-        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
-            self.delete_selection_raw();
-        }
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            sync_insert_str(&mut tab.paragraphs, tab.cursor, text);
-            tab.content.insert_str(tab.cursor, text);
-            tab.cursor += text.len();
-            tab.is_modified = true;
-        }
+        let processed = if self.paragraph_integrity {
+            text.replace('\n', " ")
+        } else if self.pilcrows {
+            text.replace('\n', "¶")
+        } else {
+            text.to_string()
+        };
+        self.insert_str(&processed);
     }
 
     pub fn condense_selection(&mut self) {
@@ -1176,6 +1175,14 @@ impl AppState {
         if let Some(_tab) = self.tabs.get(self.active_tab) {
             self.fold_all = !self.fold_all;
         }
+    }
+
+    pub fn toggle_paragraph_integrity(&mut self) {
+        /*
+         * Toggles paragraph integrity mode. When on, newlines are
+         * excluded from pastes.
+         */
+        self.paragraph_integrity = !self.paragraph_integrity;
     }
 
     pub fn apply_center_alignment(&mut self) {
