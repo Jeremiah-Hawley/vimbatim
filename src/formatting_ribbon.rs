@@ -149,7 +149,7 @@ impl FormattingRibbon {
                                 state.cycle_highlight_color();
                             });
                         }
-                        // Card styles: apply bold + custom font size
+                        // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
                             if let Some(op) = act.to_format_op() {
@@ -160,6 +160,12 @@ impl FormattingRibbon {
                             if let Some(size) = act.card_style_size() {
                                 st.update(cx, |state, _cx| {
                                     state.apply_formatting_to_selection(FormatOp::FontSize(size));
+                                });
+                            }
+                            // Hat and Block need underline; Pocket needs center align + box (Phase 4)
+                            if matches!(act, FormatAction::Hat | FormatAction::Block) {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::Underline(true));
                                 });
                             }
                         }
