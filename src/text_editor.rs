@@ -1118,8 +1118,11 @@ fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyEl
      * *after* the run's own correctly makes it win, matching real editors
      * drawing the cursor/selection on top of a highlight rather than
      * underneath it.
+     *
+     * Use flex_shrink(0.0) to prevent the div from expanding beyond the text width,
+     * so highlights only extend as far as the text itself.
      */
-    let el = apply_run_style(div(), run);
+    let el = apply_run_style(div().flex_shrink(0.0), run);
     let el = match style {
         SegmentStyle::Cursor => el.bg(rgb(0xd4d4d4)).text_color(rgb(0x1e1e1e)),
         // #264F78 at ~50% opacity, per spec 6.4's selection-highlight color.
