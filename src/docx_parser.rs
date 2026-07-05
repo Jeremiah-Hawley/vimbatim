@@ -21,6 +21,7 @@ pub struct Run {
     /// `<w:i/>` (rich-text formatting plan, Phase 1).
     pub italic: bool,
     pub underline: bool,
+    pub strikethrough: bool,
     pub highlight: bool,
     pub highlight_color: String,
     pub size: u16,

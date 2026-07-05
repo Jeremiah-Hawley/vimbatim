@@ -216,6 +216,7 @@ pub enum FormatOp {
     Bold(bool),
     Italic(bool),
     Underline(bool),
+    Strikethrough(bool),
     /// `None` removes the highlight; `Some(name)` sets it to one of spec
     /// 6.2's Word highlight-color names.
     Highlight(Option<String>),
@@ -309,6 +310,7 @@ pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, o
                 FormatOp::Bold(true) => run.bold,
                 FormatOp::Italic(true) => run.italic,
                 FormatOp::Underline(true) => run.underline,
+                FormatOp::Strikethrough(true) => run.strikethrough,
                 FormatOp::Highlight(Some(color)) => run.highlight && run.highlight_color == *color,
                 _ => false,
             };
@@ -337,6 +339,7 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::Bold(b) => run.bold = *b,
         FormatOp::Italic(b) => run.italic = *b,
         FormatOp::Underline(b) => run.underline = *b,
+        FormatOp::Strikethrough(b) => run.strikethrough = *b,
         FormatOp::Highlight(color) => {
             run.highlight = color.is_some();
             run.highlight_color = color.clone().unwrap_or_default();
@@ -348,6 +351,7 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
             run.bold = false;
             run.italic = false;
             run.underline = false;
+            run.strikethrough = false;
             run.highlight = false;
             run.highlight_color = String::new();
             run.size = 0;

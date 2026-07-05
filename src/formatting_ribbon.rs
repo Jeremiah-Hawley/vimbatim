@@ -20,10 +20,12 @@ impl FormatAction {
         match self {
             FormatAction::Underline => Some(FormatOp::Underline(true)),
             FormatAction::Italics => Some(FormatOp::Italic(true)),
+            FormatAction::Highlight => Some(FormatOp::Highlight(Some("yellow".to_string()))),
             FormatAction::HighlightYellow => Some(FormatOp::Highlight(Some("yellow".to_string()))),
             FormatAction::HighlightGreen => Some(FormatOp::Highlight(Some("green".to_string()))),
             FormatAction::RemoveHighlight => Some(FormatOp::Highlight(None)),
             FormatAction::Bold => Some(FormatOp::Bold(true)),
+            FormatAction::Strikethrough => Some(FormatOp::Strikethrough(true)),
             FormatAction::Clear => Some(FormatOp::ClearAll),
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
@@ -71,7 +73,7 @@ impl FormattingRibbon {
         }
     }
 
-    fn make_button(label: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+    fn make_button(label: &'static str, action: FormatAction, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -86,14 +88,21 @@ impl FormattingRibbon {
             .cursor_pointer()
             .on_mouse_down(gpui::MouseButton::Left, {
                 let label_text = label;
-                cx.listener(move |_this, _ev, _window, _cx| {
+                let act = action.clone();
+                let st = state.clone();
+                cx.listener(move |_this, _ev, _window, cx| {
                     println!("Button pressed: {}", label_text);
+                    if let Some(op) = act.to_format_op() {
+                        st.update(cx, |state, _cx| {
+                            state.apply_formatting_to_selection(op);
+                        });
+                    }
                 })
             })
             .child(label)
     }
 
-    fn render_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -115,7 +124,7 @@ impl FormattingRibbon {
                                 .flex_row()
                                 .gap(px(4.0))
                                 .children(row.iter().map(|btn| {
-                                    Self::make_button(btn.label, cx)
+                                    Self::make_button(btn.label, btn.action.clone(), state.clone(), cx)
                                 }))
                         }))
                 )
@@ -146,6 +155,7 @@ impl FormattingRibbon {
 
 impl Render for FormattingRibbon {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.state.clone();
         div()
             .flex()
             .flex_row()
@@ -162,6 +172,7 @@ impl Render for FormattingRibbon {
                     vec![RibbonBtn { label: "Emphasis", action: FormatAction::Emphasis }, RibbonBtn { label: "Highlight", action: FormatAction::Highlight }, RibbonBtn { label: "Clear", action: FormatAction::Clear }, RibbonBtn { label: "Fold Toggle", action: FormatAction::FoldToggle }],
                 ],
                 *self.collapsed.get("organize").unwrap_or(&false),
+                state.clone(),
                 cx,
             ))
             .child(Self::render_group(
@@ -173,6 +184,7 @@ impl Render for FormattingRibbon {
                     vec![RibbonBtn { label: "Font Color", action: FormatAction::FontColor }, RibbonBtn { label: "Strikethrough", action: FormatAction::Strikethrough }, RibbonBtn { label: "Change Case", action: FormatAction::ChangeCase }],
                 ],
                 *self.collapsed.get("document").unwrap_or(&false),
+                state.clone(),
                 cx,
             ))
             .child(Self::render_group(
@@ -184,6 +196,7 @@ impl Render for FormattingRibbon {
                     vec![RibbonBtn { label: "Doc Menu", action: FormatAction::DocMenu }, RibbonBtn { label: "Card Menu", action: FormatAction::CardMenu }],
                 ],
                 *self.collapsed.get("card_format").unwrap_or(&false),
+                state.clone(),
                 cx,
             ))
             .child(Self::render_group(
@@ -194,6 +207,7 @@ impl Render for FormattingRibbon {
                     vec![RibbonBtn { label: "Switch Tab", action: FormatAction::SwitchTabMenu }, RibbonBtn { label: "Window Split", action: FormatAction::WindowSplit }],
                 ],
                 *self.collapsed.get("view").unwrap_or(&false),
+                state.clone(),
                 cx,
             ))
             .child(Self::render_group(
@@ -205,6 +219,7 @@ impl Render for FormattingRibbon {
                     vec![RibbonBtn { label: "Wikifi", action: FormatAction::Wikifi }],
                 ],
                 *self.collapsed.get("caselist").unwrap_or(&false),
+                state.clone(),
                 cx,
             ))
     }
