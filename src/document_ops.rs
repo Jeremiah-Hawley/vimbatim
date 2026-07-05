@@ -216,6 +216,7 @@ pub enum FormatOp {
     Bold(bool),
     Italic(bool),
     Underline(bool),
+    DoubleUnderline(bool),
     Strikethrough(bool),
     /// `None` removes the highlight; `Some(name)` sets it to one of spec
     /// 6.2's Word highlight-color names.
@@ -226,6 +227,7 @@ pub enum FormatOp {
     FontFamily(Option<String>),
     /// Docx hex color (`"RRGGBB"`), or `None` to remove the override.
     Color(Option<String>),
+    Box(bool),
     /// Clears every character-formatting field (bold/italic/underline/
     /// highlight/size/font/color) back to the unformatted default.
     ClearAll,
@@ -328,8 +330,10 @@ pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, o
                 FormatOp::Bold(true) => run.bold,
                 FormatOp::Italic(true) => run.italic,
                 FormatOp::Underline(true) => run.underline,
+                FormatOp::DoubleUnderline(true) => run.double_underline,
                 FormatOp::Strikethrough(true) => run.strikethrough,
                 FormatOp::Highlight(Some(color)) => run.highlight && run.highlight_color == *color,
+                FormatOp::Box(true) => run.box_format,
                 _ => false,
             };
             if !active { return false; }
@@ -347,7 +351,9 @@ pub fn toggled_off(op: &FormatOp) -> FormatOp {
         FormatOp::Bold(_) => FormatOp::Bold(false),
         FormatOp::Italic(_) => FormatOp::Italic(false),
         FormatOp::Underline(_) => FormatOp::Underline(false),
+        FormatOp::DoubleUnderline(_) => FormatOp::DoubleUnderline(false),
         FormatOp::Highlight(_) => FormatOp::Highlight(None),
+        FormatOp::Box(_) => FormatOp::Box(false),
         other => other.clone(),
     }
 }
@@ -357,6 +363,7 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::Bold(b) => run.bold = *b,
         FormatOp::Italic(b) => run.italic = *b,
         FormatOp::Underline(b) => run.underline = *b,
+        FormatOp::DoubleUnderline(b) => run.double_underline = *b,
         FormatOp::Strikethrough(b) => run.strikethrough = *b,
         FormatOp::Highlight(color) => {
             run.highlight = color.is_some();
@@ -365,16 +372,19 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::FontSize(size) => run.size = *size,
         FormatOp::FontFamily(font) => run.font = font.clone(),
         FormatOp::Color(color) => run.color = color.clone(),
+        FormatOp::Box(b) => run.box_format = *b,
         FormatOp::ClearAll => {
             run.bold = false;
             run.italic = false;
             run.underline = false;
+            run.double_underline = false;
             run.strikethrough = false;
             run.highlight = false;
             run.highlight_color = String::new();
             run.size = 0;
             run.font = None;
             run.color = None;
+            run.box_format = false;
         }
     }
 }

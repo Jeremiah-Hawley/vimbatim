@@ -261,7 +261,11 @@ impl FormattingRibbon {
                                 }
                             });
                         }
-                        // Card styles: apply bold + custom font size + underline for Hat/Block
+                        // Card styles: apply formatting per ribbon_instructions.md
+                        // Pocket: bold, size, center, box
+                        // Hat: bold, size, center, double underline
+                        // Block: bold, size, center, underline
+                        // Tag/Cite: bold, size only
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
                             if let Some(op) = act.to_format_op() {
@@ -274,8 +278,20 @@ impl FormattingRibbon {
                                     state.apply_formatting_to_selection(FormatOp::FontSize(size));
                                 });
                             }
+                            // Pocket needs box
+                            if matches!(act, FormatAction::Pocket) {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::Box(true));
+                                });
+                            }
+                            // Hat needs double underline
+                            if matches!(act, FormatAction::Hat) {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::DoubleUnderline(true));
+                                });
+                            }
                             // Hat and Block need underline
-                            if matches!(act, FormatAction::Hat | FormatAction::Block) {
+                            if matches!(act, FormatAction::Block) {
                                 st.update(cx, |state, _cx| {
                                     state.apply_formatting_to_selection(FormatOp::Underline(true));
                                 });

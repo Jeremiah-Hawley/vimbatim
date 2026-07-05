@@ -1135,7 +1135,11 @@ fn apply_run_style(el: Div, run: Option<&Run>) -> Div {
     if run.bold { el = el.font_weight(FontWeight::BOLD); }
     if run.italic { el = el.italic(); }
     if run.underline { el = el.underline(); }
+    if run.double_underline { el = el.underline(); }
     // ponytail: strikethrough data is stored and toggled, rendering deferred until GPUI supports text decoration
+    if run.box_format {
+        el = el.border_1().border_color(rgb(0xd4d4d4));
+    }
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
         let text_hex = run.color.as_deref()

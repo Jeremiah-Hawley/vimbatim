@@ -21,6 +21,7 @@ pub struct Run {
     /// `<w:i/>` (rich-text formatting plan, Phase 1).
     pub italic: bool,
     pub underline: bool,
+    pub double_underline: bool,
     pub strikethrough: bool,
     pub highlight: bool,
     pub highlight_color: String,
@@ -31,6 +32,7 @@ pub struct Run {
     /// `<w:color w:val="RRGGBB">`, Word's own hex format. `None` (or
     /// `w:val="auto"`, parsed the same as absent) means "inherit".
     pub color: Option<String>,
+    pub box_format: bool,
     /// True when `xml:space="preserve"` is set on `<w:t>` — required to keep
     /// leading/trailing whitespace that XML parsers would otherwise strip.
     pub whitespace_preserve: bool,
