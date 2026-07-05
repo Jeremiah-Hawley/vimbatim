@@ -1848,6 +1848,11 @@ impl AppState {
          * Escape (from Insert/Visual/VisualLine/Command/Replace/Search),
          * or the Visual/VisualLine toggle-off key — every "-> Normal"
          * transition in spec 5.1's table shares this one method.
+         *
+         * When exiting Insert mode, move the cursor back one character so it
+         * lands ON the last typed character rather than after it (standard vim
+         * behavior: the cursor in Normal mode is always ON a character, not
+         * between characters).
          */
         let was_insert = self.tabs.get(self.active_tab).map(|t| t.vim_mode == VimMode::Insert).unwrap_or(false);
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -1856,6 +1861,11 @@ impl AppState {
             tab.vim_command_buf.clear();
             tab.vim_pending_operator = None;
             tab.vim_pending_text_object_prefix = None;
+            // In vim, exiting Insert mode moves cursor back one char to land
+            // ON the last character, not after it
+            if was_insert && tab.cursor > 0 {
+                tab.cursor = char_left(&tab.content, tab.cursor);
+            }
         }
         // `.` repeat (spec 5.5): an Insert session just ended — commit
         // what was typed, combining it with the operator that led into it
