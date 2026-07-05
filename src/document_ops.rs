@@ -83,6 +83,11 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
      * after it. The new second paragraph always gets `heading: 0` — real
      * Word itself reverts to body style after pressing Enter inside a
      * heading, so this matches rather than deviates from that convention.
+     *
+     * When splitting a line with card-style formatting (Pocket/Hat/Block),
+     * the new paragraph inherits the card style's center alignment and the
+     * special formatting (box/double-underline/underline) is automatically
+     * re-applied because the runs retain their formatting.
      */
     let para = &paragraphs[para_idx];
     let split_run = &para.runs[run_idx];
@@ -98,11 +103,19 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     para_b_runs.extend(para.runs[run_idx + 1..].to_vec());
 
     let heading = para.heading;
+    // Preserve center alignment for card styles (Pocket/Hat/Block)
+    // These styles always have center alignment, so continue it on the new paragraph
+    let new_alignment = if para.alignment == Alignment::Center {
+        Alignment::Center
+    } else {
+        Alignment::default()
+    };
+
     paragraphs.splice(
         para_idx..=para_idx,
         [
             Paragraph { runs: para_a_runs, heading, alignment: Alignment::default() },
-            Paragraph { runs: para_b_runs, heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment },
         ],
     );
 }
