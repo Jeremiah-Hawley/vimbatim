@@ -765,6 +765,10 @@ impl AppState {
          * Applies formatting to the entire line containing the cursor.
          * Used for card styles (Pocket, Hat, Block) which should format
          * the entire line, not just selected text.
+         *
+         * When applied to an empty line, also arms pending_format so that
+         * subsequent typing inherits the formatting (mirroring the behavior
+         * of apply_formatting_to_selection with no active selection).
          */
         let (line_start, line_end) = {
             let Some(tab) = self.tabs.get(self.active_tab) else { return };
@@ -785,6 +789,8 @@ impl AppState {
             (line_start, line_end)
         };
 
+        let is_line_empty = line_start >= line_end;
+
         self.push_undo_snapshot();
 
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
@@ -793,8 +799,24 @@ impl AppState {
         } else {
             op.clone()
         };
-        apply_formatting(&mut tab.paragraphs, line_start, line_end, effective_op);
+        apply_formatting(&mut tab.paragraphs, line_start, line_end, effective_op.clone());
         tab.is_modified = true;
+
+        // If applying to an empty line, arm pending_format so subsequent typing inherits formatting.
+        // This ensures card styles are visible immediately when the user starts typing.
+        if is_line_empty && !is_uniformly_active(&self.tabs.get(self.active_tab).map(|t| &t.paragraphs).unwrap_or(&vec![]), line_start, line_end, &op) {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                // Only set pending_format for run-level operations, not paragraph-level ones
+                match &effective_op {
+                    FormatOp::Bold(_) | FormatOp::FontSize(_) | FormatOp::Underline(_) |
+                    FormatOp::DoubleUnderline(_) | FormatOp::Box(_) | FormatOp::Italic(_) |
+                    FormatOp::Strikethrough(_) | FormatOp::Highlight(_) | FormatOp::Color(_) => {
+                        tab.pending_format = Some(effective_op);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn apply_formatting_to_selection(&mut self, op: FormatOp) {
