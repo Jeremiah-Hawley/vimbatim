@@ -42,6 +42,16 @@ pub struct Run {
 pub struct Paragraph {
     pub runs: Vec<Run>,
     pub heading: u8,
+    pub alignment: Alignment,  // left, center, right, justify
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Alignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
 }
 
 /// The save-time constants needed to reconstruct a real .docx file around
@@ -225,7 +235,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
             Event::Start(ref e) => {
                 match e.name().as_ref() {
                     b"w:p" => {
-                        current_para = Some(Paragraph { runs: Vec::new(), heading: 0 });
+                        current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default() });
                     }
                     b"w:pPr" => { in_ppr = true; }
                     b"w:pStyle" if in_ppr => {
@@ -609,6 +619,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "hi".into(), italic: true, ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:i/>"));
@@ -619,6 +630,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "hi".into(), font: Some("Georgia".into()), ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:rFonts w:ascii="Georgia"/>"#));
@@ -629,6 +641,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "hi".into(), color: Some("FF0000".into()), ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:color w:val="FF0000"/>"#));
@@ -639,6 +652,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("<w:rPr>"));
@@ -655,6 +669,7 @@ mod tests {
                 ..Run::default()
             }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,

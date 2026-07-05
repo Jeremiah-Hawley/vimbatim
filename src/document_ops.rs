@@ -1,4 +1,4 @@
-use crate::docx_parser::{Paragraph, Run};
+use crate::docx_parser::{Alignment, Paragraph, Run};
 
 /// Resolves a byte offset into `content` (the flat string vim-mode and the
 /// rest of the editor operate on) into a `(paragraph_index, run_index,
@@ -101,8 +101,8 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { runs: para_a_runs, heading },
-            Paragraph { runs: para_b_runs, heading: 0 },
+            Paragraph { runs: para_a_runs, heading, alignment: Alignment::default() },
+            Paragraph { runs: para_b_runs, heading: 0, alignment: Alignment::default() },
         ],
     );
 }
@@ -143,7 +143,7 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
         merged_runs.push(Run::default());
     }
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading }]);
+    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment: Alignment::default() }]);
 }
 
 fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, end_run: usize, end_char: usize) {
@@ -371,7 +371,7 @@ mod tests {
     }
 
     fn para(runs: Vec<Run>) -> Paragraph {
-        Paragraph { runs, heading: 0 }
+        Paragraph { runs, heading: 0, alignment: Alignment::default() }
     }
 
     #[test]

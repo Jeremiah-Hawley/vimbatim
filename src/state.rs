@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::docx_parser::{DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
+use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_formatting, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 
 /// Rapid edits within this window of the previous undo-stack push are
@@ -224,7 +224,7 @@ pub struct Tab {
 /// it. Never `vec![]`: every rich-text-aware function assumes at least one
 /// paragraph and run always exist.
 pub fn default_paragraphs() -> Vec<Paragraph> {
-    vec![Paragraph { runs: vec![Run::default()], heading: 0 }]
+    vec![Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default() }]
 }
 
 impl Tab {
@@ -4656,6 +4656,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "abc".into(), bold: true, ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 1);
         state.insert_char('X');
@@ -4666,7 +4667,7 @@ mod tests {
 
     #[test]
     fn test_backspace_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0 }];
+        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0, alignment: Alignment::default() }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.backspace();
         assert_eq!(state.tabs[0].content, "ac");
@@ -4678,6 +4679,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }, Run { text: " plain".into(), ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.tabs[0].selection = Some((2, 6)); // deletes "ld p"
@@ -4694,8 +4696,8 @@ mod tests {
     #[test]
     fn test_vim_dd_choke_point_keeps_paragraphs_synced() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0 },
-            Paragraph { runs: vec![run_plain("two")], heading: 0 },
+            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("two")], heading: 0, alignment: Alignment::default() },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.handle_vim_key("d", false, None);
@@ -4707,7 +4709,7 @@ mod tests {
 
     #[test]
     fn test_vim_paste_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0 }];
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0, alignment: Alignment::default() }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
@@ -4718,8 +4720,8 @@ mod tests {
     #[test]
     fn test_dispatch_vim_substitute_only_touches_changed_paragraphs() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0 },
-            Paragraph { runs: vec![run_plain("untouched")], heading: 0 },
+            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("untouched")], heading: 0, alignment: Alignment::default() },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.dispatch_vim_command("%s/foo/baz/");
@@ -4733,7 +4735,7 @@ mod tests {
 
     #[test]
     fn test_insert_newline_via_enter_splits_paragraph_in_sync() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0 }];
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0, alignment: Alignment::default() }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.insert_char('\n');
         assert_eq!(state.tabs[0].content, "he\nllo");
@@ -5430,6 +5432,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 4);
         state.insert_char('X'); // "boldX", paragraphs now ["boldX"] still bold
@@ -5445,6 +5448,7 @@ mod tests {
         let paragraphs = vec![Paragraph {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
+            alignment: Alignment::default(),
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 4);
         state.insert_char('X');
@@ -5556,7 +5560,7 @@ mod tests {
     }
 
     fn para_plain(text: &str) -> Paragraph {
-        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0 }
+        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0, alignment: Alignment::default() }
     }
 
     #[test]
