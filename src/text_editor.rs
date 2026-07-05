@@ -1107,6 +1107,7 @@ fn render_line(
 
         // Check if any run has box_format (Pocket formatting)
         // Wrap in full-width box container so box stays at full width while content is aligned
+        // Increased vertical padding to create visual separation between consecutive Pockets
         let has_box = p.runs.iter().any(|r| r.box_format);
         if has_box {
             return div()
@@ -1114,7 +1115,7 @@ fn render_line(
                 .border_1()
                 .border_color(rgb(0xd4d4d4))
                 .px(px(8.0))
-                .py(px(4.0))
+                .py(px(8.0))
                 .child(line_div)
                 .into_any_element();
         }
