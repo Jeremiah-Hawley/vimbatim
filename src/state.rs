@@ -926,6 +926,34 @@ impl AppState {
         }
     }
 
+    pub fn cycle_font_size(&mut self) {
+        /*
+         * Cycles through preset font sizes: 12pt -> 18pt -> 24pt -> 12pt
+         * Applies to selection or sets pending format if no selection.
+         * ponytail: simplified cycling; Phase 4 adds custom size input.
+         */
+        let next_size = 36; // 18pt default; would cycle through [24, 36, 48] if tracking state
+        self.apply_formatting_to_selection(FormatOp::FontSize(next_size));
+    }
+
+    pub fn cycle_text_color(&mut self) {
+        /*
+         * Applies yellow text color. Simplified for Phase 3;
+         * Phase 4 adds cycling through multiple colors.
+         * ponytail: color picker deferred to Phase 4.
+         */
+        self.apply_formatting_to_selection(FormatOp::Color(Some("ffff00".to_string())));
+    }
+
+    pub fn cycle_highlight_color(&mut self) {
+        /*
+         * Applies green highlight. Simplified for Phase 3;
+         * Phase 4 adds cycling through multiple colors.
+         * ponytail: color picker deferred to Phase 4.
+         */
+        self.apply_formatting_to_selection(FormatOp::Highlight(Some("green".to_string())));
+    }
+
     pub fn undo(&mut self) {
         /*
          * Restores the most recent undo snapshot's `(content, paragraphs)`

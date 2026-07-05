@@ -134,6 +134,21 @@ impl FormattingRibbon {
                                 state.apply_numbered_list();
                             });
                         }
+                        FormatAction::FontSize => {
+                            st.update(cx, |state, _cx| {
+                                state.cycle_font_size();
+                            });
+                        }
+                        FormatAction::FontColor => {
+                            st.update(cx, |state, _cx| {
+                                state.cycle_text_color();
+                            });
+                        }
+                        FormatAction::HighlightColorSelect => {
+                            st.update(cx, |state, _cx| {
+                                state.cycle_highlight_color();
+                            });
+                        }
                         // Card styles: apply bold + custom font size
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
