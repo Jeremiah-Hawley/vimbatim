@@ -28,6 +28,24 @@ impl FormatAction {
             FormatAction::Clear => Some(FormatOp::ClearAll),
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
+            // Card styles: each maps to Bold + custom font size
+            FormatAction::Pocket => Some(FormatOp::Bold(true)),    // Size 26 = 52 half-points
+            FormatAction::Hat => Some(FormatOp::Bold(true)),       // Size 22 = 44 half-points
+            FormatAction::Block => Some(FormatOp::Bold(true)),     // Size 16 = 32 half-points
+            FormatAction::Tag => Some(FormatOp::Bold(true)),       // Size 23 = 46 half-points
+            FormatAction::Cite => Some(FormatOp::Bold(true)),      // Size 13 = 26 half-points
+            FormatAction::Emphasis => Some(FormatOp::Bold(true)),  // Bold only
+            _ => None,
+        }
+    }
+
+    pub fn card_style_size(&self) -> Option<u16> {
+        match self {
+            FormatAction::Pocket => Some(52),   // 26pt
+            FormatAction::Hat => Some(44),      // 22pt
+            FormatAction::Block => Some(32),    // 16pt
+            FormatAction::Tag => Some(46),      // 23pt
+            FormatAction::Cite => Some(26),     // 13pt
             _ => None,
         }
     }
@@ -105,6 +123,20 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| {
                                 state.condense_selection();
                             });
+                        }
+                        // Card styles: apply bold + custom font size
+                        FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
+                        FormatAction::Tag | FormatAction::Cite => {
+                            if let Some(op) = act.to_format_op() {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(op);
+                                });
+                            }
+                            if let Some(size) = act.card_style_size() {
+                                st.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::FontSize(size));
+                                });
+                            }
                         }
                         _ => {
                             if let Some(op) = act.to_format_op() {
