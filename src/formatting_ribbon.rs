@@ -10,7 +10,7 @@ pub enum FormatAction {
     Paste, Condense, Pocket, Hat, Block, Tag, Cite, Underline, Emphasis, Highlight, Clear, FoldToggle,
     FontSize, FontFamily, NumberedList, Italics, Bold, BulletList, FontColor, Strikethrough, ChangeCase,
     Shrink, HighlightColorSelect, ToggleParagraphIntegrity, TogglePilcrows, DocMenu, CardMenu,
-    Nav, InvisibilityMode, SwitchTabMenu, WindowSplit,
+    Nav, InvisibilityMode, SwitchTabMenu, WindowSplit, CollapseAll,
     OpenWiki, OpenTabroom, Wikifi,
     Body, PocketCite, HighlightYellow, HighlightGreen, RemoveHighlight, OpenBlock, CloseBlock, NormalSize,
 }
@@ -63,7 +63,7 @@ impl FormatAction {
             FormatAction::Shrink => "Shrink", FormatAction::HighlightColorSelect => "HL Color", FormatAction::ToggleParagraphIntegrity => "Para Integrity",
             FormatAction::TogglePilcrows => "Pilcrows", FormatAction::DocMenu => "Doc Menu", FormatAction::CardMenu => "Card Menu",
             FormatAction::Nav => "Nav", FormatAction::InvisibilityMode => "Invisibility", FormatAction::SwitchTabMenu => "Switch Tab",
-            FormatAction::WindowSplit => "Window Split", FormatAction::OpenWiki => "Open Wiki", FormatAction::OpenTabroom => "Open Tabroom",
+            FormatAction::WindowSplit => "Window Split", FormatAction::CollapseAll => "Collapse All", FormatAction::OpenWiki => "Open Wiki", FormatAction::OpenTabroom => "Open Tabroom",
             FormatAction::Wikifi => "Wikifi", FormatAction::Body => "Body", FormatAction::PocketCite => "Pkt Cite",
             FormatAction::HighlightYellow => "HLt", FormatAction::HighlightGreen => "HLg", FormatAction::RemoveHighlight => "Rm HL",
             FormatAction::OpenBlock => "Open Blk", FormatAction::CloseBlock => "Close Blk", FormatAction::NormalSize => "Normal",
@@ -348,6 +348,89 @@ impl FormattingRibbon {
             .child(label)
     }
 
+    fn render_view_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
+        /*
+         * Special version of render_group for the VIEW section that includes a CollapseAll button.
+         * This button has access to self through the listener context.
+         */
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .border_r_1()
+            .border_color(rgb(0x3d3d3d))
+            .px(px(8.0))
+            .h_full()
+            .when(!is_collapsed, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .flex_1()
+                        .children(buttons.iter().map(|row| {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(4.0))
+                                .children(row.iter().map(|btn| {
+                                    Self::make_button(btn.label, btn.action.clone(), state.clone(), cx)
+                                }))
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .w(px(80.0))
+                                        .h(px(24.0))
+                                        .px(px(4.0))
+                                        .rounded(px(2.0))
+                                        .bg(rgb(0x3d3d3d))
+                                        .text_color(rgb(0xd4d4d4))
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                                            this.collapsed.insert("organize", true);
+                                            this.collapsed.insert("document", true);
+                                            this.collapsed.insert("card_format", true);
+                                            this.collapsed.insert("view", true);
+                                            this.collapsed.insert("caselist", true);
+                                            cx.notify();
+                                        }))
+                                        .child("Collapse All")
+                                )
+                        )
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(2.0))
+                    .cursor_pointer()
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(2.0))
+                    .bg(rgb(0x3d3d3d))
+                    .text_color(rgb(0x999999))
+                    .text_xs()
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                        let collapsed = this.collapsed.get(name).copied().unwrap_or(false);
+                        this.collapsed.insert(name, !collapsed);
+                        cx.notify();
+                    }))
+                    .child(label)
+                    .child(if is_collapsed { "▶" } else { "▼" })
+            )
+    }
+
     fn render_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -445,7 +528,7 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(Self::render_group(
+            .child(Self::render_view_group(
                 "view",
                 "VIEW",
                 &[
