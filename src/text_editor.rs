@@ -1099,6 +1099,12 @@ fn render_line(
             Alignment::Justify => line_div.justify_between(), // approximate for now
             Alignment::Left => line_div.justify_start(),
         };
+
+        // Check if any run has box_format (Pocket formatting)
+        let has_box = p.runs.iter().any(|r| r.box_format);
+        if has_box {
+            line_div = line_div.border_1().border_color(rgb(0xd4d4d4)).px(px(8.0)).py(px(4.0));
+        }
     }
     line_div.into_any_element()
 }
@@ -1137,9 +1143,7 @@ fn apply_run_style(el: Div, run: Option<&Run>) -> Div {
     if run.underline { el = el.underline(); }
     if run.double_underline { el = el.underline(); }
     // ponytail: strikethrough data is stored and toggled, rendering deferred until GPUI supports text decoration
-    if run.box_format {
-        el = el.border_1().border_color(rgb(0xd4d4d4));
-    }
+    // Note: box_format is applied at the line level in render_line(), not here at the run level
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
         let text_hex = run.color.as_deref()

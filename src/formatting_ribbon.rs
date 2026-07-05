@@ -268,43 +268,34 @@ impl FormattingRibbon {
                         // Tag/Cite: bold, size only
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
-                            if let Some(op) = act.to_format_op() {
-                                st.update(cx, |state, _cx| {
+                            // Combine all formatting into a single update to preserve selection
+                            st.update(cx, |state, _cx| {
+                                // Capture selection at start of update
+                                let selection = state.tabs.get(state.active_tab).and_then(|t| t.selection);
+
+                                // Apply bold
+                                if let Some(op) = act.to_format_op() {
                                     state.apply_formatting_to_selection(op);
-                                });
-                            }
-                            if let Some(size) = act.card_style_size() {
-                                st.update(cx, |state, _cx| {
+                                }
+                                // Apply font size
+                                if let Some(size) = act.card_style_size() {
                                     state.apply_formatting_to_selection(FormatOp::FontSize(size));
-                                });
-                            }
-                            // Pocket needs box
-                            if matches!(act, FormatAction::Pocket) {
-                                st.update(cx, |state, _cx| {
+                                }
+                                // Apply special formatting per card style
+                                if matches!(act, FormatAction::Pocket) {
                                     state.apply_formatting_to_selection(FormatOp::Box(true));
-                                });
-                            }
-                            // Hat needs double underline
-                            if matches!(act, FormatAction::Hat) {
-                                st.update(cx, |state, _cx| {
+                                }
+                                if matches!(act, FormatAction::Hat) {
                                     state.apply_formatting_to_selection(FormatOp::DoubleUnderline(true));
-                                });
-                            }
-                            // Hat and Block need underline
-                            if matches!(act, FormatAction::Block) {
-                                st.update(cx, |state, _cx| {
+                                }
+                                if matches!(act, FormatAction::Block) {
                                     state.apply_formatting_to_selection(FormatOp::Underline(true));
-                                });
-                            }
-                            // Pocket, Hat, and Block need center alignment (Phase 4.2)
-                            // Capture selection after formatting so we use the full formatted range
-                            if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
-                                st.update(cx, |state, _cx| {
-                                    // Use the current selection which should still be active
-                                    let selection = state.tabs.get(state.active_tab).and_then(|t| t.selection);
+                                }
+                                // Apply center alignment (for Pocket, Hat, Block)
+                                if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
                                     state.apply_center_alignment_with_selection(selection);
-                                });
-                            }
+                                }
+                            });
                         }
                         _ => {
                             if let Some(op) = act.to_format_op() {
