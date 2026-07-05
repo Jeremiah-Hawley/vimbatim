@@ -418,6 +418,7 @@ pub struct AppState {
     pub pilcrows: bool,
     pub fold_all: bool,
     pub invisibility_mode: bool,
+    pub split_view: bool,
 }
 
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
@@ -480,6 +481,7 @@ impl AppState {
             pilcrows: false,
             fold_all: false,
             invisibility_mode: false,
+            split_view: false,
         }
     }
 
@@ -1210,6 +1212,14 @@ impl AppState {
         self.tabs.iter().enumerate()
             .map(|(idx, tab)| (idx, tab.title.clone()))
             .collect()
+    }
+
+    pub fn toggle_split_view(&mut self) {
+        /*
+         * Toggles split view mode. When on, editor is split into
+         * two windows side-by-side.
+         */
+        self.split_view = !self.split_view;
     }
 
     pub fn apply_center_alignment(&mut self) {
@@ -4888,6 +4898,7 @@ mod tests {
             pilcrows: false,
             fold_all: false,
             invisibility_mode: false,
+            split_view: false,
         };
         state
     }

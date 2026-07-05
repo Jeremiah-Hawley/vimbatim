@@ -239,6 +239,11 @@ impl FormattingRibbon {
                                 // UI for selecting tab would go here
                             });
                         }
+                        FormatAction::WindowSplit => {
+                            st.update(cx, |state, _cx| {
+                                state.toggle_split_view();
+                            });
+                        }
                         // Card styles: apply bold + custom font size + underline for Hat/Block
                         FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
                         FormatAction::Tag | FormatAction::Cite => {
