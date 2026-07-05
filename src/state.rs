@@ -1088,6 +1088,15 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Highlight(Some(next_color.to_string())));
     }
 
+    pub fn toggle_strikethrough(&mut self) {
+        /*
+         * Toggles strikethrough on selected text or sets pending format
+         * for future typing if no selection. Data is stored but rendering
+         * is deferred until GPUI supports text decoration.
+         */
+        self.apply_formatting_to_selection(FormatOp::Strikethrough(true));
+    }
+
     pub fn apply_center_alignment(&mut self) {
         /*
          * Applies center alignment to all paragraphs overlapping the active

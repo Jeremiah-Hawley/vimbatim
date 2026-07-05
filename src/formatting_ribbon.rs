@@ -26,6 +26,7 @@ impl FormatAction {
             FormatAction::RemoveHighlight => Some(FormatOp::Highlight(None)),
             FormatAction::Bold => Some(FormatOp::Bold(true)),
             FormatAction::Clear => Some(FormatOp::ClearAll),
+            FormatAction::Strikethrough => Some(FormatOp::Strikethrough(true)),
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
             // Card styles: each maps to Bold + custom font size
