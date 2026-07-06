@@ -526,6 +526,18 @@ actions!(
     ]
 );
 
+/// The `KeyContext` tag the settings modal's panel carries (see
+/// `settings_modal.rs`) for as long as a keybind capture is armed. Every
+/// binding below requires its *absence* to match, so a keystroke that's
+/// already bound elsewhere still reaches the panel's `on_key_down` instead
+/// of firing whatever it's currently bound to — GPUI resolves an action's
+/// keybinding *before* ever delivering a raw key event to a view, and (once
+/// an action's handler consumes the event, which is the default) skips raw
+/// delivery entirely for that keystroke, so there's no way to have both
+/// happen; excluding the binding via context is the only way to guarantee
+/// the raw event still arrives while capturing.
+const NOT_CAPTURING: Option<&str> = Some("!KeybindCapturing");
+
 /// Rebuilds the entire GPUI keymap from `keybinds`. Safe to call at startup
 /// or any time after a binding changes — `App::clear_key_bindings` +
 /// `App::bind_keys` both work at runtime, not just before the window opens.
@@ -537,38 +549,38 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     let ks = |action: KeybindAction| keybinds.get(action).to_gpui_keystroke();
 
     cx.bind_keys([
-        KeyBinding::new(&ks(ToggleSettings), ToggleSettingsAction, None),
-        KeyBinding::new(&ks(ToggleSidebar), ToggleSidebarAction, None),
-        KeyBinding::new(&ks(NewTab), NewTabAction, None),
-        KeyBinding::new(&ks(CloseTab), CloseTabAction, None),
-        KeyBinding::new(&ks(Save), SaveAction, None),
-        KeyBinding::new(&ks(SaveAs), SaveAsAction, None),
-        KeyBinding::new(&ks(Find), FindAction, None),
-        KeyBinding::new(&ks(FindReplace), FindReplaceAction, None),
-        KeyBinding::new(&ks(Copy), CopyAction, None),
-        KeyBinding::new(&ks(Cut), CutAction, None),
-        KeyBinding::new(&ks(Paste), PasteAction, None),
-        KeyBinding::new(&ks(Undo), UndoAction, None),
-        KeyBinding::new(&ks(Redo), RedoAction, None),
-        KeyBinding::new(&ks(SelectAll), SelectAllAction, None),
-        KeyBinding::new(&ks(Bold), BoldAction, None),
-        KeyBinding::new(&ks(Underline), UnderlineAction, None),
-        KeyBinding::new(&ks(Shrink), ShrinkAction, None),
-        KeyBinding::new(&ks(ClearFormatting), ClearFormattingAction, None),
-        KeyBinding::new(&ks(PasteSmart), PasteSmartAction, None),
-        KeyBinding::new(&ks(Condense), CondenseAction, None),
-        KeyBinding::new(&ks(Pocket), PocketAction, None),
-        KeyBinding::new(&ks(Hat), HatAction, None),
-        KeyBinding::new(&ks(Block), BlockAction, None),
-        KeyBinding::new(&ks(Tag), TagAction, None),
-        KeyBinding::new(&ks(Cite), CiteAction, None),
-        KeyBinding::new(&ks(Emphasis), EmphasisAction, None),
-        KeyBinding::new(&ks(Highlight), HighlightAction, None),
-        KeyBinding::new(&ks(DeleteTags), DeleteTagsAction, None),
-        KeyBinding::new(&ks(StartTimer), StartTimerAction, None),
-        KeyBinding::new(&ks(OpenStats), OpenStatsAction, None),
-        KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, None),
-        KeyBinding::new(&ks(Wikifi), WikifiAction, None),
+        KeyBinding::new(&ks(ToggleSettings), ToggleSettingsAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(ToggleSidebar), ToggleSidebarAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(NewTab), NewTabAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(CloseTab), CloseTabAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Save), SaveAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(SaveAs), SaveAsAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Find), FindAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(FindReplace), FindReplaceAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Copy), CopyAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Cut), CutAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Paste), PasteAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Undo), UndoAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Redo), RedoAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(SelectAll), SelectAllAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Bold), BoldAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Underline), UnderlineAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Shrink), ShrinkAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(ClearFormatting), ClearFormattingAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(PasteSmart), PasteSmartAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Condense), CondenseAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Pocket), PocketAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Hat), HatAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Block), BlockAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Tag), TagAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Cite), CiteAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Emphasis), EmphasisAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Highlight), HighlightAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(DeleteTags), DeleteTagsAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(StartTimer), StartTimerAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(OpenStats), OpenStatsAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(Wikifi), WikifiAction, NOT_CAPTURING),
     ]);
 }
 
@@ -700,15 +712,21 @@ mod tests {
     }
 
     #[test]
-    fn real_settings_conf_matches_defaults() {
-        // Confirms settings.conf's actual on-disk values (post-reorganization)
-        // agree with every action's default_combo() — they're meant to be
-        // identical right now; this test breaks loudly the moment they drift.
+    fn real_settings_conf_is_internally_consistent() {
+        // settings.conf is a live, user-editable runtime file — the whole
+        // point of this feature is that its values change as the user
+        // remaps things or toggles vim mode, so asserting exact values here
+        // (as an earlier version of this test did) breaks the moment
+        // someone actually uses the settings modal. Instead this only
+        // checks structural invariants that must hold regardless of what's
+        // been customized: every action resolves to some combo, and no two
+        // actions collide with each other.
         let keybinds = Keybinds::load(Path::new("settings.conf"));
         for action in KeybindAction::all() {
+            let combo = keybinds.get(*action);
             assert_eq!(
-                keybinds.get(*action), action.default_combo(),
-                "{:?} in settings.conf doesn't match its default_combo()", action,
+                keybinds.find_conflict(&combo, *action), None,
+                "{:?}'s combo {:?} in settings.conf collides with another action", action, combo,
             );
         }
     }
@@ -727,11 +745,6 @@ mod tests {
         for action in KeybindAction::all() {
             assert_eq!(keybinds.get(*action), action.default_combo());
         }
-    }
-
-    #[test]
-    fn real_settings_conf_has_vim_true() {
-        assert!(load_vim_enabled(Path::new("settings.conf")));
     }
 
     #[test]

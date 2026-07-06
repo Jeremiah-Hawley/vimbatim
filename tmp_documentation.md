@@ -2092,3 +2092,83 @@ real, working `CTRL u`.
   without restarting; try to bind an already-used combo and confirm the
   conflict message names the right action; toggle Vim Mode off/on; Reset
   to Defaults and confirm every binding reverts.
+
+## Bugfix: Keybind Capture Never Actually Worked
+
+The settings modal's "Change" button correctly armed capture mode (showed
+"Press a key…"), but pressing a key never did anything — reported by the
+user after the previous session's implementation.
+
+### Root Cause
+
+The original design used `App::intercept_keystrokes` + `cx.stop_propagation()`
+to suppress an already-bound combo's action from firing while capturing,
+intending the raw `KeyDownEvent` to still reach `on_key_down` afterward.
+This doesn't work: GPUI's `Window::dispatch_key_event` uses the *same*
+`propagate_event` flag for both action dispatch short-circuiting and the
+subsequent `finish_dispatch_key_event`/`dispatch_key_down_up_event` raw-key
+delivery, without resetting it in between. Setting it `false` in an
+interceptor causes `dispatch_key_down_up_event`'s own capture-phase loop
+(`if !cx.propagate_event { return; }`, checked after processing the first
+node with any key listener) to bail out immediately — before ever reaching
+the bubble-phase pass where `.on_key_down`'s wrapped listener actually
+checks `phase == DispatchPhase::Bubble` and invokes the real callback. So
+the interceptor broke *every* capture attempt, not just the already-bound-
+combo edge case it was meant to handle.
+
+Separately (confirmed while diagnosing): GPUI's action-dispatch loop
+(`window.rs`'s `dispatch_key_event`) returns immediately once any matched
+binding's action handler stops propagation (the default) — it never calls
+`finish_dispatch_key_event` in that case. This means a keystroke already
+bound to a live action can *never* reach `on_key_down` through propagation
+tricks alone; the only way to let it fall through is to make the binding
+itself not match in the first place.
+
+### Fix
+
+Switched to GPUI's `KeyContext` predicate system instead. `settings_modal.rs`
+now conditionally tags its panel div with `.key_context("KeybindCapturing")`
+only while `capturing` is armed. Every one of `rebuild_keymap`'s 32
+`KeyBinding`s (`src/keybinds.rs`) now requires `Some("!KeybindCapturing")`
+(previously `None`) — i.e. that context's *absence* — to match. So while
+capturing, none of the app's keybindings match at all, regardless of which
+key is pressed, and the keystroke falls through to `on_key_down` normally
+via the ordinary "no binding matched" path. The broken
+`intercept_keystrokes`/`Subscription` field was removed entirely.
+
+### Also Fixed: Test Suite Fragility
+
+Discovered while re-running tests after this fix: several tests asserted
+*exact literal values* from the real, live `settings.conf` — but that file
+is deliberately user-editable at runtime (the whole point of this feature).
+The failure that surfaced it: `settings.conf`'s `vim` value had genuinely
+changed to `false` (someone using the working Vim Mode toggle on a real
+display), which is correct, expected behavior — not a bug — yet it broke
+`real_settings_conf_has_vim_true` and two of `tests/parse_testing.rs`'s
+`config_parsing`-based tests, which all hardcoded values against that same
+mutable file.
+
+- `keybinds.rs`: replaced `real_settings_conf_matches_defaults` (exact
+  per-action value checks) and removed `real_settings_conf_has_vim_true`
+  entirely; added `real_settings_conf_is_internally_consistent`, which only
+  checks structural invariants (every action resolves to a combo, no two
+  collide) that hold regardless of what's been customized.
+  `default_settings.conf`'s equivalent tests (`real_default_settings_conf_
+  matches_except_vim`/`_has_vim_false`) are kept as exact-value checks —
+  that file is never written to by the running app (only read, or copied
+  wholesale *into* settings.conf on Reset), so its content is a legitimate
+  stable invariant.
+- `tests/parse_testing.rs`: now reads a new fixture,
+  `tests/fixtures/settings.conf` (a frozen snapshot, not the live file),
+  instead of the project root's real `settings.conf` — fully decoupling
+  this test suite from whatever the app has since persisted at runtime.
+
+### Verification
+
+- `cargo test`: 554 passed, 0 failed (550 bin + 4 integration).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: confirm on a real display that clicking
+  "Change", pressing a new key, and seeing it apply immediately now
+  actually works — this was the entire point of the fix and is exactly
+  the kind of GPUI dispatch-order interaction this sandbox can't exercise.

@@ -28,14 +28,6 @@ pub struct SettingsModal {
     /// binding — shown inline on the capturing row. Capture stays active
     /// (rather than closing) so the user can just try a different key.
     conflict_message: Option<String>,
-    /// Suppresses normal app-wide action dispatch for every keystroke while
-    /// `capturing` is armed. Without this, pressing a combo that's already
-    /// globally bound elsewhere (e.g. Ctrl+S while remapping something
-    /// else) would fire *that* action instead of ever reaching
-    /// `handle_capture_key` — GPUI resolves an action's keybinding before
-    /// delivering a raw key event to this view. Dropped (unsubscribing)
-    /// the instant capture ends, successfully or not.
-    capture_subscription: Option<Subscription>,
     /// Per-category collapse state for the keybind list, mirroring
     /// `formatting_ribbon.rs`'s own collapsible-group pattern.
     collapsed: std::collections::HashMap<KeybindCategory, bool>,
@@ -53,7 +45,6 @@ impl SettingsModal {
             focus_handle: cx.focus_handle(),
             capturing: None,
             conflict_message: None,
-            capture_subscription: None,
             collapsed: std::collections::HashMap::new(),
         }
     }
@@ -63,7 +54,7 @@ impl SettingsModal {
          * Hides the modal by setting `AppState.settings_visible` to false.
          * Both the backdrop click and the explicit Close / × buttons call this.
          * Also cancels any in-progress key capture so closing the modal
-         * never leaves a dangling keystroke interceptor active.
+         * never leaves capture mode armed.
          */
         self.cancel_capture();
         self.state.update(cx, |s, cx| {
@@ -75,16 +66,21 @@ impl SettingsModal {
 
     /// Arms capture mode for `action`: the next keystroke (after this call)
     /// is interpreted as the candidate new binding by `handle_capture_key`.
+    ///
+    /// While `capturing` is `Some`, `render()` tags the panel div with the
+    /// `"KeybindCapturing"` key context, and every one of `rebuild_keymap`'s
+    /// bindings requires that context's *absence* to match (see
+    /// `keybinds::NOT_CAPTURING`) — so an already-bound combo still reaches
+    /// `handle_capture_key` below instead of firing whatever it's currently
+    /// bound to. A stop-propagation-based approach was tried first and
+    /// doesn't work: GPUI's own raw-key dispatch (`on_key_down`) checks the
+    /// very same propagate-event flag an interceptor would set, so
+    /// suppressing an action that way also silently suppresses the raw
+    /// event delivery this view depends on. Context-based exclusion is the
+    /// only mechanism that achieves both at once.
     fn start_capture(&mut self, action: KeybindAction, window: &mut Window, cx: &mut Context<Self>) {
         self.capturing = Some(action);
         self.conflict_message = None;
-        // See the field's doc comment: unconditionally swallow every
-        // keystroke's normal action dispatch while capturing, so an
-        // already-bound combo still reaches handle_capture_key below
-        // instead of firing whatever it's currently bound to.
-        self.capture_subscription = Some(cx.intercept_keystrokes(|_event, _window, cx| {
-            cx.stop_propagation();
-        }));
         self.focus_handle.clone().focus(window, cx);
         cx.notify();
     }
@@ -92,7 +88,6 @@ impl SettingsModal {
     fn cancel_capture(&mut self) {
         self.capturing = None;
         self.conflict_message = None;
-        self.capture_subscription = None; // dropping unsubscribes
     }
 
     /// Resolves a captured keystroke into a candidate `KeyCombo`, applying
@@ -326,6 +321,11 @@ impl Render for SettingsModal {
                 div()
                     .id("settings-panel")
                     .track_focus(&self.focus_handle)
+                    // Present only while capturing — see NOT_CAPTURING's doc
+                    // comment in keybinds.rs for why this is what makes an
+                    // already-bound combo still reach handle_capture_key
+                    // below instead of firing its existing action.
+                    .when(self.capturing.is_some(), |d| d.key_context("KeybindCapturing"))
                     .on_key_down(cx.listener(Self::handle_capture_key))
                     .w(px(520.0))
                     .max_h(px(640.0))
