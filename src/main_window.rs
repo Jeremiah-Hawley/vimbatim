@@ -291,6 +291,19 @@ impl Render for MainWindow {
         let settings_visible = self.state.read(cx).settings_visible;
 
         div()
+            // Baseline key context so the dispatch path always has *some*
+            // KeyContext tag on it, regardless of what currently has focus
+            // (or whether anything does). Without this, GPUI's context-
+            // predicate evaluator (`KeyBindingContextPredicate::eval_inner`)
+            // treats a completely empty context stack as an automatic
+            // non-match for *every* predicate — including negations like
+            // keybinds::NOT_CAPTURING ("!KeybindCapturing") — since it
+            // short-circuits to `false` before ever looking at the
+            // predicate itself. TextEditor is the only other view that sets
+            // a key_context ("TextEditor"), so every configured keybind
+            // (Ctrl+, included) silently stopped matching the moment focus
+            // was anywhere else (sidebar, ribbon, or nothing at all).
+            .key_context("App")
             // Wire up global action handlers for this window
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::toggle_sidebar))

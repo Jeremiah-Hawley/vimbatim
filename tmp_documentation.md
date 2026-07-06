@@ -2172,3 +2172,42 @@ mutable file.
   "Change", pressing a new key, and seeing it apply immediately now
   actually works — this was the entire point of the fix and is exactly
   the kind of GPUI dispatch-order interaction this sandbox can't exercise.
+
+## Bugfix: Ctrl+, (and every other configured keybind) only worked with the text editor focused
+
+### Root Cause
+
+`KeyBindingContextPredicate::eval_inner` (GPUI's own source,
+`crates/gpui/src/keymap/context.rs`) short-circuits to `false` for *any*
+predicate — including negations like `Not(...)` — the moment the context
+stack passed to it is empty (`contexts.last()` is `None`), before it ever
+looks at which predicate variant it's evaluating. Since every one of the
+32 keybindings registered in `rebuild_keymap` uses the context predicate
+`NOT_CAPTURING` ("!KeybindCapturing", added in the previous fix), each one
+requires the context stack to be *non-empty* just to be evaluated at all
+— `TextEditor` was the only view anywhere in the app with a
+`.key_context(...)` call, so the stack was only ever non-empty while the
+editor had focus. With focus anywhere else (sidebar, ribbon) or nowhere at
+all (fresh app launch, before any click), the context stack was empty and
+every configured keybind — Ctrl+, included — silently failed to match.
+
+### Fix
+
+Added `.key_context("App")` to `MainWindow`'s root div (`main_window.rs`).
+This guarantees the dispatch path always contributes at least one
+`KeyContext` tag regardless of what currently has focus, since the root
+div is an ancestor of everything (or the fallback target when nothing has
+focus at all) — so `!KeybindCapturing` (and any future context predicate)
+now evaluates correctly everywhere, not just inside the text editor.
+
+### Verification
+
+- `cargo test`: 554 passed, 0 failed.
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- Also cleaned up four `clippy::bool_assert_comparison` lints in
+  `tests/parse_testing.rs` (`assert_eq!(x, true/false)` → `assert!(x)`/
+  `assert!(!x)`), flagged during this fix.
+- **Not hardware-verified**: confirm on a real display that Ctrl+, now
+  opens Settings when the sidebar, ribbon, or nothing at all has focus,
+  not just when the text editor does.

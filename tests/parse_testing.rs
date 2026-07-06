@@ -14,14 +14,14 @@ fn test_formatting_section() {
     assert_eq!(s.highlight_color, "yellow");
     assert_eq!(s.small_size, 6);
     assert_eq!(s.large_size, 11);
-    assert_eq!(s.paragraph_integrity, true);
-    assert_eq!(s.pilcrows, false);
+    assert!(s.paragraph_integrity);
+    assert!(!s.pilcrows);
 }
 
 #[test]
 fn test_keybinds_section() {
     let s = config_parsing::parse(FIXTURE);
-    assert_eq!(s.vim, false);
+    assert!(!s.vim);
     assert_eq!(s.paste, "f2");
     assert_eq!(s.condense, "f3");
     assert_eq!(s.pocket_hotkey, "f4");
@@ -61,5 +61,5 @@ fn test_defaults_before_parse() {
     assert_eq!(s.highlight_color, "");
     assert_eq!(s.small_size, 0);
     assert_eq!(s.large_size, 0);
-    assert_eq!(s.vim, false);
+    assert!(!s.vim);
 }
