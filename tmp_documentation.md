@@ -1943,3 +1943,152 @@ toggle and is always dark-themed.
 - **Not hardware-verified**: the font-family fix (item 1) and the visual
   appearance of the darkened highlight (item 3) both need a real display
   to confirm — this sandbox cannot render GPUI's window.
+
+## Configurable Keybinds (settings modal, formatting branch)
+
+Lets the user remap every non-vim hotkey through a GUI in the settings
+modal (Ctrl+,), persisted to settings.conf, with duplicate detection and
+a reset-to-defaults option. Built per an explicit requirement: extendable
+to any future keybind with minimal touch points.
+
+### What Was Built
+
+**`src/keybinds.rs` (new module):**
+- `KeyCombo` — a modifier+key struct, stored platform-neutral (`ctrl`
+  always means "the primary modifier"; Ctrl→Cmd substitution happens only
+  at the edges: `to_gpui_keystroke()` (GPUI's hyphenated syntax, e.g.
+  `"ctrl-shift-b"`, substituting `cmd` on macOS), `display_string()` (UI
+  label, e.g. `"Ctrl+Shift+B"` or `"Cmd+Shift+B"`), and `from_capture()`
+  (builds a combo from a live `KeyDownEvent`, treating a Mac's Cmd key as
+  satisfying the `ctrl` slot). `parse()`/`to_conf_string()` handle
+  settings.conf's existing space-separated format (`"CTRL SHFT b"`).
+- `KeybindCategory` — the six groupings shown in the settings UI: General,
+  Editing, Text Formatting, Card Styles, Highlighting, Caselist Tools.
+- `KeybindAction` — the canonical enum of every bindable, non-vim action
+  (32 variants). Each has `label()`, `category()`, `conf_key()` (the exact
+  settings.conf key name), `default_combo()`, and `is_stub()` (true for
+  actions with no real implementation yet — Save As, Find, Find & Replace,
+  Delete Tags, Start Timer, Open Stats, Cite From Link — matching this
+  codebase's existing Doc Menu/Card Menu placeholder convention).
+- `Keybinds` — the registry mapping each action to its current combo:
+  `load()`/`defaults()`, `get()`/`set()`, `find_conflict()` (duplicate
+  detection), `save_to()` (rewrites only the file's `[KEYBINDS...]`
+  portion, leaving `[FORMATTING]` and the standalone `vim_lines` flag
+  byte-for-byte untouched).
+- `load_vim_enabled()` — reads the standalone `vim` boolean (not a
+  KeybindAction — a mode toggle, not a key combo).
+- `rebuild_keymap(cx, keybinds)` — clears and rebuilds the entire GPUI
+  keymap from a `Keybinds` instance. Callable at runtime (confirmed via
+  `App::clear_key_bindings`/`App::bind_keys`, not just at startup), so the
+  settings modal calls it immediately after every remap.
+- 32 zero-sized GPUI action structs (`actions!` macro) — one per
+  `KeybindAction`, the single place all of them are declared.
+
+**Real, pre-existing bug fixed as a side effect:** GPUI stops an event's
+propagation once a keybinding's action fires, so the raw `KeyDownEvent`
+never reaches a view's own `on_key_down` after a match. `Ctrl+B` was bound
+both to `ToggleSidebar` (a real GPUI action) and hardcoded "Bold" (a raw
+key match in `text_editor.rs`) — the action always won silently, so
+**Ctrl+B never actually bolded text**, only toggled the sidebar. Moving
+Bold/Underline/Copy/Cut/Paste/Undo/Redo/SelectAll into real, independently
+configurable GPUI actions removes the shadowing; adopting settings.conf's
+own `sidebar=CTRL SHFT b` resolves the clash (Bold keeps Ctrl+B, Sidebar
+becomes Ctrl+Shift+B).
+
+**`src/state.rs`:**
+- Added `CardStyleKind` enum (Pocket/Hat/Block/Tag) + `AppState::
+  apply_card_style(kind)`, extracted from `formatting_ribbon.rs`'s
+  previously-inline card-style button logic so both the ribbon and the
+  new keybind actions share identical behavior instead of duplicating it.
+- Added `pub keybinds: Keybinds` field; `vim_enabled` is now loaded from
+  settings.conf's `vim` flag via `keybinds::load_vim_enabled` instead of
+  being hardcoded `true` (a gap flagged repeatedly since Task D of the vim
+  mode work).
+
+**`src/formatting_ribbon.rs`:** card-style button handlers (Pocket/Hat/
+Block/Tag) now call `state.apply_card_style(kind)` instead of inline
+per-button logic; `card_style_size()` removed (dead — superseded by
+`CardStyleKind::font_size()`).
+
+**`src/main.rs`:** loads `Keybinds::load("settings.conf")` and calls
+`rebuild_keymap` once at startup, replacing the old hardcoded
+`cx.bind_keys([...])` block of 5 actions.
+
+**`src/main_window.rs`:** ~30 new `.on_action` handlers (Copy, Cut, Paste,
+Undo, Redo, SelectAll, Bold, Underline, Shrink, ClearFormatting,
+PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Emphasis, Highlight,
+SaveAs/Find/FindReplace/DeleteTags/StartTimer/OpenStats/CiteFromLink
+stubs, Wikifi), registered on the root div alongside the existing
+ToggleSettings/ToggleSidebar/Save (now retargeted to the new action
+structs from `keybinds.rs` instead of a locally-declared, now-removed
+`actions!` block).
+
+**`src/tab_bar.rs`:** its own local `NewTab`/`CloseActiveTab` actions
+removed; handlers retargeted to `keybinds::NewTabAction`/`CloseTabAction`.
+
+**`src/text_editor.rs`:** removed the now-dead hardcoded `"c"|"x"|"v"|"a"|
+"z"|"y"|"b"|"u"` match arms from `process_key_ctrl_combo` (they were
+already permanently shadowed by GPUI actions per the bug above, wherever
+one existed — now made explicit and correct instead of accidental). Vim
+jump-list (`Ctrl+O`/`Ctrl+I`) and word/doc-jump Ctrl-combos stay
+hardcoded — vim-specific, explicitly out of scope for the configurable
+system.
+
+**`src/settings_modal.rs`:** rebuilt from its placeholder body into a real
+keybind editor:
+- A Vim Mode on/off toggle row (off by default in `default_settings.conf`;
+  unchanged — still `true` — in the user's live `settings.conf`, so this
+  wiring introduces no behavior change today, only going forward).
+- Six collapsible category sections (mirroring `formatting_ribbon.rs`'s
+  own collapse-arrow convention), each listing its actions' current combo
+  + a "Change" button.
+- Capture flow: clicking "Change" arms `capturing: Option<KeybindAction>`
+  and claims keyboard focus; the next keystroke resolves via
+  `KeyCombo::from_capture`. **Non-obvious fix required here:** GPUI
+  resolves an action's keybinding *before* delivering a raw `KeyDownEvent`
+  to a view's `on_key_down` — so pressing an already-globally-bound combo
+  while capturing (e.g. Ctrl+S while remapping something else) would
+  silently fire *that* action (Save) instead of ever reaching the capture
+  handler. Fixed via `App::intercept_keystrokes`, registered only while
+  capturing, unconditionally calling `cx.stop_propagation()` for every
+  keystroke — this suppresses normal action dispatch for that one event
+  and routes it to `on_key_down` instead (confirmed against GPUI's own
+  `Window::dispatch_key_event` source: an interceptor's `stop_propagation`
+  short-circuits straight to `finish_dispatch_key_event`, skipping the
+  `match_result.bindings` action-dispatch step entirely).
+- Duplicate detection: a captured combo already in use shows "already used
+  by "X"" inline on the row and stays in capture mode so the user can just
+  try again; Escape cancels, keeping the existing binding.
+- "Reset to Defaults" copies `default_settings.conf` over `settings.conf`,
+  reloads both `Keybinds` and the vim flag, and rebuilds the live keymap.
+
+**`settings.conf` / `default_settings.conf`:** reorganized into six
+`[KEYBINDS: CATEGORY]` sub-headers (safe — the existing flat `key=value`
+parser in `config_parsing.rs` skips every line starting with `[`
+regardless of its exact text). Two typos fixed (`CRTL` → `CTRL`),
+`Find_and_Replace` renamed `find_and_replace`. Six new keys added with
+defaults matching their previously-hardcoded-only behavior (`close_tab`,
+`copy`, `cut`, `paste_raw`, `undo`, `redo`, `select_all`).
+`default_settings.conf`'s `vim` is now `false` (the user's stated default
+preference); `settings.conf`'s stays `true` (no live behavior change).
+`underline`'s value corrected from the stale, never-wired `f9` to the
+real, working `CTRL u`.
+
+### Verification
+
+- `cargo test`: 555 passed, 0 failed (551 in the bin crate, incl. ~35 new
+  for `keybinds.rs` — parsing, conflict detection, capture, default/real-
+  file consistency checks — plus 4 for `apply_card_style`; 4 in
+  `tests/parse_testing.rs`, updated to match the reorganized conf values).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic (same sandbox EGL/MESA limitation as every prior task
+  in this document) — confirms no startup-time breakage from the keymap
+  rebuild, `AppState`'s new fields, or the settings modal rewrite.
+- **Not hardware-verified**: the settings modal's capture flow (clicking
+  "Change", pressing a key, seeing the conflict message, Reset to
+  Defaults) is GPUI interaction glue this sandbox's headless environment
+  can't exercise. Confirm on a machine with a working display: open
+  Settings, remap Bold to something else, confirm it applies immediately
+  without restarting; try to bind an already-used combo and confirm the
+  conflict message names the right action; toggle Vim Mode off/on; Reset
+  to Defaults and confirm every binding reverts.

@@ -355,11 +355,17 @@ pub struct AppState {
     pub settings_visible: bool,
     pub working_directory: PathBuf,
     pub file_tree: Vec<FileNode>,
-    /// Whether vim keybindings are active. Hardcoded to `true` for now —
-    /// wiring this to settings.conf's `[KEYBINDS] vim` flag (spec 2.3) is a
-    /// separate, explicitly deferred gap, not part of the Task A-I vim mode
-    /// breakdown.
+    /// Whether vim keybindings are active, loaded from settings.conf's
+    /// `[KEYBINDS] vim` flag (see `keybinds::load_vim_enabled`) and toggled
+    /// live from the settings modal's Vim Mode switch.
     pub vim_enabled: bool,
+    /// Every configurable, non-vim keybinding (see `src/keybinds.rs`),
+    /// loaded from settings.conf at startup. Owned here (rather than a
+    /// standalone global) so the settings modal can mutate it through the
+    /// same `Entity<AppState>` every other view already shares, then call
+    /// `keybinds::rebuild_keymap` and `Keybinds::save_to` to make an edit
+    /// take effect immediately and persist.
+    pub keybinds: crate::keybinds::Keybinds,
     /// Saved macro recordings, keyed by register (user-requested, not in editor_instructions.md).
     pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
     /// The register currently being recorded into and its keystrokes so
@@ -445,18 +451,50 @@ pub struct RecordedVimKey {
     pub key_char: Option<String>,
 }
 
+/// The line-based card styles from `notes/ribbon_instructions.md` — each
+/// applies bold + a fixed font size + its own special formatting + center
+/// alignment to the entire current line. See `AppState::apply_card_style`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardStyleKind {
+    Pocket,
+    Hat,
+    Block,
+    Tag,
+}
+
+impl CardStyleKind {
+    fn font_size(&self) -> u16 {
+        match self {
+            CardStyleKind::Pocket => 52, // 26pt
+            CardStyleKind::Hat => 44,    // 22pt
+            CardStyleKind::Block => 32,  // 16pt
+            CardStyleKind::Tag => 26,    // 13pt
+        }
+    }
+
+    fn is_centered(&self) -> bool {
+        matches!(self, CardStyleKind::Pocket | CardStyleKind::Hat | CardStyleKind::Block)
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         /*
          * Initialises the application with a single empty tab, the sidebar visible,
          * the settings modal hidden, and the working directory set to the process's
          * current directory. The file tree is populated immediately by scanning that
-         * directory for .docx files.
+         * directory for .docx files. Keybindings and vim mode are loaded from
+         * settings.conf (an app-level config, always read relative to the process's
+         * CWD rather than `working_directory`, since it isn't tied to whichever
+         * folder the user opens in the file explorer).
          */
         let working_directory = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
 
         let file_tree = scan_directory(&working_directory);
+        let settings_path = std::path::Path::new("settings.conf");
+        let keybinds = crate::keybinds::Keybinds::load(settings_path);
+        let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
@@ -466,7 +504,8 @@ impl AppState {
             settings_visible: false,
             working_directory,
             file_tree,
-            vim_enabled: true,
+            vim_enabled,
+            keybinds,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,
@@ -1332,6 +1371,47 @@ impl AppState {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             apply_paragraph_alignment(&mut tab.paragraphs, start, end, Alignment::Center);
             tab.is_modified = true;
+        }
+    }
+
+    /// Applies one of the line-based card styles (Pocket/Hat/Block/Tag) to
+    /// the entire line containing the cursor: bold + the style's font size,
+    /// its special formatting (box/double-underline/underline), and center
+    /// alignment. Extracted from `formatting_ribbon.rs`'s ribbon-button
+    /// handler so both the ribbon and a configurable keybind
+    /// (`src/keybinds.rs`) can trigger identical behavior without
+    /// duplicating this logic.
+    ///
+    /// Cite and Emphasis are deliberately not `CardStyleKind` variants —
+    /// both apply to the current *selection*, not the whole line (Cite per
+    /// an earlier explicit fix; Emphasis was never line-based), so they
+    /// keep going through `apply_formatting_to_selection` at each call site.
+    pub fn apply_card_style(&mut self, kind: CardStyleKind) {
+        let size = kind.font_size();
+
+        self.apply_formatting_to_line(FormatOp::Bold(true));
+        self.apply_formatting_to_line(FormatOp::FontSize(size));
+        match kind {
+            CardStyleKind::Pocket => self.apply_formatting_to_line(FormatOp::Box(true)),
+            CardStyleKind::Hat => self.apply_formatting_to_line(FormatOp::DoubleUnderline(true)),
+            CardStyleKind::Block => self.apply_formatting_to_line(FormatOp::Underline(true)),
+            CardStyleKind::Tag => {}
+        }
+
+        if kind.is_centered() {
+            let tab = self.tabs.get_mut(self.active_tab);
+            if let Some(t) = tab {
+                let cursor = t.cursor;
+                let line_start = t.content[..cursor]
+                    .rfind('\n')
+                    .map(|pos| pos + 1)
+                    .unwrap_or(0);
+                let line_end = t.content[cursor..]
+                    .find('\n')
+                    .map(|pos| cursor + pos)
+                    .unwrap_or(t.content.len());
+                self.apply_center_alignment_with_selection(Some((line_start, line_end)));
+            }
         }
     }
 
@@ -4965,6 +5045,7 @@ mod tests {
             working_directory: std::path::PathBuf::from("."),
             file_tree: vec![],
             vim_enabled: true,
+            keybinds: crate::keybinds::Keybinds::defaults(),
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,
@@ -8655,5 +8736,53 @@ mod tests {
         assert!(state.handle_vim_key("v", false, None)); // complete find, target 'v'
         assert_eq!(state.tabs[0].cursor, 4); // second 'v' is at index 4
         assert_eq!(state.tabs[0].vim_mode, VimMode::Visual); // still in Visual, not exited
+    }
+
+    #[test]
+    fn test_apply_card_style_pocket_sets_bold_size_box_and_center() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Center);
+        assert!(para.runs.iter().all(|r| r.bold));
+        assert!(para.runs.iter().all(|r| r.size == 52));
+        assert!(para.runs.iter().all(|r| r.box_format));
+    }
+
+    #[test]
+    fn test_apply_card_style_hat_sets_double_underline_not_box() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Hat);
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Center);
+        assert!(para.runs.iter().all(|r| r.size == 44));
+        assert!(para.runs.iter().all(|r| r.double_underline));
+        assert!(para.runs.iter().all(|r| !r.box_format));
+    }
+
+    #[test]
+    fn test_apply_card_style_block_sets_underline_not_double() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Block);
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Center);
+        assert!(para.runs.iter().all(|r| r.size == 32));
+        assert!(para.runs.iter().all(|r| r.underline));
+        assert!(para.runs.iter().all(|r| !r.double_underline));
+    }
+
+    #[test]
+    fn test_apply_card_style_tag_is_left_aligned_no_box_or_underline() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Tag);
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Left);
+        assert!(para.runs.iter().all(|r| r.size == 26));
+        assert!(para.runs.iter().all(|r| r.bold));
+        assert!(para.runs.iter().all(|r| !r.box_format && !r.underline && !r.double_underline));
     }
 }

@@ -21,17 +21,22 @@ fn test_keybinds_section() {
     assert_eq!(s.block, "f6");
     assert_eq!(s.tag, "f7");
     assert_eq!(s.cite, "f8");
-    assert_eq!(s.underline, "f9");
+    // Corrected from the stale "f9" (never actually wired to anything) to
+    // match the real, working Ctrl+U shortcut, as part of making keybinds
+    // configurable (see src/keybinds.rs).
+    assert_eq!(s.underline, "CTRL u");
     assert_eq!(s.emphasis, "f10");
     assert_eq!(s.highlight, "f11");
     assert_eq!(s.clear, "f12");
     assert_eq!(s.delete_tags, "ALT f7");
-    assert_eq!(s.new_document, "CRTL n");
+    // Typo fix: "CRTL" -> "CTRL".
+    assert_eq!(s.new_document, "CTRL n");
     assert_eq!(s.start_timer, "CTRL SHFT t");
-    assert_eq!(s.open_stats, "CTRL SHIFT i");
+    assert_eq!(s.open_stats, "CTRL SHFT i");
     assert_eq!(s.shrink, "ALT f3");
     assert_eq!(s.cite_from_link, "CTRL f8");
-    assert_eq!(s.wikifi, "ALT CTRL SHFT w");
+    // Canonical modifier order is now CTRL, SHFT, ALT (see KeyCombo::to_conf_string).
+    assert_eq!(s.wikifi, "CTRL SHFT ALT w");
 }
 
 #[test]
@@ -44,7 +49,7 @@ fn test_parsing_dict() {
     assert_eq!(map.get("pilcrows").map(String::as_str),        Some("false"));
     assert_eq!(map.get("vim").map(String::as_str),             Some("true"));
     assert_eq!(map.get("paste").map(String::as_str),           Some("f2"));
-    assert_eq!(map.get("wikifi").map(String::as_str),          Some("ALT CTRL SHFT w"));
+    assert_eq!(map.get("wikifi").map(String::as_str),          Some("CTRL SHFT ALT w"));
 }
 
 #[test]

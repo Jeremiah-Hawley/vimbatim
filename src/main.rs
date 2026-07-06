@@ -1,5 +1,6 @@
 mod docx_parser;
 mod document_ops;
+mod keybinds;
 mod state;
 mod tab_bar;
 mod app_toolbar;
@@ -16,30 +17,29 @@ mod main_window;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_platform::application;
-use main_window::{MainWindow, ToggleSidebar, ToggleSettings, Save};
-use tab_bar::{CloseActiveTab, NewTab};
+use keybinds::{rebuild_keymap, Keybinds};
+use main_window::MainWindow;
+use std::path::Path;
 
 fn main() {
     /*
      * Application entry point.
      *
-     * Creates the GPUI application, registers global keybindings for toggle-settings
-     * (Ctrl+,), toggle-sidebar (Ctrl+B), new-tab (Ctrl+T), and close-tab (Ctrl+W),
-     * then opens a 1200×800 centred window containing the MainWindow view.
+     * Creates the GPUI application, loads every configurable keybinding from
+     * settings.conf (src/keybinds.rs) and registers them, then opens a
+     * 1280×768 centred window containing the MainWindow view.
      *
      * `cx.activate(true)` brings the window to the foreground on platforms that
      * require it (macOS).
      */
     application().run(|cx: &mut App| {
-        // Register application-wide keybindings.
-        // Actions are dispatched to whichever view has the keyboard focus.
-        cx.bind_keys([
-            KeyBinding::new("ctrl-,", ToggleSettings, None),
-            KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-t", NewTab, None),
-            KeyBinding::new("ctrl-w", CloseActiveTab, None),
-            KeyBinding::new("ctrl-s", Save, None),
-        ]);
+        // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
+        // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
+        // loaded from settings.conf and registered here. The settings modal
+        // calls `rebuild_keymap` again at runtime whenever the user remaps
+        // one, so this isn't the only place this ever runs.
+        let keybinds = Keybinds::load(Path::new("settings.conf"));
+        rebuild_keymap(cx, &keybinds);
 
         let bounds = Bounds::centered(
             None,

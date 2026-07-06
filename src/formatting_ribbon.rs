@@ -40,17 +40,6 @@ impl FormatAction {
         }
     }
 
-    pub fn card_style_size(&self) -> Option<u16> {
-        match self {
-            FormatAction::Pocket => Some(52),   // 26pt
-            FormatAction::Hat => Some(44),      // 22pt
-            FormatAction::Block => Some(32),    // 16pt
-            FormatAction::Tag => Some(26),      // 13pt
-            FormatAction::Cite => Some(26),     // 13pt
-            _ => None,
-        }
-    }
-
     pub fn label(&self) -> &'static str {
         match self {
             FormatAction::Paste => "Paste", FormatAction::Condense => "Condense", FormatAction::Pocket => "Pocket",
@@ -278,59 +267,24 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        // Card styles and Clear: apply formatting to entire line, not just selection
-                        // Pocket: bold, size, center, box
-                        // Hat: bold, size, center, double underline
-                        // Block: bold, size, center, underline
-                        // Tag: bold, size only
-                        // Clear: clear all formatting
-                        // (Cite applies to selection only, not handled here)
-                        FormatAction::Pocket | FormatAction::Hat | FormatAction::Block |
-                        FormatAction::Tag | FormatAction::Clear => {
+                        // Card styles: apply the shared AppState::apply_card_style,
+                        // also used by the configurable keybind actions (src/keybinds.rs)
+                        // so ribbon buttons and hotkeys behave identically.
+                        FormatAction::Pocket | FormatAction::Hat | FormatAction::Block | FormatAction::Tag => {
+                            let kind = match act {
+                                FormatAction::Pocket => crate::state::CardStyleKind::Pocket,
+                                FormatAction::Hat => crate::state::CardStyleKind::Hat,
+                                FormatAction::Block => crate::state::CardStyleKind::Block,
+                                FormatAction::Tag => crate::state::CardStyleKind::Tag,
+                                _ => unreachable!(),
+                            };
+                            st.update(cx, |state, _cx| state.apply_card_style(kind));
+                            cx.notify();
+                        }
+                        // Clear: clear all formatting from the entire line.
+                        FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
-                                // Apply bold to entire line (not for Clear)
-                                if !matches!(act, FormatAction::Clear) {
-                                    if let Some(op) = act.to_format_op() {
-                                        state.apply_formatting_to_line(op);
-                                    }
-                                }
-                                // Apply font size to entire line (not for Clear)
-                                if !matches!(act, FormatAction::Clear) {
-                                    if let Some(size) = act.card_style_size() {
-                                        state.apply_formatting_to_line(FormatOp::FontSize(size));
-                                    }
-                                }
-                                // Clear all formatting from entire line
-                                if matches!(act, FormatAction::Clear) {
-                                    state.apply_formatting_to_line(FormatOp::ClearAll);
-                                }
-                                // Apply special formatting per card style to entire line
-                                if matches!(act, FormatAction::Pocket) {
-                                    state.apply_formatting_to_line(FormatOp::Box(true));
-                                }
-                                if matches!(act, FormatAction::Hat) {
-                                    state.apply_formatting_to_line(FormatOp::DoubleUnderline(true));
-                                }
-                                if matches!(act, FormatAction::Block) {
-                                    state.apply_formatting_to_line(FormatOp::Underline(true));
-                                }
-                                // Apply center alignment to entire line (for Pocket, Hat, Block)
-                                if matches!(act, FormatAction::Pocket | FormatAction::Hat | FormatAction::Block) {
-                                    // For alignment, we need to use the line range
-                                    let tab = state.tabs.get_mut(state.active_tab);
-                                    if let Some(t) = tab {
-                                        let cursor = t.cursor;
-                                        let line_start = t.content[..cursor]
-                                            .rfind('\n')
-                                            .map(|pos| pos + 1)
-                                            .unwrap_or(0);
-                                        let line_end = t.content[cursor..]
-                                            .find('\n')
-                                            .map(|pos| cursor + pos)
-                                            .unwrap_or(t.content.len());
-                                        state.apply_center_alignment_with_selection(Some((line_start, line_end)));
-                                    }
-                                }
+                                state.apply_formatting_to_line(FormatOp::ClearAll);
                             });
                             cx.notify();
                         }

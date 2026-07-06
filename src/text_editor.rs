@@ -3,7 +3,7 @@ use gpui::*;
 
 use crate::auto_scroll::AutoScroller;
 use crate::docx_parser::{Paragraph, Run};
-use crate::document_ops::{paragraph_run_char_spans, FormatOp};
+use crate::document_ops::paragraph_run_char_spans;
 use crate::state::{matches_shifted_symbol, vim_find_target_char, AppState, VimMode};
 
 /// Approximate monospace glyph width, used only to convert a mouse click's
@@ -281,89 +281,30 @@ impl TextEditor {
          * so its early `return` doesn't also need to skip macro-recording
          * capture (Ctrl combos are app-global shortcuts, not part of vim's
          * own keystroke stream, and are never recorded into a macro).
+         *
+         * Copy/Cut/Paste/Undo/Redo/SelectAll/Bold/Underline used to be
+         * hardcoded here. They're now configurable GPUI actions
+         * (`src/keybinds.rs`, handled in `main_window.rs`) — leaving them
+         * here too would have them permanently shadowed anyway: GPUI stops
+         * an event's propagation once a keybinding's action handler runs,
+         * so this raw key-event path never actually fired for them once a
+         * matching binding existed (confirmed the hard way — Ctrl+B here
+         * never fired while Ctrl+B was also bound to ToggleSidebar).
          */
         match key {
-            "c" => {
-                // Copy: read-only — use entity.read so no update closure needed.
-                let text = self.state.read(cx).copy_selection();
-                if let Some(text) = text {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            }
-            "x" => {
-                // Cut: delete selection inside update, write result to clipboard.
-                let text = self.state.update(cx, |state, cx| {
-                    let result = state.cut_selection();
-                    if result.is_some() { cx.notify(); }
-                    result
-                });
-                if let Some(text) = text {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    cx.notify();
-                }
-            }
-            "v" => {
-                // Paste: read clipboard on outer cx first, then insert inside update.
-                if let Some(item) = cx.read_from_clipboard() {
-                    if let Some(text) = item.text() {
-                        self.state.update(cx, |state, cx| {
-                            state.insert_str(&text);
-                            cx.notify();
-                        });
-                        cx.notify();
-                    }
-                }
-            }
-            "a" => {
-                // Ctrl+A: select all (spec 4.3).
-                self.state.update(cx, |state, _cx| state.select_all());
-                cx.notify();
-            }
-            "z" => {
-                // Ctrl+Z: undo. Ctrl+Shift+Z: redo (common alternate
-                // binding alongside Ctrl+Y) (spec 4.5).
-                self.state.update(cx, |state, _cx| {
-                    if shift { state.redo() } else { state.undo() }
-                });
-                cx.notify();
-            }
-            "y" => {
-                // Ctrl+Y: redo (spec 4.5).
-                self.state.update(cx, |state, _cx| state.redo());
-                cx.notify();
-            }
             "o" => {
-                // Ctrl+O: jump list back (spec 5.5).
+                // Ctrl+O: jump list back (spec 5.5). Vim-specific, out of
+                // scope for the configurable keybind system.
                 self.state.update(cx, |state, _cx| state.vim_jump_backward());
                 cx.notify();
                 self.scroll_to_cursor(cx);
             }
             "i" => {
-                // Ctrl+I: jump list forward (spec 5.5).
+                // Ctrl+I: jump list forward (spec 5.5). Vim-specific, out of
+                // scope for the configurable keybind system.
                 self.state.update(cx, |state, _cx| state.vim_jump_forward());
                 cx.notify();
                 self.scroll_to_cursor(cx);
-            }
-            "b" => {
-                // Ctrl+B: bold (rich-text formatting plan, Phase 2 — common
-                // shortcut alongside the ribbon's own Bold button).
-                self.state.update(cx, |state, cx| {
-                    state.apply_formatting_to_selection(FormatOp::Bold(true));
-                    cx.notify();
-                });
-                cx.notify();
-            }
-            "u" => {
-                // Ctrl+U: underline. Ctrl+I is deliberately *not* wired to
-                // italic here (the conventional shortcut) — it's already
-                // real vim's own `Ctrl+I` (jump list forward, spec 5.5,
-                // wired above) and shouldn't be overwritten; italic stays
-                // ribbon-only, a documented scope limit.
-                self.state.update(cx, |state, cx| {
-                    state.apply_formatting_to_selection(FormatOp::Underline(true));
-                    cx.notify();
-                });
-                cx.notify();
             }
             // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
             // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just

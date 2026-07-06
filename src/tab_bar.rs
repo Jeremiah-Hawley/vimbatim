@@ -1,10 +1,8 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::keybinds::{CloseTabAction, NewTabAction};
 use crate::state::AppState;
-
-// Actions for the tab bar, registered globally in main.rs.
-actions!(tab_bar, [NewTab, CloseActiveTab]);
 
 /// Drag payload for tab reordering. Carries the source tab index and title.
 /// Implements `Render` because GPUI uses the payload value as the ghost view
@@ -59,7 +57,7 @@ impl TabBar {
         TabBar { state }
     }
 
-    fn handle_new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_new_tab(&mut self, _: &NewTabAction, _window: &mut Window, cx: &mut Context<Self>) {
         /*
          * Appends a blank tab and switches to it.
          */
@@ -70,7 +68,7 @@ impl TabBar {
         cx.notify();
     }
 
-    fn handle_close_active(&mut self, _: &CloseActiveTab, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_close_active(&mut self, _: &CloseTabAction, _window: &mut Window, cx: &mut Context<Self>) {
         /*
          * Closes the currently active tab. AppState ensures at least one tab survives.
          */
