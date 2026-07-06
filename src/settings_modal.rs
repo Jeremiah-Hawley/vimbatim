@@ -334,7 +334,15 @@ impl Render for SettingsModal {
                     .shadow_lg()
                     .flex()
                     .flex_col()
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, _cx| { /* absorb, don't close */ })
+                    // Stops the mouse-down from bubbling up to the backdrop's
+                    // close handler above. A plain no-op handler here does
+                    // NOT do this by itself — GPUI mouse events keep bubbling
+                    // through every ancestor's on_mouse_down unless one of
+                    // them explicitly calls stop_propagation, exactly like
+                    // keyboard dispatch. Without this, every click anywhere
+                    // in the panel (Change buttons, category headers, the
+                    // vim toggle, Reset) closed the modal.
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                     // ── Title bar ──────────────────────────────────────────────
                     .child(
                         div()
