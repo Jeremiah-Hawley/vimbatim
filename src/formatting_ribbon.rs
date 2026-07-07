@@ -3,16 +3,54 @@ use gpui::*;
 
 use crate::document_ops::FormatOp;
 use crate::state::AppState;
+use crate::theme::{palette, radius, space, Palette, ThemeColorMode};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum FormatAction {
-    Paste, Condense, Pocket, Hat, Block, Tag, Cite, Underline, Emphasis, Highlight, Clear, FoldToggle,
-    FontSize, FontFamily, NumberedList, Italics, Bold, BulletList, FontColor, Strikethrough, ChangeCase,
-    Shrink, HighlightColorSelect, ToggleParagraphIntegrity, TogglePilcrows, DocMenu, CardMenu,
-    Nav, InvisibilityMode, SwitchTabMenu, WindowSplit, CollapseAll,
-    OpenWiki, OpenTabroom, Wikifi,
-    Body, PocketCite, HighlightYellow, HighlightGreen, RemoveHighlight, OpenBlock, CloseBlock, NormalSize,
+    Paste,
+    Condense,
+    Pocket,
+    Hat,
+    Block,
+    Tag,
+    Cite,
+    Underline,
+    Emphasis,
+    Highlight,
+    Clear,
+    FoldToggle,
+    FontSize,
+    FontFamily,
+    NumberedList,
+    Italics,
+    Bold,
+    BulletList,
+    FontColor,
+    Strikethrough,
+    ChangeCase,
+    Shrink,
+    HighlightColorSelect,
+    ToggleParagraphIntegrity,
+    TogglePilcrows,
+    DocMenu,
+    CardMenu,
+    Nav,
+    InvisibilityMode,
+    SwitchTabMenu,
+    WindowSplit,
+    CollapseAll,
+    OpenWiki,
+    OpenTabroom,
+    Wikifi,
+    Body,
+    PocketCite,
+    HighlightYellow,
+    HighlightGreen,
+    RemoveHighlight,
+    OpenBlock,
+    CloseBlock,
+    NormalSize,
 }
 
 impl FormatAction {
@@ -30,32 +68,13 @@ impl FormatAction {
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
             // Card styles: each maps to Bold + custom font size
-            FormatAction::Pocket => Some(FormatOp::Bold(true)),    // Size 26 = 52 half-points
-            FormatAction::Hat => Some(FormatOp::Bold(true)),       // Size 22 = 44 half-points
-            FormatAction::Block => Some(FormatOp::Bold(true)),     // Size 16 = 32 half-points
-            FormatAction::Tag => Some(FormatOp::Bold(true)),       // Size 23 = 46 half-points
-            FormatAction::Cite => Some(FormatOp::Bold(true)),      // Size 13 = 26 half-points
-            FormatAction::Emphasis => Some(FormatOp::Bold(true)),  // Bold only
+            FormatAction::Pocket => Some(FormatOp::Bold(true)), // Size 26 = 52 half-points
+            FormatAction::Hat => Some(FormatOp::Bold(true)),    // Size 22 = 44 half-points
+            FormatAction::Block => Some(FormatOp::Bold(true)),  // Size 16 = 32 half-points
+            FormatAction::Tag => Some(FormatOp::Bold(true)),    // Size 23 = 46 half-points
+            FormatAction::Cite => Some(FormatOp::Bold(true)),   // Size 13 = 26 half-points
+            FormatAction::Emphasis => Some(FormatOp::Bold(true)), // Bold only
             _ => None,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            FormatAction::Paste => "Paste", FormatAction::Condense => "Condense", FormatAction::Pocket => "Pocket",
-            FormatAction::Hat => "Hat", FormatAction::Block => "Block", FormatAction::Tag => "Tag",
-            FormatAction::Cite => "Cite", FormatAction::Underline => "Underline", FormatAction::Emphasis => "Emphasis",
-            FormatAction::Highlight => "Highlight", FormatAction::Clear => "Clear", FormatAction::FoldToggle => "Fold Toggle",
-            FormatAction::FontSize => "Font Size", FormatAction::FontFamily => "Font Family", FormatAction::NumberedList => "Numbered List",
-            FormatAction::Italics => "Italics", FormatAction::Bold => "Bold", FormatAction::BulletList => "Bullet List",
-            FormatAction::FontColor => "Font Color", FormatAction::Strikethrough => "Strikethrough", FormatAction::ChangeCase => "Change Case",
-            FormatAction::Shrink => "Shrink", FormatAction::HighlightColorSelect => "HL Color", FormatAction::ToggleParagraphIntegrity => "Para Integrity",
-            FormatAction::TogglePilcrows => "Pilcrows", FormatAction::DocMenu => "Doc Menu", FormatAction::CardMenu => "Card Menu",
-            FormatAction::Nav => "Nav", FormatAction::InvisibilityMode => "Invisibility", FormatAction::SwitchTabMenu => "Switch Tab",
-            FormatAction::WindowSplit => "Window Split", FormatAction::CollapseAll => "Collapse All", FormatAction::OpenWiki => "Open Wiki", FormatAction::OpenTabroom => "Open Tabroom",
-            FormatAction::Wikifi => "Wikifi", FormatAction::Body => "Body", FormatAction::PocketCite => "Pkt Cite",
-            FormatAction::HighlightYellow => "HLt", FormatAction::HighlightGreen => "HLg", FormatAction::RemoveHighlight => "Rm HL",
-            FormatAction::OpenBlock => "Open Blk", FormatAction::CloseBlock => "Close Blk", FormatAction::NormalSize => "Normal",
         }
     }
 }
@@ -64,6 +83,40 @@ impl FormatAction {
 struct RibbonBtn {
     label: &'static str,
     action: FormatAction,
+    tone: RibbonTone,
+}
+
+impl RibbonBtn {
+    fn primary(label: &'static str, action: FormatAction) -> Self {
+        Self {
+            label,
+            action,
+            tone: RibbonTone::Primary,
+        }
+    }
+
+    fn secondary(label: &'static str, action: FormatAction) -> Self {
+        Self {
+            label,
+            action,
+            tone: RibbonTone::Secondary,
+        }
+    }
+
+    fn quiet(label: &'static str, action: FormatAction) -> Self {
+        Self {
+            label,
+            action,
+            tone: RibbonTone::Quiet,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RibbonTone {
+    Primary,
+    Secondary,
+    Quiet,
 }
 
 pub struct FormattingRibbon {
@@ -80,25 +133,116 @@ impl FormattingRibbon {
         }
     }
 
-    fn make_button(label: &'static str, action: FormatAction, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn set_all_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        for name in ["cards", "text", "document", "view", "caselist"] {
+            self.collapsed.insert(name, collapsed);
+        }
+        cx.notify();
+    }
+
+    fn make_button(
+        label: &'static str,
+        action: FormatAction,
+        tone: RibbonTone,
+        p: Palette,
+        color_mode: ThemeColorMode,
+        state: Entity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let action_id = action as usize;
+        let (bg, text, border, hover_bg, hover_border, active_bg, min_width) =
+            match (tone, color_mode) {
+                (RibbonTone::Primary, ThemeColorMode::Minimal) => (
+                    p.accent_wash,
+                    p.text,
+                    p.accent_muted,
+                    p.selection,
+                    p.accent,
+                    p.accent_muted,
+                    68.0,
+                ),
+                (RibbonTone::Primary, ThemeColorMode::Vivid) => (
+                    p.accent_wash,
+                    p.text,
+                    p.accent_alt,
+                    p.selection,
+                    p.highlight,
+                    p.accent_muted,
+                    68.0,
+                ),
+                (RibbonTone::Secondary, ThemeColorMode::Vivid) => (
+                    p.chrome_elevated,
+                    p.text,
+                    p.border_subtle,
+                    p.selection,
+                    p.accent_muted,
+                    p.accent_wash,
+                    68.0,
+                ),
+                (RibbonTone::Secondary, _) => (
+                    p.chrome_elevated,
+                    p.text,
+                    p.border_subtle,
+                    p.chrome_hover,
+                    p.border,
+                    p.chrome_active,
+                    60.0,
+                ),
+                (RibbonTone::Quiet, ThemeColorMode::Vivid) => (
+                    p.chrome_active,
+                    p.text_muted,
+                    p.border_subtle,
+                    p.accent_wash,
+                    p.accent_muted,
+                    p.selection,
+                    56.0,
+                ),
+                (RibbonTone::Quiet, _) => (
+                    p.chrome_active,
+                    p.text_muted,
+                    p.border_subtle,
+                    p.chrome_hover,
+                    p.border,
+                    p.chrome_active,
+                    56.0,
+                ),
+            };
+
         div()
+            .id(ElementId::named_usize("ribbon-btn", action_id))
             .flex()
             .items_center()
             .justify_center()
-            .min_w(px(60.0))
+            .min_w(px(min_width))
             .h(px(24.0))
-            .px(px(4.0))
-            .rounded(px(2.0))
-            .bg(rgb(0x3d3d3d))
-            .text_color(rgb(0xd4d4d4))
+            .px(px(space::SM))
+            .rounded(px(radius::MD))
+            .bg(rgb(bg))
+            .text_color(rgb(text))
             .text_sm()
             .cursor_pointer()
+            .border_1()
+            .border_color(rgb(border))
+            .hover(move |s| {
+                s.bg(rgb(hover_bg))
+                    .border_color(rgb(hover_border))
+                    .text_color(rgb(p.text))
+            })
+            .active(move |s| s.bg(rgb(active_bg)))
             .on_mouse_down(gpui::MouseButton::Left, {
                 let label_text = label;
-                let act = action.clone();
+                let act = action;
                 let st = state.clone();
                 cx.listener(move |_this, _ev, _window, cx| {
                     println!("Button pressed: {}", label_text);
+                    if !matches!(
+                        act,
+                        FormatAction::DocMenu
+                            | FormatAction::CardMenu
+                            | FormatAction::SwitchTabMenu
+                    ) {
+                        cx.stop_propagation();
+                    }
                     match act {
                         FormatAction::Paste => {
                             if let Some(item) = cx.read_from_clipboard() {
@@ -156,7 +300,9 @@ impl FormattingRibbon {
                         FormatAction::ChangeCase => {
                             st.update(cx, |state, _cx| {
                                 // Default to Title case for now
-                                state.apply_case_to_selection(crate::case_converter::CaseType::Title);
+                                state.apply_case_to_selection(
+                                    crate::case_converter::CaseType::Title,
+                                );
                             });
                             cx.notify();
                         }
@@ -220,7 +366,9 @@ impl FormattingRibbon {
                             }
                             #[cfg(target_os = "windows")]
                             {
-                                let _ = std::process::Command::new("cmd").args(&["/C", "start", url]).spawn();
+                                let _ = std::process::Command::new("cmd")
+                                    .args(&["/C", "start", url])
+                                    .spawn();
                             }
                         }
                         FormatAction::OpenTabroom => {
@@ -235,7 +383,9 @@ impl FormattingRibbon {
                             }
                             #[cfg(target_os = "windows")]
                             {
-                                let _ = std::process::Command::new("cmd").args(&["/C", "start", url]).spawn();
+                                let _ = std::process::Command::new("cmd")
+                                    .args(&["/C", "start", url])
+                                    .spawn();
                             }
                         }
                         FormatAction::InvisibilityMode => {
@@ -259,18 +409,19 @@ impl FormattingRibbon {
                             cx.notify();
                         }
                         FormatAction::Wikifi => {
-                            st.update(cx, |state, _cx| {
-                                match state.wikify_current_tab() {
-                                    Ok(_) => println!("Document exported to markdown"),
-                                    Err(e) => println!("Export failed: {}", e),
-                                }
+                            st.update(cx, |state, _cx| match state.wikify_current_tab() {
+                                Ok(_) => println!("Document exported to markdown"),
+                                Err(e) => println!("Export failed: {}", e),
                             });
                             cx.notify();
                         }
                         // Card styles: apply the shared AppState::apply_card_style,
                         // also used by the configurable keybind actions (src/keybinds.rs)
                         // so ribbon buttons and hotkeys behave identically.
-                        FormatAction::Pocket | FormatAction::Hat | FormatAction::Block | FormatAction::Tag => {
+                        FormatAction::Pocket
+                        | FormatAction::Hat
+                        | FormatAction::Block
+                        | FormatAction::Tag => {
                             let kind = match act {
                                 FormatAction::Pocket => crate::state::CardStyleKind::Pocket,
                                 FormatAction::Hat => crate::state::CardStyleKind::Hat,
@@ -302,136 +453,137 @@ impl FormattingRibbon {
             .child(label)
     }
 
-    fn render_view_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
-        /*
-         * Special version of render_group for the VIEW section that includes a CollapseAll button.
-         * This button has access to self through the listener context.
-         */
+    fn render_group(
+        name: &'static str,
+        label: &'static str,
+        buttons: &[Vec<RibbonBtn>],
+        is_collapsed: bool,
+        p: Palette,
+        color_mode: ThemeColorMode,
+        state: Entity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let header_text = if color_mode == ThemeColorMode::Vivid {
+            p.accent_strong
+        } else {
+            p.text_muted
+        };
+        let header_hover_text = if color_mode == ThemeColorMode::Vivid {
+            p.accent_strong
+        } else {
+            p.text
+        };
+
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(space::SM))
             .border_r_1()
-            .border_color(rgb(0x3d3d3d))
-            .px(px(8.0))
+            .border_color(rgb(p.border_subtle))
+            .px(px(space::MD))
+            .py(px(space::XS))
             .h_full()
+            .child(
+                div()
+                    .id(ElementId::from(format!("ribbon-group-toggle-{name}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::XS))
+                    .cursor_pointer()
+                    .px(px(space::XS))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::MD))
+                    .bg(rgb(p.chrome_active))
+                    .text_color(rgb(header_text))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(header_hover_text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            let collapsed = this.collapsed.get(name).copied().unwrap_or(false);
+                            this.collapsed.insert(name, !collapsed);
+                            cx.notify();
+                        }),
+                    )
+                    .child(label)
+                    .child(if is_collapsed { "▶" } else { "▼" }),
+            )
             .when(!is_collapsed, |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(4.0))
+                        .gap(px(space::XS))
                         .flex_1()
                         .children(buttons.iter().map(|row| {
                             div()
                                 .flex()
                                 .flex_row()
-                                .gap(px(4.0))
+                                .gap(px(space::XS))
                                 .children(row.iter().map(|btn| {
-                                    Self::make_button(btn.label, btn.action.clone(), state.clone(), cx)
+                                    Self::make_button(
+                                        btn.label,
+                                        btn.action,
+                                        btn.tone,
+                                        p,
+                                        color_mode,
+                                        state.clone(),
+                                        cx,
+                                    )
                                 }))
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .w(px(80.0))
-                                        .h(px(24.0))
-                                        .px(px(4.0))
-                                        .rounded(px(2.0))
-                                        .bg(rgb(0x3d3d3d))
-                                        .text_color(rgb(0xd4d4d4))
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                                            this.collapsed.insert("organize", true);
-                                            this.collapsed.insert("document", true);
-                                            this.collapsed.insert("card_format", true);
-                                            this.collapsed.insert("view", true);
-                                            this.collapsed.insert("caselist", true);
-                                            cx.notify();
-                                        }))
-                                        .child("Collapse All")
-                                )
-                        )
+                        })),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.0))
-                    .cursor_pointer()
-                    .px(px(4.0))
-                    .py(px(2.0))
-                    .rounded(px(2.0))
-                    .bg(rgb(0x3d3d3d))
-                    .text_color(rgb(0x999999))
-                    .text_xs()
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        let collapsed = this.collapsed.get(name).copied().unwrap_or(false);
-                        this.collapsed.insert(name, !collapsed);
-                        cx.notify();
-                    }))
-                    .child(label)
-                    .child(if is_collapsed { "▶" } else { "▼" })
-            )
     }
 
-    fn render_group(name: &'static str, label: &'static str, buttons: &[Vec<RibbonBtn>], is_collapsed: bool, state: Entity<AppState>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_global_controls(
+        all_collapsed: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex()
-            .flex_col()
-            .gap(px(4.0))
+            .flex_row()
+            .items_start()
+            .justify_start()
+            .gap(px(space::XS))
             .border_r_1()
-            .border_color(rgb(0x3d3d3d))
-            .px(px(8.0))
+            .border_color(rgb(p.border_subtle))
+            .px(px(space::SM))
+            .py(px(space::XS))
             .h_full()
-            .when(!is_collapsed, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .flex_1()
-                        .children(buttons.iter().map(|row| {
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(4.0))
-                                .children(row.iter().map(|btn| {
-                                    Self::make_button(btn.label, btn.action.clone(), state.clone(), cx)
-                                }))
-                        }))
-                )
-            })
             .child(
                 div()
+                    .id("ribbon-expand-all")
                     .flex()
                     .items_center()
                     .justify_center()
-                    .gap(px(2.0))
+                    .w(px(28.0))
+                    .h(px(24.0))
+                    .rounded(px(radius::MD))
+                    .bg(rgb(p.chrome_active))
+                    .text_color(rgb(p.text_muted))
+                    .text_sm()
                     .cursor_pointer()
-                    .px(px(4.0))
-                    .py(px(2.0))
-                    .rounded(px(2.0))
-                    .bg(rgb(0x3d3d3d))
-                    .text_color(rgb(0x999999))
-                    .text_xs()
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        let collapsed = this.collapsed.get(name).copied().unwrap_or(false);
-                        this.collapsed.insert(name, !collapsed);
-                        cx.notify();
-                    }))
-                    .child(label)
-                    .child(if is_collapsed { "▶" } else { "▼" })
+                    .border_1()
+                    .border_color(rgb(p.border_subtle))
+                    .hover(move |s| {
+                        s.bg(rgb(p.chrome_hover))
+                            .border_color(rgb(p.accent_muted))
+                            .text_color(rgb(p.text))
+                    })
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.set_all_collapsed(!all_collapsed, cx);
+                        }),
+                    )
+                    .child(if all_collapsed { "▶" } else { "▼" }),
             )
     }
 }
@@ -439,22 +591,74 @@ impl FormattingRibbon {
 impl Render for FormattingRibbon {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.clone();
+        let (p, color_mode) = {
+            let state_read = state.read(cx);
+            (palette(state_read.theme), state_read.theme_color_mode)
+        };
+        let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
+        let all_collapsed = ribbon_groups
+            .iter()
+            .all(|name| self.collapsed.get(name).copied().unwrap_or(false));
         div()
             .flex()
             .flex_row()
             .w_full()
             .gap(px(0.0))
             .p(px(0.0))
-            .bg(rgb(0x2d2d2d))
+            .bg(rgb(p.chrome))
+            .child(Self::render_global_controls(all_collapsed, p, cx))
             .child(Self::render_group(
-                "organize",
-                "ORGANIZE",
+                "cards",
+                "CARDS",
                 &[
-                    vec![RibbonBtn { label: "Paste", action: FormatAction::Paste }, RibbonBtn { label: "Condense", action: FormatAction::Condense }, RibbonBtn { label: "Pocket", action: FormatAction::Pocket }, RibbonBtn { label: "Hat", action: FormatAction::Hat }],
-                    vec![RibbonBtn { label: "Block", action: FormatAction::Block }, RibbonBtn { label: "Tag", action: FormatAction::Tag }, RibbonBtn { label: "Cite", action: FormatAction::Cite }, RibbonBtn { label: "Underline", action: FormatAction::Underline }],
-                    vec![RibbonBtn { label: "Emphasis", action: FormatAction::Emphasis }, RibbonBtn { label: "Highlight", action: FormatAction::Highlight }, RibbonBtn { label: "Clear", action: FormatAction::Clear }, RibbonBtn { label: "Fold Toggle", action: FormatAction::FoldToggle }],
+                    vec![
+                        RibbonBtn::primary("Paste", FormatAction::Paste),
+                        RibbonBtn::primary("Condense", FormatAction::Condense),
+                        RibbonBtn::primary("Pocket", FormatAction::Pocket),
+                        RibbonBtn::primary("Hat", FormatAction::Hat),
+                    ],
+                    vec![
+                        RibbonBtn::primary("Block", FormatAction::Block),
+                        RibbonBtn::primary("Tag", FormatAction::Tag),
+                        RibbonBtn::primary("Cite", FormatAction::Cite),
+                        RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("Highlight", FormatAction::Highlight),
+                        RibbonBtn::secondary("Shrink", FormatAction::Shrink),
+                        RibbonBtn::secondary("Clear", FormatAction::Clear),
+                        RibbonBtn::quiet("Fold", FormatAction::FoldToggle),
+                    ],
                 ],
-                *self.collapsed.get("organize").unwrap_or(&false),
+                *self.collapsed.get("cards").unwrap_or(&false),
+                p,
+                color_mode,
+                state.clone(),
+                cx,
+            ))
+            .child(Self::render_group(
+                "text",
+                "TEXT",
+                &[
+                    vec![
+                        RibbonBtn::secondary("Bold", FormatAction::Bold),
+                        RibbonBtn::secondary("Italics", FormatAction::Italics),
+                        RibbonBtn::secondary("Underline", FormatAction::Underline),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("Font Size", FormatAction::FontSize),
+                        RibbonBtn::quiet("Font Family", FormatAction::FontFamily),
+                        RibbonBtn::secondary("Font Color", FormatAction::FontColor),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("HL Color", FormatAction::HighlightColorSelect),
+                        RibbonBtn::secondary("Strike", FormatAction::Strikethrough),
+                        RibbonBtn::secondary("Case", FormatAction::ChangeCase),
+                    ],
+                ],
+                *self.collapsed.get("text").unwrap_or(&false),
+                p,
+                color_mode,
                 state.clone(),
                 cx,
             ))
@@ -462,34 +666,44 @@ impl Render for FormattingRibbon {
                 "document",
                 "DOCUMENT",
                 &[
-                    vec![RibbonBtn { label: "Font Size", action: FormatAction::FontSize }, RibbonBtn { label: "Font Family", action: FormatAction::FontFamily }, RibbonBtn { label: "Numbered List", action: FormatAction::NumberedList }],
-                    vec![RibbonBtn { label: "Italics", action: FormatAction::Italics }, RibbonBtn { label: "Bold", action: FormatAction::Bold }, RibbonBtn { label: "Bullet List", action: FormatAction::BulletList }],
-                    vec![RibbonBtn { label: "Font Color", action: FormatAction::FontColor }, RibbonBtn { label: "Strikethrough", action: FormatAction::Strikethrough }, RibbonBtn { label: "Change Case", action: FormatAction::ChangeCase }],
+                    vec![
+                        RibbonBtn::secondary("Bullets", FormatAction::BulletList),
+                        RibbonBtn::secondary("Numbered", FormatAction::NumberedList),
+                    ],
+                    vec![
+                        RibbonBtn::secondary(
+                            "Para Integrity",
+                            FormatAction::ToggleParagraphIntegrity,
+                        ),
+                        RibbonBtn::secondary("Pilcrows", FormatAction::TogglePilcrows),
+                    ],
+                    vec![
+                        RibbonBtn::quiet("Doc Menu", FormatAction::DocMenu),
+                        RibbonBtn::quiet("Card Menu", FormatAction::CardMenu),
+                    ],
                 ],
                 *self.collapsed.get("document").unwrap_or(&false),
+                p,
+                color_mode,
                 state.clone(),
                 cx,
             ))
             .child(Self::render_group(
-                "card_format",
-                "CARD FORMAT",
-                &[
-                    vec![RibbonBtn { label: "Shrink", action: FormatAction::Shrink }, RibbonBtn { label: "HL Color", action: FormatAction::HighlightColorSelect }],
-                    vec![RibbonBtn { label: "Para Integrity", action: FormatAction::ToggleParagraphIntegrity }, RibbonBtn { label: "Pilcrows", action: FormatAction::TogglePilcrows }],
-                    vec![RibbonBtn { label: "Doc Menu", action: FormatAction::DocMenu }, RibbonBtn { label: "Card Menu", action: FormatAction::CardMenu }],
-                ],
-                *self.collapsed.get("card_format").unwrap_or(&false),
-                state.clone(),
-                cx,
-            ))
-            .child(Self::render_view_group(
                 "view",
                 "VIEW",
                 &[
-                    vec![RibbonBtn { label: "Nav", action: FormatAction::Nav }, RibbonBtn { label: "Invisibility", action: FormatAction::InvisibilityMode }],
-                    vec![RibbonBtn { label: "Switch Tab", action: FormatAction::SwitchTabMenu }, RibbonBtn { label: "Window Split", action: FormatAction::WindowSplit }],
+                    vec![
+                        RibbonBtn::quiet("Nav", FormatAction::Nav),
+                        RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
+                        RibbonBtn::secondary("Split", FormatAction::WindowSplit),
+                    ],
                 ],
                 *self.collapsed.get("view").unwrap_or(&false),
+                p,
+                color_mode,
                 state.clone(),
                 cx,
             ))
@@ -497,11 +711,13 @@ impl Render for FormattingRibbon {
                 "caselist",
                 "CASELIST",
                 &[
-                    vec![RibbonBtn { label: "Open Wiki", action: FormatAction::OpenWiki }],
-                    vec![RibbonBtn { label: "Open Tabroom", action: FormatAction::OpenTabroom }],
-                    vec![RibbonBtn { label: "Wikifi", action: FormatAction::Wikifi }],
+                    vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)],
+                    vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)],
+                    vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)],
                 ],
                 *self.collapsed.get("caselist").unwrap_or(&false),
+                p,
+                color_mode,
                 state.clone(),
                 cx,
             ))
