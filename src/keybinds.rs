@@ -526,21 +526,15 @@ actions!(
     ]
 );
 
-/// The `KeyContext` tag the settings modal's panel carries (see
-/// `settings_modal.rs`) for as long as a keybind capture is armed. Every
-/// binding below requires its *absence* to match, so a keystroke that's
-/// already bound elsewhere still reaches the panel's `on_key_down` instead
-/// of firing whatever it's currently bound to — GPUI resolves an action's
-/// keybinding *before* ever delivering a raw key event to a view, and (once
-/// an action's handler consumes the event, which is the default) skips raw
-/// delivery entirely for that keystroke, so there's no way to have both
-/// happen; excluding the binding via context is the only way to guarantee
-/// the raw event still arrives while capturing.
-const NOT_CAPTURING: Option<&str> = Some("!KeybindCapturing");
-
 /// Rebuilds the entire GPUI keymap from `keybinds`. Safe to call at startup
 /// or any time after a binding changes — `App::clear_key_bindings` +
 /// `App::bind_keys` both work at runtime, not just before the window opens.
+///
+/// Also used, via a bare `cx.clear_key_bindings()` with no matching
+/// `bind_keys` call, to blank the keymap entirely while the settings modal
+/// is capturing a new binding (`settings_modal.rs`'s `start_capture`) — see
+/// that function's doc comment for why context-predicate-based exclusion
+/// and keystroke interception were both tried first and don't work.
 pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     use KeybindAction::*;
 
@@ -549,38 +543,38 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     let ks = |action: KeybindAction| keybinds.get(action).to_gpui_keystroke();
 
     cx.bind_keys([
-        KeyBinding::new(&ks(ToggleSettings), ToggleSettingsAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(ToggleSidebar), ToggleSidebarAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(NewTab), NewTabAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(CloseTab), CloseTabAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Save), SaveAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(SaveAs), SaveAsAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Find), FindAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(FindReplace), FindReplaceAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Copy), CopyAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Cut), CutAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Paste), PasteAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Undo), UndoAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Redo), RedoAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(SelectAll), SelectAllAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Bold), BoldAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Underline), UnderlineAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Shrink), ShrinkAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(ClearFormatting), ClearFormattingAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(PasteSmart), PasteSmartAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Condense), CondenseAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Pocket), PocketAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Hat), HatAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Block), BlockAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Tag), TagAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Cite), CiteAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Emphasis), EmphasisAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Highlight), HighlightAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(DeleteTags), DeleteTagsAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(StartTimer), StartTimerAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(OpenStats), OpenStatsAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, NOT_CAPTURING),
-        KeyBinding::new(&ks(Wikifi), WikifiAction, NOT_CAPTURING),
+        KeyBinding::new(&ks(ToggleSettings), ToggleSettingsAction, None),
+        KeyBinding::new(&ks(ToggleSidebar), ToggleSidebarAction, None),
+        KeyBinding::new(&ks(NewTab), NewTabAction, None),
+        KeyBinding::new(&ks(CloseTab), CloseTabAction, None),
+        KeyBinding::new(&ks(Save), SaveAction, None),
+        KeyBinding::new(&ks(SaveAs), SaveAsAction, None),
+        KeyBinding::new(&ks(Find), FindAction, None),
+        KeyBinding::new(&ks(FindReplace), FindReplaceAction, None),
+        KeyBinding::new(&ks(Copy), CopyAction, None),
+        KeyBinding::new(&ks(Cut), CutAction, None),
+        KeyBinding::new(&ks(Paste), PasteAction, None),
+        KeyBinding::new(&ks(Undo), UndoAction, None),
+        KeyBinding::new(&ks(Redo), RedoAction, None),
+        KeyBinding::new(&ks(SelectAll), SelectAllAction, None),
+        KeyBinding::new(&ks(Bold), BoldAction, None),
+        KeyBinding::new(&ks(Underline), UnderlineAction, None),
+        KeyBinding::new(&ks(Shrink), ShrinkAction, None),
+        KeyBinding::new(&ks(ClearFormatting), ClearFormattingAction, None),
+        KeyBinding::new(&ks(PasteSmart), PasteSmartAction, None),
+        KeyBinding::new(&ks(Condense), CondenseAction, None),
+        KeyBinding::new(&ks(Pocket), PocketAction, None),
+        KeyBinding::new(&ks(Hat), HatAction, None),
+        KeyBinding::new(&ks(Block), BlockAction, None),
+        KeyBinding::new(&ks(Tag), TagAction, None),
+        KeyBinding::new(&ks(Cite), CiteAction, None),
+        KeyBinding::new(&ks(Emphasis), EmphasisAction, None),
+        KeyBinding::new(&ks(Highlight), HighlightAction, None),
+        KeyBinding::new(&ks(DeleteTags), DeleteTagsAction, None),
+        KeyBinding::new(&ks(StartTimer), StartTimerAction, None),
+        KeyBinding::new(&ks(OpenStats), OpenStatsAction, None),
+        KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, None),
+        KeyBinding::new(&ks(Wikifi), WikifiAction, None),
     ]);
 }
 

@@ -59,9 +59,9 @@ impl SettingsModal {
          * Hides the modal by setting `AppState.settings_visible` to false.
          * Both the backdrop click and the explicit Close / × buttons call this.
          * Also cancels any in-progress key capture so closing the modal
-         * never leaves capture mode armed.
+         * never leaves the keymap cleared.
          */
-        self.cancel_capture();
+        self.cancel_capture(cx);
         self.theme_preview = false;
         self.state.update(cx, |s, cx| {
             s.settings_visible = false;
@@ -73,27 +73,35 @@ impl SettingsModal {
     /// Arms capture mode for `action`: the next keystroke (after this call)
     /// is interpreted as the candidate new binding by `handle_capture_key`.
     ///
-    /// While `capturing` is `Some`, `render()` tags the panel div with the
-    /// `"KeybindCapturing"` key context, and every one of `rebuild_keymap`'s
-    /// bindings requires that context's *absence* to match (see
-    /// `keybinds::NOT_CAPTURING`) — so an already-bound combo still reaches
+    /// Clears every registered keybinding for the duration of the capture
+    /// (`cancel_capture`/successful capture restores them via
+    /// `rebuild_keymap`), so an already-bound combo still reaches
     /// `handle_capture_key` below instead of firing whatever it's currently
-    /// bound to. A stop-propagation-based approach was tried first and
-    /// doesn't work: GPUI's own raw-key dispatch (`on_key_down`) checks the
-    /// very same propagate-event flag an interceptor would set, so
-    /// suppressing an action that way also silently suppresses the raw
-    /// event delivery this view depends on. Context-based exclusion is the
-    /// only mechanism that achieves both at once.
+    /// bound to. Two other approaches were tried and don't work: (1)
+    /// stop-propagation inside `App::intercept_keystrokes` — GPUI's raw-key
+    /// dispatch checks the same propagate-event flag an interceptor sets,
+    /// so suppressing an action that way also suppresses the raw event this
+    /// view depends on; (2) a `KeyContext` predicate requiring this panel's
+    /// tag to be *absent* — GPUI's context-predicate evaluator treats a
+    /// dispatch path with no context tags on it as an automatic non-match
+    /// for every predicate (including negations), and not every focus state
+    /// in this app's tree guarantees a tagged ancestor is on the path.
+    /// Clearing the keymap outright sidesteps both problems: with nothing
+    /// registered, there's nothing for any keystroke to match, regardless
+    /// of focus or context.
     fn start_capture(&mut self, action: KeybindAction, window: &mut Window, cx: &mut Context<Self>) {
         self.capturing = Some(action);
         self.conflict_message = None;
+        cx.clear_key_bindings();
         self.focus_handle.clone().focus(window, cx);
         cx.notify();
     }
 
-    fn cancel_capture(&mut self) {
+    fn cancel_capture(&mut self, cx: &mut Context<Self>) {
         self.capturing = None;
         self.conflict_message = None;
+        let keybinds = self.state.read(cx).keybinds.clone();
+        rebuild_keymap(cx, &keybinds);
     }
 
     /// Resolves a captured keystroke into a candidate `KeyCombo`, applying
@@ -106,7 +114,7 @@ impl SettingsModal {
 
         let Some(combo) = KeyCombo::from_capture(&ks.modifiers, &ks.key) else {
             // Escape: cancel capture, keeping the existing binding.
-            self.cancel_capture();
+            self.cancel_capture(cx);
             cx.notify();
             return;
         };
@@ -122,13 +130,11 @@ impl SettingsModal {
             return;
         }
 
-        let keybinds = self.state.update(cx, |s, _cx| {
+        self.state.update(cx, |s, _cx| {
             s.keybinds.set(action, combo.clone());
             let _ = s.keybinds.save_to(Path::new(SETTINGS_PATH), s.vim_enabled, &[]);
-            s.keybinds.clone()
         });
-        rebuild_keymap(cx, &keybinds);
-        self.cancel_capture();
+        self.cancel_capture(cx); // restores the keymap, now including the new binding
         cx.notify();
     }
 
@@ -160,7 +166,7 @@ impl SettingsModal {
 
     fn enter_theme_preview(&mut self, cx: &mut Context<Self>) {
         self.theme_preview = true;
-        self.cancel_capture();
+        self.cancel_capture(cx);
         cx.notify();
     }
 
@@ -183,13 +189,12 @@ impl SettingsModal {
         let theme_color_mode = crate::theme::load_theme_color_mode(path);
 
         self.state.update(cx, |s, _cx| {
-            s.keybinds = keybinds.clone();
+            s.keybinds = keybinds;
             s.vim_enabled = vim_enabled;
             s.theme = theme;
             s.theme_color_mode = theme_color_mode;
         });
-        rebuild_keymap(cx, &keybinds);
-        self.cancel_capture();
+        self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
         cx.notify();
     }
 
@@ -364,11 +369,6 @@ impl Render for SettingsModal {
                 div()
                     .id("settings-panel")
                     .track_focus(&self.focus_handle)
-                    // Present only while capturing — see NOT_CAPTURING's doc
-                    // comment in keybinds.rs for why this is what makes an
-                    // already-bound combo still reach handle_capture_key
-                    // below instead of firing its existing action.
-                    .when(self.capturing.is_some(), |d| d.key_context("KeybindCapturing"))
                     .on_key_down(cx.listener(Self::handle_capture_key))
                     .w(px(if theme_preview { 380.0 } else { 520.0 }))
                     .max_h(px(if theme_preview { 420.0 } else { 640.0 }))
