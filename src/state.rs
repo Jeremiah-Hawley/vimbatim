@@ -366,6 +366,8 @@ pub struct AppState {
     /// `keybinds::rebuild_keymap` and `Keybinds::save_to` to make an edit
     /// take effect immediately and persist.
     pub keybinds: crate::keybinds::Keybinds,
+    pub theme: crate::theme::ThemeKind,
+    pub theme_color_mode: crate::theme::ThemeColorMode,
     /// Saved macro recordings, keyed by register (user-requested, not in editor_instructions.md).
     pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
     /// The register currently being recorded into and its keystrokes so
@@ -495,6 +497,8 @@ impl AppState {
         let settings_path = std::path::Path::new("settings.conf");
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
+        let theme = crate::theme::load_theme(settings_path);
+        let theme_color_mode = crate::theme::load_theme_color_mode(settings_path);
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
@@ -506,6 +510,8 @@ impl AppState {
             file_tree,
             vim_enabled,
             keybinds,
+            theme,
+            theme_color_mode,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,
@@ -5046,6 +5052,8 @@ mod tests {
             file_tree: vec![],
             vim_enabled: true,
             keybinds: crate::keybinds::Keybinds::defaults(),
+            theme: crate::theme::ThemeKind::WorkbenchDark,
+            theme_color_mode: crate::theme::ThemeColorMode::Minimal,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,

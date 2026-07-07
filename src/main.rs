@@ -13,6 +13,7 @@ mod file_explorer;
 mod wikifi_export;
 mod settings_modal;
 mod main_window;
+mod theme;
 
 use gpui::prelude::*;
 use gpui::*;
