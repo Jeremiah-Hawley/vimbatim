@@ -746,6 +746,7 @@ impl Render for TextEditor {
             // Clicking the editor area claims keyboard focus and moves the
             // cursor to the clicked position (spec 4.1 click-to-position).
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
                 this.focus_handle.clone().focus(window, cx);
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();

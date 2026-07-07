@@ -4,7 +4,8 @@ use gpui::*;
 use std::path::PathBuf;
 
 use crate::docx_parser::create_new_docx;
-use crate::state::{AppState, FileNode, default_paragraphs};
+use crate::state::{default_paragraphs, AppState, FileNode};
+use crate::theme::{palette, radius, space, Palette};
 
 /// The collapsible file explorer sidebar shown on the right side of the window.
 ///
@@ -65,6 +66,8 @@ impl FileExplorer {
     fn render_node(
         node: &FileNode,
         depth: usize,
+        active_path: &Option<PathBuf>,
+        p: Palette,
         state_handle: &Entity<AppState>,
         cx: &mut Context<FileExplorer>,
     ) -> AnyElement {
@@ -79,7 +82,12 @@ impl FileExplorer {
         let indent = px((depth * 16) as f32);
 
         match node {
-            FileNode::Dir { name, path, children, expanded } => {
+            FileNode::Dir {
+                name,
+                path,
+                children,
+                expanded,
+            } => {
                 let chevron = if *expanded { "▾ " } else { "▸ " };
                 let path_clone = path.clone();
                 let state_clone = state_handle.clone();
@@ -100,10 +108,14 @@ impl FileExplorer {
                             .items_center()
                             .h(px(24.0))
                             .pl(indent)
-                            .pr(px(8.0))
+                            .pr(px(space::SM))
                             .cursor_pointer()
                             .text_sm()
-                            .text_color(rgb(0xc5c5c5))
+                            .text_color(rgb(p.text))
+                            .border_l_2()
+                            .border_color(rgb(p.sidebar))
+                            .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                            .active(move |s| s.bg(rgb(p.chrome_active)))
                             .on_click(move |_ev, _window, cx| {
                                 let p = path_clone.clone();
                                 state_clone.update(cx, |s, cx| {
@@ -111,21 +123,20 @@ impl FileExplorer {
                                     cx.notify();
                                 });
                             })
-                            .child(div().text_color(rgb(0x858585)).child(chevron))
-                            .child(div().child(dir_name))
+                            .child(div().text_color(rgb(p.text_muted)).child(chevron))
+                            .child(div().child(dir_name)),
                     )
                     // Recursively render children when the directory is expanded
                     .when(is_expanded, |d| {
-                        d.children(
-                            children_snap
-                                .iter()
-                                .map(|child| Self::render_node(child, depth + 1, state_handle, cx))
-                        )
+                        d.children(children_snap.iter().map(|child| {
+                            Self::render_node(child, depth + 1, active_path, p, state_handle, cx)
+                        }))
                     })
                     .into_any_element()
             }
 
             FileNode::File { name, path } => {
+                let is_active = active_path.as_ref().is_some_and(|active| active == path);
                 let path_clone = path.clone();
                 let state_clone = state_handle.clone();
                 let file_name = name.clone();
@@ -139,10 +150,27 @@ impl FileExplorer {
                     .items_center()
                     .h(px(24.0))
                     .pl(indent)
-                    .pr(px(8.0))
+                    .pr(px(space::SM))
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(rgb(0xd4d4d4))
+                    .text_color(if is_active {
+                        rgb(p.text)
+                    } else {
+                        rgb(p.text_muted)
+                    })
+                    .bg(if is_active {
+                        rgb(p.selection)
+                    } else {
+                        rgb(p.sidebar)
+                    })
+                    .border_l_2()
+                    .border_color(if is_active {
+                        rgb(p.accent)
+                    } else {
+                        rgb(p.sidebar)
+                    })
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
                     // Open on double-click; single click is for selection (future)
                     .on_click(move |ev, _window, cx| {
                         if ev.click_count() >= 2 {
@@ -153,7 +181,17 @@ impl FileExplorer {
                             });
                         }
                     })
-                    .child(div().text_color(rgb(0x858585)).child("📄 "))
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .text_xs()
+                            .text_color(if is_active {
+                                rgb(p.text)
+                            } else {
+                                rgb(p.text_faint)
+                            })
+                            .child("DOC"),
+                    )
                     .child(div().child(file_name))
                     .into_any_element()
             }
@@ -172,6 +210,7 @@ impl Render for FileExplorer {
          * scroll state is tracked per-element-ID in GPUI.
          */
         let state = self.state.read(cx);
+        let p = palette(state.theme);
         let dir_name = state
             .working_directory
             .file_name()
@@ -179,6 +218,10 @@ impl Render for FileExplorer {
             .unwrap_or(".")
             .to_string();
         let file_tree = state.file_tree.clone();
+        let active_path = state
+            .tabs
+            .get(state.active_tab)
+            .and_then(|tab| tab.file_path.clone());
         let _ = state;
 
         let state_handle = self.state.clone();
@@ -188,9 +231,9 @@ impl Render for FileExplorer {
             .flex_col()
             .w(px(240.0))
             .h_full()
-            .bg(rgb(0x252526))
+            .bg(rgb(p.sidebar))
             .border_r_1()
-            .border_color(rgb(0x464647))
+            .border_color(rgb(p.border))
             // ── Header ────────────────────────────────────────────────────────
             .child(
                 div()
@@ -198,58 +241,34 @@ impl Render for FileExplorer {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .h(px(36.0))
-                    .px(px(8.0))
+                    .h(px(44.0))
+                    .px(px(space::MD))
                     .border_b_1()
-                    .border_color(rgb(0x464647))
+                    .border_color(rgb(p.border))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(0x858585))
-                            .font_weight(FontWeight::BOLD)
-                            .child(dir_name.to_uppercase()),
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::XXS))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(p.text))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("Files"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(p.text_faint))
+                                    .child(dir_name),
+                            ),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            .gap(px(4.0))
-                            // Files button — toggles file explorer
-                            .child(
-                                div()
-                                    .id("files-btn")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(40.0))
-                                    .h(px(24.0))
-                                    .rounded(px(3.0))
-                                    .cursor_pointer()
-                                    .text_color(rgb(0x858585))
-                                    .text_sm()
-                                    .on_click(cx.listener(|_this, _ev, _window, _cx| {
-                                        println!("Button pressed: Files");
-                                    }))
-                                    .child("Files"),
-                            )
-                            // Nav button — opens navigation menu (Phase 1 placeholder)
-                            .child(
-                                div()
-                                    .id("nav-btn")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(px(24.0))
-                                    .h(px(24.0))
-                                    .rounded(px(3.0))
-                                    .cursor_pointer()
-                                    .text_color(rgb(0x858585))
-                                    .text_sm()
-                                    .on_click(cx.listener(|_this, _ev, _window, _cx| {
-                                        println!("Button pressed: Nav");
-                                    }))
-                                    .child("Nav"),
-                            )
+                            .gap(px(space::XS))
                             // Refresh button — re-scans the working directory so files
                             // created in external applications become visible without
                             // restarting vimbatim.
@@ -259,11 +278,20 @@ impl Render for FileExplorer {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .w(px(24.0))
+                                    .w(px(26.0))
                                     .h(px(24.0))
-                                    .rounded(px(3.0))
+                                    .rounded(px(radius::MD))
                                     .cursor_pointer()
-                                    .text_color(rgb(0x858585))
+                                    .text_color(rgb(p.text_muted))
+                                    .text_sm()
+                                    .border_1()
+                                    .border_color(rgb(p.border_subtle))
+                                    .hover(move |s| {
+                                        s.bg(rgb(p.chrome_hover))
+                                            .text_color(rgb(p.text))
+                                            .border_color(rgb(p.border))
+                                    })
+                                    .active(move |s| s.bg(rgb(p.chrome_active)))
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.state.update(cx, |s, cx| {
                                             s.refresh_file_tree();
@@ -279,11 +307,20 @@ impl Render for FileExplorer {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .w(px(24.0))
+                                    .w(px(26.0))
                                     .h(px(24.0))
-                                    .rounded(px(3.0))
+                                    .rounded(px(radius::MD))
                                     .cursor_pointer()
-                                    .text_color(rgb(0x858585))
+                                    .text_color(rgb(p.text_muted))
+                                    .text_sm()
+                                    .border_1()
+                                    .border_color(rgb(p.border_subtle))
+                                    .hover(move |s| {
+                                        s.bg(rgb(p.chrome_hover))
+                                            .text_color(rgb(p.text))
+                                            .border_color(rgb(p.border))
+                                    })
+                                    .active(move |s| s.bg(rgb(p.chrome_active)))
                                     .on_click(cx.listener(|this, _ev, window, cx| {
                                         this.create_new_file(window, cx);
                                     }))
@@ -299,12 +336,10 @@ impl Render for FileExplorer {
                     .id("sidebar-scroll")
                     .flex_1()
                     .overflow_y_scroll()
-                    .py(px(4.0))
-                    .children(
-                        file_tree
-                            .iter()
-                            .map(|node| Self::render_node(node, 0, &state_handle, cx))
-                    )
+                    .py(px(space::XS))
+                    .children(file_tree.iter().map(|node| {
+                        Self::render_node(node, 0, &active_path, p, &state_handle, cx)
+                    })),
             )
     }
 }
@@ -317,7 +352,13 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
      * and returns early. Children are searched recursively before returning.
      */
     for node in tree.iter_mut() {
-        if let FileNode::Dir { path, expanded, children, .. } = node {
+        if let FileNode::Dir {
+            path,
+            expanded,
+            children,
+            ..
+        } = node
+        {
             if path == target {
                 *expanded = !*expanded;
                 return;

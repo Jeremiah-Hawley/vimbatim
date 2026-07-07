@@ -2,6 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::AppState;
+use crate::theme::{color, palette, radius, space};
 
 /// Drag payload for tab reordering. Carries the source tab index and title.
 /// Implements `Render` because GPUI uses the payload value as the ghost view
@@ -18,24 +19,21 @@ struct TabDragPayload {
 impl Render for TabDragPayload {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         // Render at the cursor offset so the ghost tracks the mouse naturally.
-        div()
-            .pl(self.offset.x)
-            .pt(self.offset.y)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .h(px(36.0))
-                    .px(px(12.0))
-                    .bg(rgb(0x1e1e1e))
-                    .text_sm()
-                    .text_color(rgb(0xd4d4d4))
-                    .border_1()
-                    .border_color(rgb(0x569cd6))
-                    .shadow_md()
-                    .child(self.title.clone()),
-            )
+        div().pl(self.offset.x).pt(self.offset.y).child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h(px(36.0))
+                .px(px(space::MD))
+                .bg(rgb(color::EDITOR_BG))
+                .text_sm()
+                .text_color(rgb(color::TEXT))
+                .border_1()
+                .border_color(rgb(color::ACCENT))
+                .shadow_md()
+                .child(self.title.clone()),
+        )
     }
 }
 
@@ -55,7 +53,6 @@ impl TabBar {
          */
         TabBar { state }
     }
-
 }
 
 impl Render for TabBar {
@@ -72,6 +69,7 @@ impl Render for TabBar {
          * across frames. We use named_usize IDs to ensure uniqueness.
          */
         let state = self.state.read(cx);
+        let p = palette(state.theme);
         let tabs = state.tabs.clone();
         let active_idx = state.active_tab;
         let _ = state;
@@ -81,9 +79,9 @@ impl Render for TabBar {
             .flex_row()
             .w_full()
             .h(px(36.0))
-            .bg(rgb(0x2d2d2d))
+            .bg(rgb(p.app_bg))
             .border_b_1()
-            .border_color(rgb(0x252526));
+            .border_color(rgb(p.border_subtle));
 
         let tab_elements: Vec<_> = tabs
             .iter()
@@ -96,12 +94,25 @@ impl Render for TabBar {
                     tab.title.clone()
                 };
 
-                let tab_bg   = if is_active { rgb(0x1e1e1e) } else { rgb(0x2d2d2d) };
-                let tab_text = if is_active { rgb(0xd4d4d4) } else { rgb(0x858585) };
+                let tab_bg = if is_active {
+                    rgb(p.editor_bg)
+                } else {
+                    rgb(p.app_bg)
+                };
+                let tab_text = if is_active {
+                    rgb(p.text)
+                } else {
+                    rgb(p.text_muted)
+                };
+                let border = p.border;
+                let chrome_hover = p.chrome_hover;
+                let chrome_active = p.chrome_active;
+                let text = p.text;
+                let accent = p.accent;
 
                 // Use stable tab.id (not loop idx) so GPUI doesn't confuse element
                 // state when tabs are removed and remaining ones shift positions.
-                let tab_id   = ElementId::named_usize("tab", tab.id);
+                let tab_id = ElementId::named_usize("tab", tab.id);
                 let close_id = ElementId::named_usize("tab-close", tab.id);
 
                 div()
@@ -110,27 +121,38 @@ impl Render for TabBar {
                     .flex_row()
                     .items_center()
                     .h_full()
-                    .px(px(12.0))
-                    .gap(px(8.0))
+                    .min_w(px(96.0))
+                    .max_w(px(220.0))
+                    .px(px(space::MD))
+                    .gap(px(space::SM))
                     .bg(tab_bg)
                     .cursor_pointer()
+                    .rounded(px(radius::SM))
                     .border_r_1()
-                    .border_color(rgb(0x464647))
-                    .when(!is_active, |d| d.border_b_1().border_color(rgb(0x464647)))
+                    .border_color(rgb(border))
+                    .when(!is_active, move |d| {
+                        d.border_b_1()
+                            .border_color(rgb(border))
+                            .hover(move |s| s.bg(rgb(chrome_hover)).text_color(rgb(text)))
+                            .active(move |s| s.bg(rgb(chrome_active)))
+                    })
+                    .when(is_active, move |d| d.border_t_1().border_color(rgb(accent)))
                     // Highlight this tab's left edge when a dragged tab hovers over it.
-                    .drag_over::<TabDragPayload>(|style, _, _, _| {
-                        style.border_l_2().border_color(rgb(0x569cd6))
+                    .drag_over::<TabDragPayload>(move |style, _, _, _| {
+                        style.border_l_2().border_color(rgb(accent))
                     })
                     // Receive a dropped tab — reorder it into this position.
-                    .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
-                        if payload.from_idx != idx {
-                            this.state.update(cx, |s, cx| {
-                                s.move_tab(payload.from_idx, idx);
+                    .on_drop(
+                        cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                            if payload.from_idx != idx {
+                                this.state.update(cx, |s, cx| {
+                                    s.move_tab(payload.from_idx, idx);
+                                    cx.notify();
+                                });
                                 cx.notify();
-                            });
-                            cx.notify();
-                        }
-                    }))
+                            }
+                        }),
+                    )
                     // Click tab body → switch to this tab (fires only when not dragging).
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.state.update(cx, |s, cx| {
@@ -144,7 +166,11 @@ impl Render for TabBar {
                     // Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W>, which does
                     // not match cx.listener's output signature.
                     .on_drag(
-                        TabDragPayload { from_idx: idx, title: title.clone(), offset: Point::default() },
+                        TabDragPayload {
+                            from_idx: idx,
+                            title: title.clone(),
+                            offset: Point::default(),
+                        },
                         |payload: &TabDragPayload, offset, _window, cx| {
                             let ghost = TabDragPayload {
                                 from_idx: payload.from_idx,
@@ -155,12 +181,7 @@ impl Render for TabBar {
                         },
                     )
                     // Tab title label
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(tab_text)
-                            .child(title),
-                    )
+                    .child(div().min_w_0().text_sm().text_color(tab_text).child(title))
                     // Close button (×) — stop_propagation prevents the click from
                     // bubbling to the parent tab div's on_click (set_active_tab).
                     .child(
@@ -171,9 +192,11 @@ impl Render for TabBar {
                             .justify_center()
                             .w(px(16.0))
                             .h(px(16.0))
-                            .rounded(px(2.0))
+                            .rounded(px(radius::XS))
                             .text_sm()
-                            .text_color(rgb(0x858585))
+                            .text_color(rgb(p.text_muted))
+                            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                            .active(move |s| s.bg(rgb(p.chrome_active)))
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
@@ -195,11 +218,13 @@ impl Render for TabBar {
             .justify_center()
             .h_full()
             .w(px(36.0))
-            .text_color(rgb(0x858585))
+            .text_color(rgb(p.text_muted))
             .cursor_pointer()
             .text_lg()
             .border_r_1()
-            .border_color(rgb(0x464647))
+            .border_color(rgb(p.border))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
             .on_click(cx.listener(|this, _ev, _window, cx| {
                 this.state.update(cx, |s, cx| {
                     s.new_tab();
@@ -212,12 +237,13 @@ impl Render for TabBar {
         // Invisible spacer that fills remaining width. On mouse-down we call
         // start_window_move() directly because Linux (X11 + Wayland) implements
         // on_hit_test_window_control as a no-op, so WindowControlArea::Drag never fires.
-        let drag_region = div()
-            .flex_1()
-            .h_full()
-            .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
-                window.start_window_move();
-            });
+        let drag_region =
+            div()
+                .flex_1()
+                .h_full()
+                .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
+                    window.start_window_move();
+                });
 
         // Scrollable container for tabs only. min_w_0 lets it shrink so the
         // fixed "+" and "×" buttons are always visible regardless of tab count.
@@ -243,16 +269,21 @@ impl Render for TabBar {
             .h_full()
             .w(px(46.0))
             .flex_none()
-            .text_color(rgb(0x858585))
+            .text_color(rgb(p.text_muted))
             .cursor_pointer()
             .text_lg()
             .border_l_1()
-            .border_color(rgb(0x464647))
+            .border_color(rgb(p.border))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
             .on_click(|_ev, _window, cx| {
                 cx.quit();
             })
             .child("×");
 
-        bar.child(tab_scroll_area).child(new_btn_fixed).child(drag_region).child(close_btn)
+        bar.child(tab_scroll_area)
+            .child(new_btn_fixed)
+            .child(drag_region)
+            .child(close_btn)
     }
 }

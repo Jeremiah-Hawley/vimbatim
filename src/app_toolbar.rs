@@ -2,9 +2,10 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::AppState;
+use crate::theme::{palette, radius, space};
 
-/// A toolbar row below the tab bar showing the app name, sidebar toggle, and
-/// placeholder buttons reserved for future features.
+/// A toolbar row below the tab bar showing the app name, sidebar toggle,
+/// future command hooks, and secondary app controls.
 pub struct AppToolbar {
     state: Entity<AppState>,
 }
@@ -18,11 +19,11 @@ impl AppToolbar {
         AppToolbar { state }
     }
 
-    fn toolbar_btn(id: &'static str, label: &'static str) -> impl IntoElement {
-        /*
-         * Renders a generic placeholder button with a consistent style.
-         * The id must be unique across all buttons in one render pass.
-         */
+    fn future_command(
+        id: &'static str,
+        label: &'static str,
+        p: crate::theme::Palette,
+    ) -> impl IntoElement {
         div()
             .id(id)
             .flex()
@@ -30,12 +31,14 @@ impl AppToolbar {
             .justify_center()
             .h(px(24.0))
             .px(px(10.0))
-            .rounded(px(4.0))
+            .rounded(px(radius::MD))
             .text_xs()
-            .text_color(rgb(0x858585))
+            .text_color(rgb(p.text_muted))
             .cursor_pointer()
             .border_1()
-            .border_color(rgb(0x464647))
+            .border_color(rgb(p.border_subtle))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
             .child(label)
     }
 }
@@ -45,16 +48,24 @@ impl Render for AppToolbar {
         /*
          * Renders the app toolbar row:
          *
-         *   Vimbatim  |  [≡ Sidebar]  [Btn 1]  [Btn 2]  [Btn 3]  [Btn 4]
+         *   Vimbatim  |  [≡ Sidebar]                         [Settings]
          *
          * The sidebar toggle mutates AppState directly rather than dispatching an
          * action so it works regardless of which element has keyboard focus.
          *
-         * The placeholder buttons (Btn 1–4) are stubs for future features such as
-         * find-in-files, word count, export, or version history.
+         * This row gives users orientation without competing with the ribbon's
+         * command surface.
          */
-        let sidebar_visible = self.state.read(cx).sidebar_visible;
-        let sidebar_label = if sidebar_visible { "≡  Hide Files" } else { "≡  Show Files" };
+        let state = self.state.read(cx);
+        let p = palette(state.theme);
+        let sidebar_visible = state.sidebar_visible;
+        let _ = state;
+
+        let sidebar_label = if sidebar_visible {
+            "≡  Hide Files"
+        } else {
+            "≡  Show Files"
+        };
 
         div()
             .flex()
@@ -62,20 +73,20 @@ impl Render for AppToolbar {
             .items_center()
             .w_full()
             .h(px(36.0))
-            .px(px(12.0))
-            .gap(px(8.0))
-            .bg(rgb(0x252526))
+            .px(px(space::MD))
+            .gap(px(space::SM))
+            .bg(rgb(p.editor_bg_raised))
             .border_b_1()
-            .border_color(rgb(0x2d2d2d))
+            .border_color(rgb(p.border_subtle))
             // ── App name ──────────────────────────────────────────────────────
             .child(
                 div()
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x569cd6))
-                    .pr(px(8.0))
+                    .text_color(rgb(p.accent))
+                    .pr(px(space::SM))
                     .border_r_1()
-                    .border_color(rgb(0x464647))
+                    .border_color(rgb(p.border))
                     .child("Vimbatim"),
             )
             // ── Sidebar toggle ────────────────────────────────────────────────
@@ -87,12 +98,15 @@ impl Render for AppToolbar {
                     .justify_center()
                     .h(px(24.0))
                     .px(px(10.0))
-                    .rounded(px(4.0))
+                    .rounded(px(radius::MD))
                     .text_xs()
-                    .text_color(rgb(0xd4d4d4))
+                    .text_color(rgb(p.text))
                     .cursor_pointer()
+                    .bg(rgb(p.accent_muted))
                     .border_1()
-                    .border_color(rgb(0x569cd6))
+                    .border_color(rgb(p.accent))
+                    .hover(move |s| s.bg(rgb(p.accent_strong)))
+                    .active(move |s| s.bg(rgb(p.accent_muted)))
                     // Directly mutate AppState so the button works regardless of focus
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.state.update(cx, |s, cx| {
@@ -103,10 +117,37 @@ impl Render for AppToolbar {
                     }))
                     .child(sidebar_label),
             )
-            // ── Placeholder buttons for future features ───────────────────────
-            .child(Self::toolbar_btn("toolbar-btn-1", "Find"))
-            .child(Self::toolbar_btn("toolbar-btn-2", "Word Count"))
-            .child(Self::toolbar_btn("toolbar-btn-3", "Export"))
-            .child(Self::toolbar_btn("toolbar-btn-4", "History"))
+            .child(div().flex_1())
+            // ── Future command hooks ─────────────────────────────────────────
+            .child(Self::future_command("toolbar-find", "Find", p))
+            .child(Self::future_command("toolbar-word-count", "Word Count", p))
+            .child(Self::future_command("toolbar-export", "Export", p))
+            .child(Self::future_command("toolbar-history", "History", p))
+            // ── Secondary app controls ───────────────────────────────────────
+            .child(
+                div()
+                    .id("toolbar-settings")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(28.0))
+                    .w(px(32.0))
+                    .rounded(px(radius::MD))
+                    .text_lg()
+                    .text_color(rgb(p.text_muted))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_click(cx.listener(|this, _ev, _window, cx| {
+                        this.state.update(cx, |s, cx| {
+                            s.settings_visible = !s.settings_visible;
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }))
+                    .child("⚙"),
+            )
     }
 }
