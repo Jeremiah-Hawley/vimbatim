@@ -17,6 +17,7 @@ use crate::settings_modal::SettingsModal;
 use crate::state::{AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
+use crate::theme::palette;
 
 /// The root view of the application window.
 ///
@@ -289,6 +290,8 @@ impl Render for MainWindow {
          */
         let sidebar_visible  = self.state.read(cx).sidebar_visible;
         let settings_visible = self.state.read(cx).settings_visible;
+        let theme = self.state.read(cx).theme;
+        let p = palette(theme);
 
         div()
             // Wire up global action handlers for this window
@@ -322,10 +325,13 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::open_stats))
             .on_action(cx.listener(Self::cite_from_link))
             .on_action(cx.listener(Self::wikifi))
+            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                window.blur();
+            })
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e1e))
+            .bg(rgb(p.app_bg))
             // Needed so the modal overlay's `absolute` is relative to this container
             .relative()
             // ── Tab bar ────────────────────────────────────────────────────
