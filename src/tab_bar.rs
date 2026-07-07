@@ -1,7 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::keybinds::{CloseTabAction, NewTabAction};
 use crate::state::AppState;
 
 /// Drag payload for tab reordering. Carries the source tab index and title.
@@ -57,28 +56,6 @@ impl TabBar {
         TabBar { state }
     }
 
-    fn handle_new_tab(&mut self, _: &NewTabAction, _window: &mut Window, cx: &mut Context<Self>) {
-        /*
-         * Appends a blank tab and switches to it.
-         */
-        self.state.update(cx, |s, cx| {
-            s.new_tab();
-            cx.notify();
-        });
-        cx.notify();
-    }
-
-    fn handle_close_active(&mut self, _: &CloseTabAction, _window: &mut Window, cx: &mut Context<Self>) {
-        /*
-         * Closes the currently active tab. AppState ensures at least one tab survives.
-         */
-        let idx = self.state.read(cx).active_tab;
-        self.state.update(cx, |s, cx| {
-            s.close_tab(idx);
-            cx.notify();
-        });
-        cx.notify();
-    }
 }
 
 impl Render for TabBar {
@@ -100,8 +77,6 @@ impl Render for TabBar {
         let _ = state;
 
         let bar = div()
-            .on_action(cx.listener(Self::handle_new_tab))
-            .on_action(cx.listener(Self::handle_close_active))
             .flex()
             .flex_row()
             .w_full()

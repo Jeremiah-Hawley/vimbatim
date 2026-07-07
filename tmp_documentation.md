@@ -2211,3 +2211,71 @@ now evaluates correctly everywhere, not just inside the text editor.
 - **Not hardware-verified**: confirm on a real display that Ctrl+, now
   opens Settings when the sidebar, ribbon, or nothing at all has focus,
   not just when the text editor does.
+
+## Bugfix (real root cause): Ctrl+, and every configured keybind only fired with the text editor focused
+
+The previous "empty context stack" fix (adding `.key_context("App")` to
+`MainWindow`'s root div) did not actually solve the problem — confirmed by
+the user testing on a real display with that fix in place. Traced further
+and found the true root cause.
+
+### Root Cause
+
+`.on_action(cx.listener(Self::handler))`, registered on a specific `div()`
+in `render()`, is a **window-scoped** action listener — GPUI only invokes
+it when that div's node is part of the *currently focused* dispatch path
+(`Window::dispatch_action_on_node_inner` iterates `dispatch_path`, computed
+from `Window.focus`). `TextEditor` was the only view in the app that ever
+called `FocusHandle::focus()` to actually claim focus (on click); nothing
+else — the sidebar, the ribbon, the tab bar — ever did. So the moment
+focus was anywhere other than the text editor (or nowhere at all, e.g.
+right after launch), `MainWindow`'s root div — and every `.on_action`
+handler registered on it, all ~30 of them, Ctrl+, included — was simply
+not on the dispatch path and never ran. The earlier `.key_context("App")`
+fix targeted a real, separate quirk (an empty context stack fails every
+context predicate, even negations) but didn't address this — the div
+itself was never being visited during dispatch when focus was elsewhere,
+regardless of what context tags it carried.
+
+### Fix
+
+Converted every configurable keybind action handler from
+`.on_action(cx.listener(Self::handler))` (view/div-scoped) to
+`App::on_action(...)` (registered globally on `App.global_action_listeners`,
+once, in `MainWindow::new`). Confirmed against GPUI's own
+`Window::dispatch_action_on_node_inner` source: its "Bubble phase for
+global actions" block never reads `dispatch_path` at all — a global
+listener fires for a matching action regardless of focus state,
+unconditionally. This is architecturally the correct mechanism for
+app-wide keyboard shortcuts (as opposed to view-local ones like
+`TextEditor`'s own raw `on_key_down`, which legitimately *should* depend
+on that view having focus).
+
+One subtlety hit along the way: `Context<T>::on_action` has a completely
+different, window-scoped signature (`(TypeId, &mut Window, listener)`)
+that shadows `App::on_action` by name when called through a
+`Context<MainWindow>` — even though `Context<T>` derefs to `App`, Rust
+resolves the inherent method on the concrete type first and errors on
+arity mismatch rather than falling through to the deref'd version. Fixed
+by giving `register_global_actions` a `&mut App` parameter explicitly
+(callers just pass their `cx`, which coerces).
+
+All 32 action handlers (Copy/Cut/Paste/Undo/Redo/SelectAll/Bold/Underline/
+card styles/etc., previously spread across `main_window.rs` and
+`tab_bar.rs`'s `NewTab`/`CloseTab`) are now registered in one place —
+`MainWindow::register_global_actions`, called once from `new()` — each
+closure capturing its own clone of the shared `Entity<AppState>`. Removed
+the now-pointless `.key_context("App")` tag and the earlier `NOT_CAPTURING`
+context-predicate mechanism entirely (superseded by the previous commit's
+switch to `cx.clear_key_bindings()` during capture, which needed no
+context-tree cooperation to begin with).
+
+### Verification
+
+- `cargo test`: 554 passed, 0 failed.
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: this is the fix that should finally resolve
+  the user's repeated real-display reports — confirm Ctrl+, (and ideally
+  a couple of others, e.g. Ctrl+Z/Ctrl+B) now work with focus on the
+  sidebar, the ribbon, or nothing at all, not just the text editor.
