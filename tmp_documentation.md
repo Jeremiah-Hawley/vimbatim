@@ -2437,3 +2437,96 @@ variant.
   disturb a separately-collapsed child's own state; clicking an
   already-visible heading now visibly re-centers the viewport instead of
   doing nothing.
+
+## Docx Round-Trip Fidelity
+
+Fixed every silent formatting-loss bug in `src/docx_parser.rs`: opening a
+real `.docx`, editing it, and saving previously dropped several
+attributes the app's own UI already set — this plan closes each gap
+symmetrically (parse *and* emit) rather than just one direction, plus adds
+preservation for content types the app doesn't model at all instead of
+silently destroying them on save.
+
+### The five formatting round-trip fixes (`src/docx_parser.rs`)
+
+All five follow the same shape: a missing parse arm and/or missing emit
+logic, made symmetric.
+
+- **Alignment + heading** (`<w:pPr>` wrapper): `apply_para_style` already
+  parsed `<w:pStyle>` (heading level) correctly, but `rebuild_document_xml`
+  never emitted `<w:pPr>`/`<w:pStyle>` **at all**, for any paragraph — every
+  Pocket/Hat/Block/Tag heading was silently lost on save. New
+  `apply_para_alignment` reads `<w:jc w:val="...">` (`"center"`/`"right"`/
+  `"both"` — Word's own OOXML name for full justification, not
+  `"justify"`). Both now share one conditionally-emitted `<w:pPr>` block.
+- **Double underline**: `apply_run_prop`'s `w:u` arm set `underline = true`
+  unconditionally, collapsing Hat's double-underline card style to single
+  underline on save. Now reads `w:val="double"` into
+  `run.double_underline`, kept mutually exclusive with `underline`.
+- **Strikethrough**: `<w:strike/>` had zero XML representation in either
+  direction, despite `Run.strikethrough` already being wired through the
+  app's own formatting model.
+- **Pocket box**: no Word equivalent exists at the run level, but a
+  paragraph border (`<w:pBdr>`) is the native equivalent and renders as an
+  actual box in Word. Parsed onto every run in the paragraph (matching how
+  `apply_card_style` already applies `box_format` uniformly), emitted as a
+  4-sided single-line border when any run has it set.
+
+### Preserving content the app can't model (`Paragraph.unsupported_xml`)
+
+New field: `Paragraph.unsupported_xml: Option<String>`. At parse time, a
+paragraph containing one of a **narrow, explicit** list of elements
+(`<w:hyperlink>`, `<w:drawing>`, `<w:footnoteReference>`,
+`<w:endnoteReference>`, `<w:fldSimple>`, `<w:instrText>`) has its full raw
+inner XML captured verbatim. On save, `rebuild_document_xml` re-emits that
+verbatim instead of rebuilding from `runs`/`heading`/`alignment` — so
+editing text *elsewhere* in the document no longer silently deletes a
+hyperlink or image the app can't itself represent.
+
+Deliberately narrow rather than "anything unhandled": incidental tags like
+`<w:bookmarkStart>`/`<w:proofErr>` must keep being silently dropped exactly
+as before, not freeze the paragraph from editing.
+
+**Invalidation**: cleared to `None` the instant the paragraph is actually
+touched, at `document_ops.rs`'s existing mutation choke points
+(`sync_insert_char`, `sync_delete_range`, `apply_formatting`) — editing the
+exotic paragraph directly honestly drops its content rather than
+pretending to keep a hyperlink's target in sync with retyped text.
+
+### Warning about content the app can't preserve at all (tables)
+
+Tables are block-level (not a single line the way a paragraph is), so
+`Vec<Paragraph>` can't represent them without a real block-model redesign
+— explicitly out of scope. Instead: `parse_docx` scans raw
+`word/document.xml` for `<w:tbl` and sets `DocxOrigin.has_unsupported_blocks`;
+`open_file` copies this onto `Tab.has_unsupported_blocks`.
+`text_editor.rs`'s `render()` shows a dismissible banner ("This document
+contains a table — Vimbatim can't edit or preserve it; saving will remove
+it.") above the editor when set and not yet dismissed
+(`Tab.unsupported_banner_dismissed`). Not a blocking modal — the file still
+opens and saves; the risk is just no longer silent.
+
+### Testing
+
+Two layers, per the design spec: XML-string tests (`rebuild_document_xml`
+→ `parse_document_xml` directly, one pair per fixed attribute) plus a new
+real-file round-trip test (`create_new_docx` → `parse_docx` →
+`DocxOrigin::save` → `parse_docx` again) exercising the actual ZIP/file
+code path the running app uses — no prior test in this file touched
+`parse_docx`/`write_docx`/`DocxOrigin::save` at all.
+
+### Verification
+
+- `cargo test`: 597 passed, 0 failed (593 unit incl. ~30 new; 4
+  integration), across all 7 tasks.
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- No new dead-code warnings vs. the pre-plan baseline.
+- **Not verifiable in this sandbox, needs the user's own machine**: open a
+  real `.docx` containing at least one Pocket/Hat/Block/Tag heading, a
+  centered paragraph, and (if available) a hyperlink or table, in this
+  app; make an unrelated text edit; save; reopen the saved file in actual
+  Microsoft Word (or LibreOffice/Google Docs as a fallback) and confirm
+  the heading level, alignment, double underline/strikethrough/box, and
+  (for the hyperlink case) the hyperlink itself are all still correct.
+  This is the one thing no test in this plan can substitute for.
