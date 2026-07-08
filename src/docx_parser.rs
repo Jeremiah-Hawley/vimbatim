@@ -387,7 +387,16 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     match e.name().as_ref() {
         b"w:b" => { run.bold = true; }
         b"w:i" => { run.italic = true; }
-        b"w:u" => { run.underline = true; }
+        b"w:u" => {
+            let is_double = e.attributes().flatten().any(|attr| {
+                attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double"
+            });
+            if is_double {
+                run.double_underline = true;
+            } else {
+                run.underline = true;
+            }
+        }
         b"w:highlight" => {
             run.highlight = true;
             for attr in e.attributes().flatten() {
@@ -469,13 +478,14 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
         }
         for run in &para.runs {
             out.push_str("<w:r>");
-            let has_props = run.bold || run.italic || run.underline || run.highlight
-                || run.size > 0 || run.font.is_some() || run.color.is_some();
+            let has_props = run.bold || run.italic || run.underline || run.double_underline
+                || run.highlight || run.size > 0 || run.font.is_some() || run.color.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
                 if run.bold      { out.push_str("<w:b/>"); }
                 if run.italic    { out.push_str("<w:i/>"); }
-                if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
+                if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
+                else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
                 if run.highlight {
                     out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
                 }
@@ -745,6 +755,48 @@ mod tests {
         let reparsed = parse_document_xml(&xml).unwrap();
         assert_eq!(reparsed[0].heading, 1);
         assert_eq!(reparsed[0].alignment, Alignment::Center);
+    }
+
+    // ── double underline parsing/emission ───────────────────────────────────
+
+    #[test]
+    fn test_parses_double_underline_distinctly_from_single() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="double"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert!(paragraphs[0].runs[0].double_underline);
+        assert!(!paragraphs[0].runs[0].underline);
+    }
+
+    #[test]
+    fn test_parses_single_underline_val_as_plain_underline() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="single"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert!(paragraphs[0].runs[0].underline);
+        assert!(!paragraphs[0].runs[0].double_underline);
+    }
+
+    #[test]
+    fn test_rebuild_emits_double_underline() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:u w:val="double"/>"#));
+    }
+
+    #[test]
+    fn test_double_underline_round_trip_through_parse_and_rebuild() {
+        let original = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        let reparsed = parse_document_xml(&xml).unwrap();
+        assert!(reparsed[0].runs[0].double_underline);
+        assert!(!reparsed[0].runs[0].underline);
     }
 
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
