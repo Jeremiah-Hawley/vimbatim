@@ -140,24 +140,11 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let state = self.state.read(cx);
-        let content = state.active_content().to_string();
-        let (cursor_line, cursor_col) = state.cursor_line_col();
-        let _ = state;
-
-        let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
-        let visual_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
-
-        let cursor_top     = visual_row as f32 * LINE_HEIGHT_PX;
+        let Some((cursor_top, viewport_h, max_y, offset_x)) = self.cursor_scroll_geometry(cx) else { return };
         let cursor_bottom  = cursor_top + LINE_HEIGHT_PX;
         let margin         = SCROLL_MARGIN_LINES * LINE_HEIGHT_PX;
 
         let offset         = self.scroll_handle.offset();
-        let viewport_h     = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
-        if viewport_h <= 0.0 { return; }
-
-        let max_y          = self.scroll_handle.max_offset().y.as_f32();
         let visible_top    = -offset.y.as_f32();
         let visible_bottom = visible_top + viewport_h;
 
@@ -167,13 +154,52 @@ impl TextEditor {
             // Clamped to 0 so this can't scroll past the top of the document
             // just because the margin asked for space that doesn't exist yet.
             let new_y = (margin - cursor_top).clamp(-max_y.max(0.0), 0.0);
-            self.scroll_handle.set_offset(point(offset.x, px(new_y)));
+            self.scroll_handle.set_offset(point(offset_x, px(new_y)));
         } else if cursor_bottom > visible_bottom - margin {
             // Cursor is within `margin` of the bottom edge (or below it) —
             // scroll down so `margin` worth of buffer opens below the line.
             let new_y = (viewport_h - margin - cursor_bottom).clamp(-max_y.max(0.0), 0.0);
-            self.scroll_handle.set_offset(point(offset.x, px(new_y)));
+            self.scroll_handle.set_offset(point(offset_x, px(new_y)));
         }
+    }
+
+    /// Shared setup for `scroll_to_cursor` and `scroll_to_cursor_centered`:
+    /// resolves the cursor's current visual row into content-space Y (same
+    /// space `line_col_from_mouse_position` uses), plus the viewport height
+    /// and max scroll offset needed to clamp any new offset. `None` when the
+    /// scroll handle hasn't been laid out yet (viewport_h <= 0), which can
+    /// happen on the very first frame.
+    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels)> {
+        let state = self.state.read(cx);
+        let content = state.active_content().to_string();
+        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let _ = state;
+
+        let lines = document_lines(&content);
+        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+        let visual_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
+        let cursor_top = visual_row as f32 * LINE_HEIGHT_PX;
+
+        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+        if viewport_h <= 0.0 { return None; }
+
+        let max_y = self.scroll_handle.max_offset().y.as_f32();
+        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x))
+    }
+
+    /// Unlike `scroll_to_cursor` (which only nudges the viewport when the
+    /// cursor is near an edge), this always repositions the cursor's line to
+    /// the vertical center of the viewport. Used exclusively by the Nav
+    /// menu's jump-to-heading (`AppState::jump_to_line`, consumed via
+    /// `Tab.pending_scroll_to_cursor` in `render()` below) — landing back on
+    /// an already-visible line with no scroll at all reads as "nothing
+    /// happened" even though the cursor did move, which defeats the point
+    /// of clicking a heading to jump to it.
+    fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
+        let Some((cursor_top, viewport_h, max_y, offset_x)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - LINE_HEIGHT_PX) / 2.0;
+        let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
+        self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
 
     fn move_cursor_visual_row(&self, cx: &mut Context<Self>, delta: isize, extend: bool) {
@@ -597,11 +623,11 @@ impl Render for TextEditor {
          * Clicking anywhere in the editor reclaims keyboard focus.
          */
         // Nav menu jump (state.rs's `jump_to_line`): FileExplorer has no
-        // direct reference to this view to call scroll_to_cursor() on, so
-        // it leaves a flag on the active tab instead. Honor and clear it
-        // here, before laying out this frame, so a heading clicked from
-        // off-screen is actually visible immediately rather than only
-        // having its cursor position correct.
+        // direct reference to this view to call a scroll method on, so it
+        // leaves a flag on the active tab instead. Honor and clear it here,
+        // before laying out this frame — always centering (not the regular
+        // edge-triggered scroll_to_cursor) so clicking an already-visible
+        // heading still visibly does something.
         let should_scroll = self.state.update(cx, |state, _cx| {
             let active = state.active_tab;
             if let Some(tab) = state.tabs.get_mut(active) {
@@ -613,7 +639,7 @@ impl Render for TextEditor {
             false
         });
         if should_scroll {
-            self.scroll_to_cursor(cx);
+            self.scroll_to_cursor_centered(cx);
         }
 
         let state = self.state.read(cx);

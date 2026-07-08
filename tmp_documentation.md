@@ -2358,3 +2358,82 @@ export pipeline works now, not just the export function in isolation.
   click a heading that's scrolled off-screen and confirm the editor
   actually scrolls to it, not just moves the cursor invisibly; confirm
   Wikifi export now produces real markdown headings.
+
+## Nav Menu Follow-up: Collapse Arrows + Always-Center Jump
+
+Two refinements requested after the initial Nav implementation.
+
+### 1. Collapse arrows
+
+This required a real design change, not just an addition: the original
+Nav tree indented purely by *type* (Pocket always depth 0, Hat always
+depth 1, etc., "nested by type, not document position" — an explicit
+choice in the original design doc). But "collapse the headings underneath
+it" only has a well-defined meaning for *actual* document-structure
+nesting — a Hat's real children are whatever Blocks/Tags follow it before
+the next Hat or Pocket, not "every Block/Tag in the document." So this
+follow-up switches Nav to real tree nesting.
+
+**`src/file_explorer.rs`:**
+- New free function `build_nav_entries(headings, collapsed) -> Vec<NavEntry>`
+  — the classic "a heading's children are everything up to the next
+  heading at an equal-or-shallower level" algorithm (same one Markdown/
+  VSCode outline views use for a flat heading list), implemented with a
+  single pass and a small level stack. `NavEntry.depth` is now actual tree
+  depth (an orphan Tag with no preceding Pocket/Hat/Block sits at depth 0,
+  not depth 3); `NavEntry.has_children` gates whether a row gets an arrow
+  at all.
+- New `FileExplorer.nav_collapsed: HashSet<usize>` (line indices) — view-
+  only UI state, deliberately *not* threaded through `AppState` (unlike
+  the file tree's own `FileNode::Dir.expanded`, which lives in `AppState`
+  because file-tree structure is itself shared state — collapse state
+  here isn't shared with or meaningful to anything else). Persists across
+  re-renders naturally as a struct field; collapsing an outer heading
+  doesn't clear an inner heading's own collapsed flag, so re-expanding the
+  outer one doesn't silently re-expand the inner one too.
+- Each row is now two separate sibling elements (an optional arrow div +
+  the text div), not one div with a single click handler — the arrow
+  toggles `nav_collapsed` via `cx.listener` (needs `&mut self`), the text
+  calls `jump_to_line` via the same plain-closure-on-`state_handle`
+  pattern used elsewhere. Siblings don't bubble into each other, so no
+  `stop_propagation` juggling was needed.
+- 7 new unit tests directly on `build_nav_entries` (pure, no GPUI
+  context): flat siblings, strictly-nested levels, an orphan Tag's depth,
+  a sibling correctly popping back to depth 0 after a deeper subtree,
+  collapse hiding only its own subtree, nested collapse state surviving
+  an outer re-expand, and leaf headings getting no arrow.
+- Hit the same `gpui::*` / `#[test]` shadowing recursion-limit gotcha
+  `text_editor.rs`'s test module already has a comment about — `use
+  super::*` inside `mod tests` pulls in `gpui::*`'s own `test` macro,
+  which shadows `std::test` and blows the recursion limit expanding it.
+  Fixed the same way: import only the specific items needed, not `super::*`.
+
+### 2. Always center on jump, don't just scroll-into-view
+
+`scroll_to_cursor` (used by all *other* cursor movement) only nudges the
+viewport when the cursor is near an edge — clicking a heading that's
+already visible would previously do nothing, which reads as "the click
+didn't work" even though the cursor did move.
+
+**`src/text_editor.rs`:** extracted the shared setup both scroll methods
+need (cursor's content-space Y, viewport height, max scroll offset) into
+`cursor_scroll_geometry`, then added `scroll_to_cursor_centered`, which
+always repositions the cursor's line to the vertical middle of the
+viewport rather than only correcting when it's near an edge. The
+`pending_scroll_to_cursor` flag (exclusively set by `jump_to_line`) now
+calls this instead of the regular `scroll_to_cursor` — ordinary in-editor
+navigation (arrow keys, vim motions, click-to-position) is completely
+unaffected, since none of those touch this flag or call the centered
+variant.
+
+### Verification
+
+- `cargo test`: 565 passed, 0 failed (561 unit incl. 7 new; 4 integration).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: confirm on a real display — a heading with
+  nested headings shows an arrow, clicking it hides/shows exactly its own
+  subtree (not siblings'), and collapsing/re-expanding a parent doesn't
+  disturb a separately-collapsed child's own state; clicking an
+  already-visible heading now visibly re-centers the viewport instead of
+  doing nothing.

@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::docx_parser::create_new_docx;
@@ -18,6 +19,16 @@ use crate::theme::{palette, radius, space, Palette};
 ///     nested by type. Clicking one jumps the editor to that line.
 pub struct FileExplorer {
     state: Entity<AppState>,
+    /// Line indices (into the active tab's content) of Nav headings the
+    /// user has collapsed, hiding their nested headings. View-only UI
+    /// state — unlike the file tree's own expand/collapse (`FileNode::Dir.
+    /// expanded`, stored in `AppState` since file-tree structure is itself
+    /// shared app state), nothing else needs to know or persist this, so it
+    /// lives here rather than being threaded through `AppState`. Cleared
+    /// implicitly by nothing — collapsed state for a line index survives
+    /// edits elsewhere in the document, same as the file tree's `expanded`
+    /// flags survive unrelated file operations.
+    nav_collapsed: HashSet<usize>,
 }
 
 impl FileExplorer {
@@ -27,7 +38,7 @@ impl FileExplorer {
          * the rest of the app can react to file changes without querying the
          * sidebar directly.
          */
-        FileExplorer { state }
+        FileExplorer { state, nav_collapsed: HashSet::new() }
     }
 
     fn create_new_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -246,13 +257,18 @@ impl FileExplorer {
             .child(label)
     }
 
-    /// Renders the Nav mode's heading outline: every line in the active
-    /// tab whose `Paragraph.heading` is 1–4 (Pocket/Hat/Block/Tag — set by
-    /// `AppState::apply_card_style`), in document order, indented by type
-    /// (Pocket flush left, Tag deepest). Clicking a row jumps the editor to
-    /// that line via `AppState::jump_to_line`. Shows a placeholder message
-    /// instead of an empty list when the active tab has no headings yet.
-    fn render_nav_tree(state_handle: &Entity<AppState>, p: Palette, cx: &mut Context<FileExplorer>) -> AnyElement {
+    /// Renders the Nav mode's heading outline: every line in the active tab
+    /// whose `Paragraph.heading` is 1–4 (Pocket/Hat/Block/Tag — set by
+    /// `AppState::apply_card_style`), nested by actual document structure
+    /// (see `build_nav_entries`) rather than raw heading level, so a
+    /// heading's collapse arrow hides exactly the headings between it and
+    /// its next sibling — not an unrelated, fixed set of "everything at a
+    /// deeper type". Clicking a row's text jumps the editor to that line
+    /// via `AppState::jump_to_line`; clicking its arrow (present only when
+    /// it has nested headings) toggles `self.nav_collapsed` instead. Shows
+    /// a placeholder message instead of an empty list when the active tab
+    /// has no headings yet.
+    fn render_nav_tree(&self, state_handle: &Entity<AppState>, p: Palette, cx: &mut Context<FileExplorer>) -> AnyElement {
         let state = state_handle.read(cx);
         let Some(tab) = state.tabs.get(state.active_tab) else {
             return div().into_any_element();
@@ -283,39 +299,123 @@ impl FileExplorer {
                 .into_any_element();
         }
 
+        let entries = build_nav_entries(&headings, &self.nav_collapsed);
+
         div()
             .id("nav-scroll")
             .flex_1()
             .overflow_y_scroll()
             .py(px(space::XS))
-            .children(headings.into_iter().map(|(line_idx, heading, text)| {
-                let indent = px(((heading - 1) as f32) * 16.0);
-                let row_id = ElementId::named_usize("nav-heading", line_idx);
+            .children(entries.into_iter().map(|entry| {
+                let indent = px((entry.depth as f32) * 16.0);
+                let line_idx = entry.line_idx;
+                let is_collapsed = self.nav_collapsed.contains(&line_idx);
                 let state_clone = state_handle.clone();
 
                 div()
-                    .id(row_id)
                     .flex()
+                    .flex_row()
                     .items_center()
                     .h(px(24.0))
-                    .pl(indent + px(space::MD))
+                    .pl(indent + px(space::SM))
                     .pr(px(space::SM))
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(rgb(p.text))
-                    .truncate()
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
-                    .active(move |s| s.bg(rgb(p.chrome_active)))
-                    .on_click(move |_ev, _window, cx| {
-                        state_clone.update(cx, |s, cx| {
-                            s.jump_to_line(line_idx);
-                            cx.notify();
-                        });
+                    // Arrow: only present when this heading has nested
+                    // headings to collapse. A fixed-width spacer otherwise,
+                    // so leaf headings' text still lines up with siblings
+                    // that do have one.
+                    .child(if entry.has_children {
+                        let arrow_id = ElementId::named_usize("nav-arrow", line_idx);
+                        div()
+                            .id(arrow_id)
+                            .w(px(16.0))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(p.text_muted))
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                if !this.nav_collapsed.remove(&line_idx) {
+                                    this.nav_collapsed.insert(line_idx);
+                                }
+                                cx.notify();
+                            }))
+                            .child(if is_collapsed { "▸" } else { "▾" })
+                            .into_any_element()
+                    } else {
+                        div().w(px(16.0)).flex_shrink_0().into_any_element()
                     })
-                    .child(text)
+                    .child(
+                        div()
+                            .id(ElementId::named_usize("nav-heading", line_idx))
+                            .flex_1()
+                            .min_w_0()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(rgb(p.text))
+                            .truncate()
+                            .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                            .active(move |s| s.bg(rgb(p.chrome_active)))
+                            .on_click(move |_ev, _window, cx| {
+                                state_clone.update(cx, |s, cx| {
+                                    s.jump_to_line(line_idx);
+                                    cx.notify();
+                                });
+                            })
+                            .child(entry.text),
+                    )
             }))
             .into_any_element()
     }
+}
+
+/// One row in the Nav tree, already resolved to its rendering position —
+/// see `build_nav_entries`.
+struct NavEntry {
+    line_idx: usize,
+    text: String,
+    /// Nesting depth from actual document structure (0 = no ancestor
+    /// heading), NOT the raw `heading` level — a Tag with no preceding
+    /// Pocket/Hat/Block ancestor sits at depth 0, not depth 3.
+    depth: usize,
+    /// True when the next heading in document order has a numerically
+    /// greater `heading` value (i.e. is nested under this one) — controls
+    /// whether this row gets a collapse arrow at all.
+    has_children: bool,
+}
+
+/// Turns a flat, document-order list of `(line_idx, heading_level, text)`
+/// into the actual tree Nav's collapse arrows operate on, using the same
+/// "a heading's children are everything up to the next heading at an
+/// equal-or-shallower level" rule Markdown/VSCode outline views use for a
+/// flat heading list. `collapsed` filters out any heading whose nearest
+/// collapsed ancestor's subtree it falls inside — nested collapse state is
+/// preserved even while hidden (an inner collapse isn't lost when its
+/// outer ancestor re-expands, since `collapsed` itself is untouched here).
+fn build_nav_entries(headings: &[(usize, u8, String)], collapsed: &HashSet<usize>) -> Vec<NavEntry> {
+    let mut stack: Vec<u8> = Vec::new();
+    let mut entries = Vec::new();
+    // Once we enter a collapsed heading's subtree, set to the depth its
+    // children sit at; cleared the moment we reach something shallower.
+    let mut skip_from_depth: Option<usize> = None;
+
+    for (i, (line_idx, level, text)) in headings.iter().enumerate() {
+        while stack.last().is_some_and(|top| top >= level) {
+            stack.pop();
+        }
+        let depth = stack.len();
+
+        let is_skipped = skip_from_depth.is_some_and(|skip_depth| depth >= skip_depth);
+        if !is_skipped {
+            skip_from_depth = None;
+            let has_children = headings.get(i + 1).is_some_and(|(_, next_level, _)| next_level > level);
+            entries.push(NavEntry { line_idx: *line_idx, text: text.clone(), depth, has_children });
+            if has_children && collapsed.contains(line_idx) {
+                skip_from_depth = Some(depth + 1);
+            }
+        }
+
+        stack.push(*level);
+    }
+    entries
 }
 
 impl Render for FileExplorer {
@@ -486,7 +586,7 @@ impl Render for FileExplorer {
                         Self::render_node(node, 0, &active_path, p, &state_handle, cx)
                     }))
                     .into_any_element(),
-                SidebarMode::Nav => Self::render_nav_tree(&state_handle, p, cx),
+                SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
     }
 }
@@ -512,5 +612,133 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
             }
             toggle_dir_expanded(children, target);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Import only what's needed, not `super::*` — file_explorer.rs has
+    // `use gpui::*;` at module scope, and gpui exports its own `test`
+    // attribute macro (for async GPUI tests) that shadows std's `#[test]`
+    // and sends the test-attribute expansion into infinite recursion if
+    // it's in scope here (same fix as text_editor.rs's own test module).
+    use super::build_nav_entries;
+    use std::collections::HashSet;
+
+    /// (line_idx, heading_level, text) shorthand matching build_nav_entries'
+    /// own input shape, so test cases read as close to real headings as
+    /// possible without pulling in AppState/Paragraph.
+    fn h(line_idx: usize, level: u8, text: &str) -> (usize, u8, String) {
+        (line_idx, level, text.to_string())
+    }
+
+    #[test]
+    fn flat_siblings_all_depth_zero_no_children() {
+        // Three Pockets in a row: none nests under another.
+        let headings = vec![h(0, 1, "A"), h(1, 1, "B"), h(2, 1, "C")];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|e| e.depth == 0));
+        assert!(entries.iter().all(|e| !e.has_children));
+    }
+
+    #[test]
+    fn strictly_increasing_levels_nest_and_flag_has_children() {
+        // Pocket > Hat > Block > Tag, each nested one deeper than the last.
+        let headings = vec![h(0, 1, "Pocket"), h(1, 2, "Hat"), h(2, 3, "Block"), h(3, 4, "Tag")];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        let depths: Vec<usize> = entries.iter().map(|e| e.depth).collect();
+        assert_eq!(depths, vec![0, 1, 2, 3]);
+        assert_eq!(
+            entries.iter().map(|e| e.has_children).collect::<Vec<_>>(),
+            vec![true, true, true, false],
+        );
+    }
+
+    #[test]
+    fn a_tag_with_no_ancestor_sits_at_depth_zero_not_its_type_level() {
+        // A lone Tag (heading level 4) with nothing before it has no
+        // ancestor at all — it should render flush left, not indented as
+        // if it were nested three levels deep by raw type.
+        let headings = vec![h(0, 4, "orphan tag")];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        assert_eq!(entries[0].depth, 0);
+        assert!(!entries[0].has_children);
+    }
+
+    #[test]
+    fn sibling_after_deeper_subtree_pops_back_to_correct_depth() {
+        // Pocket > Hat > Block, then a second Pocket at the top level again —
+        // the second Pocket must be depth 0, not still nested under the first.
+        let headings = vec![
+            h(0, 1, "Pocket A"),
+            h(1, 2, "Hat under A"),
+            h(2, 3, "Block under Hat"),
+            h(3, 1, "Pocket B"),
+        ];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        assert_eq!(entries[3].line_idx, 3);
+        assert_eq!(entries[3].depth, 0);
+        assert!(entries[0].has_children); // Pocket A has Hat/Block nested under it
+    }
+
+    #[test]
+    fn collapsing_a_heading_hides_only_its_own_subtree() {
+        let headings = vec![
+            h(0, 1, "Pocket A"),
+            h(1, 2, "Hat under A"),
+            h(2, 3, "Block under Hat"),
+            h(3, 1, "Pocket B"),
+            h(4, 2, "Hat under B"),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert(0); // collapse "Pocket A"
+
+        let entries = build_nav_entries(&headings, &collapsed);
+        let visible: Vec<usize> = entries.iter().map(|e| e.line_idx).collect();
+
+        // Pocket A itself still shows (with its arrow); its Hat/Block are
+        // hidden. Pocket B and its own Hat are untouched.
+        assert_eq!(visible, vec![0, 3, 4]);
+    }
+
+    #[test]
+    fn collapsing_outer_heading_preserves_inner_collapse_state() {
+        // A Pocket containing a Hat, which itself contains a Block. Collapse
+        // both; only the Pocket's collapse should determine what's hidden
+        // right now, but the Hat's own collapsed flag must survive being
+        // hidden, so re-expanding the Pocket alone doesn't also silently
+        // re-expand the Hat.
+        let headings = vec![
+            h(0, 1, "Pocket"),
+            h(1, 2, "Hat"),
+            h(2, 3, "Block"),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert(0); // Pocket collapsed
+        collapsed.insert(1); // Hat (currently hidden) also collapsed
+
+        // While the Pocket is collapsed, only it is visible.
+        let entries = build_nav_entries(&headings, &collapsed);
+        assert_eq!(entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(), vec![0]);
+
+        // Re-expand just the Pocket (remove line 0 from the set) — the Hat's
+        // own collapse (line 1, never removed) should still hide the Block.
+        collapsed.remove(&0);
+        let entries = build_nav_entries(&headings, &collapsed);
+        assert_eq!(entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn non_collapsed_heading_with_no_children_shows_no_arrow() {
+        let headings = vec![h(0, 1, "Pocket"), h(1, 4, "Tag under it")];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        assert!(entries[0].has_children); // Pocket has the Tag nested under it
+        assert!(!entries[1].has_children); // Tag itself has nothing nested under it
     }
 }
