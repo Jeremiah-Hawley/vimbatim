@@ -45,6 +45,18 @@ pub struct Paragraph {
     pub runs: Vec<Run>,
     pub heading: u8,
     pub alignment: Alignment,  // left, center, right, justify
+    /// Raw inner XML (everything between `<w:p...>` and `</w:p>`), captured
+    /// at parse time only when this paragraph contains one of a narrow,
+    /// explicit list of elements the app doesn't model (hyperlinks, inline
+    /// drawings, footnote/endnote references, field codes) — see
+    /// `parse_document_xml`'s `UNSUPPORTED_INLINE_TAGS`. `Some` means
+    /// `rebuild_document_xml` re-emits this verbatim instead of rebuilding
+    /// from `runs`/`heading`/`alignment`. Cleared to `None` the instant this
+    /// paragraph is actually edited (`document_ops.rs`'s mutation choke
+    /// points), at which point whatever exotic content it had is
+    /// permanently, deliberately dropped — there's no way to keep e.g. a
+    /// hyperlink's target in sync with retyped text.
+    pub unsupported_xml: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -243,7 +255,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
             Event::Start(ref e) => {
                 match e.name().as_ref() {
                     b"w:p" => {
-                        current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default() });
+                        current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
                         para_has_box_border = false;
                     }
                     b"w:pPr" => { in_ppr = true; }
@@ -721,7 +733,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Center,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:jc w:val="center"/>"#));
     }
@@ -732,7 +745,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:jc"));
     }
@@ -743,7 +757,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 2,
             alignment: Alignment::Left,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:pStyle w:val="heading2"/>"#));
     }
@@ -754,7 +769,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pStyle"));
     }
@@ -765,7 +781,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pPr"));
     }
@@ -776,7 +793,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 1,
             alignment: Alignment::Center,
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml).unwrap();
         assert_eq!(reparsed[0].heading, 1);
@@ -807,7 +825,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:u w:val="double"/>"#));
     }
@@ -818,7 +837,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml).unwrap();
         assert!(reparsed[0].runs[0].double_underline);
@@ -840,7 +860,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:strike/>"));
     }
@@ -851,7 +872,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml).unwrap();
         assert!(reparsed[0].runs[0].strikethrough);
@@ -880,7 +902,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), box_format: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:pBdr>"));
         assert!(xml.contains("<w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"));
@@ -895,7 +918,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pBdr"));
     }
@@ -909,7 +933,8 @@ mod tests {
             ],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml).unwrap();
         assert!(reparsed[0].runs[0].box_format);
@@ -929,7 +954,8 @@ mod tests {
             runs: vec![Run { text: "hello".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         create_new_docx(&initial, &path).unwrap();
 
         // 2. Open it through the real parse_docx path (ZIP + XML), not the
@@ -972,7 +998,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), italic: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:i/>"));
     }
@@ -983,7 +1010,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), font: Some("Georgia".into()), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:rFonts w:ascii="Georgia"/>"#));
     }
@@ -994,7 +1022,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), color: Some("FF0000".into()), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:color w:val="FF0000"/>"#));
     }
@@ -1005,7 +1034,8 @@ mod tests {
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("<w:rPr>"));
     }
@@ -1022,7 +1052,8 @@ mod tests {
             }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
         // matching what parse_document_xml expects to find.

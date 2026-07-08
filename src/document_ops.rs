@@ -115,8 +115,8 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { runs: para_a_runs, heading, alignment },
-            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment },
+            Paragraph { runs: para_a_runs, heading, alignment, unsupported_xml: None },
+            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
         ],
     );
 }
@@ -157,7 +157,7 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
         merged_runs.push(Run::default());
     }
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment: Alignment::default() }]);
+    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment: Alignment::default(), unsupported_xml: None }]);
 }
 
 fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, end_run: usize, end_char: usize) {
@@ -413,7 +413,7 @@ mod tests {
     }
 
     fn para(runs: Vec<Run>) -> Paragraph {
-        Paragraph { runs, heading: 0, alignment: Alignment::default() }
+        Paragraph { runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     #[test]

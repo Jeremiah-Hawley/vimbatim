@@ -237,7 +237,7 @@ pub struct Tab {
 /// it. Never `vec![]`: every rich-text-aware function assumes at least one
 /// paragraph and run always exist.
 pub fn default_paragraphs() -> Vec<Paragraph> {
-    vec![Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default() }]
+    vec![Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }]
 }
 
 impl Tab {
@@ -5190,7 +5190,8 @@ mod tests {
             runs: vec![Run { text: "abc".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let mut state = make_state_with_paragraphs(paragraphs, 1);
         state.insert_char('X');
         assert_eq!(state.tabs[0].content, "aXbc");
@@ -5200,7 +5201,7 @@ mod tests {
 
     #[test]
     fn test_backspace_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0, alignment: Alignment::default() }];
+        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.backspace();
         assert_eq!(state.tabs[0].content, "ac");
@@ -5213,7 +5214,8 @@ mod tests {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }, Run { text: " plain".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.tabs[0].selection = Some((2, 6)); // deletes "ld p"
         state.delete_selection();
@@ -5229,8 +5231,8 @@ mod tests {
     #[test]
     fn test_vim_dd_choke_point_keeps_paragraphs_synced() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("two")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("two")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.handle_vim_key("d", false, None);
@@ -5242,7 +5244,7 @@ mod tests {
 
     #[test]
     fn test_vim_paste_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0, alignment: Alignment::default() }];
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
@@ -5253,8 +5255,8 @@ mod tests {
     #[test]
     fn test_dispatch_vim_substitute_only_touches_changed_paragraphs() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("untouched")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("untouched")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.dispatch_vim_command("%s/foo/baz/");
@@ -5268,7 +5270,7 @@ mod tests {
 
     #[test]
     fn test_insert_newline_via_enter_splits_paragraph_in_sync() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0, alignment: Alignment::default() }];
+        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.insert_char('\n');
         assert_eq!(state.tabs[0].content, "he\nllo");
@@ -5966,7 +5968,8 @@ mod tests {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let mut state = make_state_with_paragraphs(paragraphs, 4);
         state.insert_char('X'); // "boldX", paragraphs now ["boldX"] still bold
         assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "boldX");
@@ -5982,7 +5985,8 @@ mod tests {
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
-        }];
+        unsupported_xml: None,
+    }];
         let mut state = make_state_with_paragraphs(paragraphs, 4);
         state.insert_char('X');
         state.undo();
@@ -6093,7 +6097,7 @@ mod tests {
     }
 
     fn para_plain(text: &str) -> Paragraph {
-        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0, alignment: Alignment::default() }
+        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     #[test]
@@ -8869,8 +8873,8 @@ mod tests {
     #[test]
     fn test_apply_card_style_sets_heading_on_correct_line_when_cursor_on_second_line() {
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         // content is "first line\nsecond line" — byte 11 is the start of "second line".
         let mut state = make_state_with_paragraphs(paragraphs, 11);
@@ -8901,11 +8905,11 @@ mod tests {
         // set Paragraph.heading (wikify_export.rs's own test covers the
         // export function in isolation with hand-built headings).
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("Case Title")], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("Off-case Subtitle")], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("Block heading")], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("Tag text")], heading: 0, alignment: Alignment::default() },
-            Paragraph { runs: vec![run_plain("plain body text")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("Case Title")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("Off-case Subtitle")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("Block heading")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("Tag text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("plain body text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
 
