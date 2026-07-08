@@ -916,6 +916,54 @@ mod tests {
         assert!(reparsed[0].runs[1].box_format);
     }
 
+    // ── real-file round trip (parse_docx -> DocxOrigin::save -> parse_docx) ─
+
+    #[test]
+    fn test_real_file_round_trip_preserves_all_five_fixed_attributes() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_docx_roundtrip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        // 1. Create a minimal real .docx on disk.
+        let initial = vec![Paragraph {
+            runs: vec![Run { text: "hello".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        create_new_docx(&initial, &path).unwrap();
+
+        // 2. Open it through the real parse_docx path (ZIP + XML), not the
+        //    XML-string helpers the rest of this file's tests use.
+        let (mut paragraphs, origin) = parse_docx(&path).unwrap();
+        assert_eq!(paragraphs[0].runs[0].text, "hello");
+
+        // 3. Apply every attribute this plan fixed, directly on the parsed
+        //    model (mirroring what AppState::apply_card_style and
+        //    apply_formatting_to_selection do in the real app).
+        paragraphs[0].heading = 1;
+        paragraphs[0].alignment = Alignment::Center;
+        paragraphs[0].runs[0].double_underline = true;
+        paragraphs[0].runs[0].strikethrough = true;
+        paragraphs[0].runs[0].box_format = true;
+
+        // 4. Save through the real DocxOrigin::save path (ZIP write, not a
+        //    bare string).
+        origin.save(&paragraphs, &path).unwrap();
+
+        // 5. Parse it again from scratch — a completely fresh read of the
+        //    file just written, proving the round trip survives a real
+        //    save/reload, not just an in-memory transformation.
+        let (reparsed, _origin2) = parse_docx(&path).unwrap();
+        assert_eq!(reparsed[0].heading, 1);
+        assert_eq!(reparsed[0].alignment, Alignment::Center);
+        assert!(reparsed[0].runs[0].double_underline);
+        assert!(reparsed[0].runs[0].strikethrough);
+        assert!(reparsed[0].runs[0].box_format);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
 
     #[test]
