@@ -245,6 +245,11 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                             apply_para_style(e, para);
                         }
                     }
+                    b"w:jc" if in_ppr => {
+                        if let Some(para) = current_para.as_mut() {
+                            apply_para_alignment(e, para);
+                        }
+                    }
                     b"w:r" => {
                         current_run = Some(Run::default());
                     }
@@ -278,6 +283,11 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
+                        }
+                    }
+                    b"w:jc" if in_ppr => {
+                        if let Some(para) = current_para.as_mut() {
+                            apply_para_alignment(e, para);
                         }
                     }
                     _ if in_rpr => {
@@ -344,6 +354,22 @@ fn apply_para_style(e: &BytesStart, para: &mut Paragraph) {
                     para.heading = n as u8;
                 }
             }
+        }
+    }
+}
+
+/// Applies a `<w:jc>` element's `w:val` attribute to `para.alignment`. Word's
+/// own OOXML value for full justification is `"both"`, not `"justify"`. Any
+/// other/absent value leaves `para.alignment` at `Alignment::Left`.
+fn apply_para_alignment(e: &BytesStart, para: &mut Paragraph) {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == b"w:val" {
+            para.alignment = match attr.value.as_ref() {
+                b"center" => Alignment::Center,
+                b"right" => Alignment::Right,
+                b"both" => Alignment::Justify,
+                _ => Alignment::Left,
+            };
         }
     }
 }
@@ -426,6 +452,21 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
 
     for para in paragraphs {
         out.push_str("<w:p>");
+        let mut ppr = String::new();
+        if para.heading != 0 {
+            ppr.push_str(&format!("<w:pStyle w:val=\"heading{}\"/>", para.heading));
+        }
+        match para.alignment {
+            Alignment::Center => ppr.push_str("<w:jc w:val=\"center\"/>"),
+            Alignment::Right => ppr.push_str("<w:jc w:val=\"right\"/>"),
+            Alignment::Justify => ppr.push_str("<w:jc w:val=\"both\"/>"),
+            Alignment::Left => {}
+        }
+        if !ppr.is_empty() {
+            out.push_str("<w:pPr>");
+            out.push_str(&ppr);
+            out.push_str("</w:pPr>");
+        }
         for run in &para.runs {
             out.push_str("<w:r>");
             let has_props = run.bold || run.italic || run.underline || run.highlight
@@ -612,6 +653,98 @@ mod tests {
         assert!(!paragraphs[0].runs[0].italic);
         assert_eq!(paragraphs[0].runs[0].font, None);
         assert_eq!(paragraphs[0].runs[0].color, None);
+    }
+
+    // ── alignment + heading parsing/emission ────────────────────────────────
+
+    #[test]
+    fn test_parses_center_alignment() {
+        let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Center);
+    }
+
+    #[test]
+    fn test_parses_justify_alignment_from_both_value() {
+        // Word's own OOXML value for full justification is "both", not "justify".
+        let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"both\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Justify);
+    }
+
+    #[test]
+    fn test_paragraph_without_jc_defaults_to_left_alignment() {
+        let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Left);
+    }
+
+    #[test]
+    fn test_rebuild_emits_center_alignment() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::Center,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:jc w:val="center"/>"#));
+    }
+
+    #[test]
+    fn test_rebuild_omits_jc_for_left_alignment() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::Left,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("w:jc"));
+    }
+
+    #[test]
+    fn test_rebuild_emits_heading_style() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 2,
+            alignment: Alignment::Left,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:pStyle w:val="heading2"/>"#));
+    }
+
+    #[test]
+    fn test_rebuild_omits_pstyle_for_body_text() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::Left,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("w:pStyle"));
+    }
+
+    #[test]
+    fn test_rebuild_omits_ppr_entirely_for_plain_paragraph() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::Left,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("w:pPr"));
+    }
+
+    #[test]
+    fn test_alignment_and_heading_round_trip_through_parse_and_rebuild() {
+        let original = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Center,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        let reparsed = parse_document_xml(&xml).unwrap();
+        assert_eq!(reparsed[0].heading, 1);
+        assert_eq!(reparsed[0].alignment, Alignment::Center);
     }
 
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
