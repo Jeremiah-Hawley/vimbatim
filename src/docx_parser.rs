@@ -387,6 +387,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     match e.name().as_ref() {
         b"w:b" => { run.bold = true; }
         b"w:i" => { run.italic = true; }
+        b"w:strike" => { run.strikethrough = true; }
         b"w:u" => {
             let is_double = e.attributes().flatten().any(|attr| {
                 attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double"
@@ -479,11 +480,13 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
         for run in &para.runs {
             out.push_str("<w:r>");
             let has_props = run.bold || run.italic || run.underline || run.double_underline
-                || run.highlight || run.size > 0 || run.font.is_some() || run.color.is_some();
+                || run.strikethrough || run.highlight || run.size > 0 || run.font.is_some()
+                || run.color.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
                 if run.bold      { out.push_str("<w:b/>"); }
                 if run.italic    { out.push_str("<w:i/>"); }
+                if run.strikethrough { out.push_str("<w:strike/>"); }
                 if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
                 else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
                 if run.highlight {
@@ -797,6 +800,38 @@ mod tests {
         let reparsed = parse_document_xml(&xml).unwrap();
         assert!(reparsed[0].runs[0].double_underline);
         assert!(!reparsed[0].runs[0].underline);
+    }
+
+    // ── strikethrough parsing/emission ──────────────────────────────────────
+
+    #[test]
+    fn test_parses_strikethrough_run_property() {
+        let xml = wrap_run_xml("<w:rPr><w:strike/></w:rPr>");
+        let paragraphs = parse_document_xml(&xml).unwrap();
+        assert!(paragraphs[0].runs[0].strikethrough);
+    }
+
+    #[test]
+    fn test_rebuild_emits_strikethrough() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains("<w:strike/>"));
+    }
+
+    #[test]
+    fn test_strikethrough_round_trip_through_parse_and_rebuild() {
+        let original = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        let reparsed = parse_document_xml(&xml).unwrap();
+        assert!(reparsed[0].runs[0].strikethrough);
     }
 
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
