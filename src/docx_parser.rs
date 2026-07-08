@@ -7,6 +7,21 @@ use zip::ZipArchive;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
+/// Elements that represent real content `Paragraph`/`Run` can't model, so a
+/// paragraph containing one has its full inner XML captured verbatim into
+/// `unsupported_xml` instead of being silently destroyed on the next save.
+/// Deliberately narrow — see `Paragraph::unsupported_xml`'s doc comment for
+/// why this must NOT be "anything not explicitly handled" (that would also
+/// catch harmless, common elements like bookmarks and proofing marks).
+const UNSUPPORTED_INLINE_TAGS: &[&[u8]] = &[
+    b"w:hyperlink",
+    b"w:drawing",
+    b"w:footnoteReference",
+    b"w:endnoteReference",
+    b"w:fldSimple",
+    b"w:instrText",
+];
+
 /// A single formatting run within a paragraph — the smallest unit of text with
 /// consistent styling. Word documents split paragraphs into runs whenever
 /// formatting changes (e.g., switching from plain to bold text).
@@ -247,6 +262,15 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
     // as it's created, since <w:pPr> always precedes every <w:r> in a
     // well-formed <w:p>.
     let mut para_has_box_border = false;
+    // Byte offset (into the original `xml: &str`) right after the current
+    // paragraph's opening `<w:p...>` tag - captured the moment Event::Start
+    // for "w:p" fires, since reader.buffer_position() at that instant is
+    // exactly the start of the paragraph's inner content.
+    let mut para_start_pos: usize = 0;
+    // Set true the moment any UNSUPPORTED_INLINE_TAGS element is seen while
+    // inside the current paragraph (checked in both Event::Start and
+    // Event::Empty, since e.g. <w:drawing> commonly appears self-closing).
+    let mut para_has_unsupported_content = false;
 
     let mut buf = Vec::new();
 
@@ -257,6 +281,8 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                     b"w:p" => {
                         current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
                         para_has_box_border = false;
+                        para_has_unsupported_content = false;
+                        para_start_pos = reader.buffer_position();
                     }
                     b"w:pPr" => { in_ppr = true; }
                     b"w:pStyle" if in_ppr => {
@@ -295,6 +321,9 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                             apply_run_prop(e, run);
                         }
                     }
+                    other if UNSUPPORTED_INLINE_TAGS.contains(&other) => {
+                        para_has_unsupported_content = true;
+                    }
                     _ => {}
                 }
             }
@@ -320,6 +349,9 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                             apply_run_prop(e, run);
                         }
                     }
+                    other if UNSUPPORTED_INLINE_TAGS.contains(&other) => {
+                        para_has_unsupported_content = true;
+                    }
                     _ => {}
                 }
             }
@@ -334,7 +366,16 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
             Event::End(ref e) => {
                 match e.name().as_ref() {
                     b"w:p" => {
-                        if let Some(para) = current_para.take() {
+                        if let Some(mut para) = current_para.take() {
+                            if para_has_unsupported_content {
+                                // buffer_position() here is immediately after
+                                // "</w:p>"'s closing '>' - subtract the
+                                // literal tag's own byte length (6) to get
+                                // just the inner content, excluding the
+                                // closing tag itself.
+                                let para_end_pos = reader.buffer_position() - 6;
+                                para.unsupported_xml = Some(xml[para_start_pos..para_end_pos].to_string());
+                            }
                             paragraphs.push(para);
                         }
                         in_ppr = false;
@@ -487,6 +528,11 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
 
     for para in paragraphs {
         out.push_str("<w:p>");
+        if let Some(raw) = &para.unsupported_xml {
+            out.push_str(raw);
+            out.push_str("</w:p>");
+            continue;
+        }
         let mut ppr = String::new();
         if para.heading != 0 {
             ppr.push_str(&format!("<w:pStyle w:val=\"heading{}\"/>", para.heading));
@@ -988,6 +1034,63 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    // ── unsupported inline content preservation ─────────────────────────────
+
+    #[test]
+    fn test_captures_unsupported_xml_for_paragraph_with_hyperlink() {
+        let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert!(paragraphs[0].unsupported_xml.is_some());
+        assert!(paragraphs[0].unsupported_xml.as_ref().unwrap().contains("w:hyperlink"));
+    }
+
+    #[test]
+    fn test_plain_paragraph_has_no_unsupported_xml() {
+        let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_incidental_tags_do_not_trigger_unsupported_xml_capture() {
+        // Bookmarks are common and harmless - must NOT freeze this paragraph.
+        let xml = "<w:document><w:body><w:p><w:bookmarkStart w:id=\"0\" w:name=\"_Test\"/><w:r><w:t>plain</w:t></w:r><w:bookmarkEnd w:id=\"0\"/></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_rebuild_reemits_unsupported_xml_verbatim_when_present() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "ignored".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: Some("<w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink>".to_string()),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains("<w:hyperlink r:id=\"rId1\">"));
+        assert!(xml.contains("link text"));
+        // The runs the app *did* manage to parse for display purposes must
+        // NOT also be independently re-emitted - unsupported_xml IS the
+        // paragraph's entire content on save.
+        assert!(!xml.contains("ignored"));
+    }
+
+    #[test]
+    fn test_unsupported_xml_round_trips_through_untouched_edit_elsewhere() {
+        let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p><w:p><w:r><w:t>other paragraph</w:t></w:r></w:p></w:body></w:document>";
+        let mut paragraphs = parse_document_xml(xml).unwrap();
+        assert!(paragraphs[0].unsupported_xml.is_some());
+
+        // Edit only the SECOND paragraph - the first (with the hyperlink)
+        // is never touched.
+        paragraphs[1].runs[0].text = "edited".to_string();
+
+        let rebuilt = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(rebuilt.contains("w:hyperlink"));
+        assert!(rebuilt.contains("edited"));
     }
 
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────

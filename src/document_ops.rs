@@ -56,9 +56,13 @@ pub fn resolve_position(paragraphs: &[Paragraph], byte_offset: usize) -> (usize,
 pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char) {
     let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, byte_offset);
     if ch == '\n' {
+        // split_paragraph_at constructs two brand-new Paragraph literals,
+        // which already default unsupported_xml to None - no separate
+        // clear needed for the newline case.
         split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
     } else {
         paragraphs[para_idx].runs[run_idx].text.insert(char_offset, ch);
+        paragraphs[para_idx].unsupported_xml = None;
     }
 }
 
@@ -137,6 +141,7 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
 
     if start_para == end_para {
         delete_within_runs(&mut paragraphs[start_para].runs, start_run, start_char, end_run, end_char);
+        paragraphs[start_para].unsupported_xml = None;
         return;
     }
 
@@ -270,16 +275,21 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
     // indices the two splits above shifted.
     let mut cumulative = 0usize;
     for para in paragraphs.iter_mut() {
+        let mut touched = false;
         for run in para.runs.iter_mut() {
             let run_start = cumulative;
             let run_end = cumulative + run.text.len();
             if run_start >= start && run_end <= end {
                 apply_format_op(run, &op);
+                touched = true;
             }
             cumulative = run_end;
         }
         cumulative += 1; // the paragraph-separating '\n'
         merge_adjacent_same_format_runs(&mut para.runs);
+        if touched {
+            para.unsupported_xml = None;
+        }
     }
 }
 
@@ -847,5 +857,43 @@ mod tests {
             toggled_off(&FormatOp::Highlight(Some("yellow".into()))),
             FormatOp::Highlight(None)
         );
+    }
+
+    // ── unsupported_xml invalidation on edit ────────────────────────────────
+
+    #[test]
+    fn test_sync_insert_char_clears_unsupported_xml_on_touched_paragraph() {
+        let mut paragraphs = vec![para(vec![Run { text: "hi".into(), ..Run::default() }])];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        sync_insert_char(&mut paragraphs, 1, 'X');
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_sync_delete_range_clears_unsupported_xml_on_touched_paragraph() {
+        let mut paragraphs = vec![para(vec![Run { text: "hello".into(), ..Run::default() }])];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        sync_delete_range(&mut paragraphs, 1, 3);
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_apply_formatting_clears_unsupported_xml_only_on_touched_paragraphs() {
+        let mut paragraphs = vec![
+            para(vec![Run { text: "one".into(), ..Run::default() }]),
+            para(vec![Run { text: "two".into(), ..Run::default() }]),
+        ];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+        paragraphs[1].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        // "one\ntwo" - byte 0..3 is entirely within paragraph 0 only.
+        apply_formatting(&mut paragraphs, 0, 3, FormatOp::Bold(true));
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+        assert_eq!(paragraphs[1].unsupported_xml, Some("<w:hyperlink/>".to_string()));
     }
 }
