@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::case_converter;
 use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
-use crate::document_ops::{apply_formatting, apply_paragraph_alignment, is_uniformly_active, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
+use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, resolve_position, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 use crate::wikifi_export;
 
 /// Rapid edits within this window of the previous undo-stack push are
@@ -897,6 +897,24 @@ impl AppState {
             op.clone()
         };
         apply_formatting(&mut tab.paragraphs, line_start, line_end, effective_op.clone());
+        // apply_formatting no-ops on an empty [line_start, line_end) range
+        // (nothing to split/iterate over), so it never touches the empty
+        // line's own already-existing run(s). Apply directly here instead —
+        // sync_insert_char reuses this exact run object when the user
+        // starts typing, so seeding it now is what makes the very first
+        // typed character(s) carry the formatting. Root cause: relying on
+        // `pending_format` alone doesn't work for a multi-op call like
+        // apply_card_style's Bold+FontSize+Box in sequence, since it's a
+        // single slot — each call overwrote the previous one, so only the
+        // last-applied op ever survived to the first keystroke.
+        if is_line_empty {
+            let (para_idx, _, _) = resolve_position(&tab.paragraphs, line_start);
+            if let Some(para) = tab.paragraphs.get_mut(para_idx) {
+                for run in para.runs.iter_mut() {
+                    apply_format_op(run, &effective_op);
+                }
+            }
+        }
         tab.is_modified = true;
 
         // If applying to an empty line, arm pending_format so subsequent typing inherits formatting.
@@ -8845,6 +8863,24 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 52));
         assert!(para.runs.iter().all(|r| r.box_format));
         assert_eq!(para.heading, 1);
+    }
+
+    #[test]
+    fn test_apply_card_style_pocket_on_empty_line_then_typed_text_is_boxed_and_centered() {
+        // Reported bug repro: press the Pocket style FIRST on a blank
+        // line/tab, THEN type the card's text (the natural authoring order,
+        // vs. the already-covered "type first, then style" case above).
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        for ch in "hello".chars() {
+            state.insert_char(ch);
+        }
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Center);
+        assert!(para.runs.iter().all(|r| r.bold), "bold lost: {:?}", para.runs);
+        assert!(para.runs.iter().all(|r| r.size == 52), "size lost: {:?}", para.runs);
+        assert!(para.runs.iter().all(|r| r.box_format), "box lost: {:?}", para.runs);
     }
 
     #[test]

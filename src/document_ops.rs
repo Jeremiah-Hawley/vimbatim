@@ -382,7 +382,7 @@ pub fn toggled_off(op: &FormatOp) -> FormatOp {
     }
 }
 
-fn apply_format_op(run: &mut Run, op: &FormatOp) {
+pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
     match op {
         FormatOp::Bold(b) => run.bold = *b,
         FormatOp::Italic(b) => run.italic = *b,
