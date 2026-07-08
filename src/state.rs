@@ -122,6 +122,15 @@ pub struct Tab {
     /// is no longer bundled with `paragraphs` the way the old
     /// `DocxDocument` was).
     pub docx_origin: Option<Arc<DocxOrigin>>,
+    /// Copied from `DocxOrigin.has_unsupported_blocks` in `open_file` (or
+    /// `false` for a brand-new tab with no source file) so `text_editor.rs`'s
+    /// render path can check it directly without unwrapping
+    /// `Option<Arc<DocxOrigin>>` on every frame.
+    pub has_unsupported_blocks: bool,
+    /// True once the user has dismissed the "this document has content we
+    /// can't preserve" banner for this tab. View-level UI state, same as
+    /// every other per-tab boolean already in this struct.
+    pub unsupported_banner_dismissed: bool,
     /// A formatting toggle (spec 7) armed with no active selection, per
     /// spec 7's own intro: "or (if no selection) toggles the property for
     /// subsequent typing". Consumed by `insert_char`, which applies it to
@@ -274,6 +283,8 @@ impl Tab {
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
             pending_scroll_to_cursor: false,
+            has_unsupported_blocks: false,
+            unsupported_banner_dismissed: false,
         }
     }
 
@@ -316,6 +327,8 @@ impl Tab {
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
             pending_scroll_to_cursor: false,
+            has_unsupported_blocks: false,
+            unsupported_banner_dismissed: false,
         }
     }
 }
@@ -597,6 +610,7 @@ impl AppState {
         if let Ok((paragraphs, origin)) = parse_docx(&path) {
             tab.content = paragraphs_to_plain_text(&paragraphs);
             tab.paragraphs = paragraphs;
+            tab.has_unsupported_blocks = origin.has_unsupported_blocks;
             tab.docx_origin = Some(Arc::new(origin));
         }
         self.next_tab_id += 1;
@@ -5110,6 +5124,8 @@ mod tests {
                 vim_jump_back: Vec::new(),
                 vim_jump_forward: Vec::new(),
                 pending_scroll_to_cursor: false,
+                has_unsupported_blocks: false,
+                unsupported_banner_dismissed: false,
             }],
             active_tab: 0,
             next_tab_id: 1,
