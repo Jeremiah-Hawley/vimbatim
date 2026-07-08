@@ -220,6 +220,16 @@ pub struct Tab {
     /// one line").
     pub vim_jump_back: Vec<usize>,
     pub vim_jump_forward: Vec<usize>,
+    /// Set by `AppState::jump_to_line` (the Nav menu's click-to-jump), read
+    /// and cleared by `TextEditor::render()` on its next paint. Ordinary
+    /// in-editor cursor movement never touches this — those call
+    /// `scroll_to_cursor()` directly, since they already run inside
+    /// `TextEditor` and have a `Context<TextEditor>` to call it with. This
+    /// flag exists only because `FileExplorer` (where Nav lives) has no
+    /// reference to `TextEditor` to call that private method on directly —
+    /// only the shared `AppState` — so it leaves a note for `TextEditor` to
+    /// act on next time it redraws instead.
+    pub pending_scroll_to_cursor: bool,
 }
 
 /// A single empty paragraph containing one default (unformatted) run — the
@@ -263,6 +273,7 @@ impl Tab {
             vim_search_direction: true,
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
+            pending_scroll_to_cursor: false,
         }
     }
 
@@ -304,6 +315,7 @@ impl Tab {
             vim_search_direction: true,
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
+            pending_scroll_to_cursor: false,
         }
     }
 }
@@ -346,12 +358,25 @@ impl FileNode {
     }
 }
 
+/// Which view the left sidebar (`FileExplorer`) currently shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarMode {
+    #[default]
+    Files,
+    Nav,
+}
+
 /// The shared application state, owned as a GPUI Model and read/written by all views.
 pub struct AppState {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub next_tab_id: usize,
     pub sidebar_visible: bool,
+    /// Which view the left sidebar shows — the file tree, or (Nav) a
+    /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
+    /// Toggled from two places that both flip the same field: the ribbon's
+    /// Nav button, and a Files/Nav button pair in the sidebar's own header.
+    pub sidebar_mode: SidebarMode,
     pub settings_visible: bool,
     pub working_directory: PathBuf,
     pub file_tree: Vec<FileNode>,
@@ -477,6 +502,18 @@ impl CardStyleKind {
     fn is_centered(&self) -> bool {
         matches!(self, CardStyleKind::Pocket | CardStyleKind::Hat | CardStyleKind::Block)
     }
+
+    /// The `Paragraph.heading` value each card style marks its line with —
+    /// also the markdown level `wikifi_export.rs` maps it to (1=H1 .. 4=H4)
+    /// and the nesting depth the Nav menu indents it at.
+    fn heading_level(&self) -> u8 {
+        match self {
+            CardStyleKind::Pocket => 1,
+            CardStyleKind::Hat => 2,
+            CardStyleKind::Block => 3,
+            CardStyleKind::Tag => 4,
+        }
+    }
 }
 
 impl AppState {
@@ -505,6 +542,7 @@ impl AppState {
             active_tab: 0,
             next_tab_id: 1,
             sidebar_visible: true,
+            sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             working_directory,
             file_tree,
@@ -1404,6 +1442,19 @@ impl AppState {
             CardStyleKind::Tag => {}
         }
 
+        // Marks this line as a heading (Nav menu, Wikifi export, and
+        // heading-level font sizing all read this field) — `content` and
+        // `paragraphs` are always kept 1:1, one paragraph per line, so the
+        // number of newlines before the cursor is that paragraph's index.
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let line_idx = tab.content[..tab.cursor].matches('\n').count();
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                if let Some(para) = tab.paragraphs.get_mut(line_idx) {
+                    para.heading = kind.heading_level();
+                }
+            }
+        }
+
         if kind.is_centered() {
             let tab = self.tabs.get_mut(self.active_tab);
             if let Some(t) = tab {
@@ -1921,6 +1972,21 @@ impl AppState {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.selection = Some((0, tab.content.len()));
             tab.cursor = tab.content.len();
+        }
+    }
+
+    /// Moves the cursor to the start of `line` (0-indexed) and arms
+    /// `Tab.pending_scroll_to_cursor` so `TextEditor::render()` scrolls it
+    /// into view on its next paint — used by the Nav menu (`FileExplorer`
+    /// has no direct reference to `TextEditor` to call its own
+    /// `scroll_to_cursor()` on, only this shared state). Ordinary in-editor
+    /// navigation should keep calling `set_cursor_from_line_col` directly
+    /// and its own `scroll_to_cursor()`, not this — this flag is a signal
+    /// for cursor moves that happen from *outside* the editor view.
+    pub fn jump_to_line(&mut self, line: usize) {
+        self.set_cursor_from_line_col(line, 0);
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.pending_scroll_to_cursor = true;
         }
     }
 
@@ -5043,10 +5109,12 @@ mod tests {
                 vim_search_direction: true,
                 vim_jump_back: Vec::new(),
                 vim_jump_forward: Vec::new(),
+                pending_scroll_to_cursor: false,
             }],
             active_tab: 0,
             next_tab_id: 1,
             sidebar_visible: false,
+            sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             working_directory: std::path::PathBuf::from("."),
             file_tree: vec![],
@@ -8756,6 +8824,7 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.bold));
         assert!(para.runs.iter().all(|r| r.size == 52));
         assert!(para.runs.iter().all(|r| r.box_format));
+        assert_eq!(para.heading, 1);
     }
 
     #[test]
@@ -8768,6 +8837,7 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 44));
         assert!(para.runs.iter().all(|r| r.double_underline));
         assert!(para.runs.iter().all(|r| !r.box_format));
+        assert_eq!(para.heading, 2);
     }
 
     #[test]
@@ -8780,6 +8850,7 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 32));
         assert!(para.runs.iter().all(|r| r.underline));
         assert!(para.runs.iter().all(|r| !r.double_underline));
+        assert_eq!(para.heading, 3);
     }
 
     #[test]
@@ -8792,5 +8863,67 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 26));
         assert!(para.runs.iter().all(|r| r.bold));
         assert!(para.runs.iter().all(|r| !r.box_format && !r.underline && !r.double_underline));
+        assert_eq!(para.heading, 4);
+    }
+
+    #[test]
+    fn test_apply_card_style_sets_heading_on_correct_line_when_cursor_on_second_line() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default() },
+        ];
+        // content is "first line\nsecond line" — byte 11 is the start of "second line".
+        let mut state = make_state_with_paragraphs(paragraphs, 11);
+        state.apply_card_style(CardStyleKind::Hat);
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0, "first line untouched");
+        assert_eq!(state.tabs[0].paragraphs[1].heading, 2, "second line marked Hat");
+    }
+
+    #[test]
+    fn test_jump_to_line_moves_cursor_and_arms_scroll_flag() {
+        let mut state = make_state("one\ntwo\nthree", 0, None);
+        assert!(!state.tabs[0].pending_scroll_to_cursor);
+
+        state.jump_to_line(2);
+
+        assert_eq!(state.tabs[0].cursor, 8); // start of "three"
+        assert!(state.tabs[0].pending_scroll_to_cursor);
+        assert_eq!(state.tabs[0].selection, None);
+    }
+
+    #[test]
+    fn test_apply_card_style_end_to_end_through_wikifi_export() {
+        // End-to-end: applies each card style through the same
+        // AppState::apply_card_style the ribbon/keybinds call, then feeds
+        // the result straight into wikifi_export::export_to_markdown — the
+        // whole pipeline this was silently broken for before apply_card_style
+        // set Paragraph.heading (wikify_export.rs's own test covers the
+        // export function in isolation with hand-built headings).
+        let paragraphs = vec![
+            Paragraph { runs: vec![run_plain("Case Title")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("Off-case Subtitle")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("Block heading")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("Tag text")], heading: 0, alignment: Alignment::default() },
+            Paragraph { runs: vec![run_plain("plain body text")], heading: 0, alignment: Alignment::default() },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+
+        for (line, kind) in [
+            (0, CardStyleKind::Pocket),
+            (1, CardStyleKind::Hat),
+            (2, CardStyleKind::Block),
+            (3, CardStyleKind::Tag),
+        ] {
+            state.set_cursor_from_line_col(line, 0);
+            state.apply_card_style(kind);
+        }
+
+        let tab = &state.tabs[0];
+        let markdown = crate::wikifi_export::export_to_markdown(&tab.paragraphs, &tab.content);
+        assert_eq!(
+            markdown,
+            "# Case Title\n## Off-case Subtitle\n### Block heading\n#### Tag text\nplain body text\n"
+        );
     }
 }

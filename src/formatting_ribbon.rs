@@ -388,6 +388,23 @@ impl FormattingRibbon {
                                     .spawn();
                             }
                         }
+                        FormatAction::Nav => {
+                            // Toggles the same AppState.sidebar_mode the
+                            // file explorer's own Files/Nav header buttons
+                            // control (file_explorer.rs). Also ensures the
+                            // sidebar itself is visible — "open the
+                            // navigation tab" (ribbon_instructions.md)
+                            // implies making it visible, not just switching
+                            // its mode while it might be collapsed.
+                            st.update(cx, |state, _cx| {
+                                state.sidebar_mode = match state.sidebar_mode {
+                                    crate::state::SidebarMode::Files => crate::state::SidebarMode::Nav,
+                                    crate::state::SidebarMode::Nav => crate::state::SidebarMode::Files,
+                                };
+                                state.sidebar_visible = true;
+                            });
+                            cx.notify();
+                        }
                         FormatAction::InvisibilityMode => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_invisibility_mode();

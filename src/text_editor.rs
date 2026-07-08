@@ -596,6 +596,26 @@ impl Render for TextEditor {
          *
          * Clicking anywhere in the editor reclaims keyboard focus.
          */
+        // Nav menu jump (state.rs's `jump_to_line`): FileExplorer has no
+        // direct reference to this view to call scroll_to_cursor() on, so
+        // it leaves a flag on the active tab instead. Honor and clear it
+        // here, before laying out this frame, so a heading clicked from
+        // off-screen is actually visible immediately rather than only
+        // having its cursor position correct.
+        let should_scroll = self.state.update(cx, |state, _cx| {
+            let active = state.active_tab;
+            if let Some(tab) = state.tabs.get_mut(active) {
+                if tab.pending_scroll_to_cursor {
+                    tab.pending_scroll_to_cursor = false;
+                    return true;
+                }
+            }
+            false
+        });
+        if should_scroll {
+            self.scroll_to_cursor(cx);
+        }
+
         let state = self.state.read(cx);
         let content = state.active_content().to_string();
         // Rich-text formatting (Phase 1): each logical line is exactly one

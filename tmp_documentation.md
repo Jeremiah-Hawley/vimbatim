@@ -2279,3 +2279,82 @@ context-tree cooperation to begin with).
   the user's repeated real-display reports — confirm Ctrl+, (and ideally
   a couple of others, e.g. Ctrl+Z/Ctrl+B) now work with focus on the
   sidebar, the ribbon, or nothing at all, not just the text editor.
+
+## Nav Menu (working navigation, formatting/main branches)
+
+Implements `notes/ribbon_instructions.md`'s Nav feature per the design doc
+at `docs/superpowers/specs/2026-07-07-nav-menu-design.md` — the ribbon's
+Nav button previously printed to console and did nothing else; a Files/Nav
+button pair also used to exist in the file explorer's own header (as a
+Phase 1 placeholder) but was silently dropped in the `gui-polish` theme
+redesign. Both are now real.
+
+### What Was Built
+
+**`src/state.rs`:**
+- `SidebarMode` enum (`Files` default / `Nav`) + `AppState.sidebar_mode`
+  field — which view the left sidebar (`FileExplorer`) currently shows.
+- `AppState::apply_card_style` now sets `Paragraph.heading` (1=Pocket,
+  2=Hat, 3=Block, 4=Tag) on the cursor's line, in addition to the run
+  formatting it already applied. This closes a real, pre-existing gap:
+  neither Wikifi export nor heading-based font sizing ever actually worked
+  for a card style applied through this app, since both already read that
+  same field and it was never being set. `content`/`paragraphs` are kept
+  1:1 (one paragraph per line), so the paragraph index is just the count
+  of newlines before the cursor.
+- `Tab.pending_scroll_to_cursor: bool` + `AppState::jump_to_line(line)` —
+  the mechanism that lets a click in `FileExplorer` (which has no direct
+  reference to `TextEditor`, only the shared `AppState`) still scroll an
+  off-screen heading into view. `jump_to_line` moves the cursor and arms
+  the flag; `TextEditor::render()` checks and clears it on its next paint,
+  calling its own (otherwise-private) `scroll_to_cursor()`. Ordinary
+  in-editor navigation is unaffected — it already calls `scroll_to_cursor()`
+  directly and never touches this flag.
+
+**`src/file_explorer.rs`:**
+- Restored the Files/Nav button pair in the header (left of refresh),
+  wired to `AppState.sidebar_mode` for real this time (previous version
+  just printed to console). `render_mode_toggle_btn` is a small shared
+  helper for both halves — highlighted when active, click sets the mode.
+- `render()` branches the whole body on `sidebar_mode`: `Files` is
+  unchanged from before; `Nav` calls new `render_nav_tree()`, header
+  title/subtitle switch to "Navigation"/active tab title, refresh/+
+  buttons hidden (not applicable in Nav mode).
+- `render_nav_tree()` walks the active tab's `content`/`paragraphs`
+  together (same pairing `wikifi_export.rs` uses), collects every line
+  with `heading` 1–4, and renders each indented `(heading - 1) * 16px`
+  (Pocket flush left, Tag deepest) — nested by *type*, not document
+  position, per the design doc. Text truncates with an ellipsis past the
+  240px panel width (`.truncate()`). Clicking a row calls
+  `AppState::jump_to_line`. Shows "No headings yet" instead of an empty
+  scroll area when the active tab has none.
+
+**`src/formatting_ribbon.rs`:** `FormatAction::Nav`'s handler toggles the
+same `AppState.sidebar_mode` the file explorer's own buttons control, and
+also sets `sidebar_visible = true` — "open the navigation tab" implies
+making the sidebar visible if it's currently collapsed, not just switching
+its internal mode while hidden.
+
+**`src/wikifi_export.rs` / `src/state.rs` tests:** this function had zero
+test coverage before. Added a dependency-free unit test in
+`wikifi_export.rs` (hand-built headings 1–4 + body text) and an end-to-end
+integration test in `state.rs` that drives the real
+`AppState::apply_card_style` across a 5-line document and feeds the result
+straight into `export_to_markdown` — proving the whole ribbon/keybind →
+export pipeline works now, not just the export function in isolation.
+
+### Verification
+
+- `cargo test`: 558 passed, 0 failed (554 unit incl. 7 new for this
+  feature — heading assignment per card style, correct-line targeting on
+  a multi-line document, `jump_to_line`'s cursor+flag behavior, and the
+  two Wikifi export tests above; 4 in `tests/parse_testing.rs`).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- **Not hardware-verified**: this sandbox has no display. Confirm on a
+  real machine: click the ribbon's Nav button and the sidebar's own Nav
+  button (both should show the same heading outline); apply Pocket/Hat/
+  Block/Tag to a few lines and confirm they appear correctly indented;
+  click a heading that's scrolled off-screen and confirm the editor
+  actually scrolls to it, not just moves the cursor invisibly; confirm
+  Wikifi export now produces real markdown headings.
