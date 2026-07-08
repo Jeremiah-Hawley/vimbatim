@@ -653,6 +653,11 @@ impl Render for TextEditor {
             .get(state.active_tab)
             .map(|t| t.file_path.is_none() && t.content.is_empty())
             .unwrap_or(true);
+        let show_unsupported_banner = state
+            .tabs
+            .get(state.active_tab)
+            .map(|t| t.has_unsupported_blocks && !t.unsupported_banner_dismissed)
+            .unwrap_or(false);
         let (cursor_line, cursor_col) = state.cursor_line_col();
         // Normalise (anchor, focus) into (min, max) once so per-line lookups
         // below don't each have to re-derive the ordering.
@@ -781,6 +786,36 @@ impl Render for TextEditor {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .when(show_unsupported_banner, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .bg(rgb(0x5a3d1a))
+                        .text_color(rgb(0xf0d9a8))
+                        .text_sm()
+                        .child("This document contains a table — Vimbatim can't edit or preserve it; saving will remove it.")
+                        .child(
+                            div()
+                                .id("dismiss-unsupported-banner")
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .child("×")
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        if let Some(tab) = s.tabs.get_mut(s.active_tab) {
+                                            tab.unsupported_banner_dismissed = true;
+                                        }
+                                        cx.notify();
+                                    });
+                                })),
+                        ),
+                )
+            })
             .child(
                 div()
                     // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
