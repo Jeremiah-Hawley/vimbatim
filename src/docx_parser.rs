@@ -229,6 +229,12 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
     let mut in_ppr  = false; // inside <w:pPr>
     let mut in_rpr  = false; // inside <w:rPr>
     let mut in_text = false; // inside <w:t>
+    // Set when the current paragraph's <w:pPr> contains a <w:pBdr> (any
+    // border side implies a full box, matching how apply_card_style's
+    // Pocket always sets all four sides uniformly) — applied to each run
+    // as it's created, since <w:pPr> always precedes every <w:r> in a
+    // well-formed <w:p>.
+    let mut para_has_box_border = false;
 
     let mut buf = Vec::new();
 
@@ -238,6 +244,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                 match e.name().as_ref() {
                     b"w:p" => {
                         current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default() });
+                        para_has_box_border = false;
                     }
                     b"w:pPr" => { in_ppr = true; }
                     b"w:pStyle" if in_ppr => {
@@ -250,8 +257,11 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                             apply_para_alignment(e, para);
                         }
                     }
+                    b"w:pBdr" if in_ppr => {
+                        para_has_box_border = true;
+                    }
                     b"w:r" => {
-                        current_run = Some(Run::default());
+                        current_run = Some(Run { box_format: para_has_box_border, ..Run::default() });
                     }
                     b"w:rPr" => { in_rpr = true; }
                     b"w:t" => {
@@ -289,6 +299,9 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                         if let Some(para) = current_para.as_mut() {
                             apply_para_alignment(e, para);
                         }
+                    }
+                    b"w:pBdr" if in_ppr => {
+                        para_has_box_border = true;
                     }
                     _ if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
@@ -471,6 +484,16 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
             Alignment::Right => ppr.push_str("<w:jc w:val=\"right\"/>"),
             Alignment::Justify => ppr.push_str("<w:jc w:val=\"both\"/>"),
             Alignment::Left => {}
+        }
+        if para.runs.iter().any(|r| r.box_format) {
+            ppr.push_str(
+                "<w:pBdr>\
+                <w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>\
+                <w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>\
+                <w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>\
+                </w:pBdr>",
+            );
         }
         if !ppr.is_empty() {
             out.push_str("<w:pPr>");
@@ -832,6 +855,65 @@ mod tests {
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml).unwrap();
         assert!(reparsed[0].runs[0].strikethrough);
+    }
+
+    // ── Pocket box (paragraph border) parsing/emission ──────────────────────
+
+    #[test]
+    fn test_parses_paragraph_border_as_box_format_on_every_run() {
+        let xml = "<w:document><w:body><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/></w:pBdr></w:pPr><w:r><w:t>a</w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert!(paragraphs[0].runs[0].box_format);
+        assert!(paragraphs[0].runs[1].box_format);
+    }
+
+    #[test]
+    fn test_paragraph_without_pbdr_has_box_format_false() {
+        let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml).unwrap();
+        assert!(!paragraphs[0].runs[0].box_format);
+    }
+
+    #[test]
+    fn test_rebuild_emits_four_sided_pbdr_when_box_format_set() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), box_format: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains("<w:pBdr>"));
+        assert!(xml.contains("<w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"));
+        assert!(xml.contains("<w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"));
+        assert!(xml.contains("<w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"));
+        assert!(xml.contains("<w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/>"));
+    }
+
+    #[test]
+    fn test_rebuild_omits_pbdr_when_no_run_has_box_format() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("w:pBdr"));
+    }
+
+    #[test]
+    fn test_box_format_round_trip_through_parse_and_rebuild() {
+        let original = vec![Paragraph {
+            runs: vec![
+                Run { text: "a".into(), box_format: true, ..Run::default() },
+                Run { text: "b".into(), box_format: true, ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        let reparsed = parse_document_xml(&xml).unwrap();
+        assert!(reparsed[0].runs[0].box_format);
+        assert!(reparsed[0].runs[1].box_format);
     }
 
     // ── italic/font/color re-emission (rebuild_document_xml) ────────────────
