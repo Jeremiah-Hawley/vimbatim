@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -168,7 +169,19 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
         xml
     };
 
-    let paragraphs = parse_document_xml(&document_xml)?;
+    // word/styles.xml doesn't exist for every .docx (e.g. ones this app
+    // itself writes via create_new_docx) — treat that as "no named styles",
+    // not a parse failure.
+    let styles = match archive.by_name("word/styles.xml") {
+        Ok(mut file) => {
+            let mut xml = String::new();
+            file.read_to_string(&mut xml)?;
+            parse_styles_xml(&xml)
+        }
+        Err(_) => HashMap::new(),
+    };
+
+    let paragraphs = parse_document_xml(&document_xml, &styles)?;
 
     // Extract the fragments we need for round-trip serialisation at parse
     // time so we can discard the full XML string afterwards.
@@ -223,13 +236,108 @@ fn write_docx(raw_zip: &[u8], new_xml: &str, path: &Path) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// The formatting a named paragraph style (`word/styles.xml`) resolves to,
+/// for the narrow set of properties `Paragraph`/`Run` already model. Real
+/// Word documents commonly carry a paragraph's visual formatting entirely on
+/// the *style* it references (`<w:pStyle>`) rather than inline on the
+/// paragraph itself — a document authored with named styles for "Pocket"/
+/// "Hat"/"Block"/"Tag" (e.g. Word's own Heading 1-4, aliased accordingly)
+/// puts the box/center/bold/size/underline on the style definition, not on
+/// each paragraph. Resolved once per referenced style, applied as each such
+/// paragraph/run's *default* — any direct/inline formatting the paragraph or
+/// run also carries is applied afterward by the normal parse path and wins,
+/// matching Word's own direct-formatting-beats-style cascade.
+///
+/// Deliberately resolves only the *directly*-referenced style, not a
+/// `w:basedOn` chain — every style this app's own card conventions produce
+/// (and every one observed in a real "Verbatim"-authored test file) is based
+/// on `Normal`, which carries nothing relevant (font/size/spacing only, no
+/// alignment/border/bold/underline); walking a full inheritance chain would
+/// be solving a problem that doesn't exist here.
+#[derive(Debug, Default, Clone)]
+struct StyleDefaults {
+    alignment: Option<Alignment>,
+    box_format: bool,
+    bold: bool,
+    size: u16,
+    underline: bool,
+    double_underline: bool,
+}
+
+/// Parses `word/styles.xml` into a `styleId -> StyleDefaults` map. Missing or
+/// unparseable `w:pPr`/`w:rPr` content on a given style just leaves that
+/// style's `StyleDefaults` at its all-`false`/`None` default — same
+/// "leave it alone" fallback `apply_para_alignment`/`apply_run_prop` already
+/// use for a single paragraph's own properties.
+fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
+    let mut styles = HashMap::new();
+    let mut reader = Reader::from_str(xml);
+    reader.trim_text(false);
+
+    let mut current_id: Option<String> = None;
+    let mut current: StyleDefaults = StyleDefaults::default();
+    let mut scratch_run = Run::default();
+    let mut in_ppr = false;
+    let mut in_rpr = false;
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"w:style" => {
+                        current_id = e.attributes().flatten().find_map(|attr| {
+                            (attr.key.as_ref() == b"w:styleId")
+                                .then(|| String::from_utf8_lossy(&attr.value).into_owned())
+                        });
+                        current = StyleDefaults::default();
+                        scratch_run = Run::default();
+                    }
+                    b"w:pPr" => { in_ppr = true; }
+                    b"w:rPr" => { in_rpr = true; }
+                    b"w:jc" if in_ppr => {
+                        let mut para = Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+                        apply_para_alignment(e, &mut para);
+                        current.alignment = Some(para.alignment);
+                    }
+                    b"w:pBdr" if in_ppr => { current.box_format = true; }
+                    _ if in_rpr => { apply_run_prop(e, &mut scratch_run); }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                match e.name().as_ref() {
+                    b"w:pPr" => { in_ppr = false; }
+                    b"w:rPr" => { in_rpr = false; }
+                    b"w:style" => {
+                        current.bold = scratch_run.bold;
+                        current.size = scratch_run.size;
+                        current.underline = scratch_run.underline;
+                        current.double_underline = scratch_run.double_underline;
+                        if let Some(id) = current_id.take() {
+                            styles.insert(id, current.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    styles
+}
+
 /// Parses the XML string from `word/document.xml` into a flat `Vec<Paragraph>`.
 ///
 /// Uses quick-xml's streaming event API (no DOM tree is built) to keep memory
 /// use proportional to the longest run of text, not the full document size.
 /// Boolean flags (`in_ppr`, `in_rpr`, `in_text`) track the parser's position
 /// in the nesting hierarchy so attribute-reading only fires in the right context.
-fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::Error>> {
+fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Result<Vec<Paragraph>, Box<dyn std::error::Error>> {
     /*
      * Relevant element hierarchy in Word XML:
      *
@@ -271,6 +379,13 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
     // as it's created, since <w:pPr> always precedes every <w:r> in a
     // well-formed <w:p>.
     let mut para_has_box_border = false;
+    // The current paragraph's resolved named-style defaults (if its
+    // <w:pStyle> references one `styles` has an entry for) — seeds each new
+    // <w:r> this paragraph creates, mirroring how `para_has_box_border`
+    // seeds `box_format`. `None` for a paragraph with no style, or one whose
+    // style has no entry in `styles` (e.g. a plain "heading1" that isn't
+    // also a named style with its own formatting).
+    let mut current_style_defaults: Option<StyleDefaults> = None;
     // Byte offset (into the original `xml: &str`) right after the current
     // paragraph's opening `<w:p...>` tag - captured the moment Event::Start
     // for "w:p" fires, since reader.buffer_position() at that instant is
@@ -290,6 +405,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                     b"w:p" => {
                         current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
                         para_has_box_border = false;
+                        current_style_defaults = None;
                         para_has_unsupported_content = false;
                         para_start_pos = reader.buffer_position();
                     }
@@ -297,6 +413,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
+                            current_style_defaults = apply_paragraph_style_defaults(e, para, styles, &mut para_has_box_border);
                         }
                     }
                     b"w:jc" if in_ppr => {
@@ -308,7 +425,14 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                         para_has_box_border = true;
                     }
                     b"w:r" => {
-                        current_run = Some(Run { box_format: para_has_box_border, ..Run::default() });
+                        let mut run = Run { box_format: para_has_box_border, ..Run::default() };
+                        if let Some(defaults) = &current_style_defaults {
+                            run.bold = defaults.bold;
+                            run.size = defaults.size;
+                            run.underline = defaults.underline;
+                            run.double_underline = defaults.double_underline;
+                        }
+                        current_run = Some(run);
                     }
                     b"w:rPr" => { in_rpr = true; }
                     b"w:t" => {
@@ -343,6 +467,7 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
+                            current_style_defaults = apply_paragraph_style_defaults(e, para, styles, &mut para_has_box_border);
                         }
                     }
                     b"w:jc" if in_ppr => {
@@ -410,6 +535,32 @@ fn parse_document_xml(xml: &str) -> Result<Vec<Paragraph>, Box<dyn std::error::E
     }
 
     Ok(paragraphs)
+}
+
+/// Looks up `<w:pStyle>`'s `w:val` (the raw style ID, e.g. `"Heading1"` —
+/// same string `word/styles.xml`'s `w:styleId` uses) in `styles`, applies
+/// its resolved alignment/box to `para`/`para_has_box_border` as *defaults*
+/// (any direct `<w:jc>`/`<w:pBdr>` on this same paragraph, processed later
+/// in the same streaming pass, overwrites these afterward), and returns the
+/// resolved `StyleDefaults` so the caller can seed each new `<w:r>` this
+/// paragraph creates with its run-level defaults (bold/size/underline).
+fn apply_paragraph_style_defaults(
+    e: &BytesStart,
+    para: &mut Paragraph,
+    styles: &HashMap<String, StyleDefaults>,
+    para_has_box_border: &mut bool,
+) -> Option<StyleDefaults> {
+    let style_id = e.attributes().flatten().find_map(|attr| {
+        (attr.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&attr.value).into_owned())
+    })?;
+    let defaults = styles.get(&style_id)?.clone();
+    if let Some(alignment) = defaults.alignment {
+        para.alignment = alignment;
+    }
+    if defaults.box_format {
+        *para_has_box_border = true;
+    }
+    Some(defaults)
 }
 
 /// Applies a `<w:pStyle>` element's attributes to `para`, setting
@@ -719,40 +870,44 @@ mod tests {
         )
     }
 
+    fn no_styles() -> HashMap<String, StyleDefaults> {
+        HashMap::new()
+    }
+
     // ── italic/font/color parsing (rich-text formatting plan, Phase 1) ──────
 
     #[test]
     fn test_parses_italic_run_property() {
         let xml = wrap_run_xml("<w:rPr><w:i/></w:rPr>");
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].italic);
     }
 
     #[test]
     fn test_parses_run_font_ascii_attribute() {
         let xml = wrap_run_xml(r#"<w:rPr><w:rFonts w:ascii="Georgia"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].runs[0].font, Some("Georgia".to_string()));
     }
 
     #[test]
     fn test_parses_run_color_value() {
         let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].runs[0].color, Some("FF0000".to_string()));
     }
 
     #[test]
     fn test_color_val_auto_is_treated_as_none() {
         let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="auto"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].runs[0].color, None);
     }
 
     #[test]
     fn test_run_without_new_properties_defaults_to_none() {
         let xml = wrap_run_xml("");
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(!paragraphs[0].runs[0].italic);
         assert_eq!(paragraphs[0].runs[0].font, None);
         assert_eq!(paragraphs[0].runs[0].color, None);
@@ -763,7 +918,7 @@ mod tests {
     #[test]
     fn test_parses_center_alignment() {
         let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Center);
     }
 
@@ -771,14 +926,14 @@ mod tests {
     fn test_parses_justify_alignment_from_both_value() {
         // Word's own OOXML value for full justification is "both", not "justify".
         let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"both\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Justify);
     }
 
     #[test]
     fn test_paragraph_without_jc_defaults_to_left_alignment() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
     }
 
@@ -851,7 +1006,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
         assert_eq!(reparsed[0].heading, 1);
         assert_eq!(reparsed[0].alignment, Alignment::Center);
     }
@@ -861,7 +1016,7 @@ mod tests {
     #[test]
     fn test_parses_double_underline_distinctly_from_single() {
         let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="double"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].double_underline);
         assert!(!paragraphs[0].runs[0].underline);
     }
@@ -869,7 +1024,7 @@ mod tests {
     #[test]
     fn test_parses_single_underline_val_as_plain_underline() {
         let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="single"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].underline);
         assert!(!paragraphs[0].runs[0].double_underline);
     }
@@ -895,7 +1050,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(reparsed[0].runs[0].double_underline);
         assert!(!reparsed[0].runs[0].underline);
     }
@@ -905,7 +1060,7 @@ mod tests {
     #[test]
     fn test_parses_strikethrough_run_property() {
         let xml = wrap_run_xml("<w:rPr><w:strike/></w:rPr>");
-        let paragraphs = parse_document_xml(&xml).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].strikethrough);
     }
 
@@ -930,7 +1085,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(reparsed[0].runs[0].strikethrough);
     }
 
@@ -939,7 +1094,7 @@ mod tests {
     #[test]
     fn test_parses_paragraph_border_as_box_format_on_every_run() {
         let xml = "<w:document><w:body><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/></w:pBdr></w:pPr><w:r><w:t>a</w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].box_format);
         assert!(paragraphs[0].runs[1].box_format);
     }
@@ -947,7 +1102,7 @@ mod tests {
     #[test]
     fn test_paragraph_without_pbdr_has_box_format_false() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert!(!paragraphs[0].runs[0].box_format);
     }
 
@@ -991,7 +1146,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(reparsed[0].runs[0].box_format);
         assert!(reparsed[0].runs[1].box_format);
     }
@@ -1079,12 +1234,76 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
+    // ── paragraph-style-based formatting (word/styles.xml resolution) ───────
+
+    // Mirrors the shape real Word (and the "Verbatim" tool the user tested
+    // with) actually writes for a named paragraph style: box+center+bold+
+    // size live on the STYLE, not inline on each paragraph that uses it.
+    const POCKET_STYLE_XML: &str = r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:aliases w:val="Pocket"/><w:basedOn w:val="Normal"/><w:pPr><w:pBdr><w:top w:val="single" w:sz="24" w:space="1" w:color="auto"/><w:left w:val="single" w:sz="24" w:space="4" w:color="auto"/><w:bottom w:val="single" w:sz="24" w:space="1" w:color="auto"/><w:right w:val="single" w:sz="24" w:space="4" w:color="auto"/></w:pBdr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/><w:sz w:val="52"/></w:rPr></w:style>"#;
+
+    #[test]
+    fn test_parses_alignment_and_box_from_referenced_paragraph_style() {
+        let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
+        let styles = parse_styles_xml(&styles_xml);
+        let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Center);
+        assert_eq!(paragraphs[0].heading, 1);
+        assert!(paragraphs[0].runs[0].box_format);
+        assert!(paragraphs[0].runs[0].bold);
+        assert_eq!(paragraphs[0].runs[0].size, 52);
+    }
+
+    #[test]
+    fn test_direct_paragraph_formatting_overrides_style_defaults() {
+        let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
+        let styles = parse_styles_xml(&styles_xml);
+        // Same style reference as above, but this paragraph ALSO carries its
+        // own direct <w:jc> - direct formatting must win over the style's.
+        let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/><w:jc w:val=\"left\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Left);
+    }
+
+    #[test]
+    fn test_direct_run_formatting_overrides_style_defaults() {
+        let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
+        let styles = parse_styles_xml(&styles_xml);
+        // The style says sz=52; this run's own <w:sz> should win.
+        let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"80\"/></w:rPr><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        assert_eq!(paragraphs[0].runs[0].size, 80);
+        assert!(paragraphs[0].runs[0].bold); // still inherited from the style
+    }
+
+    #[test]
+    fn test_paragraph_without_pstyle_is_unaffected_by_styles_map() {
+        let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
+        let styles = parse_styles_xml(&styles_xml);
+        let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        assert_eq!(paragraphs[0].alignment, Alignment::Left);
+        assert!(!paragraphs[0].runs[0].box_format);
+        assert!(!paragraphs[0].runs[0].bold);
+        assert_eq!(paragraphs[0].runs[0].size, 0);
+    }
+
+    #[test]
+    fn test_pstyle_referencing_unknown_style_id_is_unaffected() {
+        let styles = parse_styles_xml("<w:styles></w:styles>");
+        let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        assert_eq!(paragraphs[0].heading, 1); // name-based heading detection still works
+        assert_eq!(paragraphs[0].alignment, Alignment::Left);
+        assert!(!paragraphs[0].runs[0].box_format);
+    }
+
     // ── unsupported inline content preservation ─────────────────────────────
 
     #[test]
     fn test_captures_unsupported_xml_for_paragraph_with_hyperlink() {
         let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert!(paragraphs[0].unsupported_xml.is_some());
         assert!(paragraphs[0].unsupported_xml.as_ref().unwrap().contains("w:hyperlink"));
     }
@@ -1092,7 +1311,7 @@ mod tests {
     #[test]
     fn test_plain_paragraph_has_no_unsupported_xml() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].unsupported_xml, None);
     }
 
@@ -1100,7 +1319,7 @@ mod tests {
     fn test_incidental_tags_do_not_trigger_unsupported_xml_capture() {
         // Bookmarks are common and harmless - must NOT freeze this paragraph.
         let xml = "<w:document><w:body><w:p><w:bookmarkStart w:id=\"0\" w:name=\"_Test\"/><w:r><w:t>plain</w:t></w:r><w:bookmarkEnd w:id=\"0\"/></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert_eq!(paragraphs[0].unsupported_xml, None);
     }
 
@@ -1124,7 +1343,7 @@ mod tests {
     #[test]
     fn test_unsupported_xml_round_trips_through_untouched_edit_elsewhere() {
         let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p><w:p><w:r><w:t>other paragraph</w:t></w:r></w:p></w:body></w:document>";
-        let mut paragraphs = parse_document_xml(xml).unwrap();
+        let mut paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
         assert!(paragraphs[0].unsupported_xml.is_some());
 
         // Edit only the SECOND paragraph - the first (with the hyperlink)
@@ -1203,7 +1422,7 @@ mod tests {
         let xml = rebuild_document_xml("<w:document>", "", &original);
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
         // matching what parse_document_xml expects to find.
-        let reparsed = parse_document_xml(&xml).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
         assert_eq!(reparsed[0].runs[0].italic, true);
         assert_eq!(reparsed[0].runs[0].font, Some("Georgia".to_string()));
         assert_eq!(reparsed[0].runs[0].color, Some("00FF00".to_string()));
