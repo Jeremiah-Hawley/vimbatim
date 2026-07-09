@@ -2530,3 +2530,93 @@ code path the running app uses — no prior test in this file touched
   the heading level, alignment, double underline/strikethrough/box, and
   (for the hyperlink case) the hyperlink itself are all still correct.
   This is the one thing no test in this plan can substitute for.
+
+## Follow-up Bug: Pocket Box/Alignment Not Rendering
+
+Reported after the round-trip plan above shipped: card formatting
+(Pocket's box, center alignment) wasn't displaying, while other run-level
+formatting (underline, size, highlight) worked fine. Two distinct root
+causes, found via `superpowers:systematic-debugging` — one live-editor
+bug, one file-parsing bug.
+
+### Bug 1: card styles on an empty line lose all but the last format op
+
+`apply_card_style` calls `apply_formatting_to_line` multiple times in a
+row (Pocket: Bold, then FontSize, then Box). On an *empty* line,
+`apply_formatting` is a no-op (nothing to iterate over a zero-length byte
+range), so each call's only real effect was arming `tab.pending_format` —
+a single `Option<FormatOp>` slot — for the next keystroke to inherit.
+Each subsequent call overwrote the previous one, so only the
+*last*-applied op (Box, for Pocket) ever survived to the first character
+actually typed; Bold and FontSize were silently dropped. Alignment was
+unaffected (`apply_paragraph_alignment` has no equivalent empty-range
+no-op), which is why this didn't look like "everything's broken."
+
+Root-caused with a new test simulating the real authoring order (style
+first, then type — the existing test suite only covered "type first,
+then style"). Fixed in `src/state.rs`'s `apply_formatting_to_line`: when
+the line is empty, directly apply each op to the line's own
+already-existing (empty) run via `document_ops::apply_format_op` (now
+`pub(crate)`), instead of relying solely on the single-slot
+`pending_format` — `sync_insert_char` reuses that same run object for the
+first keystroke, so seeding it directly is what makes every op (not just
+the last one) actually stick.
+
+### Bug 2: paragraph formatting carried entirely by a named Word style
+
+This was the actual bug behind the user's report. Their real test file
+(`COTD 6-3-2026.docx`, from "Verbatim," a related tool — not committed to
+this repo, personal content) puts Pocket/Hat/Block/Tag's formatting
+**on Word's own named paragraph styles** (`word/styles.xml`'s
+`w:styleId="Heading1"`, `<w:aliases w:val="Pocket"/>`, with `<w:pBdr>`
+(box), `<w:jc w:val="center"/>`, `<w:b/>`, `<w:sz w:val="52"/>` all
+defined on the *style*), not inline on each paragraph — each paragraph's
+own `<w:pPr>` contains nothing but `<w:pStyle w:val="Heading1"/>`.
+`docx_parser.rs` only ever read direct/inline `w:pPr`/`w:rPr` content in
+`document.xml`; it correctly detected the heading *level* (name-based
+`"headingN"` matching needs nothing from the style definition, which is
+why Nav worked), but never resolved what the *style itself* specified —
+box, alignment, bold, and size were silently dropped for every such
+paragraph.
+
+**Fix** (`src/docx_parser.rs`):
+- New `StyleDefaults` struct + `parse_styles_xml` — parses
+  `word/styles.xml` (absent on files this app creates itself; treated as
+  "no named styles," not an error) into a `styleId -> StyleDefaults` map,
+  reusing the existing `apply_para_alignment`/`apply_run_prop` helpers
+  against a scratch `Paragraph`/`Run` for each `<w:style w:type="paragraph">`
+  block's own `<w:pPr>`/`<w:rPr>`.
+- `parse_document_xml` now takes this map. When a paragraph's
+  `<w:pStyle>` resolves to an entry, its alignment/box become the
+  paragraph's *default* and its bold/size/underline/double-underline
+  become each new run's default — any direct/inline formatting the same
+  paragraph or run *also* carries is applied afterward by the existing
+  parse path exactly as before, and still wins, matching Word's own
+  direct-formatting-beats-style cascade.
+- Deliberately resolves only the *directly*-referenced style, not a
+  `w:basedOn` inheritance chain — confirmed against the real test file
+  that `Normal` (which every one of these styles is based on) carries
+  nothing relevant (font/size/spacing only), so a full chain-walk would
+  be solving a problem this file doesn't have.
+- Save side needed no changes: `rebuild_document_xml` (from the round-
+  trip plan above) already always emits direct/inline formatting, so a
+  save after this fix correctly "flattens" style-inherited formatting
+  into explicit formatting — still correct in Word's cascade, since
+  direct formatting always wins there too.
+
+### Verification
+
+- `cargo test`: 599 passed, 0 failed (595 unit incl. 6 new; 4
+  integration).
+- `timeout 5 ./target/debug/vimbatim`: launched and ran the full timeout
+  without a panic.
+- Verified directly against the user's real file via a temporary
+  (not committed) test: `parse_docx` on `COTD 6-3-2026.docx` now resolves
+  Pocket as `heading=1 alignment=Center box=true bold=true size=52`,
+  Block as `heading=3 alignment=Center box=false bold=true size=32`, and
+  Tag as `heading=4 alignment=Left box=false bold=true size=26` — all
+  exactly matching their style definitions.
+- **Not verifiable in this sandbox**: live GPUI rendering of the now-
+  correctly-resolved box/alignment (no display here) — needs the user's
+  own machine to confirm the fix is visible in the actual editor, not
+  just correct in the parsed model.
