@@ -695,7 +695,13 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
         }
         let mut ppr = String::new();
         if para.heading != 0 {
-            ppr.push_str(&format!("<w:pStyle w:val=\"heading{}\"/>", para.heading));
+            // Capitalized to match Word's own built-in styleId ("Heading1"
+            // .."Heading9" in word/styles.xml) — OOXML styleId references
+            // are matched case-sensitively, so a lowercase "heading1" points
+            // at a styleId that doesn't exist and Word silently falls back
+            // to Normal, dropping the heading's formatting and its entry in
+            // the Navigation pane.
+            ppr.push_str(&format!("<w:pStyle w:val=\"Heading{}\"/>", para.heading));
         }
         match para.alignment {
             Alignment::Center => ppr.push_str("<w:jc w:val=\"center\"/>"),
@@ -970,7 +976,11 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
-        assert!(xml.contains(r#"<w:pStyle w:val="heading2"/>"#));
+        // Capitalized to match Word's own built-in styleId casing
+        // ("Heading1".."Heading9") — see
+        // test_rebuild_emits_capitalized_heading_styleid_matching_words_own_styles_xml
+        // for why the casing has to match exactly.
+        assert!(xml.contains(r#"<w:pStyle w:val="Heading2"/>"#));
     }
 
     #[test]
@@ -1198,6 +1208,31 @@ mod tests {
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    // ── heading style round-trips against Word's actual built-in styleId ────
+
+    #[test]
+    fn test_rebuild_emits_capitalized_heading_styleid_matching_words_own_styles_xml() {
+        // Real Word documents (and every version of Microsoft Word itself)
+        // define the built-in heading styles with a capitalized styleId —
+        // <w:style w:type="paragraph" w:styleId="Heading1"> in word/styles.xml
+        // — and OOXML styleId references are matched case-sensitively. If
+        // rebuild_document_xml emits a differently-cased w:val, the saved
+        // paragraph's <w:pStyle> points at a styleId that doesn't exist in
+        // styles.xml (which this app never rewrites), so Word silently falls
+        // back to Normal: the heading's bold/size/outline-level vanish and it
+        // drops out of Word's Navigation pane, even though parsing it back
+        // into Vimbatim still shows a heading (apply_para_style lower-cases
+        // before matching, so it doesn't notice the mismatch).
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains(r#"<w:pStyle w:val="Heading1"/>"#));
     }
 
     // ── block-level unsupported content detection ───────────────────────────
