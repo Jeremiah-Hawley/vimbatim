@@ -151,10 +151,12 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
     if start_para == end_para {
         delete_within_runs(&mut paragraphs[start_para].runs, start_run, start_char, end_run, end_char);
         paragraphs[start_para].unsupported_xml = None;
+        clear_heading_if_now_empty(&mut paragraphs[start_para]);
         return;
     }
 
     let heading = paragraphs[start_para].heading;
+    let alignment = paragraphs[start_para].alignment;
     let mut merged_runs: Vec<Run> = paragraphs[start_para].runs[..start_run].to_vec();
     let mut head_run = paragraphs[start_para].runs[start_run].clone();
     head_run.text.truncate(start_char);
@@ -167,11 +169,38 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
 
     merged_runs.retain(|r| !r.text.is_empty());
     merge_adjacent_same_format_runs(&mut merged_runs);
-    if merged_runs.is_empty() {
+    // A card style's box/bold/size lives on its runs, but its heading/
+    // center-alignment are paragraph-level fields deletion never otherwise
+    // touches. Merging across a paragraph boundary should carry over the
+    // surviving (start) paragraph's own heading/alignment — e.g. backspacing
+    // away just an empty trailing line should leave a Pocket line exactly as
+    // it was, still centered. But if this merge also emptied out all the
+    // text, there's no run-level formatting left to justify keeping them
+    // either: reset both to plain, matching what Clear Formatting already
+    // does explicitly (see `apply_formatting_to_line`'s `ClearAll` arm) —
+    // otherwise `text_editor.rs`'s heading-driven bold/oversized paragraph
+    // render keeps applying to an empty line whose actual pocket-formatted
+    // text has been fully backspaced away.
+    let now_empty = merged_runs.is_empty();
+    if now_empty {
         merged_runs.push(Run::default());
     }
+    let (heading, alignment) = if now_empty { (0, Alignment::default()) } else { (heading, alignment) };
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment: Alignment::default(), unsupported_xml: None }]);
+    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment, unsupported_xml: None }]);
+}
+
+/// Once a paragraph's own within-paragraph deletion (not a cross-paragraph
+/// merge — see `sync_delete_range`'s other branch) empties out all its
+/// runs, `delete_within_runs` already resets the surviving run to
+/// `Run::default()` — but the paragraph-level `heading`/`alignment` fields
+/// it never touches would otherwise keep a card style's phantom bold/
+/// oversized/centered look alive on what's now just an empty line.
+fn clear_heading_if_now_empty(para: &mut Paragraph) {
+    if para.runs.iter().all(|r| r.text.is_empty()) {
+        para.heading = 0;
+        para.alignment = Alignment::default();
+    }
 }
 
 fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, end_run: usize, end_char: usize) {

@@ -448,6 +448,16 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                             }
                         }
                     }
+                    // A character style (`word/styles.xml`) referenced
+                    // directly on this run — see `apply_run_character_style`.
+                    // Checked ahead of the generic in_rpr catch-all so it
+                    // doesn't fall through to `apply_run_prop`'s "unknown
+                    // tag" no-op.
+                    b"w:rStyle" if in_rpr => {
+                        if let Some(run) = current_run.as_mut() {
+                            apply_run_character_style(e, run, styles);
+                        }
+                    }
                     // Catch-all for run-property elements (w:b, w:u, etc.).
                     _ if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
@@ -477,6 +487,11 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                     }
                     b"w:pBdr" if in_ppr => {
                         para_has_box_border = true;
+                    }
+                    b"w:rStyle" if in_rpr => {
+                        if let Some(run) = current_run.as_mut() {
+                            apply_run_character_style(e, run, styles);
+                        }
                     }
                     _ if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
@@ -614,6 +629,47 @@ fn apply_para_alignment(e: &BytesStart, para: &mut Paragraph) {
     }
 }
 
+/// OOXML boolean-toggle semantics: the element being present with no
+/// `w:val` (or `w:val="1"`/`"true"`) means on; `w:val="0"`/`"false"`/
+/// (for `<w:u>` specifically) `"none"` means explicitly off. Real
+/// documents' character-style definitions rely on this to turn an
+/// inherited property back off (e.g. debate-community docx files'
+/// "Style13ptBold" character style sets `<w:u w:val="none"/>` precisely so
+/// referencing it doesn't also underline the text).
+fn on_off_attr_is_true(e: &BytesStart) -> bool {
+    !e.attributes().flatten().any(|attr| {
+        attr.key.as_ref() == b"w:val" && matches!(attr.value.as_ref(), b"0" | b"false" | b"none")
+    })
+}
+
+/// Resolves a `<w:rStyle w:val="...">` — a *character* style referenced
+/// directly on a run's `<w:rPr>`, distinct from a paragraph's `<w:pStyle>`.
+/// Debate-community docx files commonly underline/bold the emphasized
+/// "read" portion of a card this way (e.g. a "StyleUnderline" character
+/// style) rather than with direct `<w:u>`/`<w:b>` — left unhandled, that
+/// text silently lost its formatting.
+///
+/// Applies as this run's baseline the same way a paragraph style's
+/// defaults already do (see `apply_paragraph_style_defaults`): any direct
+/// `<w:b>`/`<w:u>`/etc. appearing later in this same `<w:rPr>` is processed
+/// afterward by `apply_run_prop` and still wins, matching Word's own
+/// direct-formatting-beats-style cascade. `box_format` is OR'd rather than
+/// overwritten so this can't clear a box this run already has from its
+/// paragraph's own border (`word/styles.xml`'s character styles don't
+/// currently contribute a box themselves — parsing a character style's own
+/// `<w:bdr>` is a separate, unreported gap).
+fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<String, StyleDefaults>) {
+    let Some(style_id) = e.attributes().flatten().find_map(|attr| {
+        (attr.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&attr.value).into_owned())
+    }) else { return };
+    let Some(defaults) = styles.get(&style_id) else { return };
+    run.bold = defaults.bold;
+    run.size = defaults.size;
+    run.underline = defaults.underline;
+    run.double_underline = defaults.double_underline;
+    run.box_format = run.box_format || defaults.box_format;
+}
+
 /// Applies a run-property element to `run` based on the element's tag name.
 /// Handles `w:b` (bold), `w:u` (underline), `w:highlight` (highlight colour),
 /// and `w:sz` (font size in half-points).  Unknown tags are silently ignored.
@@ -625,17 +681,22 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
      * passed as a parameter to keep the call site clean.
      */
     match e.name().as_ref() {
-        b"w:b" => { run.bold = true; }
-        b"w:i" => { run.italic = true; }
-        b"w:strike" => { run.strikethrough = true; }
+        b"w:b" => { run.bold = on_off_attr_is_true(e); }
+        b"w:i" => { run.italic = on_off_attr_is_true(e); }
+        b"w:strike" => { run.strikethrough = on_off_attr_is_true(e); }
         b"w:u" => {
-            let is_double = e.attributes().flatten().any(|attr| {
-                attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double"
-            });
-            if is_double {
-                run.double_underline = true;
+            if !on_off_attr_is_true(e) {
+                run.underline = false;
+                run.double_underline = false;
             } else {
-                run.underline = true;
+                let is_double = e.attributes().flatten().any(|attr| {
+                    attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double"
+                });
+                if is_double {
+                    run.double_underline = true;
+                } else {
+                    run.underline = true;
+                }
             }
         }
         b"w:highlight" => {
@@ -1051,6 +1112,63 @@ mod tests {
         let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(paragraphs[0].runs[0].underline);
         assert!(!paragraphs[0].runs[0].double_underline);
+    }
+
+    #[test]
+    fn test_u_val_none_is_not_underlined() {
+        // OOXML boolean-toggle semantics: `w:val="none"` (also seen as "0"/
+        // "false") explicitly turns underline OFF, same as the property
+        // being absent — not "anything other than double means single".
+        // Real debate-community docx files declare this on character
+        // styles like "Style13ptBold" (`<w:u w:val="none"/>`) to explicitly
+        // suppress underline that would otherwise carry over.
+        let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="none"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        assert!(!paragraphs[0].runs[0].underline);
+        assert!(!paragraphs[0].runs[0].double_underline);
+    }
+
+    #[test]
+    fn test_b_val_0_is_not_bold() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:b w:val="0"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        assert!(!paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_rstyle_resolves_character_style_underline_and_bold() {
+        // Reported bug repro: real debate docx files (e.g. this app's own
+        // "Affective Labor" test file) underline/bold the emphasized
+        // "read" portions of a card via a *character* style referenced by
+        // <w:rStyle> on the run, rather than direct <w:u>/<w:b> — 4000+
+        // occurrences of `<w:rStyle w:val="StyleUnderline"/>` in that file
+        // alone. Unhandled, that text silently loses its underline.
+        let styles_xml = r#"<w:styles>
+            <w:style w:type="character" w:styleId="StyleUnderline">
+                <w:rPr><w:u w:val="single"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let styles = parse_styles_xml(styles_xml);
+        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        assert!(paragraphs[0].runs[0].underline, "character-style underline not applied");
+    }
+
+    #[test]
+    fn test_rstyle_direct_formatting_after_it_still_wins() {
+        // Word's own cascade: rStyle (character style) sets the run's
+        // baseline, but any direct formatting appearing later in the same
+        // <w:rPr> still overrides it — matching how a <w:pStyle>'s
+        // paragraph-level defaults already work elsewhere in this parser.
+        let styles_xml = r#"<w:styles>
+            <w:style w:type="character" w:styleId="StyleUnderline">
+                <w:rPr><w:u w:val="single"/></w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let styles = parse_styles_xml(styles_xml);
+        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/><w:u w:val="none"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        assert!(!paragraphs[0].runs[0].underline, "direct <w:u w:val=\"none\"/> after rStyle should win");
     }
 
     #[test]

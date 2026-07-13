@@ -9643,6 +9643,52 @@ mod tests {
     }
 
     #[test]
+    fn test_backspace_through_pocket_line_and_trailing_newline_clears_all_formatting() {
+        // Reported bug: Pocket a line, press Enter (new empty plain line
+        // below it), then backspace repeatedly to erase the new line AND
+        // all of the pocket text. Box/center-align visibly disappeared
+        // already, but bold/font size stuck around — because nothing ever
+        // reset the surviving paragraph's `heading` (text_editor.rs applies
+        // a heading-driven bold+oversized font at the paragraph level,
+        // independent of the run's own now-cleared bold/size) once the
+        // paragraph's actual pocket-formatted text was fully deleted.
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        state.insert_char('a');
+        state.insert_char('\n');
+        // Backspace away the new empty line, then the pocket text itself.
+        state.backspace(); // removes the newline, merges back into the pocket paragraph
+        state.backspace(); // removes "a"
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 1);
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.heading, 0, "heading not cleared once pocket text is fully deleted: {:?}", para);
+        assert_eq!(para.alignment, Alignment::Left, "not left-aligned: {:?}", para);
+        assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared: {:?}", para);
+        assert!(para.runs.iter().all(|r| !r.box_format), "box not cleared: {:?}", para);
+        assert!(para.runs.iter().all(|r| r.size == 0), "size not cleared: {:?}", para);
+    }
+
+    #[test]
+    fn test_backspace_merging_empty_line_into_pocket_line_keeps_center_alignment() {
+        // Narrower case: only ONE backspace (undoing the Enter, no pocket
+        // text deleted yet) should leave the pocket paragraph exactly as it
+        // was — still centered — not reset alignment just because a merge
+        // across paragraphs happened.
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        state.insert_char('a');
+        state.insert_char('\n');
+        state.backspace();
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 1);
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.alignment, Alignment::Center, "pocket line's center alignment should survive merging back an empty trailing line: {:?}", para);
+        assert_eq!(para.heading, 1);
+        assert!(para.runs.iter().all(|r| r.box_format));
+    }
+
+    #[test]
     fn test_clear_formatting_on_hat_line_removes_double_underline_and_heading() {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Hat);
