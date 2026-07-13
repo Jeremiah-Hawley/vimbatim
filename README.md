@@ -25,7 +25,7 @@ Because vimbatim is build from the ground up with debaters needs in mind, all yo
 
 
 # How you can support Vimbatim
-You can support Vimbatim buy donating at [https://buymeacoffee.com/jeremiahhawley](my buy me a cofee page)
+You can support Vimbatim buy donating at https://buymeacoffee.com/jeremiahhawley (my buy me a cofee page)
 or
 You can email me at uwyohawleyj@gmail.com with any ideas, suggestions, or to request to be a contributor.
 
