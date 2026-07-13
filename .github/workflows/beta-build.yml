@@ -30,11 +30,13 @@ jobs:
 
       - name: Bundle .app
         if: runner.os == 'macOS'
-        run: cargo bundle --release
-
-      - name: Copy settings.conf into the bundle
-        if: runner.os == 'macOS'
-        run: cp settings.conf "target/release/bundle/osx/Vimbatim.app/Contents/Resources/settings.conf"
+        # --format osx: cargo-bundle otherwise also builds its own .dmg by
+        # default, which we don't use (our own .dmg below adds
+        # FIRST_LAUNCH.txt alongside the .app, which cargo-bundle's doesn't).
+        # settings.conf lands in Contents/Resources/ via [package.metadata.
+        # bundle].resources in Cargo.toml — cargo-bundle creates that
+        # directory itself, unlike a manual cp into a bundle it just built.
+        run: cargo bundle --release --format osx
 
       - name: Create .dmg
         if: runner.os == 'macOS'

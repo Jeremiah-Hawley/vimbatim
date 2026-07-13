@@ -18,7 +18,11 @@ zip           = "2"
 # cargo-bundle (closed_beta_plan.md §1) reads this to build Vimbatim.app on
 # macOS. `icon` is deliberately omitted — no .icns exists in the repo yet;
 # cargo-bundle falls back to a generic app icon until one is added.
+# `resources` copies settings.conf into Contents/Resources/ itself — without
+# it, cargo-bundle never creates a Resources dir at all (no cp target to
+# copy into after the fact).
 [package.metadata.bundle]
 name = "Vimbatim"
 identifier = "com.vimbatim.app"
 short_description = ".docx editor for collegiate policy debate"
+resources = ["settings.conf"]
