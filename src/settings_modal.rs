@@ -9,6 +9,15 @@ use crate::theme::{palette, save_theme, save_theme_color_mode, ThemeColorMode, T
 const SETTINGS_PATH: &str = "settings.conf";
 const DEFAULT_SETTINGS_PATH: &str = "default_settings.conf";
 
+/// `{version} ({git_sha})`, e.g. `0.1.0-beta.1 (a1b2c3d)` — both baked in at
+/// compile time (`Cargo.toml`'s version, and `build.rs`'s
+/// `VIMBATIM_GIT_SHA`). Shown in the settings modal so a beta tester can
+/// read off exactly what build a bug report came from
+/// (`closed_beta_plan.md` §3).
+fn build_version_string() -> String {
+    format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VIMBATIM_GIT_SHA"))
+}
+
 /// The floating settings modal. Renders as a centred overlay on top of the
 /// main window whenever `AppState.settings_visible` is true.
 ///
@@ -689,43 +698,58 @@ impl Render for SettingsModal {
                                 .py(px(12.0))
                                 .border_t_1()
                                 .border_color(rgb(0x464647))
+                                // closed_beta_plan.md §3: always-visible build
+                                // string so a tester reporting a bug can read
+                                // off exactly what build they're on.
                                 .child(
                                     div()
-                                        .id("settings-reset-btn")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .px(px(16.0))
-                                        .py(px(6.0))
-                                        .bg(rgb(0x3c3c3c))
-                                        .rounded(px(4.0))
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .text_color(rgb(0xd4d4d4))
-                                        .border_1()
-                                        .border_color(rgb(0x555555))
-                                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                                            this.reset_to_defaults(cx);
-                                        }))
-                                        .child("Reset to Defaults"),
+                                        .text_xs()
+                                        .text_color(rgb(0x808080))
+                                        .child(build_version_string()),
                                 )
                                 .child(
                                     div()
-                                        .id("settings-close-btn")
                                         .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .px(px(16.0))
-                                        .py(px(6.0))
-                                        .bg(rgb(0x007acc))
-                                        .rounded(px(4.0))
-                                        .cursor_pointer()
-                                        .text_sm()
-                                        .text_color(rgb(0xffffff))
-                                        .on_click(cx.listener(|this, _ev, window, cx| {
-                                            this.close(window, cx);
-                                        }))
-                                        .child("Close"),
+                                        .flex_row()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .id("settings-reset-btn")
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .px(px(16.0))
+                                                .py(px(6.0))
+                                                .bg(rgb(0x3c3c3c))
+                                                .rounded(px(4.0))
+                                                .cursor_pointer()
+                                                .text_sm()
+                                                .text_color(rgb(0xd4d4d4))
+                                                .border_1()
+                                                .border_color(rgb(0x555555))
+                                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                    this.reset_to_defaults(cx);
+                                                }))
+                                                .child("Reset to Defaults"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("settings-close-btn")
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .px(px(16.0))
+                                                .py(px(6.0))
+                                                .bg(rgb(0x007acc))
+                                                .rounded(px(4.0))
+                                                .cursor_pointer()
+                                                .text_sm()
+                                                .text_color(rgb(0xffffff))
+                                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                                    this.close(window, cx);
+                                                }))
+                                                .child("Close"),
+                                        ),
                                 ),
                         )
                     }),

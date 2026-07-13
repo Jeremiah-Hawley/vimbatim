@@ -656,6 +656,22 @@ pub fn settings_conf_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("settings.conf"))
 }
 
+/// Fixed crash-log location for the panic hook (`main.rs`) — always the
+/// same path so a tester can find it without hunting, and so the "First
+/// Launch" doc can just tell them the one path for their OS
+/// (`closed_beta_plan.md` §5): `~/.vimbatim/crash.log` on macOS/Linux,
+/// `%APPDATA%\vimbatim\crash.log` on Windows. Both are writable without
+/// extra permissions, unlike the install directory a packaged `.app`/`.exe`
+/// may live in.
+pub fn crash_log_path() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from).map(|dir| dir.join("vimbatim"))
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".vimbatim"))
+    };
+    base.unwrap_or_else(std::env::temp_dir).join("crash.log")
+}
+
 /// The file explorer's starting directory when there's no prior working
 /// directory to restore (always true today — nothing persists
 /// `working_directory` across launches). Prefers the user's home directory
@@ -6627,6 +6643,19 @@ mod tests {
         // the process happened to be launched from.
         let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
         assert_eq!(path.parent(), Some(exe_dir.as_path()));
+    }
+
+    #[test]
+    fn test_crash_log_path_resolves_under_a_fixed_dir_named_for_the_os() {
+        let path = crash_log_path();
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("crash.log")));
+        let parent_name = path.parent().unwrap().file_name().unwrap();
+        if cfg!(target_os = "windows") {
+            assert_eq!(parent_name, "vimbatim");
+        } else {
+            assert_eq!(parent_name, ".vimbatim");
+        }
+        assert!(path.is_absolute());
     }
 
     #[test]

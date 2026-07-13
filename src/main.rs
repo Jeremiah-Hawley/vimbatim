@@ -20,8 +20,36 @@ use gpui::*;
 use gpui_platform::application;
 use keybinds::{rebuild_keymap, Keybinds};
 use main_window::MainWindow;
+use std::io::Write;
+
+/// closed_beta_plan.md §5: a double-clicked GUI app has no visible console,
+/// so an unhandled panic is otherwise completely silent to the tester (the
+/// app just vanishes) and unreportable. Wraps the default panic behavior
+/// (still prints to stderr, in case a console *is* attached) with an
+/// append to a fixed crash-log file, tagged with the exact build so a bug
+/// report can be tied back to a commit.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+
+        let build = format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VIMBATIM_GIT_SHA"));
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let entry = format!("\n--- vimbatim crash: build {build} ---\n{info}\n{backtrace}\n");
+
+        let path = state::crash_log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(entry.as_bytes());
+        }
+    }));
+}
 
 fn main() {
+    install_panic_hook();
+
     /*
      * Application entry point.
      *

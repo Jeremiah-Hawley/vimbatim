@@ -1,7 +1,8 @@
 [package]
 name = "vimbatim"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2021"
+build = "build.rs"
 
 [[bin]]
 name = "vimbatim"
@@ -13,3 +14,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui
 regex         = "1"
 quick-xml     = "0.30"
 zip           = "2"
+
+# cargo-bundle (closed_beta_plan.md §1) reads this to build Vimbatim.app on
+# macOS. `icon` is deliberately omitted — no .icns exists in the repo yet;
+# cargo-bundle falls back to a generic app icon until one is added.
+[package.metadata.bundle]
+name = "Vimbatim"
+identifier = "com.vimbatim.app"
+short_description = ".docx editor for collegiate policy debate"
