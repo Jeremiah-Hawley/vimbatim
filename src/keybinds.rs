@@ -200,6 +200,9 @@ pub enum KeybindAction {
     OpenStats,
     CiteFromLink,
     Wikifi,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 impl KeybindAction {
@@ -212,6 +215,7 @@ impl KeybindAction {
             PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Emphasis,
             Highlight,
             DeleteTags, StartTimer, OpenStats, CiteFromLink, Wikifi,
+            ZoomIn, ZoomOut, ZoomReset,
         ]
     }
 
@@ -250,6 +254,9 @@ impl KeybindAction {
             OpenStats => "Open Stats",
             CiteFromLink => "Cite From Link",
             Wikifi => "Wikifi",
+            ZoomIn => "Zoom In",
+            ZoomOut => "Zoom Out",
+            ZoomReset => "Reset Zoom",
         }
     }
 
@@ -257,7 +264,8 @@ impl KeybindAction {
         use KeybindAction::*;
         use KeybindCategory as C;
         match self {
-            ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace => C::General,
+            ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace
+                | ZoomIn | ZoomOut | ZoomReset => C::General,
             Copy | Cut | Paste | Undo | Redo | SelectAll => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
             PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Emphasis => C::CardStyles,
@@ -302,6 +310,9 @@ impl KeybindAction {
             OpenStats => "open_stats",
             CiteFromLink => "cite_from_link",
             Wikifi => "wikifi",
+            ZoomIn => "zoom_in",
+            ZoomOut => "zoom_out",
+            ZoomReset => "zoom_reset",
         }
     }
 
@@ -346,6 +357,11 @@ impl KeybindAction {
             OpenStats => KeyCombo::new(true, true, false, "i"),
             CiteFromLink => KeyCombo::new(true, false, false, "f8"),
             Wikifi => KeyCombo::new(true, true, true, "w"),
+            // "=" (not "+") so this fires without needing Shift on a US
+            // layout — the same convention VS Code and most editors use.
+            ZoomIn => KeyCombo::new(true, false, false, "="),
+            ZoomOut => KeyCombo::new(true, false, false, "-"),
+            ZoomReset => KeyCombo::new(true, false, false, "0"),
         }
     }
 
@@ -509,7 +525,7 @@ pub fn load_vim_enabled(path: &Path) -> bool {
 }
 
 // Every bindable action needs its own zero-sized GPUI action struct — this
-// is the one place all 32 are declared. `main_window.rs` registers a small
+// is the one place all 35 are declared. `main_window.rs` registers a small
 // `.on_action` handler per struct; `rebuild_keymap` below is the only place
 // that needs to know which struct corresponds to which `KeybindAction`.
 actions!(
@@ -523,6 +539,7 @@ actions!(
         CiteAction, EmphasisAction,
         HighlightAction,
         DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
+        ZoomInAction, ZoomOutAction, ZoomResetAction,
     ]
 );
 
@@ -575,6 +592,9 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         KeyBinding::new(&ks(OpenStats), OpenStatsAction, None),
         KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, None),
         KeyBinding::new(&ks(Wikifi), WikifiAction, None),
+        KeyBinding::new(&ks(ZoomIn), ZoomInAction, None),
+        KeyBinding::new(&ks(ZoomOut), ZoomOutAction, None),
+        KeyBinding::new(&ks(ZoomReset), ZoomResetAction, None),
     ]);
 }
 

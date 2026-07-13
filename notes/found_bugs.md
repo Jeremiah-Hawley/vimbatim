@@ -1,16 +1,17 @@
-# File Purpose
-This file contains descriptions of bugs I found while testing
+bugfixes_and_packaging# File Purpos0
+This file contains descriptions of bugs I found while testing, visual bugs are just visual and don't impact functionality, functionality bugs are bugs that do impact functionality, and Forgitten Implicit Features are features that I meant to have inlcuded but didn't explicitly refer to them so they're small changes that need to be added. the order of priority for editing is
+1) Functionality bugs
+2) Forgotten Implicit Feaetures
+3) Visual Bugs
+
+When fixing bugs, if there is an lack of clarity ask the user to clarify the issue or how they'd like it fixed.
 ## Visual bugs
 
 
 ## Functionality bugs
-### File Saving
-When creating a new file in the text editor, after writing text in it, saving just returns "Save failed: tab has no parsed document", this likely requires two things to be changed
-1) When creating a new .docx file it needs to do more than create an empty file with the .docx extension, it needs to create a zip file containing multiple xml files formatted the way word would and text should be put in the document.xml file which is the one that contains document text
-2) Parsing a file shouldn't be a requirement for saving a file, after creating a file in vimbatim, and then saving that file it should just create a new file with the properties in the editor rather than failing
+### Slow when editing pre-existing .docx files
+Curently editing docx files that have been loaded from another file takes far longer than creating and editing a new file from scratch. I would asome this has something to do with .docx parsing or saving, remember that it only matters if the docx portion of whats on screen is written properly at save time, so you should be able to move a lot of the computational workload to the saving process which is less time restricted than the editing process
 
-### Directory and Document Searching
-In the file explorer on the right, it only updates available files and folders on open, so if a file or folder is created in another application (like Microsoft File Explorer, or Microsoft Word) it will not show until vimbatim is restarted.
-
+## Forgotten Implicit Features
 
 

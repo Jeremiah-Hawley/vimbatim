@@ -510,6 +510,20 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                                 let para_end_pos = reader.buffer_position() - 6;
                                 para.unsupported_xml = Some(xml[para_start_pos..para_end_pos].to_string());
                             }
+                            // Word fragments runs heavily (spell-check,
+                            // revision-tracking remnants) even when adjacent
+                            // runs share identical formatting, which made
+                            // every per-keystroke edit on a loaded document
+                            // walk far more runs than an equivalent
+                            // freshly-typed one (`resolve_position` and the
+                            // sync_*/apply_formatting helpers are all
+                            // O(runs)). Collapsing them once here, at parse
+                            // time, is free — it doesn't change what gets
+                            // saved (`unsupported_xml`, when set, is
+                            // re-emitted verbatim and ignores `runs`
+                            // entirely) but keeps every later edit as cheap
+                            // as it already is for a new document.
+                            crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
                             paragraphs.push(para);
                         }
                         in_ppr = false;
@@ -1105,8 +1119,10 @@ mod tests {
     fn test_parses_paragraph_border_as_box_format_on_every_run() {
         let xml = "<w:document><w:body><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/></w:pBdr></w:pPr><w:r><w:t>a</w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>";
         let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
-        assert!(paragraphs[0].runs[0].box_format);
-        assert!(paragraphs[0].runs[1].box_format);
+        // Parse-time run merging collapses "a"+"b" (identical formatting)
+        // into one run, so check the property holds across whatever runs
+        // remain rather than hardcoding a run count.
+        assert!(paragraphs[0].runs.iter().all(|r| r.box_format));
     }
 
     #[test]
@@ -1157,8 +1173,10 @@ mod tests {
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
-        assert!(reparsed[0].runs[0].box_format);
-        assert!(reparsed[0].runs[1].box_format);
+        // Parse-time run merging collapses "a"+"b" (identical formatting)
+        // into one run, so check the property holds across whatever runs
+        // remain rather than hardcoding a run count.
+        assert!(reparsed[0].runs.iter().all(|r| r.box_format));
     }
 
     // ── real-file round trip (parse_docx -> DocxOrigin::save -> parse_docx) ─
@@ -1321,6 +1339,30 @@ mod tests {
         assert!(!paragraphs[0].runs[0].box_format);
         assert!(!paragraphs[0].runs[0].bold);
         assert_eq!(paragraphs[0].runs[0].size, 0);
+    }
+
+    // ── parse-time run merging (editing-speed fix) ──────────────────────────
+
+    #[test]
+    fn test_adjacent_runs_with_identical_formatting_merge_at_parse_time() {
+        // Word fragments runs at spell-check/revision boundaries even when
+        // formatting doesn't change; merging these once at parse time keeps
+        // every later per-keystroke edit as cheap on a loaded document as on
+        // a freshly-typed one (both O(runs), but this keeps `runs` small).
+        let xml = "<w:document><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>foo</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>bar</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        assert_eq!(paragraphs[0].runs.len(), 1);
+        assert_eq!(paragraphs[0].runs[0].text, "foobar");
+        assert!(paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_adjacent_runs_with_different_formatting_stay_separate_at_parse_time() {
+        let xml = "<w:document><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>foo</w:t></w:r><w:r><w:t>bar</w:t></w:r></w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        assert_eq!(paragraphs[0].runs.len(), 2);
+        assert!(paragraphs[0].runs[0].bold);
+        assert!(!paragraphs[0].runs[1].bold);
     }
 
     #[test]

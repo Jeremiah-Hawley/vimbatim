@@ -81,40 +81,49 @@ pub fn sync_insert_str(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text
 fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx: usize, char_offset: usize) {
     /*
      * Splits paragraph `para_idx` into two at (run_idx, char_offset): the
-     * run being split becomes a "head" run (keeping the split run's
-     * formatting) ending the first paragraph, and a "tail" run (same
-     * formatting) starting the second, followed by whatever runs came
+     * run being split becomes a "head" run ending the first paragraph, and
+     * a "tail" run starting the second, followed by whatever runs came
      * after it. The new second paragraph always gets `heading: 0` — real
      * Word itself reverts to body style after pressing Enter inside a
      * heading, so this matches rather than deviates from that convention.
      *
-     * When splitting a line with card-style formatting (Pocket/Hat/Block),
-     * the new paragraph inherits the card style's center alignment and the
-     * special formatting (box/double-underline/underline) is automatically
-     * re-applied because the runs retain their formatting.
+     * When splitting a line with card-style formatting (Pocket/Hat/Block/
+     * Tag, i.e. `heading != 0`), the new paragraph's formatting reverts to
+     * plain (see `was_heading` below) instead of inheriting the split run's
+     * bold/size/box/underline/alignment — otherwise `heading` would reset
+     * but the line would still visually look like the card style.
      */
     let para = &paragraphs[para_idx];
     let split_run = &para.runs[run_idx];
     let mut head_run = split_run.clone();
     head_run.text = split_run.text[..char_offset].to_string();
-    let mut tail_run = split_run.clone();
-    tail_run.text = split_run.text[char_offset..].to_string();
+
+    let heading = para.heading;
+    let alignment = para.alignment;
+    // A card style (Pocket/Hat/Block/Tag) is entirely run-level formatting
+    // plus this paragraph-level `heading` marker (state.rs's
+    // `apply_card_style`) — so splitting a heading line must revert the
+    // *new* paragraph's formatting the same way real Word reverts to Normal
+    // style after Enter inside a heading, not just clone the split run's
+    // bold/size/box/underline onto it. `size: 0` (via `Run::default()`) is
+    // this codebase's existing "inherit normal size" convention (also what
+    // a brand-new blank document's first paragraph starts with), so this
+    // doesn't need a caller-supplied default size.
+    let was_heading = heading != 0;
+    let tail_text = split_run.text[char_offset..].to_string();
+    let (tail_run, new_alignment) = if was_heading {
+        (Run { text: tail_text, ..Run::default() }, Alignment::default())
+    } else {
+        let mut run = split_run.clone();
+        run.text = tail_text;
+        (run, alignment)
+    };
 
     let mut para_a_runs: Vec<Run> = para.runs[..run_idx].to_vec();
     para_a_runs.push(head_run);
 
     let mut para_b_runs: Vec<Run> = vec![tail_run];
     para_b_runs.extend(para.runs[run_idx + 1..].to_vec());
-
-    let heading = para.heading;
-    let alignment = para.alignment;
-    // Preserve center alignment for card styles (Pocket/Hat/Block) on both paragraphs
-    // These styles always have center alignment, so continue it on the new paragraph too
-    let new_alignment = if alignment == Alignment::Center {
-        Alignment::Center
-    } else {
-        Alignment::default()
-    };
 
     paragraphs.splice(
         para_idx..=para_idx,
@@ -186,17 +195,20 @@ fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, 
 /// previously had unrelated text become textually adjacent — without this,
 /// repeated edits would let paragraphs accumulate more and more same-format
 /// runs indefinitely.
-fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
+pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
     let mut i = 0;
     while i + 1 < runs.len() {
         let same_format = runs[i].bold == runs[i + 1].bold
             && runs[i].italic == runs[i + 1].italic
             && runs[i].underline == runs[i + 1].underline
+            && runs[i].double_underline == runs[i + 1].double_underline
+            && runs[i].strikethrough == runs[i + 1].strikethrough
             && runs[i].highlight == runs[i + 1].highlight
             && runs[i].highlight_color == runs[i + 1].highlight_color
             && runs[i].size == runs[i + 1].size
             && runs[i].font == runs[i + 1].font
             && runs[i].color == runs[i + 1].color
+            && runs[i].box_format == runs[i + 1].box_format
             && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve;
         if same_format {
             let next_text = runs[i + 1].text.clone();
@@ -248,8 +260,10 @@ pub enum FormatOp {
     Color(Option<String>),
     Box(bool),
     /// Clears every character-formatting field (bold/italic/underline/
-    /// highlight/size/font/color) back to the unformatted default.
-    ClearAll,
+    /// highlight/font/color) back to the unformatted default, and size to
+    /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
+    /// `large_size`, not to "no override").
+    ClearAll { default_size: u16 },
 }
 
 /// Applies `op` to every run (byte-)range `[start, end)` spans (spec 7.2),
@@ -397,7 +411,7 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::FontFamily(font) => run.font = font.clone(),
         FormatOp::Color(color) => run.color = color.clone(),
         FormatOp::Box(b) => run.box_format = *b,
-        FormatOp::ClearAll => {
+        FormatOp::ClearAll { default_size } => {
             run.bold = false;
             run.italic = false;
             run.underline = false;
@@ -405,7 +419,7 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
             run.strikethrough = false;
             run.highlight = false;
             run.highlight_color = String::new();
-            run.size = 0;
+            run.size = *default_size;
             run.font = None;
             run.color = None;
             run.box_format = false;
@@ -538,6 +552,59 @@ mod tests {
         assert_eq!(paragraphs[0].runs[0].text, "foo");
         assert_eq!(paragraphs[0].runs[1].text, "b");
         assert_eq!(paragraphs[1].runs[0].text, "ar");
+    }
+
+    #[test]
+    fn test_insert_newline_at_end_of_heading_line_resets_new_paragraph_to_plain() {
+        // A Pocket-styled line (heading 1, bold, sized, boxed, centered) —
+        // pressing Enter at its end should start a plain body-text line,
+        // not continue looking like a Pocket.
+        let heading_line = Paragraph {
+            runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut paragraphs = vec![heading_line];
+        sync_insert_char(&mut paragraphs, 5, '\n'); // cursor at end of "hello"
+
+        assert_eq!(paragraphs.len(), 2);
+        // Original line keeps its heading formatting untouched.
+        assert_eq!(paragraphs[0].heading, 1);
+        assert!(paragraphs[0].runs[0].bold);
+        // New line is plain: no heading, no inherited run formatting, left-aligned.
+        assert_eq!(paragraphs[1].heading, 0);
+        assert_eq!(paragraphs[1].alignment, Alignment::Left);
+        assert!(!paragraphs[1].runs[0].bold);
+        assert_eq!(paragraphs[1].runs[0].size, 0);
+        assert!(!paragraphs[1].runs[0].box_format);
+    }
+
+    #[test]
+    fn test_insert_newline_mid_heading_line_resets_trailing_text_to_plain() {
+        // Splitting in the middle of a Hat-styled line: the trailing half
+        // that moves to the new paragraph loses the Hat formatting too,
+        // matching Word's "Enter inside a heading reverts to body style".
+        let heading_line = Paragraph {
+            runs: vec![Run { text: "hello world".into(), bold: true, size: 44, double_underline: true, ..Run::default() }],
+            heading: 2,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut paragraphs = vec![heading_line];
+        sync_insert_char(&mut paragraphs, 5, '\n'); // split after "hello"
+
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(paragraphs[0].runs[0].text, "hello");
+        assert!(paragraphs[0].runs[0].bold);
+        assert_eq!(paragraphs[0].heading, 2);
+
+        assert_eq!(paragraphs[1].runs[0].text, " world");
+        assert_eq!(paragraphs[1].heading, 0);
+        assert_eq!(paragraphs[1].alignment, Alignment::Left);
+        assert!(!paragraphs[1].runs[0].bold);
+        assert!(!paragraphs[1].runs[0].double_underline);
+        assert_eq!(paragraphs[1].runs[0].size, 0);
     }
 
     #[test]
@@ -771,10 +838,10 @@ mod tests {
             color: Some("FF0000".into()),
             ..Run::default()
         }])];
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll);
+        apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll { default_size: 22 });
         let r = &paragraphs[0].runs[0];
         assert!(!r.bold && !r.italic && !r.underline && !r.highlight);
-        assert_eq!(r.size, 0);
+        assert_eq!(r.size, 22);
         assert_eq!(r.font, None);
         assert_eq!(r.color, None);
     }
@@ -845,7 +912,7 @@ mod tests {
     fn test_is_uniformly_active_false_for_non_togglable_ops() {
         let paragraphs = vec![para(vec![run("hello")])];
         assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::FontSize(24)));
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::ClearAll));
+        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::ClearAll { default_size: 22 }));
     }
 
     #[test]

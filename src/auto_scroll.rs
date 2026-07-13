@@ -4,7 +4,7 @@ use std::rc::Rc;
 use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, Window};
 
 use crate::state::AppState;
-use crate::text_editor::{document_lines, line_col_from_mouse_position, visual_rows_for_viewport};
+use crate::text_editor::{document_lines, expand_rows_for_display, line_col_from_mouse_position, visual_rows_for_viewport};
 
 /// How close a click-drag has to get to the top/bottom of the viewport
 /// before auto-scroll kicks in.
@@ -155,11 +155,21 @@ impl AutoScroller {
         let new_y = clamp_scroll_offset(current.y.as_f32() + delta, max_y);
         self.scroll_handle.set_offset(point(current.x, px(new_y)));
 
+        // ponytail: still an uncached full-document rewrap per tick, unlike
+        // TextEditor's on_mouse_down/on_mouse_move (see `cached_or_fresh_row_tables`)
+        // — AutoScroller only holds `state`/`scroll_handle`, not a reference to
+        // TextEditor's RowCache, and this only fires once per animation frame
+        // during an edge-drag rather than on every mouse-move pixel. Route
+        // through the cache too if edge-drag scrolling ever measures as a real cost.
         let scroll_y = self.scroll_handle.offset().y.as_f32();
+        let zoom = self.state.read(cx).zoom;
         let content = self.state.read(cx).active_content().to_string();
+        let paragraphs = self.state.read(cx).tabs.get(self.state.read(cx).active_tab)
+            .map(|t| t.paragraphs.clone()).unwrap_or_default();
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
-        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows);
+        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom);
+        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom);
+        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);
             cx.notify();

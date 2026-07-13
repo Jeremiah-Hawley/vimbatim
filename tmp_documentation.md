@@ -2620,3 +2620,771 @@ paragraph.
   correctly-resolved box/alignment (no display here) — needs the user's
   own machine to confirm the fix is visible in the actual editor, not
   just correct in the parsed model.
+
+## Bugfix: Slow Editing of Pre-Existing .docx Files
+
+Reported in `notes/found_bugs.md`: editing a loaded `.docx` was far
+slower than typing into a brand-new tab. Root cause, found via
+`superpowers:systematic-debugging` by tracing every choke-point mutation
+(`insert_char`/`backspace`/`sync_delete_range`/`apply_formatting`) back
+to `document_ops.rs::resolve_position`, which they all call at least
+once per keystroke: it's O(runs in the paragraph). A brand-new tab starts
+with exactly one run, so this is free. A paragraph parsed from a *real*
+Word file is not — Word fragments a paragraph's text across many `<w:r>`
+elements (spell-check boundaries, revision-tracking remnants, etc.) even
+when every fragment shares identical formatting, so a loaded document's
+paragraphs carried far more runs than necessary, making every keystroke's
+O(runs) work proportionally slower.
+
+**Fix** (`src/docx_parser.rs`, `src/document_ops.rs`): the app already
+had exactly the right tool for this — `apply_formatting`'s
+`merge_adjacent_same_format_runs` (used after every edit, to keep the
+same problem from *reappearing* during editing) — just never applied at
+parse time, when the problem is largest. Made it `pub(crate)` and call it
+once per paragraph in `parse_document_xml`, right before the paragraph is
+pushed. This is free: it doesn't change what gets saved
+(`Paragraph.unsupported_xml`, when set, is re-emitted verbatim at save
+time and ignores `runs` entirely) but permanently collapses a loaded
+document's excess runs down to the same shape a freshly-typed document
+already has, so every later keystroke is exactly as cheap either way —
+moving the cost to load time (a one-off cost, paid once) instead of
+paying it on every single edit, per the bug report's own suggested
+direction ("move the computational workload to the process that's less
+time restricted").
+
+Along the way, found and fixed a second, smaller latent bug in
+`merge_adjacent_same_format_runs` itself: its "same format" comparison
+was missing `double_underline`/`strikethrough`/`box_format` (its own doc
+comment already claimed to compare "every field except text," which
+wasn't true) — without this, calling it more aggressively at parse time
+risked silently merging e.g. a `box_format: true` run into an adjacent
+non-boxed run and losing the box on part of the text. Fixed by adding
+the three missing fields to the comparison.
+
+Two existing tests (`test_parses_paragraph_border_as_box_format_on_every_run`,
+`test_box_format_round_trip_through_parse_and_rebuild`) asserted on
+`runs[0]`/`runs[1]` for two same-formatted runs that now correctly merge
+into one — updated both to assert the property (`box_format`) holds
+across `paragraphs[0].runs.iter().all(...)` instead of hardcoding a run
+count, which is what they actually meant to test. Added two new tests
+directly covering the merge itself: adjacent same-formatted runs merge
+into one with the concatenated text, adjacent differently-formatted runs
+stay separate.
+
+**Caveat, raised on advisor review — likely not the whole story**: this
+fix targets one confirmed, verified root cause (excess runs from Word's
+own fragmentation), but there's at least one more O(document-size) cost
+in the same edit path that run-merging does *not* touch:
+`push_undo_snapshot` (`state.rs`, called on every non-coalesced edit)
+does `tab.content.clone()` + `tab.paragraphs.clone()` — a full clone of
+the *entire* document on every keystroke, not just the touched
+paragraph. A freshly-typed tab starts near-empty, so this is cheap; a
+loaded card's full text/paragraph structure is not, regardless of how
+few runs each paragraph has. `resolve_position`'s outer loop (one
+iteration per paragraph, re-walked from paragraph 0 on every call) is
+similarly unaffected by within-paragraph run count if the document has
+many separate paragraphs rather than one long one. This fix should make
+a real, measurable difference — real debate cards are typically one long
+paragraph, which is exactly the shape this fix targets, and Word's
+run-fragmentation was a genuine, confirmed bug — but if the user still
+finds editing slow after this, the undo-snapshot clone is the next
+thing to trace, not a sign this fix was wrong.
+
+### Verification
+
+- `cargo test`: 602 passed, 0 failed (598 unit incl. 4 new/changed; 4
+  integration).
+- **Not independently benchmarked**: no profiler run in this sandbox to
+  measure the actual before/after keystroke latency on a real large card
+  file — the fix is verified as *correct* (tests) and as addressing one
+  identified, confirmed root cause, but the user's own hardware is
+  needed to confirm the fix is sufficient in practice (see caveat above).
+
+## Follow-up: Slow Editing Persisted After Run-Merging — Real Root Cause
+
+The user reported the fix above did not resolve the slowness (still
+~500ms/keystroke on a loaded document vs. a blank one). Per
+`superpowers:systematic-debugging`'s "if fix doesn't work, return to
+Phase 1" guidance, re-investigated rather than layering another guess on
+top, and added a headless diagnostic benchmark
+(`text_editor::tests::bench_diagnostic_large_document_per_keystroke_costs`,
+gated behind no feature flag — run with `cargo test bench_diagnostic --
+--nocapture`) to measure, not guess, which of three candidate O(document
+size) costs on the per-keystroke path actually dominates, on a
+realistic 15,300-char single-paragraph document (a debate card is
+typically one giant paragraph):
+
+1. **100× `insert_char`** (covers `push_undo_snapshot`'s clone +
+   `sync_insert_char` + `resolve_position`, the whole mutation path,
+   flagged as a caveat above): **1.7µs/keystroke**. Ruled out.
+2. **One `tab.paragraphs.clone()`** (the same clone `render()` does
+   every frame): **1.8µs**. Ruled out.
+3. **`build_visual_rows` over the full document, with the real
+   character-width lookup swapped for a free synthetic closure**:
+   **~600µs** for the whole document — i.e. the wrap *algorithm's own*
+   cost (iterating every character, building rows) is real but small
+   relative to 500ms.
+
+That leaves only the one thing this display-less sandbox can't put a
+wall-clock number on: the *real* per-character width lookup inside
+`char_width_fn` (`text_editor.rs`), which calls GPUI's
+`TextSystem::layout_width` — a locked, hash-keyed, frame-based cache
+(`LineLayoutCache`, in vendored `gpui/src/text_system/line_layout.rs`)
+— once per character, on every wrap pass, on every keystroke (`render()`
+alone triggers one; up to 6 more call sites can trigger additional
+passes in the same keystroke). Critically, GPUI's *own* internal line
+wrapper (`gpui/src/text_system/line_wrapper.rs`, used by GPUI itself to
+render text) does the exact same per-character shaping lookup but
+*never pays this cost per occurrence* — it has a local cache
+(`cached_ascii_char_widths: [Option<Pixels>; 128]` + a `HashMap`
+fallback) checked first. This app's `char_width_fn` was calling
+`layout_width` directly, with no such cache of its own — every
+occurrence of every character re-hit GPUI's expensive locked cache,
+even for characters seen a thousand times already in the same wrap
+pass.
+
+**Fix** (`src/text_editor.rs`, `char_width_fn`): added the same
+technique GPUI's own `LineWrapper` uses — a `RefCell`-backed ASCII
+array (`[Option<f32>; 128]`) plus a `HashMap<char, f32>` fallback,
+local to each `char_width_fn` closure instance (recreated fresh on
+every wrap pass, so it needs no invalidation logic — a smaller, safer
+change than swapping the whole wrap algorithm for GPUI's `LineWrapper`
+type, which was considered and rejected as disproportionate to the
+gain). `RefCell` (not a `mut` capture) was required to keep the
+closure's `Fn` bound, since `build_visual_rows`/`wrap_line_into_rows`
+are typed against `&impl Fn(char) -> f32`.
+
+On the diagnostic's 15,300-char/27-unique-char document, this cuts the
+number of expensive `layout_width` calls per wrap pass from one per
+character occurrence (14,960) to one per unique character (27) — a
+**554× reduction**, verified by the benchmark test itself (not
+estimated). Real prose text stays within a small, roughly constant
+alphabet regardless of document length, so this reduction factor grows
+with document size rather than shrinking.
+
+### Verification
+
+- `cargo test`: 620 passed, 0 failed (all prior tests unaffected; one
+  new diagnostic benchmark test added).
+- `cargo build`: clean, no new warnings.
+- **Reviewed with the advisor tool before implementing** (per explicit
+  user request): confirmed the local-cache fix was correctly scoped
+  (not over-built into a full `LineWrapper` swap) and confirmed the
+  three-way benchmark was the right way to isolate the real cost
+  without needing a live display.
+- **Still not independently wall-clock-benchmarked on real hardware**:
+  this sandbox has no display, so the actual `layout_width` cost (and
+  thus the real keystroke latency, before and after) can't be measured
+  directly — only the *call-count* reduction (554×) is measured
+  directly. The call-count evidence is strong (everything else on the
+  per-keystroke path is measured at low-single-digit microseconds), but
+  the user's own hardware is needed for a final before/after wall-clock
+  confirmation.
+
+## Follow-up Fix: `char_width_fn`'s Cache Panicked on Real Documents
+
+The user hit a crash opening a real `.docx` (COTD) with the cache fix
+above in place: `thread 'main' panicked at src/text_editor.rs:1383:25:
+RefCell already borrowed`. It did not reproduce on a brand-new blank
+tab, only on the real file.
+
+**Root cause**: the previous fix kept `char_width_fn`'s return type as
+`impl Fn(char) -> f32` (required by `build_visual_rows`/
+`wrap_line_into_rows`'s existing `&impl Fn(char) -> f32` signatures) and
+reached for `RefCell` to get interior mutability for the new cache. The
+non-ASCII cache-miss branch was written as
+`if let Some(&w) = other_cache.borrow().get(&c) { w } else {
+other_cache.borrow_mut().insert(c, w); w }` — a well-known Rust footgun:
+the temporary `Ref` produced by `.borrow()` in an `if let` scrutinee is
+kept alive for the *entire* if/else (not just the `if` arm), so the
+`else` arm's `borrow_mut()` always panicked with "already borrowed" —
+but only the first time any given non-ASCII character was seen (the
+`if` arm, a cache hit, never touches `borrow_mut()`). A blank tab is
+pure ASCII (the ASCII branch uses direct indexing, not this pattern) and
+never triggers it; the COTD file's non-ASCII characters (smart
+quotes/accents, as real Word documents commonly have) hit the miss path
+on their very first occurrence and crashed immediately.
+
+**Fix**: rather than patch around `RefCell` (e.g. with `.copied()` to
+drop the `Ref` before the `else`, which would have also worked), checked
+GPUI's own reference implementation this was modeled on —
+`LineWrapper::width_for_char` (`gpui/src/text_system/line_wrapper.rs`)
+— and found it uses `&mut self` directly, not `Fn` + interior
+mutability. Switched `char_width_fn` to return `impl FnMut(char) -> f32`
+and updated `wrap_line_into_rows`/`build_visual_rows` (and their
+call sites, `visual_rows_for_viewport` and existing tests) from
+`&impl Fn(char) -> f32` to `&mut impl FnMut(char) -> f32` to match. This
+removes the `RefCell` entirely — the cache is now a plain `mut` array +
+`HashMap` capture, checked and updated at compile time by the borrow
+checker instead of at runtime by a droppable guard, which makes this
+whole class of bug (a forgotten/extended borrow guard) structurally
+impossible rather than merely fixed-for-now.
+
+Added `test_wrap_line_into_rows_stateful_width_fn_handles_repeated_non_ascii`,
+which drives a stateful (cache-populating) width closure across a line
+with repeated non-ASCII characters through the same `&mut impl FnMut`
+signature, to guard against this exact shape of regression.
+
+### Verification
+
+- `cargo test`: 621 passed, 0 failed (adds the one regression test
+  above; no existing test changed behavior, only their `&width_of` call
+  sites updated to `&mut width_of` for the trait-bound change).
+- `cargo build`: clean.
+- **Not re-verified on real hardware against the actual COTD file**:
+  this sandbox has no display and can't open a real window, so the fix
+  is verified by (a) reasoning about exactly why the panic occurred,
+  matching it to a documented Rust gotcha, (b) matching GPUI's own
+  tested reference implementation exactly instead of improvising a
+  RefCell-based variant, and (c) a new unit test covering the specific
+  repeated-non-ASCII-character shape that crashed — but opening the
+  actual COTD file has not been re-run by this agent.
+
+## Bugfix: Clear Formatting Not Clearing Pocket/Hat/Block Formatting
+
+Reported in `notes/found_bugs.md`: clicking "Clear" (or its F12 hotkey)
+on a Pocket/Hat/Block-styled line failed to fully clear it — it should
+reset the line to `large_size` (settings.conf, default 11pt), no
+underline/highlight/bold, left-aligned, no heading.
+
+**Root cause**: `apply_card_style` (Pocket/Hat/Block/Tag) sets both
+run-level fields (bold, size, box/double-underline/underline) *and*
+paragraph-level fields (`para.heading`, `para.alignment = Center`).
+`FormatOp::ClearAll`, dispatched through `apply_formatting_to_line`, only
+ever mutated run-level fields via `apply_format_op` — it never touched
+`heading`/`alignment`. Since `text_editor.rs` applies a heading's font
+size/bold as a paragraph-div-level default that a run's own (now cleared)
+fields would otherwise override, a "cleared" heading line kept rendering
+at its heading size/weight and stayed centered — the box/underline
+themselves *did* clear correctly (they're only ever set at the run
+level), which is why the bug looked partial rather than total.
+
+**Fix**:
+- `src/state.rs`: `apply_formatting_to_line` now resets
+  `para.heading = 0` and `para.alignment = Alignment::Left` on the line's
+  paragraph whenever the op is `ClearAll`, right after the existing
+  run-level `apply_formatting` call — mirrors how `apply_card_style`
+  itself sets both levels together, just in the opposite direction.
+- `FormatOp::ClearAll` changed from a unit variant to
+  `ClearAll { default_size: u16 }` so run `size` resets to the
+  spec-required `large_size` instead of `0` ("no override" — previously
+  fell back to whatever the renderer's own default happens to be, not
+  necessarily 11pt). New `load_large_size_half_points` (`src/state.rs`,
+  next to `AppState::new`) reads `large_size` from settings.conf,
+  mirroring `keybinds::load_vim_enabled`'s tolerant flat-scan pattern
+  (falls back to 22 half-points/11pt on a missing file or key) rather
+  than wiring in the unused `config_parsing` crate, which `expect()`s the
+  file to exist. New `AppState.large_size_half_points` field, loaded once
+  at startup; both call sites (`main_window.rs`'s F12 action,
+  `formatting_ribbon.rs`'s Clear button) now read it and pass it through.
+- `formatting_ribbon.rs`: removed `FormatAction::Clear`'s entry in
+  `to_format_op` — dead code once `ClearAll` needed the app's configured
+  size, since Clear was already always intercepted by its own match arm
+  before reaching that generic mapping (confirmed via grep: no other call
+  site reaches it through `Clear`).
+
+Two new tests in `src/state.rs` cover the actual bug report end to end:
+apply Pocket/Hat, then Clear, and assert heading/alignment/size/bold/
+box/double-underline are all back to the unformatted default.
+
+**Caveat, raised on advisor review**: a cleared run now explicitly gets
+`size = 22` half-points (11pt → `px(11)`, ~14.7px at real DPI, but this
+app's `text_size()` treats the points value as raw pixels, so it renders
+literally 11px), while *unstyled* text elsewhere (a run with `size == 0`,
+never explicitly formatted) falls through to GPUI's `.text_sm()`
+default, ~14px. So a line that's just been Cleared will render visibly
+*smaller* than ordinary never-formatted body text, even though both are
+now "no special formatting." This is exactly the literal spec in
+`found_bugs.md` (explicitly asked for `large_size`, not "no override"),
+so it isn't a bug in this fix — but it exposes that this app's actual
+default text size (~14px) and settings.conf's `large_size` (11pt) aren't
+the same value, which the user may notice and read as new/wrong. Worth
+confirming this is the intended look, not just spec-compliant.
+
+### Verification
+
+- `cargo test`: 604 passed, 0 failed (600 unit incl. 2 new; 4
+  integration).
+- **Not hardware-verified**: no display in this sandbox to visually
+  confirm the cleared line renders as plain left-aligned 11pt text (and
+  to judge whether the size caveat above actually reads as wrong) —
+  needs the user's own machine.
+
+## Bugfix: Auto-Scroll Triggered Too Late at Bottom of Page
+
+Reported in `notes/found_bugs.md`: keyboard-driven auto-scroll (as
+opposed to `auto_scroll.rs`'s separate mouse-drag auto-scroller) already
+worked, but only once the cursor was 3-4 lines from the bottom edge, and
+needed to start earlier.
+
+**Root cause**: `text_editor.rs`'s `scroll_to_cursor` (called after every
+key event that can move the cursor) already implements exactly this as a
+tunable buffer, `SCROLL_MARGIN_LINES` — scrolling starts once the cursor
+comes within that many lines of the viewport edge. It was set to `3.0`,
+matching the "3-4 lines" the user observed almost exactly — not a logic
+bug, a calibration value that needed raising.
+
+**Fix**: `src/text_editor.rs` — `SCROLL_MARGIN_LINES` raised from `3.0`
+to `6.0`. No test added: `scroll_to_cursor` is GPUI-effectful
+(`ScrollHandle`/viewport bounds), part of the pre-existing set of methods
+this codebase deliberately leaves untested for lack of a GPUI test
+harness (see `auto_scroll.rs`'s own pure-function split for the pattern
+this *would* follow if it needed coverage).
+
+### Verification
+
+- `cargo test`: 604 passed, 0 failed (no count change — no logic path
+  added, just one constant).
+- **Not hardware-verified**: needs the user's own machine to confirm 6
+  lines of buffer feels right; the exact value is a preference, easy to
+  retune further at `src/text_editor.rs`'s `SCROLL_MARGIN_LINES` if 6 is
+  still too little (or too much).
+
+## Feature: Editor Zoom (Ctrl+=/Ctrl+-/Ctrl+0)
+
+`notes/found_bugs.md` listed "Zoom in / Zoom out" with no description.
+User clarified: it used to work via Ctrl++/Ctrl+-. A full search (git log
+across all branches, reflog, dangling commits/blobs, stash, every file in
+the working tree) found zero trace of a zoom feature ever having existed
+in this repo — built fresh, scoped to editor text only (not app chrome)
+per the user's explicit choice between the two options offered.
+
+**`AppState`** (`src/state.rs`): new `pub zoom: f32` field (default
+`1.0`), `zoom_in`/`zoom_out`/`zoom_reset` methods with `ZOOM_MIN`/
+`ZOOM_MAX`/`ZOOM_STEP` associated consts (50%-250%, 10% steps — VS
+Code/Word's own granularity). Not persisted to settings.conf — resets to
+100% each launch, a deliberate simplification (no existing precedent in
+this app for per-session-only state vs. persisted settings, and the
+report didn't ask for persistence).
+
+**Keybinds** (`src/keybinds.rs`): added as three ordinary
+`KeybindAction` variants (`ZoomIn`/`ZoomOut`/`ZoomReset`, `General`
+category, default `Ctrl+=`/`Ctrl+-`/`Ctrl+0` — "=" rather than "+" so it
+fires without Shift on a US layout, matching VS Code's own convention)
+rather than a special-cased hotkey — this app already has a complete
+configurable-keybind system every other "plain app" shortcut goes
+through, and `settings_modal.rs` already renders every `KeybindAction`
+generically, so the three new actions are fully rebindable in Settings
+with no UI changes needed. New `ZoomInAction`/`ZoomOutAction`/
+`ZoomResetAction` GPUI action structs (`actions!` macro) + `KeyBinding`
+registrations; `main_window.rs` gets three `on_action` handlers calling
+the new `AppState` methods, mirroring the existing `ClearFormattingAction`
+pattern exactly.
+
+**Making zoom actually visible** (`src/text_editor.rs`,
+`src/auto_scroll.rs`) was the bulk of the work: `FONT_SIZE_PX`/
+`LINE_HEIGHT_PX`/`CHAR_WIDTH_PX` were module-level constants read
+directly by render styling, word-wrap glyph measurement, and click/scroll
+hit-testing — a zoom multiplier had to reach all three consistently, or
+zoomed text would overlap (line height didn't grow), wrap at the wrong
+width (measured against the un-zoomed font size), or misplace clicks
+(hit-testing used the un-zoomed char width). Rather than a global
+mutable, `zoom: f32` (read once from `AppState` per call) was threaded as
+an explicit parameter through the existing pure functions that needed it
+— most of the wrap/geometry pipeline (`wrap_line_into_rows`,
+`build_visual_rows`, `column_for_x`, `line_for_y`) already took its
+inputs as parameters rather than reading the module consts directly, so
+only the handful of entry points that *did* read the bare consts needed
+signature changes: `heading_font_size_px`, `char_width_fn`,
+`visual_rows_for_viewport`, `line_col_from_mouse_position`, `render_line`
+→ `render_segment` → `apply_run_style` (for `run.size`-based explicit
+formatting), plus each of their ~15 call sites across `render()`,
+`process_key`'s H/M/L block, `scroll_to_cursor`/`cursor_scroll_geometry`/
+`scroll_to_cursor_centered`, `move_cursor_visual_row`, and
+`AutoScroller::tick`. App chrome (placeholder text, the mode-indicator
+strip) deliberately keeps GPUI's plain `.text_sm()` — out of scope per
+the user's "editor text only" choice.
+
+Two new tests: `zoom_in`/`zoom_out`/`zoom_reset` clamping (`state.rs`),
+`heading_font_size_px` scaling with a non-1.0 zoom (`text_editor.rs`).
+The rest of the threaded parameter (render styling, hit-testing) is
+GPUI-effectful and follows this codebase's existing convention of leaving
+that class of code untested for lack of a GPUI test harness — covered by
+`cargo test` only insofar as every changed call site still type-checks
+and the existing (zoom=1.0-equivalent) geometry tests still pass
+unchanged.
+
+### Verification
+
+- `cargo test`: 610 passed, 0 failed (606 unit incl. 7 new/changed; 4
+  integration).
+- `cargo build`: clean, no new warnings from any touched file.
+- `timeout 5 ./run.sh`: ran the full timeout with no panic (no display in
+  this sandbox, so this only confirms startup logic, not visual zoom
+  behavior).
+- **Not hardware-verified**: needs the user's own machine to confirm
+  Ctrl+=/Ctrl+-/Ctrl+0 actually zoom the document text in the running
+  app, and that text stays legible/non-overlapping/correctly hit-tested
+  at both zoom extremes (50% and 250%).
+
+## Feature: File Explorer Right-Click Menu (Delete / New File)
+
+`notes/found_bugs.md` (Forgotten Implicit Feature): right-click a file in
+the sidebar to delete it, or create a new file at the right-clicked
+location. Built from scratch — no existing context-menu pattern anywhere
+in this codebase to extend.
+
+**`AppState`** (`src/state.rs`): new `FileContextMenuTarget` enum
+(`File(PathBuf)` / `Dir(PathBuf)` / `Background`) + `FileContextMenu`
+struct (`position: (f32, f32)` — a plain tuple, not `gpui::Point`, since
+`state.rs` is deliberately gpui-free; `target`; `confirming_delete: bool`)
++ `Option<FileContextMenu>` field, plus five pure methods:
+`open_file_context_menu`/`close_file_context_menu`/
+`request_context_menu_delete_confirmation`/`confirm_context_menu_delete`/
+`create_file_at_context_menu_location`. Deletion is scoped to `File`
+targets only — deleting a whole directory tree needs stronger
+confirmation than this menu offers, so `Dir`/`Background` are a no-op,
+not an error. A real filesystem delete has no undo, so clicking "Delete"
+doesn't delete immediately — it arms `confirming_delete`, and the menu
+re-renders as a "Delete \"name\"? Confirm / Cancel" step; only the second
+click actually calls `fs::remove_file`.
+
+`create_file_at_context_menu_location` resolves the target directory
+(a File target's parent dir / a Dir target itself / `working_directory`
+for Background) and delegates to new `create_new_docx_in(dir)` — the
+"Untitled.docx" / "Untitled 1.docx" / ... naming-sequence logic **moved
+out of `file_explorer.rs`'s existing `create_new_file`** into this one
+shared `AppState` method, so the sidebar's "+" button and the new
+right-click "New File" (different target directories, same naming logic)
+don't duplicate it.
+
+**Rendering** (`src/file_explorer.rs`): new `on_mouse_down(MouseButton::Right, ...)`
+handlers on each file row, each dir row (`stop_propagation`s so a
+row-level right-click doesn't also trigger the tree body's own handler),
+and the scrollable tree body itself (catches right-clicks on empty
+space → `Background` target). The menu itself (`render_context_menu`) is
+built on GPUI's `anchored()` (pins an element to a window-relative pixel
+position — the exact coordinate space `MouseDownEvent.position` is
+already in, confirmed against `text_editor.rs`'s own established
+window-to-local conversion pattern) wrapped in `deferred()` (paints above
+the rest of the tree regardless of element-tree position) — the same two
+primitives Zed's own context menus are built on (found by reading the
+vendored `gpui` source directly, `crates/gpui/src/elements/{anchored,deferred}.rs`,
+rather than inventing a manual `.relative()`/coordinate-math scheme).
+`.snap_to_window()` keeps it from rendering off-screen near a window
+edge.
+
+**Dismissal**: reused `main_window.rs`'s existing top-level
+`on_mouse_down(MouseButton::Left, ...)` (previously just `window.blur()`)
+rather than adding a second full-window backdrop — it now also closes
+`file_context_menu` if one is open, and every menu row already
+`stop_propagation()`s so a click inside the menu can't reach it.
+
+Nine new tests in `src/state.rs` cover every new method, including three
+real-filesystem tests (temp dir per test, named after the test itself so
+parallel `cargo test` threads never collide, mirroring
+`docx_parser.rs`'s own `test_real_file_round_trip_...` pattern): delete
+confirmation doesn't delete until confirmed, delete actually removes the
+file, and each of the three target kinds resolves to the right directory
+for "New File".
+
+### Verification
+
+- `cargo test`: 619 passed, 0 failed (615 unit incl. 9 new; 4
+  integration) — including three tests that touch a real filesystem
+  (temp directories, cleaned up by neither test nor the OS between runs,
+  matching this codebase's existing convention for that class of test).
+- `cargo build`: clean, no new warnings from any touched file.
+- `timeout 5 ./run.sh`: ran the full timeout with no panic.
+- **Not hardware-verified**: needs the user's own machine to confirm the
+  menu actually appears at the click position, snaps to the window edge
+  correctly near a boundary, and dismisses on an outside click — none of
+  this is exercisable without a real display.
+
+## Feature: Maximize/Minimize Window Buttons
+
+`notes/found_bugs.md` (Forgotten Implicit Feature): two more buttons to
+the left of the close button in the top-right title bar, for maximize
+and minimize.
+
+**Root context**: this app renders its own custom, in-app tab/title bar
+(`tab_bar.rs`) rather than relying on the OS's native window decorations
+— it already has its own drag-region (`window.start_window_move()`, with
+a comment explaining native `WindowControlArea::Drag` hit-testing is a
+no-op on Linux) and its own "×" close button (`cx.quit()`), so "the close
+button" the report refers to is this in-app one, not an OS-native
+control — confirming there's nowhere else to add these two buttons but
+here.
+
+**Fix** (`src/tab_bar.rs`): two new buttons, styled identically to the
+existing `close_btn` (same 46px width, hover/active colors, border), in
+a `[—] [□] [×]` cluster before it. Both call straight through to GPUI's
+real platform-level window controls — `Window::minimize_window()` and
+`Window::zoom_window()` (GPUI's actual maximize/restore toggle, named
+after macOS's own "zoom" term for the same action) — found by reading
+the vendored `gpui` source (`crates/gpui/src/window.rs`) rather than
+assuming an API existed. `TabBar::render`'s previously-unused `_window`
+param is now read (`window.is_maximized()`) so the maximize button's own
+icon reflects current state ("□" to maximize, "❐" once already
+maximized), matching Windows/most Linux desktop environment convention.
+
+Per the report's own explicit note ("make sure the two new buttons don't
+cover the new-tab button/tab-scroll area and vice versa"): no extra
+layout code was needed. The drag region between the new-tab button and
+this button cluster is already a `flex_1` spacer that shrinks to
+whatever space is left over as fixed-width (`flex_none`) siblings are
+added — exactly how the existing close button already avoided covering
+anything. Two more `flex_none` buttons just shrink that same spacer
+further; `tab_scroll_area`'s own `min_w_0` handles the tab list side of
+the same concern, unchanged.
+
+No unit tests added — consistent with this codebase's established
+convention (see `text_editor.rs`'s own testing-convention note) of
+leaving GPUI-effectful code (window/platform calls, mouse handlers)
+untested for lack of a GPUI test harness in this sandbox; there's no
+pure logic here to test in isolation.
+
+### Verification
+
+- `cargo test`: 619 passed, 0 failed (no count change — no new pure
+  logic).
+- `cargo build`: clean, no new warnings from `tab_bar.rs`.
+- `timeout 5 ./run.sh`: ran the full timeout with no panic.
+- **Not hardware-verified**: needs the user's own machine to confirm the
+  buttons actually minimize/maximize the real window (this sandbox has
+  no display, and `Window::is_maximized`'s own doc comment notes some
+  platforms, e.g. Windows, report this differently than bounds matching
+  the display size) and that the icon correctly flips on restore.
+
+## Feature: Card-style row overlap fix (multi-slot uniform_list rows)
+
+`handoff.md` / `uniform_list_plan.md`: `uniform_list`'s single-measurement
+layout (`item_top = item_height * item_index`, one height applied to every
+row) made Pocket/Hat/Block card-style lines and document headings visually
+overlap the row(s) below them, since their real rendered height (larger
+font, plus Pocket's box padding/border) exceeds the one uniform
+`LINE_HEIGHT_PX` slot every row was otherwise forced into. Root cause and
+three candidate fixes were written up in `handoff.md`; the user picked
+"expand oversized lines into multiple uniform-height slots" over dropping
+`uniform_list` entirely or inflating `LINE_HEIGHT_PX` for every row.
+
+**Fix** (`src/text_editor.rs`): `slot_count_for_paragraph(para, zoom)` —
+pure function computing how many `LINE_HEIGHT_PX` slots a paragraph needs,
+from the largest run-level `FontSize` or `heading_font_size_px`, plus a
+fixed `CARD_BOX_EXTRA_PX` for Pocket's box padding/border (not scaled by
+zoom, matching the box's own fixed `px()` calls). `expand_rows_for_display`
+expands the wrap-rows table into a `uniform_list`-facing "display rows"
+table: an oversized row keeps its own entry, followed by `slot_count - 1`
+blank spacer entries reserved so its content has empty space to visually
+spill into (ordinary CSS overflow, not clipped) instead of the next row's
+content. `RowCache` caches both derived vectors (`display_to_wrap`/
+`wrap_to_display`) alongside `rows`, same invalidation key.
+
+Every place that turned a wrap-row index into a pixel Y position moved to
+this "display row" space too, since a spacer inserted earlier in the
+document shifts everything after it down: `cursor_visual_row` in
+`render()`, `cursor_scroll_geometry` (feeds `scroll_to_cursor`/
+`scroll_to_cursor_centered`), and `line_col_from_mouse_position` (all 3
+call sites: `on_mouse_down`, `on_mouse_move`, `AutoScroller`'s edge-scroll
+tick in `auto_scroll.rs`). Cursor Up/Down deliberately stayed in wrap-row
+space (`visual_row_for_line_col`/`visual_row_step`) — spacer rows are
+invisible to logical cursor movement. A click landing on a spacer slot
+resolves to the real content row above it, not whatever comes after.
+
+7 new unit tests. Not hardware-verified — this sandbox has no GPU/Vulkan
+driver, so nothing here has actually been seen rendering; needs the user's
+own machine to confirm a Pocket/Hat/Block line no longer overlaps the row
+below it, clicking into the blank space below an oversized line still
+lands the cursor on that line, and scroll-to-cursor/auto-scroll still
+track correctly past an oversized line.
+
+### Verification
+
+- `cargo test`: 650 passed, 0 failed (up from 643; 7 new).
+- `cargo build`: clean, no new warnings.
+- **Not hardware-verified**: see above.
+
+## Feature: Route click/drag hit-testing and cursor-scroll through RowCache
+
+`performance_plan.md` item 3 ("route hit-testing through the cache") —
+`on_mouse_down`/`on_mouse_move` each independently re-cloned `content` and
+re-ran the full-document wrap on every event (`on_mouse_move` fires on
+every pixel of drag movement), separately from `render()`'s own now-cached
+copy of the same work. `cursor_scroll_geometry` (called by
+`scroll_to_cursor` on essentially every key event) had the same gap, an
+even higher-frequency one.
+
+**Fix** (`src/text_editor.rs`): `TextEditor::cached_or_fresh_row_tables`
+reuses `RowCache`'s `rows`/`display_to_wrap`/`wrap_to_display` (cheap
+`Rc::clone`s) when still valid for the current viewport width, falling
+back to a fresh computation only on a genuine miss (e.g. before the first
+render — this method doesn't own populating the cache, `render()` does).
+`on_mouse_down`, `on_mouse_move`, and `cursor_scroll_geometry` all route
+through it now. `AutoScroller::tick` (`auto_scroll.rs`) deliberately still
+recomputes locally, marked with a `ponytail:` comment — it has no
+reference to `TextEditor`'s cache, and only runs once per animation frame
+during an edge-drag rather than on every mouse-move pixel.
+
+No new unit tests: the cache-hit path is just `Rc::clone`s already covered
+by `row_cache_is_valid`'s tests, and the miss-path fallback is the same
+full-document-wrap code `render()`/`cursor_scroll_geometry` always ran,
+unchanged.
+
+### Verification
+
+- `cargo test`: 650 passed, 0 failed (no count change).
+- `cargo build`: clean, no new warnings.
+
+## Feature: Undo/redo stack byte-budget cap
+
+`performance_plan.md` item 4 ("shrink undo/redo's memory footprint") — at
+`UNDO_STACK_CAP` (200) full `(content, paragraphs)` clones each, a large,
+heavily-formatted document is a real multi-hundred-MB steady-state memory
+cost, not hypothetical, and undo/redo never shrank that regardless of
+document size.
+
+**Fix** (`src/state.rs`): `snapshot_byte_estimate(content, paragraphs)` —
+rough byte-size estimate of one snapshot (content length plus every run's
+string fields). `undo_stack_cap_for_snapshot_size(bytes)` — derives an
+effective cap from `UNDO_STACK_BYTE_BUDGET` (100MB) divided by the current
+snapshot size, clamped between `UNDO_STACK_MIN_CAP` (10) and
+`UNDO_STACK_CAP` (200). `push_undo_snapshot`, `undo()`, and `redo()` all
+trim their respective stack to this size-aware cap instead of the fixed
+200 — small documents keep the full 200-deep undo history unchanged;
+large ones shrink proportionally so total stack memory stays bounded.
+`redo_stack` gets the same trim (in `undo()`/`redo()`, at the point each
+pushes onto the other stack) — otherwise holding Ctrl+Z on a huge document
+without any new edit could still blow past the byte budget via
+`redo_stack` alone, since `push_undo_snapshot`'s own cap only ever
+constrains `undo_stack`.
+
+6 new unit tests: the pure size-estimate/cap functions directly (4 tests),
+plus two integration tests (`make_state` with a 1MB document) proving
+`push_undo_snapshot`/`undo()` actually apply the size-aware cap in
+practice, not just that the functions exist.
+
+### Verification
+
+- `cargo test`: 656 passed, 0 failed (up from 650; 6 new).
+- `cargo build`: clean, no new warnings.
+
+## Feature: settings.conf / working_directory resolve against the executable's location, not CWD
+
+`closed_beta_plan.md` §0 — a hard prerequisite for the closed-beta
+packaging work. `main.rs`'s `Keybinds::load` and `state.rs`'s own
+settings.conf readers (keybinds, vim-enabled, theme, large-size) all
+resolved `Path::new("settings.conf")` against the process's current
+working directory, which is always the repo root under `cargo run`/
+`./run.sh` but has no such guarantee for a packaged `.app`/`.exe` launched
+by double-click (macOS Finder launches typically start at CWD `/`;
+Windows depends on the shortcut's "Start in" field). `working_directory`
+similarly defaulted to raw `current_dir()`, which would open the file
+explorer at some unrelated system directory on first launch instead of
+somewhere the user actually has files.
+
+**Fix** (`src/state.rs`): `settings_conf_path()` resolves next to
+`std::env::current_exe()`'s parent directory, falling back to the bare
+relative path only if `current_exe()` itself fails. `main.rs` now calls
+this same function instead of its own separate `Path::new("settings.conf")`
+literal, so the two readers can't drift apart. `default_working_directory()`
+prefers `$HOME` (`%USERPROFILE%\Documents` on Windows) over `current_dir()`
+— there's no persisted prior `working_directory` anywhere in this codebase
+for it to prefer instead, so "no prior working directory known" is simply
+always the case today.
+
+2 new unit tests. Not hardware-verified beyond `timeout 5 ./run.sh` running
+clean with no panic — the actual bug scenario (a double-click launch from
+outside the repo directory) needs the user's own machine, since both
+`cargo run` and `./run.sh` are always invoked from the repo root.
+
+### Verification
+
+- `cargo test`: 658 passed, 0 failed (up from 656; 2 new).
+- `cargo build`: clean, no new warnings.
+- `timeout 5 ./run.sh`: ran the full timeout with no panic.
+
+## Bug fix: stale `pending_format` resurrects a cleared Pocket box on subsequent typing
+
+Reported repro: Pocket a line (F4), Clear Formatting it (F12) while still
+empty, then type — the box reappeared around the new text, and kept
+following the cursor onto every new line typed afterward.
+
+**Root cause**: `apply_formatting_to_line`'s pending-format-arming logic
+(`src/state.rs`, gated on `is_line_empty`) only sets `tab.pending_format`
+for an explicit allow-list of run-level ops (`Bold`/`FontSize`/`Box`/etc.)
+— `FormatOp::ClearAll` isn't in that list, so it falls through the `_ => {}`
+arm and never touches `pending_format`. `apply_card_style`'s Bold+FontSize+
+Box sequence (Pocket) leaves `pending_format` armed to `Box(true)` (the
+last op applied). Clear Formatting correctly reset the run's own fields
+and the paragraph's `heading`/`alignment`, but left that stale
+`pending_format` in place — and per `insert_char`'s own doc comment, a
+pending format "applies to every character typed... not just this one",
+with no expiry, so it kept force-re-applying `Box(true)` to everything
+typed from then on, including across `Enter` (paragraph-split inherits
+whatever the split run's fields already are, so a boxed run split by
+`Enter` produces two boxed runs).
+
+**Fix** (`src/state.rs`): `ClearAll`'s existing dedicated branch (already
+resetting `para.heading`/`alignment`) now also sets `tab.pending_format =
+None`, unconditionally (not gated by `is_line_empty`, since a stale
+`pending_format` could in principle have been armed by an earlier
+empty-line op even if the *current* Clear Formatting call happens on
+non-empty text).
+
+3 new tests: the two existing Clear Formatting tests both start from a
+non-empty line (`"hello world"`), where the pending-format-arming branch
+never runs at all — neither would have caught this. The new tests
+specifically start from an *empty* line (matching the actual repro),
+confirming `pending_format` is `None` after Clear Formatting, that newly
+typed text doesn't inherit the cleared box, and that typing across a
+newline afterward doesn't leak it into the new paragraph either.
+
+### Verification
+
+- `cargo test`: 660 passed, 0 failed (up from 658; 3 new — TDD: the first
+  new test failed against the old code, confirming it reproduced the bug,
+  before the fix was applied).
+- `cargo build`: clean, no new warnings.
+
+## Follow-up: same bug, broader trigger — Pocket box leaking after plain Enter (no Clear Formatting needed)
+
+The fix above only cleared `pending_format` when `ClearAll` ran. User
+report after that fix: the box *still* leaked — this time triggered just
+by pressing Enter on a Pocket line (F4), no Clear Formatting involved at
+all. Bold/size/center-align correctly disappeared on the new line, but the
+box persisted and kept trailing the cursor down every subsequent line.
+
+**Root cause, now traced fully**: `apply_formatting_to_line` is *only*
+ever called from two places — `apply_card_style` (Bold, then FontSize,
+then Box/DoubleUnderline/Underline in sequence) and `ClearAll`. Its
+pending-format-arming block re-armed `tab.pending_format` to whatever the
+*current* call's op was, every single call — so after Pocket's 3-call
+sequence, `pending_format` ends up `Some(Box(true))` (the last op),
+completely independent of Clear Formatting. Since nothing ever clears a
+pending format except an explicit matching re-toggle or (as of the fix
+above) `ClearAll`, this stayed armed forever. `split_paragraph_at`
+(`document_ops.rs`) already correctly reverts bold/size/heading/alignment
+for a paragraph split from a heading-marked (card-style) line — which is
+exactly why those disappeared as expected — but `insert_char` re-applies
+`pending_format` to *every* character typed regardless, including the
+freshly-split, already-correctly-reset tail run, and every character typed
+after it on any later line.
+
+The empty-line run-seeding a few lines above this block (added by an
+earlier fix, see this file's "rich-text formatting Phase 2" notes) already
+makes the very next keystroke correct on its own — so this arming block
+was never actually needed for `apply_card_style` to work, only for making
+the *next* character correct, which was already solved. It was pure
+side effect, and a harmful one once anything came after that first
+character.
+
+**Fix** (`src/state.rs`): removed the pending-format-arming block from
+`apply_formatting_to_line` entirely, rather than special-casing `ClearAll`
+again — the block has no legitimate remaining purpose now that both of its
+only two callers are accounted for. `apply_formatting_to_selection`'s own,
+separate no-selection pending-format arming (the genuine "stay bold until
+toggled off" sticky mode) is untouched.
+
+1 new test (plus the two from the fix above still pass unchanged): Pocket
+an empty line, assert `pending_format` is `None` immediately (not just
+after a later Clear Formatting), then type across an Enter and confirm
+only the *new* paragraph lost its box — the original Pocket line
+legitimately keeps it.
+
+### Verification
+
+- `cargo test`: 661 passed, 0 failed (up from 660; 1 new — TDD: failed
+  against the code with only the narrower `ClearAll` fix, confirming the
+  broader repro, before removing the arming block).
+- `cargo build`: clean, no new warnings.
+- `timeout 5 ./run.sh`: ran the full timeout with no panic.

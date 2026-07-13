@@ -1,11 +1,21 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use std::rc::Rc;
+
 use crate::auto_scroll::AutoScroller;
 use crate::docx_parser::{Paragraph, Run};
 use crate::document_ops::paragraph_run_char_spans;
 use crate::state::{matches_shifted_symbol, vim_find_target_char, AppState, VimMode};
 
+/// `CHAR_WIDTH_PX`/`FONT_SIZE_PX`/`LINE_HEIGHT_PX` below are the 100%-zoom
+/// baseline (`AppState.zoom == 1.0`) — every call site multiplies by the
+/// active tab's `zoom` before use, so document text, wrapping, and
+/// click/scroll hit-testing all scale together (found_bugs.md's Ctrl+=/
+/// Ctrl+-/Ctrl+0 zoom). App chrome (placeholder text, the mode-indicator
+/// strip) deliberately keeps using GPUI's plain `.text_sm()` instead —
+/// zoom is scoped to document text only, not the whole UI.
+///
 /// Approximate monospace glyph width, used only to convert a mouse click's
 /// pixel X position into a character column within its row. This is an
 /// estimate (0.6× font size, the typical monospace advance width), not real
@@ -31,8 +41,11 @@ const CONTENT_PADDING_PX: f32 = 16.0;
 /// Number of lines of buffer to keep visible above/below the cursor —
 /// mirrors Vim's `scrolloff`. `scroll_to_cursor` starts scrolling once the
 /// cursor comes within this many lines of the viewport edge, rather than
-/// waiting until the cursor line itself is already clipped.
-const SCROLL_MARGIN_LINES: f32 = 3.0;
+/// waiting until the cursor line itself is already clipped. Raised from 3
+/// to 6 (found_bugs.md: auto-scroll at the bottom of the page only kicked
+/// in once the cursor was already 3-4 lines from the edge — the old value
+/// of this same constant — and needed to start earlier).
+const SCROLL_MARGIN_LINES: f32 = 6.0;
 /// A literal, well-known monospace family name rather than the generic
 /// CSS-style alias `"monospace"`. GPUI's font matching (`cosmic_text`'s
 /// `load_family`) filters real system fonts by an *exact string* match
@@ -53,6 +66,52 @@ const FONT_FAMILY: &str = "DejaVu Sans Mono";
 /// `apply_run_style` as the "effective" text color when a run has no
 /// explicit `color` override, to decide whether a highlight needs darkening.
 const DEFAULT_TEXT_COLOR_HEX: u32 = 0xd4d4d4;
+
+/// Caches the word-wrapped row table (and the intermediate data it's built
+/// from — split lines, per-line chars, line byte offsets, and the cloned
+/// paragraph formatting) across renders that don't actually change the
+/// document. Scrolling, cursor movement, and focus changes all trigger a
+/// render but don't touch `content`/`paragraphs` — without this cache,
+/// `render()` re-wraps the *entire* document on every single one of those,
+/// regardless of how much is actually visible (see performance_plan.md /
+/// uniform_list_plan.md). Invalidated by `Tab.content_version` (bumped on
+/// every real edit — see its own doc comment in `state.rs`), not by
+/// comparing `content` itself, which would defeat the point.
+///
+/// `Rc`-wrapped so a cache hit is a handful of cheap pointer clones, not a
+/// deep clone of the document — also what lets this data be captured
+/// cheaply into a `uniform_list` render closure later, instead of deep-
+/// cloned into it on every render.
+struct RowCache {
+    tab_id: usize,
+    content_version: u64,
+    /// `f32` isn't `Eq`; comparing via `to_bits()` is the standard way to
+    /// use a float as an exact cache key without pulling in an epsilon
+    /// comparison that would need its own tuning.
+    viewport_width_bits: u32,
+    zoom_bits: u32,
+    lines: Rc<Vec<String>>,
+    line_chars: Rc<Vec<Vec<char>>>,
+    line_byte_starts: Rc<Vec<usize>>,
+    rows: Rc<Vec<(usize, usize, usize)>>,
+    paragraphs: Rc<Vec<Paragraph>>,
+    /// `uniform_list`-facing expansion of `rows` — see
+    /// `expand_rows_for_display`'s doc comment. Cached alongside `rows`
+    /// since it's derived from it plus `paragraphs`/`zoom`, all of which are
+    /// already part of this cache's invalidation key.
+    display_to_wrap: Rc<Vec<Option<usize>>>,
+    wrap_to_display: Rc<Vec<usize>>,
+}
+
+/// Pure cache-validity check, pulled out of `render()` so it's unit-testable
+/// without a GPUI context — the one part of the row cache that isn't just
+/// GPUI interaction glue.
+fn row_cache_is_valid(cache: &RowCache, tab_id: usize, content_version: u64, viewport_width: f32, zoom: f32) -> bool {
+    cache.tab_id == tab_id
+        && cache.content_version == content_version
+        && cache.viewport_width_bits == viewport_width.to_bits()
+        && cache.zoom_bits == zoom.to_bits()
+}
 
 /// The main document editing area.
 ///
@@ -76,6 +135,18 @@ pub struct TextEditor {
     /// coordinates into document-relative ones; drag-to-edge auto-scroll
     /// uses `.bounds()` for its edge-trigger check.
     scroll_handle: ScrollHandle,
+    /// The `uniform_list` element's own scroll-handle type, passed to its
+    /// `.track_scroll()` in render(). Its `base_handle` field is a plain
+    /// `gpui::ScrollHandle` — the *same* type `scroll_handle` above already
+    /// is (confirmed against the vendored `gpui` source, `elements/div.rs`'s
+    /// `ScrollHandle(Rc<RefCell<..>>)` and `elements/uniform_list.rs`'s
+    /// `UniformListScrollState.base_handle: ScrollHandle`), so `scroll_handle`
+    /// is initialized *from* this one's `base_handle` in `new()` below —
+    /// both fields end up pointing at the same Rc-shared state. That's what
+    /// lets every existing consumer of `scroll_handle` (click/drag pixel
+    /// math, `AutoScroller`, `scroll_to_cursor`) keep working unchanged
+    /// while `uniform_list` itself tracks the real scroll position.
+    uniform_list_scroll_handle: UniformListScrollHandle,
     /// Drives continuous scrolling while a click-drag sits near the top/
     /// bottom edge of the viewport — see `auto_scroll::AutoScroller`.
     auto_scroller: AutoScroller,
@@ -85,6 +156,10 @@ pub struct TextEditor {
     /// than in `AppState` since resolving it triggers `replay_macro`, which
     /// needs this struct's GPUI context.
     macro_at_pending: bool,
+    /// The word-wrapped row table for the current render, memoized across
+    /// renders that don't change the document — see `RowCache`. `None`
+    /// before the first render.
+    row_cache: Option<RowCache>,
 }
 
 impl TextEditor {
@@ -98,9 +173,18 @@ impl TextEditor {
          * participates in the focus tree.
          */
         let focus_handle = cx.focus_handle();
-        let scroll_handle = ScrollHandle::new();
+        let uniform_list_scroll_handle = UniformListScrollHandle::new();
+        let scroll_handle = uniform_list_scroll_handle.0.borrow().base_handle.clone();
         let auto_scroller = AutoScroller::new(scroll_handle.clone(), state.clone());
-        TextEditor { state, focus_handle, scroll_handle, auto_scroller, macro_at_pending: false }
+        TextEditor {
+            state,
+            focus_handle,
+            scroll_handle,
+            uniform_list_scroll_handle,
+            auto_scroller,
+            macro_at_pending: false,
+            row_cache: None,
+        }
     }
 
     fn scroll_to_cursor(&self, cx: &Context<Self>) {
@@ -119,10 +203,14 @@ impl TextEditor {
          * more-negative values mean the document has been scrolled further down.
          *
          * All positions here are in the same "content space" that
-         * `line_col_from_mouse_position` uses: visual row `i`'s top sits at
-         * `i * LINE_HEIGHT_PX`, with no padding baked into per-row offsets —
-         * padding is only ever a one-time inset when converting to/from
-         * screen space. `bounds().size.height` is the div's full border-box
+         * `line_col_from_mouse_position` uses: display row `i`'s top sits at
+         * `i * LINE_HEIGHT_PX` (see `expand_rows_for_display` — the cursor's
+         * *wrap* row is translated into this display-row space first, since
+         * an oversized card-style/heading row earlier in the document
+         * reserves extra blank spacer rows that push everything after it
+         * down), with no padding baked into per-row offsets — padding is
+         * only ever a one-time inset when converting to/from screen space.
+         * `bounds().size.height` is the div's full border-box
          * height, which includes the top *and* bottom padding, so the actual
          * visible content window is `viewport_h - 2 * CONTENT_PADDING_PX`,
          * not the raw bounds height — using the raw height here previously
@@ -140,9 +228,10 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let Some((cursor_top, viewport_h, max_y, offset_x)) = self.cursor_scroll_geometry(cx) else { return };
-        let cursor_bottom  = cursor_top + LINE_HEIGHT_PX;
-        let margin         = SCROLL_MARGIN_LINES * LINE_HEIGHT_PX;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom)) = self.cursor_scroll_geometry(cx) else { return };
+        let line_height    = LINE_HEIGHT_PX * zoom;
+        let cursor_bottom  = cursor_top + line_height;
+        let margin         = SCROLL_MARGIN_LINES * line_height;
 
         let offset         = self.scroll_handle.offset();
         let visible_top    = -offset.y.as_f32();
@@ -169,22 +258,64 @@ impl TextEditor {
     /// and max scroll offset needed to clamp any new offset. `None` when the
     /// scroll handle hasn't been laid out yet (viewport_h <= 0), which can
     /// happen on the very first frame.
-    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels)> {
+    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32)> {
         let state = self.state.read(cx);
-        let content = state.active_content().to_string();
         let (cursor_line, cursor_col) = state.cursor_line_col();
+        let zoom = state.zoom;
         let _ = state;
 
-        let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+        // `scroll_to_cursor` calls this on essentially every key event, so
+        // reusing `RowCache` here (populated by the last `render()`, almost
+        // always still valid — nothing between renders changes tab_id/
+        // content_version/viewport_width/zoom) avoids paying a full-
+        // document rewrap on every single keystroke, on top of render()'s
+        // own now-cached cost.
+        let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+        let (rows, _, wrap_to_display) = self.cached_or_fresh_row_tables(cx, viewport_width);
         let visual_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
-        let cursor_top = visual_row as f32 * LINE_HEIGHT_PX;
+        // Translate into display-row space (see `expand_rows_for_display`)
+        // so an oversized card-style/heading row earlier in the document
+        // pushes this pixel position down by however many blank spacer
+        // rows it reserved, matching what `render()` actually paints.
+        let display_row = wrap_to_display[visual_row];
+        let cursor_top = display_row as f32 * LINE_HEIGHT_PX * zoom;
 
         let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
         if viewport_h <= 0.0 { return None; }
 
         let max_y = self.scroll_handle.max_offset().y.as_f32();
-        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x))
+        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom))
+    }
+
+    /// Returns the row tables the most recent `render()` already computed
+    /// (`RowCache`, a handful of cheap `Rc::clone`s) when they're still
+    /// valid for the given viewport width, instead of re-running the
+    /// full-document wrap — used by `cursor_scroll_geometry` and the
+    /// click/drag hit-testing handlers below (`performance_plan.md`'s
+    /// "route hit-testing through the cache" item). Falls back to a fresh,
+    /// uncached computation on a miss (e.g. the very first render hasn't
+    /// happened yet) — this method doesn't own populating `row_cache`,
+    /// `render()` does, and it runs again on the next frame regardless.
+    fn cached_or_fresh_row_tables(
+        &self,
+        cx: &Context<Self>,
+        viewport_width: f32,
+    ) -> (Rc<Vec<(usize, usize, usize)>>, Rc<Vec<Option<usize>>>, Rc<Vec<usize>>) {
+        let state = self.state.read(cx);
+        let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
+        let content_version = state.tabs.get(state.active_tab).map(|t| t.content_version).unwrap_or(0);
+        let zoom = state.zoom;
+        if let Some(cache) = self.row_cache.as_ref() {
+            if row_cache_is_valid(cache, tab_id, content_version, viewport_width, zoom) {
+                return (cache.rows.clone(), cache.display_to_wrap.clone(), cache.wrap_to_display.clone());
+            }
+        }
+        let content = state.active_content().to_string();
+        let paragraphs = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let lines = document_lines(&content);
+        let rows = Rc::new(visual_rows_for_viewport(cx, &lines, viewport_width, zoom));
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
+        (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
 
     /// Unlike `scroll_to_cursor` (which only nudges the viewport when the
@@ -196,8 +327,8 @@ impl TextEditor {
     /// happened" even though the cursor did move, which defeats the point
     /// of clicking a heading to jump to it.
     fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - LINE_HEIGHT_PX) / 2.0;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - LINE_HEIGHT_PX * zoom) / 2.0;
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -224,10 +355,11 @@ impl TextEditor {
         let state = self.state.read(cx);
         let content = state.active_content().to_string();
         let (cursor_line, cursor_col) = state.cursor_line_col();
+        let zoom = state.zoom;
         let _ = state;
 
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
+        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32(), zoom);
 
         let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         let (_, row_start, _) = rows[current_row];
@@ -436,16 +568,18 @@ impl TextEditor {
                 if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger
                     && shift && matches!(key, "h" | "m" | "l")
                 {
+                    let zoom = self.state.read(cx).zoom;
                     let content = self.state.read(cx).active_content().to_string();
                     let lines = document_lines(&content);
                     let bounds = self.scroll_handle.bounds();
-                    let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
+                    let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom);
                     if !rows.is_empty() {
+                        let line_height = LINE_HEIGHT_PX * zoom;
                         let viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
-                        let top_row = ((-offset.y.as_f32()) / LINE_HEIGHT_PX).floor().max(0.0) as usize;
+                        let top_row = ((-offset.y.as_f32()) / line_height).floor().max(0.0) as usize;
                         let top_row = top_row.min(rows.len() - 1);
-                        let visible_count = ((viewport_h / LINE_HEIGHT_PX).floor().max(1.0)) as usize;
+                        let visible_count = ((viewport_h / line_height).floor().max(1.0)) as usize;
                         let bottom_row = (top_row + visible_count.saturating_sub(1)).min(rows.len() - 1);
                         let target_row = match key {
                             "h" => top_row,
@@ -643,11 +777,24 @@ impl Render for TextEditor {
         }
 
         let state = self.state.read(cx);
-        let content = state.active_content().to_string();
-        // Rich-text formatting (Phase 1): each logical line is exactly one
-        // paragraph (§1 of formatting_todo.md), so `paragraphs[i]` gives
-        // `lines[i]`'s formatting runs directly — no separate lookup needed.
-        let paragraphs: Vec<Paragraph> = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let zoom = state.zoom;
+        let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+        let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
+        let content_version = state.tabs.get(state.active_tab).map(|t| t.content_version).unwrap_or(0);
+        let cache_valid = self
+            .row_cache
+            .as_ref()
+            .is_some_and(|c| row_cache_is_valid(c, tab_id, content_version, viewport_width, zoom));
+        // Only pay for the full content/paragraphs clone on a cache miss.
+        // `document_lines`/word-wrap need `cx` free of `state`'s borrow (see
+        // `let _ = state;` below), so the actual wrap happens further down —
+        // this just captures the owned data a miss needs before that borrow ends.
+        let fresh_content_and_paragraphs = (!cache_valid).then(|| {
+            (
+                state.active_content().to_string(),
+                state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default(),
+            )
+        });
         let is_new_tab = state
             .tabs
             .get(state.active_tab)
@@ -749,27 +896,67 @@ impl Render for TextEditor {
 
         let is_focused = self.focus_handle.is_focused(window);
 
-        let lines = document_lines(&content);
-        let line_chars: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
+        // Rebuild the word-wrapped row table only on a cache miss (see
+        // `RowCache`'s doc comment) — `state`'s borrow of `cx` has already
+        // ended (`let _ = state;` above), so `cx` is free for
+        // `visual_rows_for_viewport` again here.
+        if let Some((content, paragraphs)) = fresh_content_and_paragraphs {
+            let lines = document_lines(&content);
+            let line_chars: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
 
-        // Byte offset of each logical line's start within `content`, needed
-        // to test `selection` (a document-wide byte range) against each line.
-        let mut line_byte_starts: Vec<usize> = Vec::with_capacity(lines.len());
-        let mut byte_offset = 0;
-        for l in &lines {
-            line_byte_starts.push(byte_offset);
-            byte_offset += l.len() + 1; // +1 for the '\n' the split() consumed
+            // Byte offset of each logical line's start within `content`,
+            // needed to test `selection` (a document-wide byte range)
+            // against each line.
+            let mut line_byte_starts: Vec<usize> = Vec::with_capacity(lines.len());
+            let mut byte_offset = 0;
+            for l in &lines {
+                line_byte_starts.push(byte_offset);
+                byte_offset += l.len() + 1; // +1 for the '\n' the split() consumed
+            }
+
+            // Word-wrap each logical line into fixed-height visual rows so
+            // long lines reflow within the viewport instead of running off
+            // the right edge. Click/drag hit-testing and scroll-to-cursor
+            // rebuild this exact same row table (via the same helper
+            // functions) so all three always agree on where each row's
+            // boundaries fall.
+            let rows = visual_rows_for_viewport(cx, &lines, viewport_width, zoom);
+            let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
+
+            self.row_cache = Some(RowCache {
+                tab_id,
+                content_version,
+                viewport_width_bits: viewport_width.to_bits(),
+                zoom_bits: zoom.to_bits(),
+                lines: Rc::new(lines),
+                line_chars: Rc::new(line_chars),
+                line_byte_starts: Rc::new(line_byte_starts),
+                rows: Rc::new(rows),
+                paragraphs: Rc::new(paragraphs),
+                display_to_wrap: Rc::new(display_to_wrap),
+                wrap_to_display: Rc::new(wrap_to_display),
+            });
         }
+        let cache = self
+            .row_cache
+            .as_ref()
+            .expect("populated just above on a miss; cache_valid guarantees it already existed on a hit");
+        let lines = cache.lines.clone();
+        let line_chars = cache.line_chars.clone();
+        let line_byte_starts = cache.line_byte_starts.clone();
+        let rows = cache.rows.clone();
+        let paragraphs = cache.paragraphs.clone();
+        let display_to_wrap = cache.display_to_wrap.clone();
+        let wrap_to_display = cache.wrap_to_display.clone();
 
-        // Word-wrap each logical line into fixed-height visual rows so long
-        // lines reflow within the viewport instead of running off the right
-        // edge. Using the viewport's own current bounds (not a hardcoded
-        // width) keeps wrapping correct across window resizes. Click/drag
-        // hit-testing and scroll-to-cursor rebuild this exact same row table
-        // (via the same helper functions) so all three always agree on
-        // where each row's boundaries fall.
-        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32());
-        let cursor_visual_row = is_focused.then(|| visual_row_for_line_col(&rows, cursor_line, cursor_col));
+        // Display-space cursor row (see `expand_rows_for_display`) — the
+        // `uniform_list` closure below iterates display indices, not raw
+        // wrap-row indices, so the cursor-row comparison inside it needs to
+        // be in the same space.
+        let cursor_visual_row = is_focused.then(|| {
+            let wrap_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
+            wrap_to_display[wrap_row]
+        });
 
         // Outer wrapper: takes the same slot in main_window's flex row the
         // scrollable editor div used to occupy directly (`.flex_1()`,
@@ -831,10 +1018,9 @@ impl Render for TextEditor {
                 this.focus_handle.clone().focus(window, cx);
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let content = this.state.read(cx).active_content().to_string();
-                let lines = document_lines(&content);
-                let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows);
+                let zoom = this.state.read(cx).zoom;
+                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
                 this.state.update(cx, |state, cx| {
                     state.set_cursor_from_line_col(line, col);
                     cx.notify();
@@ -856,10 +1042,9 @@ impl Render for TextEditor {
                 if !ev.dragging() { return; }
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let content = this.state.read(cx).active_content().to_string();
-                let lines = document_lines(&content);
-                let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows);
+                let zoom = this.state.read(cx).zoom;
+                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
                 this.state.update(cx, |state, cx| {
                     state.extend_selection_to_line_col(line, col);
                     cx.notify();
@@ -879,6 +1064,8 @@ impl Render for TextEditor {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _ev, _window, _cx| {
                 this.auto_scroller.stop();
             }))
+            .flex()
+            .flex_col()
             .flex_1()
             .min_w_0()
             // Critical (see main_window.rs's `min_h_0` comment for the same
@@ -891,37 +1078,54 @@ impl Render for TextEditor {
             // scrolling internally.
             .min_h_0()
             .bg(rgb(0x1e1e1e))
-            .overflow_y_scroll()
-            // Prevent long lines from expanding the editor div beyond its flex_1 allocation.
-            // overflow_y_scroll only sets the vertical axis; without this, the x axis
-            // defaults to visible and content flows off-screen to the right.
-            .overflow_x_hidden()
-            .track_scroll(&self.scroll_handle)
-            .p(px(16.0))
-            // Thin focus ring so the user can tell where key input lands
-            .border_1()
-            .border_color(if is_focused { rgb(0x007acc) } else { rgb(0x1e1e1e) })
+            // No `.overflow_y_scroll()`/`.track_scroll()`/`.p()`/`.border_1()`
+            // here anymore — `uniform_list` below owns the actual scrolling
+            // now (it sets its own vertical overflow internally and is
+            // `.track_scroll()`ed to `uniform_list_scroll_handle`), and
+            // padding/border move with it: `self.scroll_handle.bounds()`
+            // (via the shared handle, see `TextEditor::new()`) reflects
+            // *uniform_list's* box, and the click/scroll pixel math's
+            // `CONTENT_PADDING_PX` subtraction assumes that box already
+            // includes the padding inset, same as it did when this div was
+            // both the padded box and the tracked scroll container at once.
+            // This div is now just a plain flex_col wrapper stacking
+            // [new-tab placeholder?, the scrollable row list].
+            // Placeholder shown on an empty, unsaved tab — a plain sibling
+            // above the row list now rather than uniform_list's first
+            // "item" (uniform_list has no such prepend slot); low-risk since
+            // a genuinely empty new tab has nothing to scroll to anyway.
+            .when(is_new_tab, |d| {
+                d.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x555555))
+                        .font_family(FONT_FAMILY)
+                        .p(px(16.0))
+                        .child("Open a file from the sidebar, or start typing…"),
+                )
+            })
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    // w_full constrains each row to the editor width so wrapped
-                    // rows all line up under one another.
-                    .w_full()
-                    // Placeholder shown on an empty, unsaved tab
-                    .when(is_new_tab, |d| {
-                        d.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x555555))
-                                .font_family(FONT_FAMILY)
-                                .child("Open a file from the sidebar, or start typing…"),
-                        )
-                    })
-                    // One div per visual row (a wrapped logical line spans
-                    // several); render_line overlays the cursor marker and/or
-                    // selection highlight on whichever rows they actually touch.
-                    .children(rows.iter().enumerate().map(|(visual_idx, &(li, row_start, row_end))| {
+                uniform_list("text-editor-rows", display_to_wrap.len(), {
+                    let lines = lines.clone();
+                    let line_chars = line_chars.clone();
+                    let line_byte_starts = line_byte_starts.clone();
+                    let rows = rows.clone();
+                    let paragraphs = paragraphs.clone();
+                    let display_to_wrap = display_to_wrap.clone();
+                    move |range: std::ops::Range<usize>, _window, _cx| {
+                        range.map(|display_idx| {
+                        // A `None` slot is a blank spacer reserved after an
+                        // oversized (card-style/heading) row so its content
+                        // has empty space to visually spill into instead of
+                        // overlapping the row below — see
+                        // `expand_rows_for_display`'s doc comment. Same
+                        // fixed `.h()` as a real row, just no content, so
+                        // `uniform_list`'s single-measurement layout still
+                        // sees a uniform row height everywhere.
+                        let Some(visual_idx) = display_to_wrap[display_idx] else {
+                            return div().h(px(LINE_HEIGHT_PX * zoom)).into_any_element();
+                        };
+                            let (li, row_start, row_end) = rows[visual_idx];
                         let chars = &line_chars[li];
                         let row_text: String = chars[row_start..row_end].iter().collect();
 
@@ -931,7 +1135,7 @@ impl Render for TextEditor {
                         // was computed for every row regardless of the condition, and
                         // underflowed (panicked) on any row whose row_start exceeded the
                         // cursor's column — i.e. almost any row that isn't the cursor's own.
-                        let row_cursor_col = (cursor_visual_row == Some(visual_idx))
+                        let row_cursor_col = (cursor_visual_row == Some(display_idx))
                             .then(|| cursor_col - row_start);
 
                         // Clip the logical line's selection char-range (if any) down
@@ -979,6 +1183,7 @@ impl Render for TextEditor {
                             &row_run_spans,
                             paragraphs.get(li),
                             prev_has_box,
+                            zoom,
                         );
                         // Heading styles (spec 6.5): a paragraph-wide default
                         // that per-run formatting (bold/size/etc., applied
@@ -987,16 +1192,19 @@ impl Render for TextEditor {
                         // text style cascades to children and a child's own
                         // call wins. NOTE: a heading's larger font size can
                         // visually overflow this row's fixed `LINE_HEIGHT_PX`
-                        // — row height doesn't adjust for it, since that
-                        // height feeds click/scroll pixel math built for a
-                        // uniform row size; needs real-hardware verification
-                        // (this sandbox has no display) to see how it looks.
+                        // by design — `expand_rows_for_display` reserves
+                        // blank spacer rows after this one sized for exactly
+                        // that overflow (see `slot_count_for_paragraph`), so
+                        // it spills into empty space rather than the next
+                        // row's content; still needs real-hardware
+                        // verification (this sandbox has no display) to
+                        // confirm how it actually looks.
                         let heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
                         let row_div = div()
                             .font_family(FONT_FAMILY)
-                            .text_sm()
+                            .text_size(px(FONT_SIZE_PX * zoom))
                             .text_color(rgb(0xd4d4d4));
-                        let row_div = match heading_font_size_px(heading) {
+                        let row_div = match heading_font_size_px(heading, zoom) {
                             Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
                             None => row_div,
                         };
@@ -1009,11 +1217,58 @@ impl Render for TextEditor {
                             // would otherwise grow this div past one row and break
                             // the fixed-row-height assumption click/scroll math relies on.
                             .whitespace_nowrap()
-                            // min_h keeps empty rows visually present
-                            .min_h(px(LINE_HEIGHT_PX))
+                            // `.h()`, not `.min_h()` — uniform_list measures
+                            // exactly one row (`measure_item`, always at
+                            // `list_width: None` i.e. unconstrained/MinContent
+                            // width — confirmed in the vendored gpui source,
+                            // `elements/uniform_list.rs`'s `request_layout`/
+                            // `prepaint`) and applies *that single row's*
+                            // height to *every* row in the whole list
+                            // (`item_top = item_height * item_index`, same
+                            // file). `.min_h()` only floors the height, so
+                            // any row whose content naturally measures taller
+                            // than `LINE_HEIGHT_PX` under that unconstrained-
+                            // width measurement pass — which any wrapped or
+                            // multi-span row can — poisoned every row's
+                            // spacing uniformly (found from a real bug
+                            // report: lines rendering ~2x too far apart, and
+                            // auto-scroll/scroll-to-cursor firing late since
+                            // their pixel math assumes exactly
+                            // `LINE_HEIGHT_PX` per row). An explicit `.h()`
+                            // is a fixed layout size independent of content
+                            // or measurement width, so `measure_item` always
+                            // returns exactly `LINE_HEIGHT_PX * zoom`
+                            // regardless of which row it happens to measure.
+                            // A heading's larger font can still visually
+                            // overflow this box (unchanged from before this
+                            // fix, still not clipped since overflow stays
+                            // visible — see the comment on `heading` above).
+                            .h(px(LINE_HEIGHT_PX * zoom))
                             .child(content_el)
-                    }))
-            ) // closes the lines-container .child(...)
+                            .into_any_element()
+                        }).collect()
+                    }
+                })
+                // `uniform_list` is the actual scrollable element now (it
+                // sets vertical overflow internally); padding/border move
+                // here from the old outer div for the reason explained
+                // above this `.child(...)` block.
+                .track_scroll(&self.uniform_list_scroll_handle)
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .w_full()
+                // Prevent long lines from expanding the editor past its
+                // flex_1 allocation — uniform_list only constrains the
+                // vertical axis internally, same as the old div's own
+                // `.overflow_y_scroll()` needed an explicit
+                // `.overflow_x_hidden()` alongside it.
+                .overflow_x_hidden()
+                .p(px(16.0))
+                // Thin focus ring so the user can tell where key input lands
+                .border_1()
+                .border_color(if is_focused { rgb(0x007acc) } else { rgb(0x1e1e1e) })
+            ) // closes the "text-editor" div's .child(uniform_list...)
             ) // closes the scrollable-editor .child(...) on the wrapper
             .child({
                 // Mode indicator (spec 5.1) — a sibling below the scrollable
@@ -1046,6 +1301,7 @@ fn render_line(
     run_spans: &[(usize, usize, usize)],
     para: Option<&Paragraph>,
     prev_has_box: bool,
+    zoom: f32,
 ) -> AnyElement {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
@@ -1082,7 +1338,7 @@ fn render_line(
                 use crate::docx_parser::Alignment;
                 let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
                 if !needs_alignment {
-                    return apply_run_style(div(), run).child(line.to_string()).into_any_element();
+                    return apply_run_style(div(), run, zoom).child(line.to_string()).into_any_element();
                 }
             }
         }
@@ -1117,7 +1373,7 @@ fn render_line(
                     } else {
                         chars[run_start + start..run_start + end].iter().collect()
                     };
-                    render_segment(text, run, style)
+                    render_segment(text, run, style, zoom)
                 })
                 .collect::<Vec<_>>()
         })
@@ -1159,7 +1415,7 @@ fn render_line(
     line_div.into_any_element()
 }
 
-fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyElement {
+fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle, zoom: f32) -> AnyElement {
     /*
      * Applies the run's formatting first, then layers the cursor/selection
      * overlay on top — each of GPUI's style calls simply overwrites the
@@ -1172,7 +1428,7 @@ fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyEl
      * Use flex_shrink(0.0) to prevent the div from expanding beyond the text width,
      * so highlights only extend as far as the text itself.
      */
-    let el = apply_run_style(div().flex_shrink(0.0), run);
+    let el = apply_run_style(div().flex_shrink(0.0), run, zoom);
     let el = match style {
         SegmentStyle::Cursor => el.bg(rgb(0xd4d4d4)).text_color(rgb(0x1e1e1e)),
         // #264F78 at ~50% opacity, per spec 6.4's selection-highlight color.
@@ -1182,7 +1438,7 @@ fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle) -> AnyEl
     el.child(text).into_any_element()
 }
 
-fn apply_run_style(el: Div, run: Option<&Run>) -> Div {
+fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32) -> Div {
     /*
      * Maps a `Run`'s fields onto GPUI style calls per spec 6.2 (extended
      * with italic/font/color, rich-text formatting plan Phase 1's scope
@@ -1214,7 +1470,7 @@ fn apply_run_style(el: Div, run: Option<&Run>) -> Div {
         el = el.bg(rgb(highlight_hex));
     }
     if run.size > 0 {
-        el = el.text_size(px(run.size as f32 / 2.0));
+        el = el.text_size(px(run.size as f32 / 2.0 * zoom));
     }
     if let Some(font) = &run.font {
         el = el.font_family(font.clone());
@@ -1281,19 +1537,87 @@ fn darken_for_light_text(hex: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-fn heading_font_size_px(heading: u8) -> Option<f32> {
+fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
     /*
-     * Spec 6.5's heading-level font size table. `None` for `heading == 0`
-     * (body text — no override).
+     * Spec 6.5's heading-level font size table, scaled by `zoom`. `None`
+     * for `heading == 0` (body text — no override).
      */
     match heading {
         0 => None,
-        1 => Some(24.0),
-        2 => Some(20.0),
-        3 => Some(18.0),
-        4..=6 => Some(16.0),
-        _ => Some(14.0), // 7-9
+        1 => Some(24.0 * zoom),
+        2 => Some(20.0 * zoom),
+        3 => Some(18.0 * zoom),
+        4..=6 => Some(16.0 * zoom),
+        _ => Some(14.0 * zoom), // 7-9
     }
+}
+
+/// Vertical padding (`py(8.0)`, top+bottom) plus border (`border_1()`,
+/// top+bottom) that `render_line`'s box wrapper (`FormatOp::Box`, used by
+/// the Pocket card style) adds around the text itself, on top of the font's
+/// own height — not scaled by `zoom` (matches the fixed `px(8.0)`/
+/// `border_1()` calls in `render_line`). Used by `slot_count_for_paragraph`
+/// to reserve enough uniform_list slots for a boxed line's real height.
+const CARD_BOX_EXTRA_PX: f32 = 18.0;
+
+/// How many uniform-height `LINE_HEIGHT_PX` slots a paragraph's rendered
+/// line actually needs. `gpui::uniform_list` (see `RowCache`/`render()`)
+/// measures exactly one row and forces every item in the list to that same
+/// height — a paragraph using a larger font (card styles Pocket/Hat/Block/
+/// Tag via a run-level `FontSize`, or a document heading via
+/// `heading_font_size_px`) would otherwise visually spill into the row(s)
+/// below it. `expand_rows_for_display` reserves `slot_count - 1` extra
+/// blank rows after this paragraph's row so that overflow has somewhere
+/// empty to land instead (see handoff.md's "card-styled lines now overlap"
+/// writeup for the full history).
+///
+/// `font_px` and `LINE_HEIGHT_PX` both scale by `zoom` the same way, but
+/// `CARD_BOX_EXTRA_PX` doesn't, so `zoom` still has to be threaded through
+/// rather than cancelling out.
+fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32) -> usize {
+    let Some(para) = para else { return 1 };
+    let run_max_px = para
+        .runs
+        .iter()
+        .filter(|r| r.size > 0)
+        .map(|r| r.size as f32 / 2.0 * zoom)
+        .fold(0.0_f32, f32::max);
+    let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
+    let font_px = run_max_px.max(heading_px).max(FONT_SIZE_PX * zoom);
+    let has_box = para.runs.iter().any(|r| r.box_format);
+    let needed_px = font_px * (LINE_HEIGHT_PX / FONT_SIZE_PX)
+        + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 };
+    ((needed_px / (LINE_HEIGHT_PX * zoom)).ceil() as usize).max(1)
+}
+
+/// Expands the word-wrapped `rows` table (one entry per visual row) into a
+/// `uniform_list`-facing "display rows" table that reserves extra blank
+/// slots after any oversized paragraph (see `slot_count_for_paragraph`).
+///
+/// Returns `(display_to_wrap, wrap_to_display)`:
+/// - `display_to_wrap[display_idx]` is `Some(wrap_idx)` for the row that
+///   holds real content (the first of its reserved slots), or `None` for a
+///   blank spacer slot reserved after it.
+/// - `wrap_to_display[wrap_idx]` is the display index a given wrap-table
+///   row starts at — needed anywhere pixel math is keyed off a wrap-row
+///   index (cursor position, scroll-to-cursor) so it accounts for spacer
+///   rows inserted earlier in the document.
+pub(crate) fn expand_rows_for_display(
+    rows: &[(usize, usize, usize)],
+    paragraphs: &[Paragraph],
+    zoom: f32,
+) -> (Vec<Option<usize>>, Vec<usize>) {
+    let mut display_to_wrap = Vec::with_capacity(rows.len());
+    let mut wrap_to_display = Vec::with_capacity(rows.len());
+    for (wrap_idx, (li, _, _)) in rows.iter().enumerate() {
+        wrap_to_display.push(display_to_wrap.len());
+        display_to_wrap.push(Some(wrap_idx));
+        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom);
+        for _ in 1..slots {
+            display_to_wrap.push(None);
+        }
+    }
+    (display_to_wrap, wrap_to_display)
 }
 
 fn usable_wrap_width(viewport_width_px: f32) -> f32 {
@@ -1312,12 +1636,13 @@ fn usable_wrap_width(viewport_width_px: f32) -> f32 {
     if usable <= 0.0 { f32::MAX } else { usable }
 }
 
-fn char_width_fn(cx: &App, font: Font) -> impl Fn(char) -> f32 {
+fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) -> f32 {
     /*
      * Builds a closure that returns a character's real, rendered pixel
-     * width for `font` at `FONT_SIZE_PX`, backed by GPUI's own
-     * `TextSystem::layout_width` (the same glyph-shaping measurement GPUI
-     * itself uses to paint text, cached internally per character).
+     * width for `font` at `font_size_px` (the zoomed font size — see
+     * `AppState.zoom`), backed by GPUI's own `TextSystem::layout_width`
+     * (the same glyph-shaping measurement GPUI itself uses to paint text,
+     * cached internally per character).
      *
      * This replaces the old approach of assuming every character is
      * `CHAR_WIDTH_PX` wide for wrap purposes: that uniform estimate is
@@ -1329,25 +1654,62 @@ fn char_width_fn(cx: &App, font: Font) -> impl Fn(char) -> f32 {
      * The returned closure owns its own `Arc<TextSystem>` clone (cheap —
      * it's a refcount bump) and a resolved `FontId`, so it doesn't borrow
      * `cx` and can be passed freely into the pure wrap functions below.
+     *
+     * `layout_width` itself goes through GPUI's frame-based `LineLayoutCache`
+     * (a locked, hash-keyed cache) on every call — cheap once per unique
+     * character, but real documents call this once per *occurrence*, not
+     * once per unique character. GPUI's own `LineWrapper::width_for_char`
+     * (text_system/line_wrapper.rs) avoids exactly this cost with a local
+     * per-char cache (`&mut self`, ASCII array + HashMap fallback); this
+     * closure mirrors that technique and signature exactly (`FnMut`, not
+     * `Fn`-plus-`RefCell` — an earlier version tried `RefCell` to keep a
+     * `Fn` bound and hit a real "already borrowed" panic from an `if let
+     * ... else { borrow_mut() }` whose immutable borrow's temporary lives
+     * across the whole if/else; `FnMut` sidesteps that class of bug
+     * entirely, same as the reference implementation) so a wrap pass over a
+     * document with thousands of characters but only ~60-100 distinct ones
+     * pays the expensive lookup only ~60-100 times, not once per character.
+     * Scoped to a single closure instance (recreated on each wrap pass), so
+     * it needs no invalidation logic.
      */
     let text_system = cx.text_system().clone();
     let font_id = text_system.resolve_font(&font);
-    move |c: char| text_system.layout_width(font_id, px(FONT_SIZE_PX), c).as_f32()
+    let mut ascii_cache: [Option<f32>; 128] = [None; 128];
+    let mut other_cache: std::collections::HashMap<char, f32> = std::collections::HashMap::new();
+    move |c: char| {
+        if (c as u32) < 128 {
+            let idx = c as usize;
+            if let Some(w) = ascii_cache[idx] {
+                return w;
+            }
+            let w = text_system.layout_width(font_id, px(font_size_px), c).as_f32();
+            ascii_cache[idx] = Some(w);
+            w
+        } else if let Some(&w) = other_cache.get(&c) {
+            w
+        } else {
+            let w = text_system.layout_width(font_id, px(font_size_px), c).as_f32();
+            other_cache.insert(c, w);
+            w
+        }
+    }
 }
 
-pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_width_px: f32) -> Vec<(usize, usize, usize)> {
+pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_width_px: f32, zoom: f32) -> Vec<(usize, usize, usize)> {
     /*
      * Convenience wrapper combining `char_width_fn` + `usable_wrap_width` +
      * `build_visual_rows` — the single entry point every cx-having call
      * site (render, click/drag hit-testing, scroll-to-cursor, Up/Down,
      * auto-scroll) uses to build the row table, so they can never disagree
-     * about wrap width or glyph metrics.
+     * about wrap width or glyph metrics. `zoom` (`AppState.zoom`) scales
+     * the font size wrapping is measured against, so a zoomed-in document
+     * re-wraps at the same visual width it renders at.
      */
-    let width_of = char_width_fn(cx, font(FONT_FAMILY));
-    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &width_of)
+    let mut width_of = char_width_fn(cx, font(FONT_FAMILY), FONT_SIZE_PX * zoom);
+    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &mut width_of)
 }
 
-fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &impl Fn(char) -> f32) -> Vec<(usize, usize)> {
+fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &mut impl FnMut(char) -> f32) -> Vec<(usize, usize)> {
     /*
      * Word-wraps one logical line's characters into visual rows whose
      * accumulated real glyph width (via `width_of`) stays within
@@ -1404,7 +1766,7 @@ fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &impl Fn(ch
     rows
 }
 
-fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &impl Fn(char) -> f32) -> Vec<(usize, usize, usize)> {
+fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &mut impl FnMut(char) -> f32) -> Vec<(usize, usize, usize)> {
     /*
      * Flattens every logical line into an ordered list of visual rows, each
      * tagged with its owning logical line index and its [start, end) char
@@ -1416,7 +1778,7 @@ fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &impl Fn(ch
     let mut rows = Vec::new();
     for (li, line) in lines.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, width_of) {
+        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, &mut *width_of) {
             rows.push((li, start, end));
         }
     }
@@ -1528,6 +1890,8 @@ pub(crate) fn line_col_from_mouse_position(
     content_bounds: Bounds<Pixels>,
     scroll_offset_y: f32,
     rows: &[(usize, usize, usize)],
+    display_to_wrap: &[Option<usize>],
+    zoom: f32,
 ) -> (usize, usize) {
     /*
      * Converts a window-space mouse position into a (logical_line,
@@ -1540,9 +1904,11 @@ pub(crate) fn line_col_from_mouse_position(
      * `visual_rows_for_viewport`, which needs a live GPUI context for real
      * glyph-width measurement) rather than rebuilding it internally — this
      * function itself stays plain and cx-free. A pixel Y is first resolved
-     * to a *visual* row (a wrapped logical line spans several) and only
-     * then translated back to the logical (line, column) pair that
-     * `AppState` understands.
+     * to a *display* row (see `expand_rows_for_display` — a wrapped
+     * logical line spans several visual rows, and an oversized card-style/
+     * heading row reserves extra blank spacer rows after it) and only then
+     * translated back to the logical (line, column) pair that `AppState`
+     * understands.
      *
      * `content_bounds` is the editor's fixed viewport box — GPUI's own
      * layout bounds for the tracked div (`ScrollHandle::bounds()`), which
@@ -1557,8 +1923,13 @@ pub(crate) fn line_col_from_mouse_position(
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
     let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
-    let col_in_row = column_for_x(local_x, CHAR_WIDTH_PX);
-    let visual_row = line_for_y(local_y, LINE_HEIGHT_PX, rows.len());
+    let col_in_row = column_for_x(local_x, CHAR_WIDTH_PX * zoom);
+    let display_row = line_for_y(local_y, LINE_HEIGHT_PX * zoom, display_to_wrap.len());
+
+    // A click landing on a blank spacer slot (the empty space an oversized
+    // row's content visually spills into) belongs to that row, not to
+    // whatever comes after it — walk back to the nearest real content row.
+    let visual_row = (0..=display_row).rev().find_map(|i| display_to_wrap[i]).unwrap_or(0);
 
     let (logical_line, row_start, row_end) = rows[visual_row];
     let col = row_start + col_in_row.min(row_end - row_start);
@@ -1668,7 +2039,12 @@ mod tests {
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
+        row_cache_is_valid, RowCache, slot_count_for_paragraph, expand_rows_for_display,
     };
+    use std::rc::Rc;
+    use crate::state::AppState;
+    use crate::docx_parser::{Paragraph, Run, Alignment};
+    use std::time::Instant;
 
     #[test]
     fn test_column_for_x_zero_is_first_column() {
@@ -1861,13 +2237,13 @@ mod tests {
 
     #[test]
     fn test_wrap_line_into_rows_empty_line_is_one_row() {
-        assert_eq!(wrap_line_into_rows(&[], 80.0, &|_| 8.0), vec![(0, 0)]);
+        assert_eq!(wrap_line_into_rows(&[], 80.0, &mut |_| 8.0), vec![(0, 0)]);
     }
 
     #[test]
     fn test_wrap_line_into_rows_fits_in_one_row() {
         let chars: Vec<char> = "hello".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 80.0, &|_| 8.0), vec![(0, 5)]);
+        assert_eq!(wrap_line_into_rows(&chars, 80.0, &mut |_| 8.0), vec![(0, 5)]);
     }
 
     #[test]
@@ -1876,7 +2252,7 @@ mod tests {
         // (8 chars); last space within budget is at index 5, so row 1 is
         // [0,5)="hello", the space at 5 is consumed, row 2 starts at 6: "world".
         let chars: Vec<char> = "hello world".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 64.0, &|_| 8.0), vec![(0, 5), (6, 11)]);
+        assert_eq!(wrap_line_into_rows(&chars, 64.0, &mut |_| 8.0), vec![(0, 5), (6, 11)]);
     }
 
     #[test]
@@ -1884,13 +2260,13 @@ mod tests {
         // No spaces at all within budget -> hard break exactly at the pixel
         // budget (32px / 8px-per-char = 4 chars per row).
         let chars: Vec<char> = "abcdefghij".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &|_| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
     }
 
     #[test]
     fn test_wrap_line_into_rows_exact_multiple_of_width() {
         let chars: Vec<char> = "abcdefgh".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &|_| 8.0), vec![(0, 4), (4, 8)]);
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_| 8.0), vec![(0, 4), (4, 8)]);
     }
 
     #[test]
@@ -1898,7 +2274,7 @@ mod tests {
         // Two words separated by exactly one space at the wrap point: the
         // space must not reappear as a leading character on the next row.
         let chars: Vec<char> = "aaaa bbbb".chars().collect();
-        let rows = wrap_line_into_rows(&chars, 40.0, &|_| 8.0);
+        let rows = wrap_line_into_rows(&chars, 40.0, &mut |_| 8.0);
         for (start, end) in &rows {
             let text: String = chars[*start..*end].iter().collect();
             assert!(!text.starts_with(' '), "row {:?} starts with a space", text);
@@ -1911,7 +2287,7 @@ mod tests {
         // character's width must still advance one character per row rather
         // than looping forever or producing an empty row.
         let chars: Vec<char> = "ab".chars().collect();
-        let rows = wrap_line_into_rows(&chars, 10.0, &|_| 100.0);
+        let rows = wrap_line_into_rows(&chars, 10.0, &mut |_| 100.0);
         assert_eq!(rows, vec![(0, 1), (1, 2)]);
     }
 
@@ -1924,9 +2300,29 @@ mod tests {
         // 20px budget — a uniform 8px/char estimate would have wrapped
         // after only 2.
         let chars: Vec<char> = vec!['.'; 20];
-        let width_of = |c: char| if c == '.' { 2.0 } else { 8.0 };
-        let rows = wrap_line_into_rows(&chars, 20.0, &width_of);
+        let mut width_of = |c: char| if c == '.' { 2.0 } else { 8.0 };
+        let rows = wrap_line_into_rows(&chars, 20.0, &mut width_of);
         assert_eq!(rows[0], (0, 10));
+    }
+
+    #[test]
+    fn test_wrap_line_into_rows_stateful_width_fn_handles_repeated_non_ascii() {
+        // Regression: an earlier version of char_width_fn's per-char cache
+        // used `Fn` + `RefCell` to satisfy this function's old `&impl Fn`
+        // bound; a cache miss on any non-ASCII character (an `if let ...
+        // else { borrow_mut() }` whose immutable borrow's temporary lived
+        // across the whole if/else) panicked with "already borrowed" the
+        // first time a real .docx with non-ASCII text (smart quotes,
+        // accents) was opened. This exercises the exact shape that broke:
+        // a stateful width-lookup closure (cache populated on first sight,
+        // read back on repeats) driven across a line with repeated
+        // non-ASCII characters, through the same `&mut impl FnMut` this
+        // function now requires.
+        let chars: Vec<char> = "caf\u{e9} caf\u{e9} \u{201c}word\u{201d}".chars().collect();
+        let mut cache: std::collections::HashMap<char, f32> = std::collections::HashMap::new();
+        let mut width_of = |c: char| *cache.entry(c).or_insert(8.0);
+        let rows = wrap_line_into_rows(&chars, 200.0, &mut width_of);
+        assert_eq!(rows, vec![(0, chars.len())]);
     }
 
     // ── build_visual_rows / document_lines ──────────────────────────────────
@@ -1944,14 +2340,14 @@ mod tests {
     #[test]
     fn test_build_visual_rows_one_row_per_short_line() {
         let lines = document_lines("hi\nthere");
-        let rows = build_visual_rows(&lines, 800.0, &|_| 8.0);
+        let rows = build_visual_rows(&lines, 800.0, &mut |_| 8.0);
         assert_eq!(rows, vec![(0, 0, 2), (1, 0, 5)]);
     }
 
     #[test]
     fn test_build_visual_rows_wraps_long_line_into_multiple_rows() {
         let lines = document_lines("hello world");
-        let rows = build_visual_rows(&lines, 64.0, &|_| 8.0);
+        let rows = build_visual_rows(&lines, 64.0, &mut |_| 8.0);
         assert_eq!(rows, vec![(0, 0, 5), (0, 6, 11)]);
     }
 
@@ -2060,27 +2456,33 @@ mod tests {
 
     #[test]
     fn test_heading_font_size_body_text_has_no_override() {
-        assert_eq!(heading_font_size_px(0), None);
+        assert_eq!(heading_font_size_px(0, 1.0), None);
     }
 
     #[test]
     fn test_heading_font_size_levels_1_through_3_each_distinct() {
-        assert_eq!(heading_font_size_px(1), Some(24.0));
-        assert_eq!(heading_font_size_px(2), Some(20.0));
-        assert_eq!(heading_font_size_px(3), Some(18.0));
+        assert_eq!(heading_font_size_px(1, 1.0), Some(24.0));
+        assert_eq!(heading_font_size_px(2, 1.0), Some(20.0));
+        assert_eq!(heading_font_size_px(3, 1.0), Some(18.0));
     }
 
     #[test]
     fn test_heading_font_size_levels_4_to_6_share_one_size() {
-        assert_eq!(heading_font_size_px(4), Some(16.0));
-        assert_eq!(heading_font_size_px(5), Some(16.0));
-        assert_eq!(heading_font_size_px(6), Some(16.0));
+        assert_eq!(heading_font_size_px(4, 1.0), Some(16.0));
+        assert_eq!(heading_font_size_px(5, 1.0), Some(16.0));
+        assert_eq!(heading_font_size_px(6, 1.0), Some(16.0));
     }
 
     #[test]
     fn test_heading_font_size_levels_7_to_9_share_one_size() {
-        assert_eq!(heading_font_size_px(7), Some(14.0));
-        assert_eq!(heading_font_size_px(9), Some(14.0));
+        assert_eq!(heading_font_size_px(7, 1.0), Some(14.0));
+        assert_eq!(heading_font_size_px(9, 1.0), Some(14.0));
+    }
+
+    #[test]
+    fn test_heading_font_size_scales_with_zoom() {
+        assert_eq!(heading_font_size_px(1, 2.0), Some(48.0));
+        assert_eq!(heading_font_size_px(0, 2.0), None);
     }
 
     // ── relative_luminance / is_light_color / darken_for_light_text ────────
@@ -2149,5 +2551,305 @@ mod tests {
     fn test_darken_for_light_text_result_is_no_longer_light() {
         assert!(is_light_color(0xFFD700));
         assert!(!is_light_color(darken_for_light_text(0xFFD700)));
+    }
+
+    // ── Diagnostic: isolate the per-keystroke cost on a large loaded document ──
+    //
+    // Reproduces the "editing a loaded .docx is slower than a blank tab"
+    // report on a single ~15k-char paragraph (the realistic worst case: a
+    // debate card is one giant paragraph). Times three independent things
+    // that all run on every keystroke of a real edit, with GPUI's own
+    // (expensive, locked, hashed) `layout_width` deliberately excluded from
+    // (3) via a synthetic width closure — so this isolates the mutation
+    // path (1), the undo-snapshot clone (2), and the wrap algorithm's own
+    // cost (3) from the one thing this sandbox can't measure (real font
+    // shaping, which needs a live GPUI `App`). Run with
+    // `cargo test bench_diagnostic -- --nocapture` to see the printed
+    // numbers; not a pass/fail regression test.
+    #[test]
+    fn bench_diagnostic_large_document_per_keystroke_costs() {
+        let big_text: String = "the quick brown fox jumps over the lazy dog "
+            .repeat(340); // ~15,300 chars, one giant paragraph
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: big_text.clone(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+
+        let mut state = AppState::new();
+        state.tabs[0].content = big_text.clone();
+        state.tabs[0].paragraphs = paragraphs;
+        state.tabs[0].cursor = big_text.len();
+
+        // (1) 100x insert_char: covers push_undo_snapshot + sync_insert_char
+        //     (which calls resolve_position) — the whole mutation path.
+        let t0 = Instant::now();
+        for _ in 0..100 {
+            state.insert_char('a');
+        }
+        let insert_100_elapsed = t0.elapsed();
+
+        // (2) One paragraphs.clone(), the same clone push_undo_snapshot and
+        //     TextEditor::render() both pay on every non-coalesced keystroke
+        //     and every frame respectively.
+        let t1 = Instant::now();
+        let _cloned = state.tabs[0].paragraphs.clone();
+        let clone_elapsed = t1.elapsed();
+
+        // (3) build_visual_rows over the full document with a synthetic,
+        //     branch-free width closure — isolates the wrap algorithm's own
+        //     cost from real font-shaping cost (which this headless sandbox
+        //     cannot measure without a live GPUI App).
+        let lines = document_lines(&state.tabs[0].content);
+        let mut synthetic_width_of = |c: char| if c == ' ' { 4.0 } else { 8.4 };
+        let t2 = Instant::now();
+        let _rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
+        let wrap_elapsed = t2.elapsed();
+
+        // How many times a wrap pass over this document calls the real,
+        // expensive text_system.layout_width path before vs. after the
+        // per-call cache added to char_width_fn: before, once per character
+        // occurrence; after, once per *unique* character (the cache's own
+        // hit path never reaches layout_width again for a repeat).
+        let occurrences = big_text.chars().count();
+        let unique: std::collections::HashSet<char> = big_text.chars().collect();
+
+        eprintln!(
+            "bench_diagnostic: 100x insert_char = {:?} ({:?}/keystroke), \
+             paragraphs.clone() = {:?}, build_visual_rows (synthetic width) = {:?}, \
+             expensive layout_width calls per wrap pass: before={} (one per char) \
+             after={} (one per unique char) = {:.0}x fewer",
+            insert_100_elapsed,
+            insert_100_elapsed / 100,
+            clone_elapsed,
+            wrap_elapsed,
+            occurrences,
+            unique.len(),
+            occurrences as f64 / unique.len() as f64,
+        );
+
+        // Sanity bound only (catches an accidental infinite loop / O(n^3)
+        // blowup) — not the diagnostic signal itself, which is the printed
+        // numbers above.
+        assert!(insert_100_elapsed.as_secs() < 5);
+    }
+
+    #[test]
+    fn bench_diagnostic_row_cache_hit_vs_miss_on_large_heavily_formatted_document() {
+        // Unlike the bench above (one giant single-run paragraph), this
+        // builds a document shaped like a real heavily-formatted case file:
+        // many paragraphs, each with several runs (mixed bold/italic/
+        // highlight spans within the same line, the way Bold+Highlight+Cite
+        // formatting actually looks) — the shape performance_plan.md flagged
+        // as multiplying render cost on top of raw document length, since
+        // more runs per line means more span-clipping/element work per row.
+        //
+        // Measures what `RowCache` (uniform_list_plan.md Part 1, now wired
+        // into `render()`) actually buys: a cache MISS pays the full
+        // clone-and-rewrap cost `render()` used to pay on *every* frame; a
+        // cache HIT is just `Rc::clone`ing the same 5 fields. Deliberately
+        // doesn't vary scroll position (top vs. deep in the document) the
+        // way the plan originally sketched — under the caching built so far,
+        // the whole document is wrapped either way regardless of scroll
+        // offset; a scroll-position-dependent cost only appears once
+        // uniform_list (Part 2 / step 4) limits work to the visible range.
+        let paragraph_count = 500;
+        let runs_per_paragraph = 6;
+        let mut paragraphs = Vec::with_capacity(paragraph_count);
+        for i in 0..paragraph_count {
+            let mut runs = Vec::with_capacity(runs_per_paragraph);
+            for r in 0..runs_per_paragraph {
+                runs.push(Run {
+                    text: format!("segment {i}-{r} of a heavily formatted line "),
+                    bold: r % 2 == 0,
+                    italic: r % 3 == 0,
+                    highlight: r % 4 == 0,
+                    highlight_color: if r % 4 == 0 { "yellow".to_string() } else { String::new() },
+                    size: 24,
+                    ..Run::default()
+                });
+            }
+            paragraphs.push(Paragraph { runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None });
+        }
+        let content: String = paragraphs
+            .iter()
+            .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut synthetic_width_of = |c: char| if c == ' ' { 4.0 } else { 8.4 };
+        let lines = document_lines(&content);
+
+        // (1) Cache MISS: the full rebuild render() pays without a cached
+        // row table — clone paragraphs, collect per-line chars, word-wrap.
+        let t0 = Instant::now();
+        let _miss_paragraphs = paragraphs.clone();
+        let _miss_line_chars: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
+        let _miss_rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
+        let miss_elapsed = t0.elapsed();
+
+        // (2) Cache HIT: the same data, but already `Rc`-wrapped the way
+        // `RowCache` stores it — a hit is just cloning these 5 handles.
+        let rc_paragraphs = Rc::new(paragraphs.clone());
+        let rc_lines = Rc::new(lines.clone());
+        let rc_line_chars: Rc<Vec<Vec<char>>> = Rc::new(lines.iter().map(|l| l.chars().collect()).collect());
+        let rc_rows = Rc::new(build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of));
+        let t1 = Instant::now();
+        let _hit_paragraphs = rc_paragraphs.clone();
+        let _hit_lines = rc_lines.clone();
+        let _hit_line_chars = rc_line_chars.clone();
+        let _hit_rows = rc_rows.clone();
+        let hit_elapsed = t1.elapsed();
+
+        eprintln!(
+            "bench_diagnostic_row_cache: {} paragraphs x {} runs each ({} bytes) — \
+             cache MISS (full rebuild) = {:?}, cache HIT (Rc clones) = {:?}, {:.0}x faster on hit",
+            paragraph_count,
+            runs_per_paragraph,
+            content.len(),
+            miss_elapsed,
+            hit_elapsed,
+            miss_elapsed.as_nanos() as f64 / (hit_elapsed.as_nanos().max(1) as f64),
+        );
+
+        // The actual diagnostic signal is the printed numbers above; this is
+        // just a sanity bound confirming the cache is doing its job at all,
+        // not a specific performance target.
+        assert!(hit_elapsed < miss_elapsed, "a cache hit must be cheaper than a full rebuild");
+    }
+
+    // ── row_cache_is_valid (uniform_list_plan.md Part 1) ─────────────────────
+
+    fn test_row_cache(tab_id: usize, content_version: u64, viewport_width: f32, zoom: f32) -> RowCache {
+        RowCache {
+            tab_id,
+            content_version,
+            viewport_width_bits: viewport_width.to_bits(),
+            zoom_bits: zoom.to_bits(),
+            lines: Rc::new(Vec::new()),
+            line_chars: Rc::new(Vec::new()),
+            line_byte_starts: Rc::new(Vec::new()),
+            rows: Rc::new(Vec::new()),
+            paragraphs: Rc::new(Vec::new()),
+            display_to_wrap: Rc::new(Vec::new()),
+            wrap_to_display: Rc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn test_row_cache_is_valid_when_everything_matches() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(row_cache_is_valid(&cache, 1, 5, 800.0, 1.0));
+    }
+
+    #[test]
+    fn test_row_cache_is_valid_false_when_tab_id_differs() {
+        // A different tab could coincidentally share the same
+        // content_version/width/zoom — tab_id must be checked, or a tab
+        // switch could serve another tab's stale wrapped rows.
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid(&cache, 2, 5, 800.0, 1.0));
+    }
+
+    #[test]
+    fn test_row_cache_is_valid_false_when_content_version_differs() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid(&cache, 1, 6, 800.0, 1.0));
+    }
+
+    #[test]
+    fn test_row_cache_is_valid_false_when_viewport_width_differs() {
+        // A window resize must invalidate the cache — the old wrap width no
+        // longer matches where lines should actually break.
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid(&cache, 1, 5, 801.0, 1.0));
+    }
+
+    #[test]
+    fn test_row_cache_is_valid_false_when_zoom_differs() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid(&cache, 1, 5, 800.0, 1.25));
+    }
+
+    // ── slot_count_for_paragraph / expand_rows_for_display ────────────────────
+    // (card-style row-overlap fix — handoff.md)
+
+    fn plain_paragraph() -> Paragraph {
+        Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+    }
+
+    fn pocket_paragraph() -> Paragraph {
+        // Mirrors AppState::apply_card_style(CardStyleKind::Pocket): bold +
+        // FontSize(52 half-points = 26px) + Box(true), heading level 1.
+        Paragraph {
+            runs: vec![Run { size: 52, bold: true, box_format: true, ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    #[test]
+    fn test_slot_count_plain_paragraph_is_one_slot() {
+        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0), 1);
+    }
+
+    #[test]
+    fn test_slot_count_no_paragraph_data_is_one_slot() {
+        // A brand-new tab has no parsed paragraphs yet — must not panic or
+        // under/over-count when formatting data is simply absent.
+        assert_eq!(slot_count_for_paragraph(None, 1.0), 1);
+    }
+
+    #[test]
+    fn test_slot_count_pocket_needs_multiple_slots() {
+        // 26px font (~1.86x LINE_HEIGHT_PX/FONT_SIZE_PX ratio) plus the box's
+        // padding/border comfortably needs more than one 20px slot.
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
+        assert!(slots > 1, "expected Pocket line to need multiple slots, got {slots}");
+    }
+
+    #[test]
+    fn test_slot_count_scales_with_zoom() {
+        // CARD_BOX_EXTRA_PX doesn't scale with zoom, so at very low zoom it
+        // dominates and needs relatively more slots than at 1x.
+        let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
+        let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5);
+        assert!(at_half >= at_1x);
+    }
+
+    #[test]
+    fn test_slot_count_heading_without_box_still_oversized() {
+        // heading_font_size_px(1, 1.0) == 24px, no box — still needs 2 slots
+        // (24 * 20/14 == 34.3px > 20px, <= 40px).
+        let para = Paragraph { runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0), 2);
+    }
+
+    #[test]
+    fn test_expand_rows_for_display_plain_rows_are_untouched() {
+        let rows = vec![(0, 0, 5), (1, 0, 5)];
+        let paragraphs = vec![plain_paragraph(), plain_paragraph()];
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0);
+        assert_eq!(display_to_wrap, vec![Some(0), Some(1)]);
+        assert_eq!(wrap_to_display, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_expand_rows_for_display_inserts_spacers_after_oversized_row() {
+        let rows = vec![(0, 0, 5), (1, 0, 5)];
+        let paragraphs = vec![pocket_paragraph(), plain_paragraph()];
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0);
+
+        // Row 0 (Pocket) occupies `slots` display rows: itself, then blanks.
+        let mut expected = vec![Some(0)];
+        expected.extend(std::iter::repeat(None).take(slots - 1));
+        expected.push(Some(1));
+        assert_eq!(display_to_wrap, expected);
+
+        // Row 1 (plain) now starts `slots` display rows in, not 1.
+        assert_eq!(wrap_to_display, vec![0, slots]);
     }
 }

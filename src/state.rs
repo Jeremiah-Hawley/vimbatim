@@ -13,8 +13,50 @@ use crate::wikifi_export;
 /// coalesced into the same undo step (spec 4.5), so e.g. typing a whole
 /// word doesn't need one Ctrl+Z per character.
 const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(300);
-/// Maximum number of snapshots kept on a tab's undo stack (spec 4.5).
+/// Maximum number of snapshots kept on a tab's undo stack (spec 4.5) — the
+/// ceiling for small/typical documents. Large documents are capped further
+/// by `UNDO_STACK_BYTE_BUDGET` instead (see `undo_stack_cap_for_snapshot_size`).
 const UNDO_STACK_CAP: usize = 200;
+/// Total approximate bytes `undo_stack`/`redo_stack` may hold at once.
+/// `performance_plan.md`'s "undo/redo stack memory" finding: at
+/// `UNDO_STACK_CAP` full `(content, paragraphs)` clones each, a large,
+/// heavily-formatted document is a real multi-hundred-MB steady state, not
+/// a hypothetical. Chosen so a ~5MB document (a large real debate case
+/// file) still keeps dozens of undo levels, not just `UNDO_STACK_MIN_CAP`.
+const UNDO_STACK_BYTE_BUDGET: usize = 100_000_000;
+/// Even a huge document keeps at least this many undo levels — a fixed
+/// memory budget alone would otherwise let one very large document shrink
+/// undo depth to an unusably small number.
+const UNDO_STACK_MIN_CAP: usize = 10;
+
+/// Rough byte-size estimate of one undo/redo snapshot. Only used to keep
+/// the stacks' total memory bounded on large documents, not for anything
+/// content-accuracy-sensitive, so an approximation (content plus every
+/// run's string fields) is enough — no need to walk anything not already
+/// owned by the snapshot itself.
+fn snapshot_byte_estimate(content: &str, paragraphs: &[Paragraph]) -> usize {
+    content.len()
+        + paragraphs
+            .iter()
+            .flat_map(|p| &p.runs)
+            .map(|r| {
+                r.text.len()
+                    + r.highlight_color.len()
+                    + r.font.as_deref().map_or(0, str::len)
+                    + r.color.as_deref().map_or(0, str::len)
+            })
+            .sum::<usize>()
+}
+
+/// How many snapshots the undo/redo stacks should keep given the current
+/// document's approximate snapshot size — `UNDO_STACK_CAP` for small
+/// documents, shrinking proportionally as `snapshot_bytes` grows so total
+/// stack memory stays within `UNDO_STACK_BYTE_BUDGET`, never below
+/// `UNDO_STACK_MIN_CAP`.
+fn undo_stack_cap_for_snapshot_size(snapshot_bytes: usize) -> usize {
+    let budget_based = UNDO_STACK_BYTE_BUDGET / snapshot_bytes.max(1);
+    budget_based.clamp(UNDO_STACK_MIN_CAP, UNDO_STACK_CAP)
+}
 
 /// The vim mode a tab's editing state is currently in (spec 5.1). `Insert`
 /// behaves like the plain (non-vim) editor; the other four modes swallow
@@ -106,6 +148,14 @@ pub struct Tab {
     pub title: String,
     pub file_path: Option<PathBuf>,
     pub content: String,
+    /// Bumped on every real mutation to `content`/`paragraphs` — starts at
+    /// `push_undo_snapshot()` (this codebase's de facto "a real edit is
+    /// about to happen" choke point, called by nearly every mutating
+    /// method), plus `undo()`/`redo()` which replace both fields wholesale
+    /// without going through it. Lets `TextEditor`'s row-wrap cache detect
+    /// "did the text actually change since I last wrapped it" without
+    /// comparing the full `content` string on every render.
+    pub content_version: u64,
     pub is_modified: bool,
     /// The tab's live, editable formatted content (rich-text formatting
     /// plan, Phase 1) — always has at least one paragraph with one run,
@@ -249,6 +299,18 @@ pub fn default_paragraphs() -> Vec<Paragraph> {
     vec![Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }]
 }
 
+/// The file explorer sidebar's starting width in pixels — not persisted
+/// across launches (deliberate: dragging the sidebar wider/narrower is a
+/// per-session convenience, not a saved preference).
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 240.0;
+
+/// Clamps a proposed sidebar width (from dragging its resize handle,
+/// `main_window.rs`) to a usable range: never so narrow file names become
+/// unreadable, never so wide it swallows the editor.
+pub fn clamp_sidebar_width(width: f32) -> f32 {
+    width.clamp(180.0, 480.0)
+}
+
 impl Tab {
     pub fn new_empty(id: usize) -> Self {
         /*
@@ -260,6 +322,7 @@ impl Tab {
             title: "New Tab".to_string(),
             file_path: None,
             content: String::new(),
+            content_version: 0,
             is_modified: false,
             paragraphs: default_paragraphs(),
             docx_origin: None,
@@ -304,6 +367,7 @@ impl Tab {
             title,
             file_path: Some(path),
             content: String::new(),
+            content_version: 0,
             is_modified: false,
             paragraphs: default_paragraphs(),
             docx_origin: None,
@@ -379,12 +443,46 @@ pub enum SidebarMode {
     Nav,
 }
 
+/// What a file-explorer right-click landed on (`found_bugs.md`'s Forgotten
+/// Implicit Feature: right-click to delete or create). Determines both what
+/// "Delete" acts on and which directory "New File" creates into.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FileContextMenuTarget {
+    File(PathBuf),
+    Dir(PathBuf),
+    /// Right-click on empty space below the tree — "New File" creates at
+    /// `working_directory`'s root; "Delete" has nothing to act on.
+    Background,
+}
+
+/// State for the file explorer's right-click menu. `position` is a window-
+/// relative `(x, y)` in pixels — a plain tuple, not a `gpui::Point`, since
+/// `state.rs` is deliberately gpui-free (see the rest of this file); the
+/// view layer (`file_explorer.rs`) converts at its own boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileContextMenu {
+    pub position: (f32, f32),
+    pub target: FileContextMenuTarget,
+    /// Set by clicking "Delete" once, before the destructive
+    /// `fs::remove_file` actually runs — a real filesystem delete has no
+    /// undo, so the menu shows a "Delete <name>? Confirm / Cancel" step
+    /// instead of deleting on the first click.
+    pub confirming_delete: bool,
+}
+
 /// The shared application state, owned as a GPUI Model and read/written by all views.
 pub struct AppState {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub next_tab_id: usize,
     pub sidebar_visible: bool,
+    /// File explorer sidebar width in pixels, changed by dragging its
+    /// resize handle (`main_window.rs`). Deliberately not persisted to
+    /// settings.conf — resets to `DEFAULT_SIDEBAR_WIDTH` every launch.
+    pub sidebar_width: f32,
+    /// Open state of the file explorer's right-click menu, `None` when
+    /// closed. See `FileContextMenu`.
+    pub file_context_menu: Option<FileContextMenu>,
     /// Which view the left sidebar shows — the file tree, or (Nav) a
     /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
     /// Toggled from two places that both flip the same field: the ribbon's
@@ -406,6 +504,19 @@ pub struct AppState {
     pub keybinds: crate::keybinds::Keybinds,
     pub theme: crate::theme::ThemeKind,
     pub theme_color_mode: crate::theme::ThemeColorMode,
+    /// `large_size` from settings.conf, in half-points (`Run.size`'s unit).
+    /// The size "Clear Formatting" resets a line back to. See
+    /// `load_large_size_half_points`.
+    pub large_size_half_points: u16,
+    /// Editor text zoom multiplier (`found_bugs.md`'s Ctrl+=/Ctrl+-/Ctrl+0
+    /// zoom, rebuilt from scratch — no trace of a prior implementation
+    /// survived in git history). Applied only to the document text
+    /// (`text_editor.rs`'s font size/line height/wrap and hit-testing
+    /// math), not the surrounding app chrome — a deliberate scope
+    /// narrowing the user confirmed. `1.0` is 100% (no zoom). Not
+    /// persisted to settings.conf — resets to 100% each launch, matching
+    /// how a fresh Word session doesn't remember its last zoom level either.
+    pub zoom: f32,
     /// Saved macro recordings, keyed by register (user-requested, not in editor_instructions.md).
     pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
     /// The register currently being recorded into and its keystrokes so
@@ -529,32 +640,90 @@ impl CardStyleKind {
     }
 }
 
+/// Resolves settings.conf's real path: next to the running executable
+/// (`std::env::current_exe()`'s parent directory), not the process's
+/// current working directory. A double-clicked packaged `.app`/`.exe` has
+/// no guaranteed CWD (macOS Finder launches typically start at `/`;
+/// Windows depends on the shortcut's "Start in" field) — reading relative
+/// to CWD would silently fall back to every setting's hardcoded default on
+/// a tester's very first launch (`closed_beta_plan.md` §0). Falls back to
+/// the bare relative path (today's `cargo run`/`./run.sh` behavior) if the
+/// executable's own path can't be resolved.
+pub fn settings_conf_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("settings.conf")))
+        .unwrap_or_else(|| PathBuf::from("settings.conf"))
+}
+
+/// The file explorer's starting directory when there's no prior working
+/// directory to restore (always true today — nothing persists
+/// `working_directory` across launches). Prefers the user's home directory
+/// (`Documents` on Windows, matching Explorer's own default save location)
+/// over the process's CWD: a packaged `.app`/`.exe` launched by
+/// double-click has no guaranteed CWD, and opening the file tree at some
+/// unrelated system directory (e.g. `/` on macOS) reads as broken on first
+/// launch (`closed_beta_plan.md` §0). Falls back to `current_dir()`, then
+/// `.`, only if the platform's home-directory env var is unset.
+fn default_working_directory() -> PathBuf {
+    let home = if cfg!(target_os = "windows") {
+        std::env::var_os("USERPROFILE").map(PathBuf::from).map(|home| home.join("Documents"))
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    };
+    home.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Reads `large_size` (points, `[FORMATTING]` section) from settings.conf —
+/// the size "Clear Formatting" (`found_bugs.md`) resets a line back to.
+/// Mirrors `keybinds::load_vim_enabled`'s tolerant flat key=value scan
+/// rather than pulling in the unused `config_parsing` crate (which panics
+/// on a missing file). Converted to half-points, `Run.size`'s own unit.
+/// Falls back to 22 (11pt) when the file or key is missing/unparseable,
+/// matching settings.conf's own shipped default.
+fn load_large_size_half_points(path: &std::path::Path) -> u16 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "large_size").then(|| value.trim().parse::<u16>().ok()).flatten()
+            })
+        })
+        .map(|points| points * 2)
+        .unwrap_or(22)
+}
+
 impl AppState {
     pub fn new() -> Self {
         /*
          * Initialises the application with a single empty tab, the sidebar visible,
-         * the settings modal hidden, and the working directory set to the process's
-         * current directory. The file tree is populated immediately by scanning that
-         * directory for .docx files. Keybindings and vim mode are loaded from
-         * settings.conf (an app-level config, always read relative to the process's
-         * CWD rather than `working_directory`, since it isn't tied to whichever
-         * folder the user opens in the file explorer).
+         * the settings modal hidden, and the working directory defaulted per
+         * `default_working_directory()` (the user's home directory, since there's
+         * no persisted prior working directory to prefer). The file tree is
+         * populated immediately by scanning that directory for .docx files.
+         * Keybindings and vim mode are loaded from settings.conf, resolved via
+         * `settings_conf_path()` (next to the running executable, not the
+         * process's CWD — see that function's own doc comment).
          */
-        let working_directory = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+        let working_directory = default_working_directory();
 
         let file_tree = scan_directory(&working_directory);
-        let settings_path = std::path::Path::new("settings.conf");
+        let settings_path = settings_conf_path();
+        let settings_path = settings_path.as_path();
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
         let theme = crate::theme::load_theme(settings_path);
         let theme_color_mode = crate::theme::load_theme_color_mode(settings_path);
+        let large_size_half_points = load_large_size_half_points(settings_path);
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
             active_tab: 0,
             next_tab_id: 1,
             sidebar_visible: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            file_context_menu: None,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             working_directory,
@@ -563,6 +732,8 @@ impl AppState {
             keybinds,
             theme,
             theme_color_mode,
+            large_size_half_points,
+            zoom: 1.0,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,
@@ -738,8 +909,16 @@ impl AppState {
          * to. Any new edit clears the redo stack, since it invalidates the
          * futures those redo entries pointed to. Capped at UNDO_STACK_CAP,
          * dropping the oldest snapshot once exceeded.
+         *
+         * This is also this codebase's de facto "a real content mutation is
+         * about to happen" choke point, so `content_version` bumps here
+         * unconditionally, *before* the coalescing check below — a fast
+         * typing burst must still bump it on every keystroke (uniform_list_plan.md
+         * Part 1), even though only the first keystroke of the burst pushes
+         * an actual undo entry.
          */
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        tab.content_version += 1;
         let now = Instant::now();
         let within_coalesce_window = tab.last_edit_at
             .map(|t| now.duration_since(t) < UNDO_COALESCE_WINDOW)
@@ -749,7 +928,8 @@ impl AppState {
             return;
         }
         tab.undo_stack.push((tab.content.clone(), tab.paragraphs.clone()));
-        if tab.undo_stack.len() > UNDO_STACK_CAP {
+        let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(&tab.content, &tab.paragraphs));
+        while tab.undo_stack.len() > cap {
             tab.undo_stack.remove(0);
         }
         tab.redo_stack.clear();
@@ -897,6 +1077,33 @@ impl AppState {
             op.clone()
         };
         apply_formatting(&mut tab.paragraphs, line_start, line_end, effective_op.clone());
+        // Card styles (Pocket/Hat/Block/Tag) mark their line with
+        // `para.heading` and center `para.alignment` (see
+        // `apply_card_style`) — both paragraph-level fields `apply_formatting`
+        // above never touches, since it only mutates run-level fields.
+        // Left alone, a cleared line kept its heading's font-size/bold
+        // override (text_editor.rs applies it at the paragraph-div level,
+        // overriding a run's own now-cleared `size`/`bold`) and stayed
+        // centered even after every run field was reset — the actual root
+        // cause behind found_bugs.md's "Clear... fails to clear pocket,
+        // hat, and block formatting".
+        if let FormatOp::ClearAll { .. } = effective_op {
+            let (para_idx, _, _) = resolve_position(&tab.paragraphs, line_start);
+            if let Some(para) = tab.paragraphs.get_mut(para_idx) {
+                para.heading = 0;
+                para.alignment = Alignment::Left;
+            }
+            // A prior card-style/formatting op on this same empty line (e.g.
+            // apply_card_style's Bold+FontSize+Box sequence) may have armed
+            // `pending_format`, which otherwise keeps force-applying to
+            // every character typed from here on (insert_char's own doc
+            // comment) — indefinitely, since nothing else was clearing it.
+            // Clear Formatting has to reset this too, or newly typed text
+            // (and, via paragraph-splitting on Enter, every line typed
+            // after it) keeps resurrecting formatting that was supposedly
+            // just cleared.
+            tab.pending_format = None;
+        }
         // apply_formatting no-ops on an empty [line_start, line_end) range
         // (nothing to split/iterate over), so it never touches the empty
         // line's own already-existing run(s). Apply directly here instead —
@@ -916,22 +1123,20 @@ impl AppState {
             }
         }
         tab.is_modified = true;
-
-        // If applying to an empty line, arm pending_format so subsequent typing inherits formatting.
-        // This ensures card styles are visible immediately when the user starts typing.
-        if is_line_empty && !is_uniformly_active(&self.tabs.get(self.active_tab).map(|t| &t.paragraphs).unwrap_or(&vec![]), line_start, line_end, &op) {
-            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                // Only set pending_format for run-level operations, not paragraph-level ones
-                match &effective_op {
-                    FormatOp::Bold(_) | FormatOp::FontSize(_) | FormatOp::Underline(_) |
-                    FormatOp::DoubleUnderline(_) | FormatOp::Box(_) | FormatOp::Italic(_) |
-                    FormatOp::Strikethrough(_) | FormatOp::Highlight(_) | FormatOp::Color(_) => {
-                        tab.pending_format = Some(effective_op);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Deliberately does NOT arm `pending_format` here (unlike
+        // `apply_formatting_to_selection`'s no-selection case, which is a
+        // genuine "stay bold until toggled off again" sticky mode the user
+        // controls one keypress at a time). `apply_formatting_to_line` is
+        // only ever called by `apply_card_style` (Bold+FontSize+Box/etc. in
+        // sequence) and `ClearAll` — the empty-line run-seeding just above
+        // already makes the very next keystroke correct, so arming
+        // `pending_format` here was pure side effect, not a real need. It
+        // used to leak indefinitely: since nothing but an unrelated
+        // matching toggle or Clear Formatting ever cleared it, a single
+        // Pocket line could resurrect its box on every line typed
+        // afterward, including across a paragraph split on Enter (a real
+        // reported bug — see this file's own history for the two
+        // narrower fixes that preceded removing this block entirely).
     }
 
     pub fn apply_formatting_to_selection(&mut self, op: FormatOp) {
@@ -978,6 +1183,7 @@ impl AppState {
                     } else {
                         op.clone()
                     };
+                    self.push_undo_snapshot();
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                         apply_formatting(&mut tab.paragraphs, cursor, next_char_boundary, effective_op);
                         tab.is_modified = true;
@@ -1268,6 +1474,24 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Highlight(Some(next_color.to_string())));
     }
 
+    /// Bounds and step for `AppState.zoom` — 50%-250% in 10% increments,
+    /// matching common editors' (VS Code, Word) zoom granularity.
+    pub const ZOOM_MIN: f32 = 0.5;
+    pub const ZOOM_MAX: f32 = 2.5;
+    pub const ZOOM_STEP: f32 = 0.1;
+
+    pub fn zoom_in(&mut self) {
+        self.zoom = (self.zoom + Self::ZOOM_STEP).min(Self::ZOOM_MAX);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.zoom = (self.zoom - Self::ZOOM_STEP).max(Self::ZOOM_MIN);
+    }
+
+    pub fn zoom_reset(&mut self) {
+        self.zoom = 1.0;
+    }
+
     pub fn toggle_strikethrough(&mut self) {
         /*
          * Toggles strikethrough on selected text or sets pending format
@@ -1450,6 +1674,27 @@ impl AppState {
         }
     }
 
+    pub fn apply_line_alignment(&mut self, alignment: Alignment) {
+        /*
+         * Sets the alignment of the line containing the cursor (ribbon's
+         * Align Left/Align Center buttons) — line-scoped like
+         * `apply_formatting_to_line`/`apply_card_style`, not selection-
+         * spanning like `apply_center_alignment`. Not a toggle: `Alignment`
+         * is a single-valued paragraph field, so setting one value
+         * inherently supersedes whatever was there before.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let cursor = tab.cursor;
+        let line_start = tab.content[..cursor].rfind('\n').map(|pos| pos + 1).unwrap_or(0);
+        let line_end = tab.content[cursor..].find('\n').map(|pos| cursor + pos).unwrap_or(tab.content.len());
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            apply_paragraph_alignment(&mut tab.paragraphs, line_start, line_end, alignment);
+            tab.is_modified = true;
+        }
+    }
+
     /// Applies one of the line-based card styles (Pocket/Hat/Block/Tag) to
     /// the entire line containing the cursor: bold + the style's font size,
     /// its special formatting (box/double-underline/underline), and center
@@ -1518,9 +1763,17 @@ impl AppState {
          */
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         let Some(previous) = tab.undo_stack.pop() else { return };
+        tab.content_version += 1;
         let current_content = std::mem::replace(&mut tab.content, previous.0);
         let current_paragraphs = std::mem::replace(&mut tab.paragraphs, previous.1);
         tab.redo_stack.push((current_content, current_paragraphs));
+        // Same size-aware cap as `push_undo_snapshot` — repeatedly undoing
+        // a huge document without any new edit would otherwise let
+        // `redo_stack` grow past what `undo_stack` was ever bounded to.
+        let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(&tab.content, &tab.paragraphs));
+        while tab.redo_stack.len() > cap {
+            tab.redo_stack.remove(0);
+        }
         tab.selection = None;
         tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
         tab.is_modified = true;
@@ -1538,9 +1791,14 @@ impl AppState {
          */
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         let Some(next) = tab.redo_stack.pop() else { return };
+        tab.content_version += 1;
         let current_content = std::mem::replace(&mut tab.content, next.0);
         let current_paragraphs = std::mem::replace(&mut tab.paragraphs, next.1);
         tab.undo_stack.push((current_content, current_paragraphs));
+        let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(&tab.content, &tab.paragraphs));
+        while tab.undo_stack.len() > cap {
+            tab.undo_stack.remove(0);
+        }
         tab.selection = None;
         tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
         tab.is_modified = true;
@@ -2085,6 +2343,104 @@ impl AppState {
          * after creating new files so the explorer reflects the new state.
          */
         self.file_tree = scan_directory(&self.working_directory);
+    }
+
+    pub fn set_working_directory(&mut self, dir: PathBuf) {
+        /*
+         * Re-roots the file explorer at `dir` (the "Open Folder" button) and
+         * shows the sidebar, since picking a folder implies the user wants to
+         * see it. Open tabs are untouched — this only affects the tree.
+         */
+        self.working_directory = dir;
+        self.sidebar_visible = true;
+        self.refresh_file_tree();
+    }
+
+    // ── File explorer right-click menu (found_bugs.md Forgotten Implicit
+    // Feature: right-click to delete or create) ────────────────────────────
+
+    pub fn open_file_context_menu(&mut self, position: (f32, f32), target: FileContextMenuTarget) {
+        /*
+         * Opens (or repositions/retargets, if one is already open) the file
+         * explorer's right-click menu. Always starts un-confirmed — even a
+         * right-click while a delete confirmation is showing starts over
+         * rather than carrying the old confirmation state to a new target.
+         */
+        self.file_context_menu = Some(FileContextMenu { position, target, confirming_delete: false });
+    }
+
+    pub fn close_file_context_menu(&mut self) {
+        self.file_context_menu = None;
+    }
+
+    pub fn request_context_menu_delete_confirmation(&mut self) {
+        /*
+         * Arms the "Delete <name>? Confirm / Cancel" step — see
+         * `FileContextMenu.confirming_delete`'s doc comment for why deletion
+         * isn't one click.
+         */
+        if let Some(menu) = self.file_context_menu.as_mut() {
+            menu.confirming_delete = true;
+        }
+    }
+
+    pub fn confirm_context_menu_delete(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Deletes the file the open context menu targets from disk and
+         * refreshes the tree. A no-op (not an error) for a Dir or
+         * Background target — deletion is scoped to files only, since
+         * deleting a whole directory tree needs stronger confirmation than
+         * this menu offers. Closes the menu either way.
+         */
+        let result: Result<(), Box<dyn std::error::Error>> = match self.file_context_menu.take() {
+            Some(FileContextMenu { target: FileContextMenuTarget::File(path), .. }) => {
+                std::fs::remove_file(&path).map_err(Into::into)
+            }
+            _ => Ok(()),
+        };
+        self.refresh_file_tree();
+        result
+    }
+
+    pub fn create_file_at_context_menu_location(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Creates a new blank .docx in the context menu's target directory
+         * (a File target's parent directory, a Dir target itself, or
+         * `working_directory` for Background) and opens it — the
+         * right-click counterpart to the sidebar's own "+" button
+         * (`create_new_docx_in`), just targeting wherever was clicked
+         * instead of always the tree's root.
+         */
+        let Some(menu) = self.file_context_menu.take() else { return Ok(()) };
+        let dir = match menu.target {
+            FileContextMenuTarget::File(path) => {
+                path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.working_directory.clone())
+            }
+            FileContextMenuTarget::Dir(path) => path,
+            FileContextMenuTarget::Background => self.working_directory.clone(),
+        };
+        self.create_new_docx_in(&dir)
+    }
+
+    pub fn create_new_docx_in(&mut self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Creates a new blank .docx file in `dir`, named the first unused
+         * "Untitled.docx" / "Untitled 1.docx" / ... in sequence, opens it,
+         * and refreshes the file tree. Shared by the sidebar's "+" button
+         * (dir = working_directory) and the right-click menu's "New File"
+         * (dir = wherever was clicked).
+         */
+        let mut name = "Untitled.docx".to_string();
+        let mut counter = 1;
+        while dir.join(&name).exists() {
+            name = format!("Untitled {}.docx", counter);
+            counter += 1;
+        }
+        let path = dir.join(&name);
+        create_new_docx(&default_paragraphs(), &path)?;
+        self.refresh_file_tree();
+        self.open_file(path);
+        Ok(())
     }
 
     // ── vim mode transitions (spec 5.1) ─────────────────────────────────────────
@@ -5119,6 +5475,7 @@ mod tests {
                 title: "test".into(),
                 file_path: None,
                 content: content.to_string(),
+                content_version: 0,
                 is_modified: false,
                 paragraphs: default_paragraphs(),
                 docx_origin: None,
@@ -5148,6 +5505,8 @@ mod tests {
             active_tab: 0,
             next_tab_id: 1,
             sidebar_visible: false,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            file_context_menu: None,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             working_directory: std::path::PathBuf::from("."),
@@ -5156,6 +5515,8 @@ mod tests {
             keybinds: crate::keybinds::Keybinds::defaults(),
             theme: crate::theme::ThemeKind::WorkbenchDark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
+            large_size_half_points: 22,
+            zoom: 1.0,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,
@@ -5185,6 +5546,28 @@ mod tests {
             state.record_change_key(key, shift, key_char);
         }
         state.handle_vim_key(key, shift, key_char);
+    }
+
+    // ── clamp_sidebar_width ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_clamp_sidebar_width_within_range_is_unchanged() {
+        assert_eq!(clamp_sidebar_width(300.0), 300.0);
+    }
+
+    #[test]
+    fn test_clamp_sidebar_width_below_min_clamps_to_min() {
+        assert_eq!(clamp_sidebar_width(50.0), 180.0);
+    }
+
+    #[test]
+    fn test_clamp_sidebar_width_above_max_clamps_to_max() {
+        assert_eq!(clamp_sidebar_width(900.0), 480.0);
+    }
+
+    #[test]
+    fn test_clamp_sidebar_width_default_is_within_range() {
+        assert_eq!(clamp_sidebar_width(DEFAULT_SIDEBAR_WIDTH), DEFAULT_SIDEBAR_WIDTH);
     }
 
     // ── Rich text formatting Phase 1: default_paragraphs / Tab construction ────
@@ -5941,6 +6324,57 @@ mod tests {
         assert_eq!(undo_contents(&state), vec!["a".to_string(), "ab".to_string()]);
     }
 
+    // ── content_version (uniform_list_plan.md Part 1: row-wrap cache key) ───
+
+    #[test]
+    fn test_content_version_bumps_on_insert() {
+        let mut state = make_state("ab", 2, None);
+        let before = state.tabs[0].content_version;
+        state.insert_char('c');
+        assert!(state.tabs[0].content_version > before);
+    }
+
+    #[test]
+    fn test_content_version_bumps_on_every_keystroke_even_within_coalesce_window() {
+        // The version must bump on *every* real edit, not just the first
+        // keystroke of a coalesced burst — otherwise the row-wrap cache
+        // would serve stale text for every keystroke inside the 300ms
+        // window except the first. Only one undo-stack entry gets pushed
+        // (coalesced), but content_version still climbs every time.
+        let mut state = make_state("a", 1, None);
+        let v0 = state.tabs[0].content_version;
+        state.insert_char('b'); // within the coalesce window of itself, but v0 -> v1 regardless
+        let v1 = state.tabs[0].content_version;
+        state.insert_char('c'); // still within the window as v1's edit
+        let v2 = state.tabs[0].content_version;
+        assert!(v1 > v0, "version did not bump on first keystroke");
+        assert!(v2 > v1, "version did not bump on second (coalesced) keystroke");
+        assert_eq!(state.tabs[0].undo_stack.len(), 1, "sanity check: still just one coalesced undo entry");
+    }
+
+    #[test]
+    fn test_content_version_does_not_bump_on_true_noop() {
+        // Backspace at document start is a true no-op (state.rs's own
+        // documented convention: no mutation, no undo push) — the cache key
+        // must not churn for it either.
+        let mut state = make_state("", 0, None);
+        let before = state.tabs[0].content_version;
+        state.backspace();
+        assert_eq!(state.tabs[0].content_version, before);
+    }
+
+    #[test]
+    fn test_content_version_bumps_on_undo_and_redo() {
+        let mut state = make_state("ab", 2, None);
+        state.insert_char('c');
+        let after_insert = state.tabs[0].content_version;
+        state.undo();
+        assert!(state.tabs[0].content_version > after_insert, "undo did not bump version");
+        let after_undo = state.tabs[0].content_version;
+        state.redo();
+        assert!(state.tabs[0].content_version > after_undo, "redo did not bump version");
+    }
+
     #[test]
     fn test_undo_restores_previous_content() {
         let mut state = make_state("ab", 2, None);
@@ -6053,6 +6487,35 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_formatting_to_selection_with_no_selection_is_undoable() {
+        // Bug: pressing a formatting hotkey (Ctrl+B, etc.) with the cursor on
+        // a character but no active selection mutated the document without
+        // ever pushing an undo snapshot, so Ctrl+Z couldn't undo it. Cursor
+        // at 0 formats the 'h' under it.
+        let paragraphs = vec![para_plain("hello")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = None;
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert!(state.tabs[0].paragraphs[0].runs[0].bold, "formatting wasn't applied");
+        state.undo();
+        assert!(!state.tabs[0].paragraphs[0].runs[0].bold, "undo did not revert the no-selection formatting");
+    }
+
+    #[test]
+    fn test_apply_formatting_to_selection_with_cursor_at_document_end_is_true_noop() {
+        // Cursor at the very end of the document has no character under it
+        // to format — this must stay a true no-op (no undo step created),
+        // matching the "true no-op = don't push" convention every other
+        // mutation entry point in this file already follows.
+        let paragraphs = vec![para_plain("hello")];
+        let mut state = make_state_with_paragraphs(paragraphs, 5);
+        state.tabs[0].selection = None;
+        let undo_depth_before = state.tabs[0].undo_stack.len();
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        assert_eq!(state.tabs[0].undo_stack.len(), undo_depth_before);
+    }
+
+    #[test]
     fn test_apply_formatting_to_selection_toggles_off_when_already_active() {
         // Bug fix: re-clicking Bold on an already-bold selection should
         // un-bold it, matching Word's toolbar toggle behavior, instead of
@@ -6152,6 +6615,31 @@ mod tests {
         assert!(state.tabs[0].redo_stack.is_empty());
     }
 
+    // ── closed_beta_plan.md §0: settings.conf / working_directory resolve
+    // against the executable's location, not CWD ─────────────────────────────
+
+    #[test]
+    fn test_settings_conf_path_resolves_next_to_executable() {
+        let path = settings_conf_path();
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("settings.conf")));
+        // A packaged .app/.exe has no guaranteed CWD, so this must resolve
+        // relative to the running executable's own directory, not wherever
+        // the process happened to be launched from.
+        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(path.parent(), Some(exe_dir.as_path()));
+    }
+
+    #[test]
+    fn test_default_working_directory_is_not_bare_cwd_dot() {
+        // Before this fix, working_directory always came from
+        // std::env::current_dir() — a double-clicked packaged .app/.exe has
+        // no guaranteed CWD (e.g. macOS Finder launches at "/"), so this
+        // guards against silently regressing back to that.
+        let dir = default_working_directory();
+        assert_ne!(dir, PathBuf::from("."));
+        assert!(dir.is_absolute());
+    }
+
     #[test]
     fn test_undo_stack_capped_at_200() {
         let mut state = make_state("", 0, None);
@@ -6160,6 +6648,87 @@ mod tests {
             break_coalesce_window(&mut state); // force every insert onto its own step
         }
         assert_eq!(state.tabs[0].undo_stack.len(), 200);
+    }
+
+    // ── undo/redo byte-budget cap (performance_plan.md's "undo/redo stack
+    // memory" finding) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_byte_estimate_sums_content_and_run_strings() {
+        let content = "hello world"; // 11 bytes
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run {
+                text: "hello world".into(), // 11 bytes, counted again (runs are the source of truth for formatted text)
+                highlight_color: "yellow".into(), // 6 bytes
+                font: Some("Arial".into()), // 5 bytes
+                color: Some("FF0000".into()), // 6 bytes
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        assert_eq!(snapshot_byte_estimate(content, &paragraphs), 11 + 11 + 6 + 5 + 6);
+    }
+
+    #[test]
+    fn test_undo_stack_cap_full_for_small_snapshots() {
+        assert_eq!(undo_stack_cap_for_snapshot_size(100), UNDO_STACK_CAP);
+    }
+
+    #[test]
+    fn test_undo_stack_cap_shrinks_for_large_snapshots() {
+        // 1MB snapshot: 100_000_000 / 1_000_000 == 100, well under UNDO_STACK_CAP.
+        assert_eq!(undo_stack_cap_for_snapshot_size(1_000_000), 100);
+    }
+
+    #[test]
+    fn test_undo_stack_cap_never_below_minimum() {
+        // A snapshot bigger than the whole budget would compute to 0 without
+        // the floor — must still keep at least UNDO_STACK_MIN_CAP levels.
+        assert_eq!(undo_stack_cap_for_snapshot_size(UNDO_STACK_BYTE_BUDGET * 10), UNDO_STACK_MIN_CAP);
+    }
+
+    #[test]
+    fn test_undo_stack_shrinks_below_200_for_large_document() {
+        // Proves push_undo_snapshot actually applies the size-aware cap
+        // (not just that the pure function exists): a 1MB document's
+        // snapshot size caps it well below the usual 200. Computed from
+        // the actual final content/paragraphs rather than hardcoded, since
+        // formatting-sync (insert_char keeps `paragraphs` textually in
+        // step with `content`) means the snapshot is larger than
+        // `content.len()` alone.
+        let big_content = "a".repeat(1_000_000);
+        let mut state = make_state(&big_content, big_content.len(), None);
+        for _ in 0..150 {
+            state.insert_char('x');
+            break_coalesce_window(&mut state);
+        }
+        let tab = &state.tabs[0];
+        let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(&tab.content, &tab.paragraphs));
+        assert!(expected_cap < 200);
+        assert_eq!(tab.undo_stack.len(), expected_cap);
+    }
+
+    #[test]
+    fn test_redo_stack_shrinks_below_200_for_large_document() {
+        // Undoing repeatedly without any new edit must cap redo_stack the
+        // same way push_undo_snapshot caps undo_stack — otherwise a user
+        // holding Ctrl+Z on a huge document could still blow past the byte
+        // budget via redo_stack alone.
+        let big_content = "a".repeat(1_000_000);
+        let mut state = make_state(&big_content, big_content.len(), None);
+        for _ in 0..150 {
+            state.insert_char('x');
+            break_coalesce_window(&mut state);
+        }
+        for _ in 0..150 {
+            state.undo();
+        }
+        let tab = &state.tabs[0];
+        let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(&tab.content, &tab.paragraphs));
+        assert!(expected_cap < 200);
+        assert_eq!(tab.redo_stack.len(), expected_cap);
     }
 
     #[test]
@@ -8852,6 +9421,93 @@ mod tests {
         assert_eq!(state.tabs[0].vim_mode, VimMode::Visual); // still in Visual, not exited
     }
 
+    // ── Zoom (found_bugs.md: Ctrl+=/Ctrl+-/Ctrl+0, rebuilt from scratch) ────
+
+    #[test]
+    fn test_zoom_in_increases_by_step() {
+        let mut state = make_state("", 0, None);
+        state.zoom_in();
+        assert!((state.zoom - 1.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_zoom_out_decreases_by_step() {
+        let mut state = make_state("", 0, None);
+        state.zoom_out();
+        assert!((state.zoom - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_zoom_in_clamps_at_max() {
+        let mut state = make_state("", 0, None);
+        state.zoom = AppState::ZOOM_MAX;
+        state.zoom_in();
+        assert_eq!(state.zoom, AppState::ZOOM_MAX);
+    }
+
+    #[test]
+    fn test_zoom_out_clamps_at_min() {
+        let mut state = make_state("", 0, None);
+        state.zoom = AppState::ZOOM_MIN;
+        state.zoom_out();
+        assert_eq!(state.zoom, AppState::ZOOM_MIN);
+    }
+
+    #[test]
+    fn test_zoom_reset_returns_to_100_percent() {
+        let mut state = make_state("", 0, None);
+        state.zoom = 1.8;
+        state.zoom_reset();
+        assert_eq!(state.zoom, 1.0);
+    }
+
+    #[test]
+    fn test_apply_line_alignment_center_sets_current_line() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_line_alignment(Alignment::Center);
+
+        assert_eq!(state.tabs[0].paragraphs[0].alignment, Alignment::Center);
+    }
+
+    #[test]
+    fn test_apply_line_alignment_left_sets_current_line() {
+        // Start centered, then switch back to left — the two buttons
+        // should behave as a mutually exclusive pair, not independent
+        // on/off toggles.
+        let mut state = make_state("hello world", 0, None);
+        state.apply_line_alignment(Alignment::Center);
+        state.apply_line_alignment(Alignment::Left);
+
+        assert_eq!(state.tabs[0].paragraphs[0].alignment, Alignment::Left);
+    }
+
+    #[test]
+    fn test_apply_line_alignment_only_affects_current_line_not_whole_document() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.apply_line_alignment(Alignment::Center);
+
+        assert_eq!(state.tabs[0].paragraphs[0].alignment, Alignment::Center);
+        assert_eq!(state.tabs[0].paragraphs[1].alignment, Alignment::Left);
+    }
+
+    #[test]
+    fn test_apply_line_alignment_targets_line_under_cursor_not_first_line() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+        ];
+        let cursor = "first line\n".len(); // start of "second line"
+        let mut state = make_state_with_paragraphs(paragraphs, cursor);
+        state.apply_line_alignment(Alignment::Center);
+
+        assert_eq!(state.tabs[0].paragraphs[0].alignment, Alignment::Left);
+        assert_eq!(state.tabs[0].paragraphs[1].alignment, Alignment::Center);
+    }
+
     #[test]
     fn test_apply_card_style_pocket_sets_bold_size_box_and_center() {
         let mut state = make_state("hello world", 0, None);
@@ -8881,6 +9537,123 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.bold), "bold lost: {:?}", para.runs);
         assert!(para.runs.iter().all(|r| r.size == 52), "size lost: {:?}", para.runs);
         assert!(para.runs.iter().all(|r| r.box_format), "box lost: {:?}", para.runs);
+    }
+
+    #[test]
+    fn test_clear_formatting_resets_pocket_heading_alignment_and_size() {
+        // found_bugs.md: "Clear Formatting failing to remove all
+        // formatting" — clicking Clear on a Pocket-styled line left it
+        // visually still boxed/centered/oversized, because the run-level
+        // ClearAll never reset the paragraph-level heading/alignment fields
+        // apply_card_style also sets.
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        state.large_size_half_points = 22; // 11pt, settings.conf's default
+
+        let default_size = state.large_size_half_points;
+        state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.heading, 0, "heading not cleared");
+        assert_eq!(para.alignment, Alignment::Left, "not left-aligned");
+        assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared");
+        assert!(para.runs.iter().all(|r| !r.box_format), "box not cleared");
+        assert!(para.runs.iter().all(|r| r.size == 22), "size not reset to large_size");
+    }
+
+    #[test]
+    fn test_clear_formatting_on_empty_line_clears_stale_pending_format() {
+        // Repro: Pocket (F4) on an *empty* line, then Clear Formatting
+        // (F12) on that same still-empty line, then type. The newly typed
+        // text kept getting boxed, because ClearAll wasn't in
+        // apply_formatting_to_line's pending-format-arming match — whatever
+        // card-style op (Box(true), the last of apply_card_style's
+        // Bold+FontSize+Box sequence) armed `pending_format` earlier was
+        // never cleared, so it kept force-applying to every character
+        // typed afterward (see insert_char's own doc comment: a pending
+        // format applies "to every character typed... not just this one").
+        // The existing Clear Formatting tests above don't catch this since
+        // they start from a non-empty line, where the pending-format-arming
+        // branch (gated on `is_line_empty`) never even runs.
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        let default_size = state.large_size_half_points;
+        state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+
+        assert_eq!(state.tabs[0].pending_format, None, "stale pending_format should be cleared by Clear Formatting");
+
+        state.insert_char('a');
+        let para = &state.tabs[0].paragraphs[0];
+        assert!(para.runs.iter().all(|r| !r.box_format), "newly typed text should not inherit the cleared Pocket box");
+    }
+
+    #[test]
+    fn test_clear_formatting_on_empty_line_does_not_leak_box_across_newline() {
+        // Second half of the same repro: without the fix, the stale
+        // pending_format kept applying on *every* keystroke, including
+        // across an Enter — so a new paragraph created after typing on the
+        // "cleared" line still ended up boxed too.
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        let default_size = state.large_size_half_points;
+        state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+
+        state.insert_char('a');
+        state.insert_char('\n');
+        state.insert_char('b');
+
+        assert!(state.tabs[0].paragraphs.iter().all(|p| p.runs.iter().all(|r| !r.box_format)),
+            "no paragraph should carry the cleared Pocket box after typing across a newline: {:?}",
+            state.tabs[0].paragraphs);
+    }
+
+    #[test]
+    fn test_pocket_on_empty_line_does_not_leave_pending_format_after_enter() {
+        // Broader repro (no Clear Formatting involved this time): Pocket
+        // (F4) an empty line, press Enter, keep typing. The new paragraph
+        // correctly lost bold/size/heading/alignment — split_paragraph_at
+        // (document_ops.rs) already reverts all of that for a
+        // heading-marked split — but still ended up boxed, because
+        // apply_card_style's internal apply_formatting_to_line(Box(true))
+        // call left `pending_format` armed indefinitely (nothing but an
+        // explicit re-toggle or Clear Formatting ever cleared it). That
+        // stale pending format then kept re-applying Box(true) to
+        // whatever got typed next — including the freshly-split,
+        // already-correctly-reset tail run — and would keep doing so on
+        // every subsequent line too.
+        //
+        // The run is already seeded directly for the very next keystroke
+        // (see apply_formatting_to_line's own `is_line_empty` seeding
+        // above), so arming `pending_format` here serves no purpose for
+        // apply_card_style and should not happen at all.
+        let mut state = make_state("", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        assert_eq!(state.tabs[0].pending_format, None, "apply_card_style should not leave a sticky pending format armed");
+
+        state.insert_char('a');
+        state.insert_char('\n');
+        state.insert_char('b');
+
+        // Paragraph 0 ("a") is legitimately still a real Pocket line — it
+        // should keep its box. Only paragraph 1 ("b", created by the
+        // Enter split) should have reverted to plain.
+        let paragraphs = &state.tabs[0].paragraphs;
+        assert!(paragraphs[0].runs.iter().all(|r| r.box_format), "the original Pocket line should keep its box: {:?}", paragraphs);
+        assert!(paragraphs[1].runs.iter().all(|r| !r.box_format), "box should not leak onto the new paragraph after Enter: {:?}", paragraphs);
+    }
+
+    #[test]
+    fn test_clear_formatting_on_hat_line_removes_double_underline_and_heading() {
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Hat);
+
+        let default_size = state.large_size_half_points;
+        state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.heading, 0);
+        assert_eq!(para.alignment, Alignment::Left);
+        assert!(para.runs.iter().all(|r| !r.double_underline));
     }
 
     #[test]
@@ -8981,5 +9754,137 @@ mod tests {
             markdown,
             "# Case Title\n## Off-case Subtitle\n### Block heading\n#### Tag text\nplain body text\n"
         );
+    }
+
+    // ── File explorer right-click menu (found_bugs.md) ──────────────────────
+
+    /// A fresh, unique temp directory for a filesystem-touching test —
+    /// mirrors `docx_parser.rs`'s own `test_real_file_round_trip_...`
+    /// pattern, with `test_name` added so parallel test threads (cargo
+    /// test's default) never collide on the same directory.
+    fn temp_test_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vimbatim_ctx_menu_test_{}_{}", std::process::id(), test_name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_open_file_context_menu_sets_state() {
+        let mut state = make_state("", 0, None);
+        state.open_file_context_menu((10.0, 20.0), FileContextMenuTarget::Background);
+
+        let menu = state.file_context_menu.as_ref().unwrap();
+        assert_eq!(menu.position, (10.0, 20.0));
+        assert_eq!(menu.target, FileContextMenuTarget::Background);
+        assert!(!menu.confirming_delete);
+    }
+
+    #[test]
+    fn test_close_file_context_menu_clears_state() {
+        let mut state = make_state("", 0, None);
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Background);
+        state.close_file_context_menu();
+        assert!(state.file_context_menu.is_none());
+    }
+
+    #[test]
+    fn test_request_delete_confirmation_arms_flag_without_deleting() {
+        let dir = temp_test_dir("request_confirmation");
+        let path = dir.join("keep-me.docx");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::File(path.clone()));
+        state.request_context_menu_delete_confirmation();
+
+        assert!(state.file_context_menu.as_ref().unwrap().confirming_delete);
+        assert!(path.exists(), "delete must not happen until confirmed");
+    }
+
+    #[test]
+    fn test_confirm_delete_removes_the_targeted_file() {
+        let dir = temp_test_dir("confirm_delete");
+        let path = dir.join("delete-me.docx");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir;
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::File(path.clone()));
+        state.request_context_menu_delete_confirmation();
+
+        state.confirm_context_menu_delete().unwrap();
+
+        assert!(!path.exists());
+        assert!(state.file_context_menu.is_none());
+    }
+
+    #[test]
+    fn test_confirm_delete_is_noop_for_dir_and_background_targets() {
+        let mut state = make_state("", 0, None);
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Dir(std::path::PathBuf::from("/some/dir")));
+        assert!(state.confirm_context_menu_delete().is_ok());
+
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Background);
+        assert!(state.confirm_context_menu_delete().is_ok());
+    }
+
+    #[test]
+    fn test_create_new_docx_in_picks_first_available_untitled_name() {
+        let dir = temp_test_dir("naming_sequence");
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        state.create_new_docx_in(&dir).unwrap();
+        assert!(dir.join("Untitled.docx").exists());
+
+        state.create_new_docx_in(&dir).unwrap();
+        assert!(dir.join("Untitled 1.docx").exists());
+    }
+
+    #[test]
+    fn test_create_file_at_context_menu_location_targets_files_parent_dir() {
+        let dir = temp_test_dir("file_target_parent_dir");
+        let subdir = dir.join("cards");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let existing_file = subdir.join("existing.docx");
+        std::fs::write(&existing_file, b"placeholder").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::File(existing_file));
+
+        state.create_file_at_context_menu_location().unwrap();
+
+        // New file lands next to the right-clicked file (in `cards/`), not
+        // at the tree's root (`dir`).
+        assert!(subdir.join("Untitled.docx").exists());
+        assert!(!dir.join("Untitled.docx").exists());
+    }
+
+    #[test]
+    fn test_create_file_at_context_menu_location_targets_dir_itself() {
+        let dir = temp_test_dir("dir_target");
+        let subdir = dir.join("cards");
+        std::fs::create_dir_all(&subdir).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Dir(subdir.clone()));
+
+        state.create_file_at_context_menu_location().unwrap();
+
+        assert!(subdir.join("Untitled.docx").exists());
+    }
+
+    #[test]
+    fn test_create_file_at_context_menu_location_background_targets_working_directory() {
+        let dir = temp_test_dir("background_target");
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Background);
+
+        state.create_file_at_context_menu_location().unwrap();
+
+        assert!(dir.join("Untitled.docx").exists());
     }
 }

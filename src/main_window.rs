@@ -3,7 +3,7 @@ use gpui::*;
 
 use crate::app_toolbar::AppToolbar;
 use crate::document_ops::FormatOp;
-use crate::file_explorer::FileExplorer;
+use crate::file_explorer::{FileExplorer, SidebarResizePayload};
 use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
     BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
@@ -11,10 +11,10 @@ use crate::keybinds::{
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, OpenStatsAction, PasteAction,
     PasteSmartAction, PocketAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
-    UndoAction, UnderlineAction, WikifiAction,
+    UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
 use crate::settings_modal::SettingsModal;
-use crate::state::{AppState, CardStyleKind};
+use crate::state::{clamp_sidebar_width, AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 use crate::theme::palette;
@@ -214,9 +214,25 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ClearFormattingAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_line(FormatOp::ClearAll);
+                let default_size = st.large_size_half_points;
+                st.apply_formatting_to_line(FormatOp::ClearAll { default_size });
                 cx.notify();
             });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &ZoomInAction, cx| {
+            s.update(cx, |st, cx| { st.zoom_in(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &ZoomOutAction, cx| {
+            s.update(cx, |st, cx| { st.zoom_out(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &ZoomResetAction, cx| {
+            s.update(cx, |st, cx| { st.zoom_reset(); cx.notify(); });
         });
 
         let s = state.clone();
@@ -334,9 +350,35 @@ impl Render for MainWindow {
         let theme = self.state.read(cx).theme;
         let p = palette(theme);
 
+        let ctx_menu_state = self.state.clone();
+        let resize_state = self.state.clone();
         div()
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
+            // Closes the file explorer's right-click menu (found_bugs.md)
+            // on any left-click elsewhere in the app — its own rows call
+            // `cx.stop_propagation()` so a click inside the menu never
+            // reaches here.
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
+                ctx_menu_state.update(cx, |s, cx| {
+                    if s.file_context_menu.is_some() {
+                        s.close_file_context_menu();
+                        cx.notify();
+                    }
+                });
+            })
+            // Sidebar resize drag (FileExplorer's handle starts it via
+            // `.on_drag(SidebarResizePayload, ...)`). Registered on this
+            // root, window-spanning div — not on the sidebar itself, whose
+            // handle is only 4px wide — so the drag keeps tracking even
+            // when the cursor moves faster than the handle's own bounds.
+            // Mirrors Zed's own `Workspace::on_drag_move` dock-resize
+            // pattern (`workspace.rs`), the reference this was built from.
+            .on_drag_move(move |e: &DragMoveEvent<SidebarResizePayload>, _window, cx| {
+                let new_width = clamp_sidebar_width(e.event.position.x.as_f32());
+                resize_state.update(cx, |s, cx| {
+                    s.sidebar_width = new_width;
+                    cx.notify();
+                });
             })
             .size_full()
             .flex()

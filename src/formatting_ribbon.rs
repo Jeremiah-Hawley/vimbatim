@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::docx_parser::Alignment;
 use crate::document_ops::FormatOp;
 use crate::state::AppState;
 use crate::theme::{palette, radius, space, Palette, ThemeColorMode};
@@ -43,6 +44,8 @@ pub enum FormatAction {
     OpenWiki,
     OpenTabroom,
     Wikifi,
+    AlignLeft,
+    AlignCenter,
     Body,
     PocketCite,
     HighlightYellow,
@@ -63,7 +66,9 @@ impl FormatAction {
             FormatAction::HighlightGreen => Some(FormatOp::Highlight(Some("green".to_string()))),
             FormatAction::RemoveHighlight => Some(FormatOp::Highlight(None)),
             FormatAction::Bold => Some(FormatOp::Bold(true)),
-            FormatAction::Clear => Some(FormatOp::ClearAll),
+            // Clear is always intercepted by its own match arm below (it
+            // needs AppState's configured default size, which this method
+            // has no access to) before ever reaching this generic mapping.
             FormatAction::Strikethrough => Some(FormatOp::Strikethrough(true)),
             FormatAction::Shrink => Some(FormatOp::FontSize(20)),
             FormatAction::NormalSize => Some(FormatOp::FontSize(24)),
@@ -449,10 +454,22 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| state.apply_card_style(kind));
                             cx.notify();
                         }
+                        // Align Left / Align Center: set the current line's
+                        // alignment. Not a toggle — see AppState::apply_line_alignment.
+                        FormatAction::AlignLeft | FormatAction::AlignCenter => {
+                            let alignment = match act {
+                                FormatAction::AlignLeft => Alignment::Left,
+                                FormatAction::AlignCenter => Alignment::Center,
+                                _ => unreachable!(),
+                            };
+                            st.update(cx, |state, _cx| state.apply_line_alignment(alignment));
+                            cx.notify();
+                        }
                         // Clear: clear all formatting from the entire line.
                         FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
-                                state.apply_formatting_to_line(FormatOp::ClearAll);
+                                let default_size = state.large_size_half_points;
+                                state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
                             });
                             cx.notify();
                         }
@@ -697,6 +714,10 @@ impl Render for FormattingRibbon {
                     vec![
                         RibbonBtn::quiet("Doc Menu", FormatAction::DocMenu),
                         RibbonBtn::quiet("Card Menu", FormatAction::CardMenu),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("Align Left", FormatAction::AlignLeft),
+                        RibbonBtn::secondary("Align Center", FormatAction::AlignCenter),
                     ],
                 ],
                 *self.collapsed.get("document").unwrap_or(&false),
