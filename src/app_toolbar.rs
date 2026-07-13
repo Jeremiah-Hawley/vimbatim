@@ -117,6 +117,49 @@ impl Render for AppToolbar {
                     }))
                     .child(sidebar_label),
             )
+            // ── Open folder ───────────────────────────────────────────────────
+            .child(
+                div()
+                    .id("toolbar-open-folder")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded(px(radius::MD))
+                    .text_xs()
+                    .text_color(rgb(p.text_muted))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(p.border_subtle))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    // Native OS folder picker (gpui's own prompt_for_paths) —
+                    // no dialog UI of our own to build or maintain.
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: false,
+                            directories: true,
+                            multiple: false,
+                            prompt: None,
+                        });
+                        let state = this.state.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                                return;
+                            };
+                            let Some(dir) = paths.pop() else {
+                                return;
+                            };
+                            state.update(cx, |s, cx| {
+                                s.set_working_directory(dir);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }))
+                    .child("Open Folder"),
+            )
             .child(div().flex_1())
             // ── Future command hooks ─────────────────────────────────────────
             .child(Self::future_command("toolbar-find", "Find", p))

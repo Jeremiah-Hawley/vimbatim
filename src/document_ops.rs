@@ -56,9 +56,13 @@ pub fn resolve_position(paragraphs: &[Paragraph], byte_offset: usize) -> (usize,
 pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char) {
     let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, byte_offset);
     if ch == '\n' {
+        // split_paragraph_at constructs two brand-new Paragraph literals,
+        // which already default unsupported_xml to None - no separate
+        // clear needed for the newline case.
         split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
     } else {
         paragraphs[para_idx].runs[run_idx].text.insert(char_offset, ch);
+        paragraphs[para_idx].unsupported_xml = None;
     }
 }
 
@@ -77,24 +81,43 @@ pub fn sync_insert_str(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text
 fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx: usize, char_offset: usize) {
     /*
      * Splits paragraph `para_idx` into two at (run_idx, char_offset): the
-     * run being split becomes a "head" run (keeping the split run's
-     * formatting) ending the first paragraph, and a "tail" run (same
-     * formatting) starting the second, followed by whatever runs came
+     * run being split becomes a "head" run ending the first paragraph, and
+     * a "tail" run starting the second, followed by whatever runs came
      * after it. The new second paragraph always gets `heading: 0` — real
      * Word itself reverts to body style after pressing Enter inside a
      * heading, so this matches rather than deviates from that convention.
      *
-     * When splitting a line with card-style formatting (Pocket/Hat/Block),
-     * the new paragraph inherits the card style's center alignment and the
-     * special formatting (box/double-underline/underline) is automatically
-     * re-applied because the runs retain their formatting.
+     * When splitting a line with card-style formatting (Pocket/Hat/Block/
+     * Tag, i.e. `heading != 0`), the new paragraph's formatting reverts to
+     * plain (see `was_heading` below) instead of inheriting the split run's
+     * bold/size/box/underline/alignment — otherwise `heading` would reset
+     * but the line would still visually look like the card style.
      */
     let para = &paragraphs[para_idx];
     let split_run = &para.runs[run_idx];
     let mut head_run = split_run.clone();
     head_run.text = split_run.text[..char_offset].to_string();
-    let mut tail_run = split_run.clone();
-    tail_run.text = split_run.text[char_offset..].to_string();
+
+    let heading = para.heading;
+    let alignment = para.alignment;
+    // A card style (Pocket/Hat/Block/Tag) is entirely run-level formatting
+    // plus this paragraph-level `heading` marker (state.rs's
+    // `apply_card_style`) — so splitting a heading line must revert the
+    // *new* paragraph's formatting the same way real Word reverts to Normal
+    // style after Enter inside a heading, not just clone the split run's
+    // bold/size/box/underline onto it. `size: 0` (via `Run::default()`) is
+    // this codebase's existing "inherit normal size" convention (also what
+    // a brand-new blank document's first paragraph starts with), so this
+    // doesn't need a caller-supplied default size.
+    let was_heading = heading != 0;
+    let tail_text = split_run.text[char_offset..].to_string();
+    let (tail_run, new_alignment) = if was_heading {
+        (Run { text: tail_text, ..Run::default() }, Alignment::default())
+    } else {
+        let mut run = split_run.clone();
+        run.text = tail_text;
+        (run, alignment)
+    };
 
     let mut para_a_runs: Vec<Run> = para.runs[..run_idx].to_vec();
     para_a_runs.push(head_run);
@@ -102,21 +125,11 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     let mut para_b_runs: Vec<Run> = vec![tail_run];
     para_b_runs.extend(para.runs[run_idx + 1..].to_vec());
 
-    let heading = para.heading;
-    let alignment = para.alignment;
-    // Preserve center alignment for card styles (Pocket/Hat/Block) on both paragraphs
-    // These styles always have center alignment, so continue it on the new paragraph too
-    let new_alignment = if alignment == Alignment::Center {
-        Alignment::Center
-    } else {
-        Alignment::default()
-    };
-
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { runs: para_a_runs, heading, alignment },
-            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment },
+            Paragraph { runs: para_a_runs, heading, alignment, unsupported_xml: None },
+            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
         ],
     );
 }
@@ -137,10 +150,13 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
 
     if start_para == end_para {
         delete_within_runs(&mut paragraphs[start_para].runs, start_run, start_char, end_run, end_char);
+        paragraphs[start_para].unsupported_xml = None;
+        clear_heading_if_now_empty(&mut paragraphs[start_para]);
         return;
     }
 
     let heading = paragraphs[start_para].heading;
+    let alignment = paragraphs[start_para].alignment;
     let mut merged_runs: Vec<Run> = paragraphs[start_para].runs[..start_run].to_vec();
     let mut head_run = paragraphs[start_para].runs[start_run].clone();
     head_run.text.truncate(start_char);
@@ -153,11 +169,38 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
 
     merged_runs.retain(|r| !r.text.is_empty());
     merge_adjacent_same_format_runs(&mut merged_runs);
-    if merged_runs.is_empty() {
+    // A card style's box/bold/size lives on its runs, but its heading/
+    // center-alignment are paragraph-level fields deletion never otherwise
+    // touches. Merging across a paragraph boundary should carry over the
+    // surviving (start) paragraph's own heading/alignment — e.g. backspacing
+    // away just an empty trailing line should leave a Pocket line exactly as
+    // it was, still centered. But if this merge also emptied out all the
+    // text, there's no run-level formatting left to justify keeping them
+    // either: reset both to plain, matching what Clear Formatting already
+    // does explicitly (see `apply_formatting_to_line`'s `ClearAll` arm) —
+    // otherwise `text_editor.rs`'s heading-driven bold/oversized paragraph
+    // render keeps applying to an empty line whose actual pocket-formatted
+    // text has been fully backspaced away.
+    let now_empty = merged_runs.is_empty();
+    if now_empty {
         merged_runs.push(Run::default());
     }
+    let (heading, alignment) = if now_empty { (0, Alignment::default()) } else { (heading, alignment) };
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment: Alignment::default() }]);
+    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment, unsupported_xml: None }]);
+}
+
+/// Once a paragraph's own within-paragraph deletion (not a cross-paragraph
+/// merge — see `sync_delete_range`'s other branch) empties out all its
+/// runs, `delete_within_runs` already resets the surviving run to
+/// `Run::default()` — but the paragraph-level `heading`/`alignment` fields
+/// it never touches would otherwise keep a card style's phantom bold/
+/// oversized/centered look alive on what's now just an empty line.
+fn clear_heading_if_now_empty(para: &mut Paragraph) {
+    if para.runs.iter().all(|r| r.text.is_empty()) {
+        para.heading = 0;
+        para.alignment = Alignment::default();
+    }
 }
 
 fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, end_run: usize, end_char: usize) {
@@ -181,17 +224,20 @@ fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, 
 /// previously had unrelated text become textually adjacent — without this,
 /// repeated edits would let paragraphs accumulate more and more same-format
 /// runs indefinitely.
-fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
+pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
     let mut i = 0;
     while i + 1 < runs.len() {
         let same_format = runs[i].bold == runs[i + 1].bold
             && runs[i].italic == runs[i + 1].italic
             && runs[i].underline == runs[i + 1].underline
+            && runs[i].double_underline == runs[i + 1].double_underline
+            && runs[i].strikethrough == runs[i + 1].strikethrough
             && runs[i].highlight == runs[i + 1].highlight
             && runs[i].highlight_color == runs[i + 1].highlight_color
             && runs[i].size == runs[i + 1].size
             && runs[i].font == runs[i + 1].font
             && runs[i].color == runs[i + 1].color
+            && runs[i].box_format == runs[i + 1].box_format
             && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve;
         if same_format {
             let next_text = runs[i + 1].text.clone();
@@ -243,8 +289,10 @@ pub enum FormatOp {
     Color(Option<String>),
     Box(bool),
     /// Clears every character-formatting field (bold/italic/underline/
-    /// highlight/size/font/color) back to the unformatted default.
-    ClearAll,
+    /// highlight/font/color) back to the unformatted default, and size to
+    /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
+    /// `large_size`, not to "no override").
+    ClearAll { default_size: u16 },
 }
 
 /// Applies `op` to every run (byte-)range `[start, end)` spans (spec 7.2),
@@ -270,16 +318,21 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
     // indices the two splits above shifted.
     let mut cumulative = 0usize;
     for para in paragraphs.iter_mut() {
+        let mut touched = false;
         for run in para.runs.iter_mut() {
             let run_start = cumulative;
             let run_end = cumulative + run.text.len();
             if run_start >= start && run_end <= end {
                 apply_format_op(run, &op);
+                touched = true;
             }
             cumulative = run_end;
         }
         cumulative += 1; // the paragraph-separating '\n'
         merge_adjacent_same_format_runs(&mut para.runs);
+        if touched {
+            para.unsupported_xml = None;
+        }
     }
 }
 
@@ -372,7 +425,7 @@ pub fn toggled_off(op: &FormatOp) -> FormatOp {
     }
 }
 
-fn apply_format_op(run: &mut Run, op: &FormatOp) {
+pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
     match op {
         FormatOp::Bold(b) => run.bold = *b,
         FormatOp::Italic(b) => run.italic = *b,
@@ -387,7 +440,7 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::FontFamily(font) => run.font = font.clone(),
         FormatOp::Color(color) => run.color = color.clone(),
         FormatOp::Box(b) => run.box_format = *b,
-        FormatOp::ClearAll => {
+        FormatOp::ClearAll { default_size } => {
             run.bold = false;
             run.italic = false;
             run.underline = false;
@@ -395,7 +448,7 @@ fn apply_format_op(run: &mut Run, op: &FormatOp) {
             run.strikethrough = false;
             run.highlight = false;
             run.highlight_color = String::new();
-            run.size = 0;
+            run.size = *default_size;
             run.font = None;
             run.color = None;
             run.box_format = false;
@@ -413,7 +466,7 @@ mod tests {
     }
 
     fn para(runs: Vec<Run>) -> Paragraph {
-        Paragraph { runs, heading: 0, alignment: Alignment::default() }
+        Paragraph { runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     #[test]
@@ -528,6 +581,59 @@ mod tests {
         assert_eq!(paragraphs[0].runs[0].text, "foo");
         assert_eq!(paragraphs[0].runs[1].text, "b");
         assert_eq!(paragraphs[1].runs[0].text, "ar");
+    }
+
+    #[test]
+    fn test_insert_newline_at_end_of_heading_line_resets_new_paragraph_to_plain() {
+        // A Pocket-styled line (heading 1, bold, sized, boxed, centered) —
+        // pressing Enter at its end should start a plain body-text line,
+        // not continue looking like a Pocket.
+        let heading_line = Paragraph {
+            runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut paragraphs = vec![heading_line];
+        sync_insert_char(&mut paragraphs, 5, '\n'); // cursor at end of "hello"
+
+        assert_eq!(paragraphs.len(), 2);
+        // Original line keeps its heading formatting untouched.
+        assert_eq!(paragraphs[0].heading, 1);
+        assert!(paragraphs[0].runs[0].bold);
+        // New line is plain: no heading, no inherited run formatting, left-aligned.
+        assert_eq!(paragraphs[1].heading, 0);
+        assert_eq!(paragraphs[1].alignment, Alignment::Left);
+        assert!(!paragraphs[1].runs[0].bold);
+        assert_eq!(paragraphs[1].runs[0].size, 0);
+        assert!(!paragraphs[1].runs[0].box_format);
+    }
+
+    #[test]
+    fn test_insert_newline_mid_heading_line_resets_trailing_text_to_plain() {
+        // Splitting in the middle of a Hat-styled line: the trailing half
+        // that moves to the new paragraph loses the Hat formatting too,
+        // matching Word's "Enter inside a heading reverts to body style".
+        let heading_line = Paragraph {
+            runs: vec![Run { text: "hello world".into(), bold: true, size: 44, double_underline: true, ..Run::default() }],
+            heading: 2,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut paragraphs = vec![heading_line];
+        sync_insert_char(&mut paragraphs, 5, '\n'); // split after "hello"
+
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(paragraphs[0].runs[0].text, "hello");
+        assert!(paragraphs[0].runs[0].bold);
+        assert_eq!(paragraphs[0].heading, 2);
+
+        assert_eq!(paragraphs[1].runs[0].text, " world");
+        assert_eq!(paragraphs[1].heading, 0);
+        assert_eq!(paragraphs[1].alignment, Alignment::Left);
+        assert!(!paragraphs[1].runs[0].bold);
+        assert!(!paragraphs[1].runs[0].double_underline);
+        assert_eq!(paragraphs[1].runs[0].size, 0);
     }
 
     #[test]
@@ -761,10 +867,10 @@ mod tests {
             color: Some("FF0000".into()),
             ..Run::default()
         }])];
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll);
+        apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll { default_size: 22 });
         let r = &paragraphs[0].runs[0];
         assert!(!r.bold && !r.italic && !r.underline && !r.highlight);
-        assert_eq!(r.size, 0);
+        assert_eq!(r.size, 22);
         assert_eq!(r.font, None);
         assert_eq!(r.color, None);
     }
@@ -835,7 +941,7 @@ mod tests {
     fn test_is_uniformly_active_false_for_non_togglable_ops() {
         let paragraphs = vec![para(vec![run("hello")])];
         assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::FontSize(24)));
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::ClearAll));
+        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::ClearAll { default_size: 22 }));
     }
 
     #[test]
@@ -847,5 +953,43 @@ mod tests {
             toggled_off(&FormatOp::Highlight(Some("yellow".into()))),
             FormatOp::Highlight(None)
         );
+    }
+
+    // ── unsupported_xml invalidation on edit ────────────────────────────────
+
+    #[test]
+    fn test_sync_insert_char_clears_unsupported_xml_on_touched_paragraph() {
+        let mut paragraphs = vec![para(vec![Run { text: "hi".into(), ..Run::default() }])];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        sync_insert_char(&mut paragraphs, 1, 'X');
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_sync_delete_range_clears_unsupported_xml_on_touched_paragraph() {
+        let mut paragraphs = vec![para(vec![Run { text: "hello".into(), ..Run::default() }])];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        sync_delete_range(&mut paragraphs, 1, 3);
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+    }
+
+    #[test]
+    fn test_apply_formatting_clears_unsupported_xml_only_on_touched_paragraphs() {
+        let mut paragraphs = vec![
+            para(vec![Run { text: "one".into(), ..Run::default() }]),
+            para(vec![Run { text: "two".into(), ..Run::default() }]),
+        ];
+        paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
+        paragraphs[1].unsupported_xml = Some("<w:hyperlink/>".to_string());
+
+        // "one\ntwo" - byte 0..3 is entirely within paragraph 0 only.
+        apply_formatting(&mut paragraphs, 0, 3, FormatOp::Bold(true));
+
+        assert_eq!(paragraphs[0].unsupported_xml, None);
+        assert_eq!(paragraphs[1].unsupported_xml, Some("<w:hyperlink/>".to_string()));
     }
 }

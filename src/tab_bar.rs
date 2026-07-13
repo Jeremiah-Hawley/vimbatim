@@ -56,18 +56,26 @@ impl TabBar {
 }
 
 impl Render for TabBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         /*
          * Renders the full tab bar:
          *
-         *   [Tab 0] [Tab 1] … [+]  <── drag region ──>  [×]
+         *   [Tab 0] [Tab 1] … [+]  <── drag region ──>  [—] [□] [×]
          *
          * The drag region is an invisible flex-1 spacer marked as WindowControlArea::Drag
          * so clicking and dragging it moves the window on supported platforms.
+         * It shrinks automatically as fixed-width siblings (new-tab, minimize,
+         * maximize, close) are added — flexbox reflows the flex_1 spacer
+         * rather than letting any fixed-width sibling get covered or overlap
+         * another, so the minimize/maximize buttons need no special-case
+         * layout code of their own (found_bugs.md's own note to "make sure
+         * the two new buttons don't cover" the new-tab button/tab-scroll
+         * area is already satisfied by this existing flex arrangement).
          *
          * Tab elements require an `.id()` so GPUI can track hover/click state
          * across frames. We use named_usize IDs to ensure uniqueness.
          */
+        let is_maximized = window.is_maximized();
         let state = self.state.read(cx);
         let p = palette(state.theme);
         let tabs = state.tabs.clone();
@@ -180,8 +188,11 @@ impl Render for TabBar {
                             cx.new(|_| ghost)
                         },
                     )
-                    // Tab title label
-                    .child(div().min_w_0().text_sm().text_color(tab_text).child(title))
+                    // Tab title label. `.truncate()` (overflow_hidden +
+                    // whitespace_nowrap + text_ellipsis) clips the back of a
+                    // long name with "…" instead of wrapping it onto a
+                    // second line.
+                    .child(div().min_w_0().flex_1().truncate().text_sm().text_color(tab_text).child(title))
                     // Close button (×) — stop_propagation prevents the click from
                     // bubbling to the parent tab div's on_click (set_active_tab).
                     .child(
@@ -260,6 +271,55 @@ impl Render for TabBar {
         // never squeezed or scrolled away when many tabs are open.
         let new_btn_fixed = new_btn.flex_none();
 
+        // Minimize/Maximize (found_bugs.md Forgotten Implicit Feature) —
+        // real platform-level window controls, not a fullscreen toggle:
+        // `Window::minimize_window`/`zoom_window` call straight through to
+        // the platform window (`zoom_window` is GPUI's real maximize/restore
+        // toggle, named after macOS's own "zoom" term for it). Styled
+        // identically to `close_btn` below for a consistent three-button
+        // cluster.
+        let minimize_btn = div()
+            .id("window-minimize-btn")
+            .flex()
+            .items_center()
+            .justify_center()
+            .h_full()
+            .w(px(46.0))
+            .flex_none()
+            .text_color(rgb(p.text_muted))
+            .cursor_pointer()
+            .text_lg()
+            .border_l_1()
+            .border_color(rgb(p.border))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
+            .on_click(|_ev, window, _cx| {
+                window.minimize_window();
+            })
+            .child("−");
+
+        // Icon reflects current state: "□" to maximize, "❐" (restore) once
+        // already maximized — same convention Windows/most Linux DEs use.
+        let maximize_btn = div()
+            .id("window-maximize-btn")
+            .flex()
+            .items_center()
+            .justify_center()
+            .h_full()
+            .w(px(46.0))
+            .flex_none()
+            .text_color(rgb(p.text_muted))
+            .cursor_pointer()
+            .text_lg()
+            .border_l_1()
+            .border_color(rgb(p.border))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
+            .on_click(|_ev, window, _cx| {
+                window.zoom_window();
+            })
+            .child(if is_maximized { "❐" } else { "□" });
+
         // "×" button on the far right closes the entire application.
         let close_btn = div()
             .id("app-close-btn")
@@ -284,6 +344,8 @@ impl Render for TabBar {
         bar.child(tab_scroll_area)
             .child(new_btn_fixed)
             .child(drag_region)
+            .child(minimize_btn)
+            .child(maximize_btn)
             .child(close_btn)
     }
 }

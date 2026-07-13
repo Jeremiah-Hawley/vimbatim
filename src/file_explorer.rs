@@ -4,11 +4,29 @@ use gpui::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::docx_parser::create_new_docx;
-use crate::state::{default_paragraphs, AppState, FileNode, SidebarMode};
+use crate::state::{AppState, FileContextMenu, FileContextMenuTarget, FileNode, SidebarMode};
 use crate::theme::{palette, radius, space, Palette};
 
-/// The collapsible file explorer sidebar shown on the right side of the window.
+/// Drag payload used solely to identify a sidebar-resize drag to
+/// `MainWindow`'s `on_drag_move` handler (`main_window.rs`) — GPUI
+/// discriminates `on_drag_move` listeners by payload type, so this carries
+/// no data of its own (the live mouse position comes from the drag event
+/// itself). Must implement `Render` because GPUI uses the payload as the
+/// ghost view that would follow the cursor while dragging; an invisible
+/// `gpui::Empty` is correct here since the resize is felt through the
+/// sidebar's own width changing live, not a floating ghost — mirrors
+/// `workspace::DraggedDock` in Zed's own dock-resize implementation, the
+/// reference this was built from.
+#[derive(Clone)]
+pub struct SidebarResizePayload;
+
+impl Render for SidebarResizePayload {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// The collapsible file explorer sidebar shown on the left side of the window.
 ///
 /// Has two modes (`AppState.sidebar_mode`), toggled by the Files/Nav button
 /// pair in its own header or the ribbon's Nav button:
@@ -17,6 +35,9 @@ use crate::theme::{palette, radius, space, Palette};
 ///     a new tab.
 ///   • Nav: an outline of the active tab's Pocket/Hat/Block/Tag headings,
 ///     nested by type. Clicking one jumps the editor to that line.
+///
+/// Width is `AppState.sidebar_width`, changeable by dragging the resize
+/// handle on its right edge (`render`, bottom).
 pub struct FileExplorer {
     state: Entity<AppState>,
     /// Line indices (into the active tab's content) of Nav headings the
@@ -43,32 +64,19 @@ impl FileExplorer {
 
     fn create_new_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         /*
-         * Creates a new blank .docx file in the working directory. Picks the
-         * first unused name in the "Untitled.docx", "Untitled 1.docx", … series.
+         * Creates a new blank .docx file in the working directory via
+         * `AppState::create_new_docx_in`, shared with the right-click
+         * menu's "New File" (which targets wherever was clicked instead of
+         * always the tree's root).
          *
          * In a future iteration this should open a modal asking for a custom name
          * rather than auto-generating one.
          */
         let dir = self.state.read(cx).working_directory.clone();
-
-        let mut name = "Untitled.docx".to_string();
-        let mut counter = 1;
-        // Find the first available filename in the sequence
-        while dir.join(&name).exists() {
-            name = format!("Untitled {}.docx", counter);
-            counter += 1;
-        }
-        let path = dir.join(&name);
-
-        // Write a valid minimal .docx so the file can be parsed and saved immediately.
-        if let Err(e) = create_new_docx(&default_paragraphs(), &path) {
-            eprintln!("[FileExplorer] failed to create {}: {}", path.display(), e);
-            return;
-        }
-
         self.state.update(cx, |s, cx| {
-            s.refresh_file_tree();
-            s.open_file(path);
+            if let Err(e) = s.create_new_docx_in(&dir) {
+                eprintln!("[FileExplorer] failed to create new file in {}: {}", dir.display(), e);
+            }
             cx.notify();
         });
         cx.notify();
@@ -107,6 +115,8 @@ impl FileExplorer {
                 let chevron = if *expanded { "▾ " } else { "▸ " };
                 let path_clone = path.clone();
                 let state_clone = state_handle.clone();
+                let path_for_ctx = path.clone();
+                let state_for_ctx = state_handle.clone();
                 let children_snap = children.clone();
                 let is_expanded = *expanded;
                 let dir_name = name.clone();
@@ -122,7 +132,7 @@ impl FileExplorer {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .h(px(24.0))
+                            .min_h(px(24.0))
                             .pl(indent)
                             .pr(px(space::SM))
                             .cursor_pointer()
@@ -139,8 +149,21 @@ impl FileExplorer {
                                     cx.notify();
                                 });
                             })
+                            // Right-click: open the context menu targeting
+                            // this directory ("New File" creates inside it).
+                            // stop_propagation so the sidebar body's own
+                            // Background right-click handler doesn't also fire.
+                            .on_mouse_down(MouseButton::Right, move |ev, _window, cx| {
+                                cx.stop_propagation();
+                                let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                                let target = FileContextMenuTarget::Dir(path_for_ctx.clone());
+                                state_for_ctx.update(cx, |s, cx| {
+                                    s.open_file_context_menu(position, target);
+                                    cx.notify();
+                                });
+                            })
                             .child(div().text_color(rgb(p.text_muted)).child(chevron))
-                            .child(div().child(dir_name)),
+                            .child(div().flex_1().min_w_0().line_clamp(2).child(dir_name)),
                     )
                     // Recursively render children when the directory is expanded
                     .when(is_expanded, |d| {
@@ -155,6 +178,8 @@ impl FileExplorer {
                 let is_active = active_path.as_ref().is_some_and(|active| active == path);
                 let path_clone = path.clone();
                 let state_clone = state_handle.clone();
+                let path_for_ctx = path.clone();
+                let state_for_ctx = state_handle.clone();
                 let file_name = name.clone();
                 // Use path string as a unique element ID for this file row
                 let file_id = ElementId::from(path.to_string_lossy().into_owned());
@@ -164,7 +189,7 @@ impl FileExplorer {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .h(px(24.0))
+                    .min_h(px(24.0))
                     .pl(indent)
                     .pr(px(space::SM))
                     .cursor_pointer()
@@ -197,6 +222,20 @@ impl FileExplorer {
                             });
                         }
                     })
+                    // Right-click: open the context menu targeting this
+                    // file ("Delete" acts on it; "New File" creates
+                    // alongside it, in its parent directory).
+                    // stop_propagation so the sidebar body's own Background
+                    // right-click handler doesn't also fire.
+                    .on_mouse_down(MouseButton::Right, move |ev, _window, cx| {
+                        cx.stop_propagation();
+                        let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                        let target = FileContextMenuTarget::File(path_for_ctx.clone());
+                        state_for_ctx.update(cx, |s, cx| {
+                            s.open_file_context_menu(position, target);
+                            cx.notify();
+                        });
+                    })
                     .child(
                         div()
                             .w(px(28.0))
@@ -208,10 +247,181 @@ impl FileExplorer {
                             })
                             .child("DOC"),
                     )
-                    .child(div().child(file_name))
+                    .child(div().flex_1().min_w_0().line_clamp(2).child(file_name))
                     .into_any_element()
             }
         }
+    }
+
+    /// Renders the file explorer's right-click menu (`AppState.file_context_menu`,
+    /// found_bugs.md's Forgotten Implicit Feature) as a floating panel pinned
+    /// to the click position via GPUI's `anchored()` (window-relative
+    /// coordinates, matching `MouseDownEvent.position`) wrapped in
+    /// `deferred()` so it paints above the file tree regardless of where it
+    /// sits in the element tree — the same two primitives Zed's own
+    /// context menus are built on.
+    ///
+    /// Two states: the normal menu ("New File", plus "Delete" only for a
+    /// File target — deleting a directory needs stronger confirmation than
+    /// this menu offers, so it's not shown for Dir/Background), and a
+    /// "Delete <name>? Confirm / Cancel" step once "Delete" has been
+    /// clicked once (`FileContextMenu.confirming_delete`) — a real
+    /// filesystem delete has no undo, so it isn't one click.
+    fn render_context_menu(
+        menu: FileContextMenu,
+        p: Palette,
+        state_handle: &Entity<AppState>,
+        _cx: &mut Context<FileExplorer>,
+    ) -> AnyElement {
+        let (x, y) = menu.position;
+
+        let panel = if menu.confirming_delete {
+            let display_name = match &menu.target {
+                FileContextMenuTarget::File(path) => {
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("this file").to_string()
+                }
+                _ => "this file".to_string(),
+            };
+            let cancel_state = state_handle.clone();
+            let confirm_state = state_handle.clone();
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .w(px(220.0))
+                .bg(rgb(p.chrome))
+                .border_1()
+                .border_color(rgb(p.border))
+                .rounded(px(radius::MD))
+                .shadow_lg()
+                .p(px(space::SM))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(p.text))
+                        .child(format!("Delete \"{}\"? This can't be undone.", display_name)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(space::XS))
+                        .child(
+                            div()
+                                .id("ctx-menu-cancel")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(26.0))
+                                .rounded(px(radius::MD))
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(rgb(p.text_muted))
+                                .border_1()
+                                .border_color(rgb(p.border_subtle))
+                                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                .on_click(move |_ev, _window, cx| {
+                                    cancel_state.update(cx, |s, cx| {
+                                        s.close_file_context_menu();
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Cancel"),
+                        )
+                        .child(
+                            div()
+                                .id("ctx-menu-confirm-delete")
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(26.0))
+                                .rounded(px(radius::MD))
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(rgb(0xf14c4c))
+                                .border_1()
+                                .border_color(rgb(0xf14c4c))
+                                .hover(move |s| s.bg(rgba(0xf14c4c33)))
+                                .on_click(move |_ev, _window, cx| {
+                                    confirm_state.update(cx, |s, cx| {
+                                        if let Err(e) = s.confirm_context_menu_delete() {
+                                            eprintln!("[FileExplorer] failed to delete: {}", e);
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .child("Delete"),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            let can_delete = matches!(menu.target, FileContextMenuTarget::File(_));
+            let new_file_state = state_handle.clone();
+            let delete_state = state_handle.clone();
+
+            div()
+                .flex()
+                .flex_col()
+                .w(px(160.0))
+                .bg(rgb(p.chrome))
+                .border_1()
+                .border_color(rgb(p.border))
+                .rounded(px(radius::MD))
+                .shadow_lg()
+                .py(px(space::XXS))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("ctx-menu-new-file")
+                        .h(px(26.0))
+                        .px(px(space::SM))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(p.text))
+                        .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                        .on_click(move |_ev, _window, cx| {
+                            new_file_state.update(cx, |s, cx| {
+                                if let Err(e) = s.create_file_at_context_menu_location() {
+                                    eprintln!("[FileExplorer] failed to create file: {}", e);
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child("New File"),
+                )
+                .when(can_delete, |d| {
+                    d.child(
+                        div()
+                            .id("ctx-menu-delete")
+                            .h(px(26.0))
+                            .px(px(space::SM))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .text_sm()
+                            .text_color(rgb(0xf14c4c))
+                            .hover(move |s| s.bg(rgba(0xf14c4c33)))
+                            .on_click(move |_ev, _window, cx| {
+                                delete_state.update(cx, |s, cx| {
+                                    s.request_context_menu_delete_confirmation();
+                                    cx.notify();
+                                });
+                            })
+                            .child("Delete"),
+                    )
+                })
+                .into_any_element()
+        };
+
+        deferred(anchored().position(point(px(x), px(y))).snap_to_window().child(panel))
+            .with_priority(1)
+            .into_any_element()
     }
 
     /// One half of the Files/Nav header toggle: highlighted when it
@@ -448,6 +658,7 @@ impl Render for FileExplorer {
             .tabs
             .get(state.active_tab)
             .and_then(|tab| tab.file_path.clone());
+        let sidebar_width = state.sidebar_width;
         let _ = state;
 
         let state_handle = self.state.clone();
@@ -455,7 +666,8 @@ impl Render for FileExplorer {
         div()
             .flex()
             .flex_col()
-            .w(px(240.0))
+            .relative()
+            .w(px(sidebar_width))
             .h_full()
             .bg(rgb(p.sidebar))
             .border_r_1()
@@ -582,12 +794,49 @@ impl Render for FileExplorer {
                     .flex_1()
                     .overflow_y_scroll()
                     .py(px(space::XS))
+                    // Right-click on empty space (not a file/dir row, which
+                    // stop_propagation()s its own right-click first) — "New
+                    // File" creates at the tree's root; "Delete" has
+                    // nothing to act on.
+                    .on_mouse_down(MouseButton::Right, {
+                        let state_clone = state_handle.clone();
+                        move |ev, _window, cx| {
+                            let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                            state_clone.update(cx, |s, cx| {
+                                s.open_file_context_menu(position, FileContextMenuTarget::Background);
+                                cx.notify();
+                            });
+                        }
+                    })
                     .children(file_tree.iter().map(|node| {
                         Self::render_node(node, 0, &active_path, p, &state_handle, cx)
                     }))
                     .into_any_element(),
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
+            .when_some(self.state.read(cx).file_context_menu.clone(), |el, menu| {
+                el.child(Self::render_context_menu(menu, p, &state_handle, cx))
+            })
+            // ── Resize handle ────────────────────────────────────────────────
+            // A thin strip on the sidebar's right edge (the border shared
+            // with the text editor). Dragging it fires MainWindow's
+            // `on_drag_move::<SidebarResizePayload>` (main_window.rs), which
+            // covers the whole window so the drag keeps tracking even if
+            // the cursor slips off this 4px strip mid-drag.
+            .child(
+                div()
+                    .id("sidebar-resize-handle")
+                    .absolute()
+                    .top(px(0.0))
+                    .right(px(-2.0))
+                    .h_full()
+                    .w(px(4.0))
+                    .cursor_col_resize()
+                    .occlude()
+                    .on_drag(SidebarResizePayload, |payload: &SidebarResizePayload, _offset, _window, cx| {
+                        cx.new(|_| payload.clone())
+                    }),
+            )
     }
 }
 

@@ -20,7 +20,6 @@ use gpui::*;
 use gpui_platform::application;
 use keybinds::{rebuild_keymap, Keybinds};
 use main_window::MainWindow;
-use std::path::Path;
 
 fn main() {
     /*
@@ -39,7 +38,7 @@ fn main() {
         // loaded from settings.conf and registered here. The settings modal
         // calls `rebuild_keymap` again at runtime whenever the user remaps
         // one, so this isn't the only place this ever runs.
-        let keybinds = Keybinds::load(Path::new("settings.conf"));
+        let keybinds = Keybinds::load(&state::settings_conf_path());
         rebuild_keymap(cx, &keybinds);
 
         let bounds = Bounds::centered(

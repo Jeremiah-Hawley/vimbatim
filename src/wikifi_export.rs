@@ -53,7 +53,8 @@ mod tests {
             runs: vec![Run { text: text.to_string(), ..Default::default() }],
             heading,
             alignment: Alignment::default(),
-        };
+        unsupported_xml: None,
+    };
         let paragraphs = vec![
             para(1, "Case Title"),
             para(2, "Off-case Subtitle"),
