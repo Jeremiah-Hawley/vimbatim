@@ -3,6 +3,9 @@
 docs/
 notes/
 
+*.md
+!/README.md
+
 # Added by cargo
 
 /target
