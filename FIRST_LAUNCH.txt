@@ -1,0 +1,37 @@
+Vimbatim — First Launch Instructions
+=====================================
+
+This is a closed beta build. It isn't signed by Apple or Microsoft yet, so
+your OS will show an "unknown developer" warning the first time you open
+it. This is expected — here's how to get past it.
+
+macOS
+-----
+1. Unzip/unmount and drag Vimbatim.app to Applications (or run it from
+   wherever you put it).
+2. Right-click (or Control-click) Vimbatim.app and choose "Open".
+3. A warning dialog appears. Click "Open" again. (Just double-clicking the
+   app will refuse to launch and won't offer this option — you must
+   right-click the first time.)
+4. If macOS still refuses to open it, open Terminal and run:
+     xattr -cr /Applications/Vimbatim.app
+   then try opening it again.
+
+Windows
+-------
+1. Unzip the folder anywhere you like.
+2. Double-click vimbatim.exe.
+3. Windows SmartScreen will show a blue "Windows protected your PC" box.
+   Click "More info", then click "Run anyway".
+
+After that first launch, the app opens normally like anything else.
+
+Found a bug or crash?
+----------------------
+If the app crashes, a log is written automatically:
+  macOS/Linux: ~/.vimbatim/crash.log
+  Windows:     %APPDATA%\vimbatim\crash.log
+
+Please share what you were doing plus that crash.log file (if the app
+crashed) in the feedback channel — the exact build you're on is shown in
+Settings, at the bottom of the panel.

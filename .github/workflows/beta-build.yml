@@ -1,0 +1,75 @@
+name: Beta build
+
+# closed_beta_plan.md §2: manually triggered per beta round, not on every
+# push, so testers only see deliberately-cut builds. Artifacts from a
+# workflow run are only visible to repo collaborators — that's what keeps
+# this "not a public GitHub Release" while still using free native build
+# machines for both OSes (GPUI's Metal/DirectX backends can't be
+# cross-compiled from Linux).
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build (release)
+        run: cargo build --release
+
+      # ── macOS: cargo-bundle .app, wrapped in a .dmg ─────────────────────
+      - name: Install cargo-bundle
+        if: runner.os == 'macOS'
+        run: cargo install cargo-bundle
+
+      - name: Bundle .app
+        if: runner.os == 'macOS'
+        run: cargo bundle --release
+
+      - name: Copy settings.conf into the bundle
+        if: runner.os == 'macOS'
+        run: cp settings.conf "target/release/bundle/osx/Vimbatim.app/Contents/Resources/settings.conf"
+
+      - name: Create .dmg
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist/dmg-staging
+          cp -R "target/release/bundle/osx/Vimbatim.app" dist/dmg-staging/
+          cp FIRST_LAUNCH.txt "dist/dmg-staging/First Launch - Read Me.txt"
+          hdiutil create -volname "Vimbatim" -srcfolder "dist/dmg-staging" \
+            -ov -format UDZO "dist/Vimbatim-macOS.dmg"
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: vimbatim-macos
+          path: dist/Vimbatim-macOS.dmg
+
+      # ── Windows: plain .zip (exe + settings.conf + a First Launch doc) ──
+      - name: Assemble zip contents
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist/Vimbatim-Windows
+          cp target/release/vimbatim.exe dist/Vimbatim-Windows/
+          cp settings.conf dist/Vimbatim-Windows/
+          cp FIRST_LAUNCH.txt dist/Vimbatim-Windows/README.txt
+
+      - name: Zip
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          7z a Vimbatim-Windows.zip Vimbatim-Windows
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: vimbatim-windows
+          path: dist/Vimbatim-Windows.zip
