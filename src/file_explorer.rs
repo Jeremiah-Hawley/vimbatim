@@ -857,6 +857,9 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
         {
             if path == target {
                 *expanded = !*expanded;
+                if *expanded && children.is_empty() {
+                    *children = crate::state::scan_directory(path);
+                }
                 return;
             }
             toggle_dir_expanded(children, target);
