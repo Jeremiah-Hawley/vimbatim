@@ -6,6 +6,11 @@ notes/
 *.md
 !/README.md
 
+*.xml
+*.hpp
+*.cpp
+*.docx
+
 # Added by cargo
 
 /target
