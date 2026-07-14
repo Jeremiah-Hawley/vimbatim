@@ -682,12 +682,20 @@ pub fn crash_log_path() -> PathBuf {
 /// launch (`closed_beta_plan.md` §0). Falls back to `current_dir()`, then
 /// `.`, only if the platform's home-directory env var is unset.
 fn default_working_directory() -> PathBuf {
-    let home = if cfg!(target_os = "windows") {
-        std::env::var_os("USERPROFILE").map(PathBuf::from).map(|home| home.join("Documents"))
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map(|home| home.join("Documents"))
     } else {
-        std::env::var_os("HOME").map(PathBuf::from)
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Documents"))
     };
-    home.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    let path = base
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join("Vimbatim");
+    let _ = std::fs::create_dir_all(&path);
+    path
 }
 
 /// Reads `large_size` (points, `[FORMATTING]` section) from settings.conf —
@@ -4526,11 +4534,10 @@ pub fn scan_directory(dir: &PathBuf) -> Vec<FileNode> {
         }
 
         if path.is_dir() {
-            let children = scan_directory(&path);
             dirs.push(FileNode::Dir {
                 name,
                 path,
-                children,
+                children: Vec::new(),
                 expanded: false,
             });
         } else if path.extension().and_then(|e| e.to_str()) == Some("docx") {
