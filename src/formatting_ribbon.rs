@@ -128,13 +128,23 @@ pub struct FormattingRibbon {
     #[allow(dead_code)]
     state: Entity<AppState>,
     collapsed: std::collections::HashMap<&'static str, bool>,
+    open_menu: Option<FormatAction>,
+    menu_anchor: Point<Pixels>,
+    editing_custom: Option<FormatAction>,
+    custom_hex_buffer: String,
+    custom_color_focus: FocusHandle,
 }
 
 impl FormattingRibbon {
-    pub fn new(state: Entity<AppState>) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         FormattingRibbon {
             state,
             collapsed: std::collections::HashMap::new(),
+            open_menu: None,
+            menu_anchor: Point::default(),
+            editing_custom: None,
+            custom_hex_buffer: String::new(),
+            custom_color_focus: cx.focus_handle(),
         }
     }
 
@@ -238,7 +248,7 @@ impl FormattingRibbon {
                 let label_text = label;
                 let act = action;
                 let st = state.clone();
-                cx.listener(move |_this, _ev, _window, cx| {
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
                     println!("Button pressed: {}", label_text);
                     if !matches!(
                         act,
@@ -283,19 +293,6 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::FontColor => {
-                            st.update(cx, |state, _cx| {
-                                // Default to Black for now
-                                state.apply_font_color(crate::color_picker::ColorChoice::Black);
-                            });
-                            cx.notify();
-                        }
-                        FormatAction::HighlightColorSelect => {
-                            st.update(cx, |state, _cx| {
-                                state.cycle_highlight_color();
-                            });
-                            cx.notify();
-                        }
                         FormatAction::Shrink => {
                             st.update(cx, |state, _cx| {
                                 state.shrink_text();
@@ -335,29 +332,19 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::DocMenu => {
-                            println!("Doc Menu opened - options are placeholders for Phase 5");
-                            // Menu items:
-                            // - Fix Fake Tags
-                            // - Convert analytics to tags
-                            // - Fix Formatting Gaps
-                            // - Revert to default styles
-                            // - Remove emphasis
-                            // - Remove non highlighted underlining
-                            // - Remove blank lines
-                            // - Remove pilcrows
-                            // - Select similar formatting
-                        }
-                        FormatAction::CardMenu => {
-                            println!("Card Menu opened - options are placeholders for Phase 5");
-                            // Menu items:
-                            // - Condense, no pilcrows
-                            // - Condense, pilcrows
-                            // - Uncondensed
-                            // - Standardize highlighting
-                            // - Standardize highlighting with exception
-                            // - Auto emphasis first
-                            // - Duplicate cite
+                        FormatAction::DocMenu
+                        | FormatAction::CardMenu
+                        | FormatAction::FontFamily
+                        | FormatAction::FontColor
+                        | FormatAction::HighlightColorSelect => {
+                            if this.open_menu == Some(act) {
+                                this.open_menu = None;
+                            } else {
+                                this.open_menu = Some(act);
+                                this.menu_anchor = ev.position;
+                                this.editing_custom = None;
+                            }
+                            cx.notify();
                         }
                         FormatAction::OpenWiki => {
                             let url = "https://opencaselist.com/";
@@ -485,6 +472,66 @@ impl FormattingRibbon {
                 })
             })
             .child(label)
+    }
+
+    fn render_menu_panel(
+        &self,
+        action: FormatAction,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let items: Vec<&'static str> = match action {
+            FormatAction::DocMenu => vec![
+                "Fix Fake Tags",
+                "Convert analytics to tags",
+                "Fix Formatting Gaps",
+                "Revert to default styles",
+                "Remove emphasis",
+                "Remove non highlighted underlining",
+                "Remove blank lines",
+                "Remove pilcrows",
+                "Select similar formatting",
+            ],
+            _ => vec![],
+        };
+
+        let menu_label = "Doc Menu";
+        div()
+            .id("ribbon-menu-panel")
+            .flex()
+            .flex_col()
+            .min_w(px(220.0))
+            .max_h(px(320.0))
+            .overflow_y_scroll()
+            .p(px(space::XS))
+            .gap(px(space::XXS))
+            .rounded(px(radius::MD))
+            .bg(rgb(p.chrome_elevated))
+            .border_1()
+            .border_color(rgb(p.border))
+            .shadow_lg()
+            .children(items.into_iter().enumerate().map(|(idx, item)| {
+                div()
+                    .id(ElementId::named_usize("ribbon-menu-item", idx))
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .text_color(rgb(p.text))
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(p.chrome_hover)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            println!("{menu_label}: {item}");
+                            this.open_menu = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(item)
+            }))
+            .into_any_element()
     }
 
     fn render_group(
@@ -633,13 +680,47 @@ impl Render for FormattingRibbon {
         let all_collapsed = ribbon_groups
             .iter()
             .all(|name| self.collapsed.get(name).copied().unwrap_or(false));
+        let open_menu = self.open_menu;
         div()
+            .id("ribbon-root")
+            .relative()
             .flex()
             .flex_row()
             .w_full()
             .gap(px(0.0))
             .p(px(0.0))
             .bg(rgb(p.chrome))
+            .when_some(open_menu, |d, action| {
+                let anchor = self.menu_anchor;
+                let panel = self.render_menu_panel(action, p, cx);
+                d.child(
+                    deferred(
+                        div()
+                            .id("ribbon-menu-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| {
+                                    this.open_menu = None;
+                                    this.editing_custom = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                anchored()
+                                    .position(anchor)
+                                    .snap_to_window()
+                                    .offset(point(px(-8.0), px(4.0)))
+                                    .child(panel),
+                            ),
+                    )
+                    .with_priority(100),
+                )
+            })
             .child(Self::render_global_controls(all_collapsed, p, cx))
             .child(Self::render_group(
                 "cards",
