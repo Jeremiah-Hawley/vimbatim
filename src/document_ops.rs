@@ -495,6 +495,32 @@ pub fn apply_paragraph_alignment(paragraphs: &mut Vec<Paragraph>, start: usize, 
     }
 }
 
+/// Resets the paragraph-level `heading`/`alignment` fields (set by
+/// `apply_card_style` for Pocket/Hat/Block/Tag) on every paragraph that
+/// overlaps `[start, end)`, or just the paragraph at `start` when
+/// `start == end`. `apply_formatting`/`apply_format_op` only ever mutate
+/// run-level fields (bold/size/box/etc.), so `FormatOp::ClearAll` needs this
+/// on top of that call at every call site — shared here (same span-walking
+/// shape as `apply_paragraph_alignment` above) so `apply_formatting_to_line`
+/// and `apply_formatting_to_selection` both call one choke point instead of
+/// each re-deriving it.
+pub fn reset_card_style_in_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize) {
+    if start > end { return; }
+    let (start_para, _, _) = resolve_position(paragraphs, start);
+    let (end_para, _, _) = if start == end {
+        (start_para, 0, 0)
+    } else {
+        resolve_position(paragraphs, end)
+    };
+
+    for idx in start_para..=end_para.min(paragraphs.len() - 1) {
+        if let Some(para) = paragraphs.get_mut(idx) {
+            para.heading = 0;
+            para.alignment = Alignment::Left;
+        }
+    }
+}
+
 pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, op: &FormatOp) -> bool {
     if start >= end { return false; }
     let mut cumulative = 0usize;

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::case_converter;
 use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
-use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, resolve_position, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
+use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, reset_card_style_in_range, resolve_position, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
 use crate::wikifi_export;
 
 /// Rapid edits within this window of the previous undo-stack push are
@@ -1195,11 +1195,7 @@ impl AppState {
         // cause behind found_bugs.md's "Clear... fails to clear pocket,
         // hat, and block formatting".
         if let FormatOp::ClearAll { .. } = effective_op {
-            let (para_idx, _, _) = resolve_position(&tab.paragraphs, line_start);
-            if let Some(para) = tab.paragraphs.get_mut(para_idx) {
-                para.heading = 0;
-                para.alignment = Alignment::Left;
-            }
+            reset_card_style_in_range(&mut tab.paragraphs, line_start, line_end);
             // A prior card-style/formatting op on this same empty line (e.g.
             // apply_card_style's Bold+FontSize+Box sequence) may have armed
             // `pending_format`, which otherwise keeps force-applying to
@@ -1270,7 +1266,18 @@ impl AppState {
                     } else {
                         op.clone()
                     };
-                    apply_formatting(&mut tab.paragraphs, start, end, effective_op);
+                    apply_formatting(&mut tab.paragraphs, start, end, effective_op.clone());
+                    // Mirrors apply_formatting_to_line's own ClearAll special
+                    // case (see its comment above `reset_card_style_in_range`):
+                    // apply_formatting above only ever mutates run-level
+                    // fields, never a Pocket/Hat/Block paragraph's own
+                    // `heading`/`alignment` — left alone, Clear Formatting
+                    // through an active selection silently kept a card-styled
+                    // paragraph boxed/centered while only stripping bold/size.
+                    if let FormatOp::ClearAll { .. } = effective_op {
+                        reset_card_style_in_range(&mut tab.paragraphs, start, end);
+                        tab.pending_format = None;
+                    }
                     tab.is_modified = true;
                 }
             }
@@ -9972,6 +9979,33 @@ mod tests {
         assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared");
         assert!(para.runs.iter().all(|r| !r.box_format), "box not cleared");
         assert!(para.runs.iter().all(|r| r.size == 22), "size not reset to large_size");
+    }
+
+    #[test]
+    fn test_clear_formatting_via_selection_resets_pocket_heading_and_alignment() {
+        // Same bug as test_clear_formatting_resets_pocket_heading_alignment_
+        // and_size, but through the SELECTION path (clear_formatting() with
+        // tab.selection.is_some()), which routes to
+        // apply_formatting_to_selection instead of apply_formatting_to_line.
+        // That branch only ever called document_ops::apply_formatting for
+        // run-level fields (bold/size/box) and never reset the paragraph-
+        // level heading/alignment apply_card_style also sets — so clicking
+        // Clear Formatting with an ordinary, single-paragraph selection
+        // inside a Pocket-styled line left it still boxed/centered.
+        let mut state = make_state("hello world", 0, None);
+        state.apply_card_style(CardStyleKind::Pocket);
+        state.large_size_half_points = 22; // 11pt, settings.conf's default
+
+        // Selection entirely inside the one (Pocket) paragraph.
+        state.tabs[0].selection = Some((0, 5));
+        state.clear_formatting();
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert_eq!(para.heading, 0, "heading not cleared via selection path");
+        assert_eq!(para.alignment, Alignment::Left, "not left-aligned via selection path");
+        assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared via selection path");
+        assert!(para.runs.iter().all(|r| !r.box_format), "box not cleared via selection path");
+        assert_eq!(state.tabs[0].pending_format, None, "stale pending_format should be cleared via selection path too");
     }
 
     #[test]
