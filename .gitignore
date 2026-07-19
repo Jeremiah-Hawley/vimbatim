@@ -2,6 +2,7 @@
 .superpowers/
 docs/
 notes/
+.worktrees/
 
 *.md
 !/README.md
