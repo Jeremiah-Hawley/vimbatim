@@ -756,6 +756,18 @@ impl Render for TextEditor {
          *
          * Clicking anywhere in the editor reclaims keyboard focus.
          */
+        // Tab switch (TabBar's on_click -> `set_active_tab`) and file-open
+        // (sidebar, new-tab) never touch GPUI keyboard focus directly — they
+        // only flip `active_tab` on the shared AppState. Left alone, the
+        // text editor's FocusHandle stays wherever it was (often nowhere),
+        // so Enter/keys silently stop reaching `handle_key_down` until the
+        // user clicks into the editor again. Honor and clear the request
+        // here, once per frame, mirroring `pending_scroll_to_cursor` below.
+        if self.state.read(cx).pending_focus_editor {
+            self.state.update(cx, |state, _cx| state.pending_focus_editor = false);
+            self.focus_handle.clone().focus(window, cx);
+        }
+
         // Nav menu jump (state.rs's `jump_to_line`): FileExplorer has no
         // direct reference to this view to call a scroll method on, so it
         // leaves a flag on the active tab instead. Honor and clear it here,

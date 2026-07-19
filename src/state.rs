@@ -474,6 +474,15 @@ pub struct FileContextMenu {
 pub struct AppState {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Set whenever `active_tab` changes to a tab the user didn't get there
+    /// by clicking directly into the editor (tab-bar click, file-open from
+    /// the sidebar) — GPUI keyboard focus doesn't move on its own just
+    /// because `active_tab` did, so without this the text editor's
+    /// `FocusHandle` is left wherever it was (often nowhere), and Enter/keys
+    /// silently stop reaching it until the user clicks into the editor
+    /// again. `TextEditor::render` checks and clears this once per frame,
+    /// mirroring `Tab::pending_scroll_to_cursor`'s same check-and-clear idiom.
+    pub pending_focus_editor: bool,
     pub next_tab_id: usize,
     pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
@@ -744,6 +753,7 @@ impl AppState {
         AppState {
             tabs: vec![Tab::new_empty(0)],
             active_tab: 0,
+            pending_focus_editor: false,
             next_tab_id: 1,
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -786,6 +796,7 @@ impl AppState {
         self.next_tab_id += 1;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.pending_focus_editor = true;
     }
 
     pub fn open_file(&mut self, path: PathBuf) {
@@ -799,6 +810,7 @@ impl AppState {
          */
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
             self.active_tab = idx;
+            self.pending_focus_editor = true;
             return;
         }
         let mut tab = Tab::from_path(self.next_tab_id, path.clone());
@@ -811,6 +823,7 @@ impl AppState {
         self.next_tab_id += 1;
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.pending_focus_editor = true;
     }
 
     pub fn save_active_tab(&mut self) -> Result<(), String> {
@@ -886,6 +899,12 @@ impl AppState {
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        // Closing a tab (via its close button, not a click into the editor)
+        // can leave a different tab active — same focus-loss bug as
+        // `set_active_tab`/`open_file`, so request the same reclaim.
+        // Harmless when the active tab didn't actually change: GPUI's
+        // `focus()` is a no-op if the handle is already focused.
+        self.pending_focus_editor = true;
     }
 
     pub fn move_tab(&mut self, from: usize, to: usize) {
@@ -916,9 +935,13 @@ impl AppState {
     pub fn set_active_tab(&mut self, idx: usize) {
         /*
          * Switches focus to the tab at the given index, if it exists.
+         * Requests that the text editor reclaim keyboard focus too (see
+         * `pending_focus_editor`'s doc comment) — a tab-bar click never
+         * touches GPUI focus on its own.
          */
         if idx < self.tabs.len() {
             self.active_tab = idx;
+            self.pending_focus_editor = true;
         }
     }
 
@@ -5527,6 +5550,7 @@ mod tests {
                 unsupported_banner_dismissed: false,
             }],
             active_tab: 0,
+            pending_focus_editor: false,
             next_tab_id: 1,
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -5570,6 +5594,93 @@ mod tests {
             state.record_change_key(key, shift, key_char);
         }
         state.handle_vim_key(key, shift, key_char);
+    }
+
+    // ── pending_focus_editor (tab switch / open / close / new-tab) ──────────
+
+    #[test]
+    fn set_active_tab_requests_editor_focus() {
+        // Root-cause regression test for the intermittent Enter/keyboard
+        // lockout (notes/feedback.md): clicking a tab only ever called
+        // `set_active_tab`, which never touched GPUI keyboard focus, so the
+        // text editor's FocusHandle was left stale until the user clicked
+        // back into it. `pending_focus_editor` is the flag `TextEditor::render`
+        // checks-and-clears to reclaim focus once per frame.
+        let mut state = make_state("hello", 0, None);
+        state.tabs.push(Tab::new_empty(1));
+        state.pending_focus_editor = false;
+
+        state.set_active_tab(1);
+
+        assert!(state.pending_focus_editor);
+    }
+
+    #[test]
+    fn set_active_tab_out_of_range_does_not_request_focus() {
+        let mut state = make_state("hello", 0, None);
+        state.pending_focus_editor = false;
+
+        state.set_active_tab(99);
+
+        assert!(!state.pending_focus_editor);
+    }
+
+    #[test]
+    fn new_tab_requests_editor_focus() {
+        let mut state = make_state("hello", 0, None);
+        state.pending_focus_editor = false;
+
+        state.new_tab();
+
+        assert!(state.pending_focus_editor);
+    }
+
+    #[test]
+    fn open_file_new_tab_requests_editor_focus() {
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_focus_test_{}_new",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.pending_focus_editor = false;
+
+        state.open_file(path);
+
+        assert!(state.pending_focus_editor);
+    }
+
+    #[test]
+    fn open_file_existing_tab_requests_editor_focus() {
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_focus_test_{}_existing",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path.clone());
+        state.pending_focus_editor = false; // clear what the first open set
+
+        state.open_file(path); // already open -> switches to existing tab
+
+        assert!(state.pending_focus_editor);
+    }
+
+    #[test]
+    fn close_tab_requests_editor_focus() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs.push(Tab::new_empty(1));
+        state.pending_focus_editor = false;
+
+        state.close_tab(0);
+
+        assert!(state.pending_focus_editor);
     }
 
     // ── clamp_sidebar_width ──────────────────────────────────────────────────
