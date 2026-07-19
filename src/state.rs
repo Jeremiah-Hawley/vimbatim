@@ -1863,6 +1863,17 @@ impl AppState {
         Some(tab.content[start..end].to_string())
     }
 
+    /// Sibling of `copy_selection` that also returns the selection's
+    /// per-run formatting, for `rich_clipboard::encode_with_lengths` to ride
+    /// alongside the plain text on copy/cut. `None` under the same
+    /// conditions `copy_selection` returns `None`.
+    pub fn copy_selection_runs(&self) -> Option<Vec<Run>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let (a, f) = tab.selection?;
+        let (start, end) = (a.min(f), a.max(f));
+        Some(crate::document_ops::runs_in_range(&tab.paragraphs, start, end))
+    }
+
     pub fn cut_selection(&mut self) -> Option<String> {
         /*
          * Extracts the selected text, deletes it, and returns the text so the
@@ -1897,6 +1908,31 @@ impl AppState {
             sync_insert_str(&mut tab.paragraphs, tab.cursor, text);
             tab.content.insert_str(tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
+            tab.is_modified = true;
+        }
+        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+            rec.push_str(text);
+        }
+    }
+
+    /// Like `insert_str`, but also stitches `runs` (already boundary-aligned
+    /// to `text`, per `rich_clipboard::decode`'s own guarantee) into
+    /// `tab.paragraphs` at the insertion point instead of leaving the
+    /// inserted text as one unstyled run — restores formatting on an in-app
+    /// paste. `document_ops::sync_insert_str_with_runs` falls back to plain,
+    /// inheriting behavior itself when `runs` is empty, so this mirrors
+    /// `insert_str` exactly otherwise.
+    pub fn insert_str_with_runs(&mut self, text: &str, runs: &[Run]) {
+        if text.is_empty() { return; }
+        self.push_undo_snapshot();
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection_raw();
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
+            crate::document_ops::sync_insert_str_with_runs(&mut tab.paragraphs, tab.cursor, text, runs);
+            tab.content.insert_str(tab.cursor, text);
+            tab.cursor += text.len();
             tab.is_modified = true;
         }
         if let Some(rec) = self.vim_insertion_recording.as_mut() {

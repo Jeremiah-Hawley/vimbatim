@@ -9,7 +9,7 @@ use crate::keybinds::{
     BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
     CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction, FindAction,
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PocketAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
+    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
@@ -145,32 +145,46 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &CopyAction, cx| {
-            let text = s.read(cx).copy_selection();
-            if let Some(text) = text {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+            let state = s.read(cx);
+            let Some(text) = state.copy_selection() else { return };
+            let runs = state.copy_selection_runs().unwrap_or_default();
+            let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
         });
 
         let s = state.clone();
         cx.on_action(move |_: &CutAction, cx| {
+            let runs = s.read(cx).copy_selection_runs().unwrap_or_default();
             let text = s.update(cx, |st, cx| {
                 let result = st.cut_selection();
                 if result.is_some() { cx.notify(); }
                 result
             });
             if let Some(text) = text {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+                cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
             }
         });
 
         let s = state.clone();
         cx.on_action(move |_: &PasteAction, cx| {
+            let Some(item) = cx.read_from_clipboard() else { return };
+            let Some(text) = item.text() else { return };
+            let rich = item.metadata().and_then(|m| crate::rich_clipboard::decode(m, &text));
+            s.update(cx, |st, cx| {
+                match rich {
+                    Some(runs) => st.insert_str_with_runs(&text, &runs),
+                    None => st.insert_str(&text),
+                }
+                cx.notify();
+            });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &PasteWithoutFormattingAction, cx| {
             if let Some(item) = cx.read_from_clipboard() {
                 if let Some(text) = item.text() {
-                    s.update(cx, |st, cx| {
-                        st.insert_str(&text);
-                        cx.notify();
-                    });
+                    s.update(cx, |st, cx| { st.insert_str(&text); cx.notify(); });
                 }
             }
         });

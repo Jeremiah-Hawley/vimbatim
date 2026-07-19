@@ -56,7 +56,7 @@ pub struct Run {
 
 /// One paragraph of the document, composed of zero or more runs.
 /// `heading` is 0 for body text, or 1–9 mirroring Word's Heading 1–9 styles.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Paragraph {
     pub runs: Vec<Run>,
     pub heading: u8,

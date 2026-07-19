@@ -71,11 +71,88 @@ pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch:
 /// cost of not being O(1) for multi-line paste, which isn't a hot path in
 /// this editor.
 pub fn sync_insert_str(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text: &str) {
-    let mut offset = byte_offset;
-    for ch in text.chars() {
-        sync_insert_char(paragraphs, offset, ch);
-        offset += ch.len_utf8();
+    sync_insert_str_impl(paragraphs, byte_offset, text, None);
+}
+
+/// Rich-paste sibling of `sync_insert_str`: instead of every inserted
+/// character inheriting whatever run it lands inside, each `runs[i]` keeps
+/// its own formatting as a run of its own. `runs`' concatenated text must
+/// equal `text` (the contract `rich_clipboard::decode` already guarantees);
+/// an empty `runs` falls back to `sync_insert_str`'s plain, inheriting
+/// behavior rather than silently dropping `text`.
+pub fn sync_insert_str_with_runs(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text: &str, runs: &[Run]) {
+    if runs.is_empty() {
+        sync_insert_str(paragraphs, byte_offset, text);
+    } else {
+        sync_insert_str_impl(paragraphs, byte_offset, text, Some(runs));
     }
+}
+
+fn sync_insert_str_impl(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text: &str, runs: Option<&[Run]>) {
+    let mut offset = byte_offset;
+    match runs {
+        None => {
+            for ch in text.chars() {
+                sync_insert_char(paragraphs, offset, ch);
+                offset += ch.len_utf8();
+            }
+        }
+        Some(runs) => {
+            // Each incoming run keeps its own formatting rather than
+            // inheriting whatever's already at the insertion point — still
+            // driven one *character* at a time (matching sync_insert_str's
+            // own "simple and correct" tradeoff above) so a `'\n'` inside a
+            // run's text (shouldn't happen — see below — but costs nothing
+            // extra to handle) still splits the paragraph structurally via
+            // the exact same primitive `sync_insert_char` uses, instead of
+            // corrupting the "no run's text contains '\n'" invariant the
+            // rest of this module relies on. In practice `rich_clipboard`'s
+            // `decode()` only ever succeeds for a single-paragraph copy —
+            // `runs_in_range` never emits '\n' as part of any run's text,
+            // so a multi-paragraph copy's runs undershoot the plain text's
+            // length and `decode` rejects it outright — so this never
+            // actually fires on data produced by this app's own `encode`.
+            for run in runs {
+                for ch in run.text.chars() {
+                    if ch == '\n' {
+                        let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, offset);
+                        split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
+                    } else {
+                        insert_styled_char(paragraphs, offset, ch, run);
+                    }
+                    offset += ch.len_utf8();
+                }
+            }
+            // Re-fuses the one-char-at-a-time runs above back into one run
+            // per contiguous same-formatting stretch — the same cleanup
+            // `apply_formatting` already runs after its own splits.
+            for para in paragraphs.iter_mut() {
+                merge_adjacent_same_format_runs(&mut para.runs);
+            }
+        }
+    }
+}
+
+/// Inserts a single character as its own run carrying `style`'s formatting
+/// (not the run it lands inside's) at `byte_offset`, splitting the
+/// surrounding run first via `split_run_at_position` when the insertion
+/// point falls in the middle of one.
+fn insert_styled_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char, style: &Run) {
+    let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, byte_offset);
+    let mut new_run = style.clone();
+    new_run.text = ch.to_string();
+
+    let run_len = paragraphs[para_idx].runs[run_idx].text.len();
+    let insert_at = if char_offset == 0 {
+        run_idx
+    } else if char_offset >= run_len {
+        run_idx + 1
+    } else {
+        split_run_at_position(&mut paragraphs[..], para_idx, run_idx, char_offset);
+        run_idx + 1
+    };
+    paragraphs[para_idx].runs.insert(insert_at, new_run);
+    paragraphs[para_idx].unsupported_xml = None;
 }
 
 fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx: usize, char_offset: usize) {
@@ -334,6 +411,33 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
             para.unsupported_xml = None;
         }
     }
+}
+
+/// Extracts the runs (with their own text sliced to the overlap) covering
+/// byte range `[start, end)` across `paragraphs`, in document order.
+/// Paragraph boundaries contribute a single `\n` to the cumulative offset,
+/// mirroring `apply_formatting`'s own walk.
+pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<Run> {
+    let mut out = Vec::new();
+    let mut cumulative = 0usize;
+    for para in paragraphs {
+        for run in &para.runs {
+            let run_start = cumulative;
+            let run_end = cumulative + run.text.len();
+            let overlap_start = start.max(run_start);
+            let overlap_end = end.min(run_end);
+            if overlap_start < overlap_end {
+                let local_start = overlap_start - run_start;
+                let local_end = overlap_end - run_start;
+                let mut sliced = run.clone();
+                sliced.text = run.text[local_start..local_end].to_string();
+                out.push(sliced);
+            }
+            cumulative = run_end;
+        }
+        cumulative += 1; // the paragraph-separating '\n'
+    }
+    out
 }
 
 fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usize, run_idx: usize, byte_offset: usize) {
@@ -991,5 +1095,62 @@ mod tests {
 
         assert_eq!(paragraphs[0].unsupported_xml, None);
         assert_eq!(paragraphs[1].unsupported_xml, Some("<w:hyperlink/>".to_string()));
+    }
+
+    #[test]
+    fn test_runs_in_range_extracts_overlapping_runs_across_a_paragraph_boundary() {
+        let paragraphs = vec![
+            para(vec![Run { text: "hello ".into(), bold: true, ..Run::default() }]),
+            para(vec![Run { text: "world".into(), italic: true, ..Run::default() }]),
+        ];
+        // "hello \nworld" — select "lo \nwo" (indices 3..9)
+        let result = runs_in_range(&paragraphs, 3, 9);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].text, "lo ");
+        assert!(result[0].bold);
+        assert_eq!(result[1].text, "wo");
+        assert!(result[1].italic);
+    }
+
+    #[test]
+    fn test_sync_insert_str_with_runs_appends_distinct_runs_at_end() {
+        let mut paragraphs = vec![para(vec![run("foo")])];
+        let runs = vec![
+            Run { text: "bar".into(), bold: true, ..Run::default() },
+            Run { text: "baz".into(), italic: true, ..Run::default() },
+        ];
+        sync_insert_str_with_runs(&mut paragraphs, 3, "barbaz", &runs);
+
+        assert_eq!(paragraphs[0].runs.len(), 3);
+        assert_eq!(paragraphs[0].runs[0].text, "foo");
+        assert_eq!(paragraphs[0].runs[1], runs[0]);
+        assert_eq!(paragraphs[0].runs[2], runs[1]);
+    }
+
+    #[test]
+    fn test_sync_insert_str_with_runs_splits_the_run_it_lands_inside() {
+        let mut paragraphs = vec![para(vec![run("hello world")])];
+        let runs = vec![Run { text: " brave".into(), bold: true, ..Run::default() }];
+        // "hello world" -> insert " brave" at byte 5 (between "hello" and " world")
+        sync_insert_str_with_runs(&mut paragraphs, 5, " brave", &runs);
+
+        assert_eq!(paragraphs[0].runs.len(), 3);
+        assert_eq!(paragraphs[0].runs[0].text, "hello");
+        assert_eq!(paragraphs[0].runs[1], runs[0]);
+        assert_eq!(paragraphs[0].runs[2].text, " world");
+    }
+
+    #[test]
+    fn test_sync_insert_str_with_runs_matches_plain_insert_when_runs_is_empty() {
+        // No runs supplied (e.g. decode() produced an empty Vec) should
+        // behave exactly like the plain sync_insert_str, inheriting the
+        // surrounding run's formatting rather than inserting nothing.
+        let mut plain = vec![para(vec![Run { text: "hi".into(), bold: true, ..Run::default() }])];
+        let mut with_empty_runs = plain.clone();
+
+        sync_insert_str(&mut plain, 2, "!");
+        sync_insert_str_with_runs(&mut with_empty_runs, 2, "!", &[]);
+
+        assert_eq!(plain, with_empty_runs);
     }
 }

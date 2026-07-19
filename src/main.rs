@@ -1,6 +1,7 @@
 mod docx_parser;
 mod document_ops;
 mod keybinds;
+mod rich_clipboard;
 mod state;
 mod tab_bar;
 mod app_toolbar;

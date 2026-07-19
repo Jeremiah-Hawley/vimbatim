@@ -179,6 +179,7 @@ pub enum KeybindAction {
     Copy,
     Cut,
     Paste,
+    PasteWithoutFormatting,
     Undo,
     Redo,
     SelectAll,
@@ -210,7 +211,7 @@ impl KeybindAction {
         use KeybindAction::*;
         &[
             ToggleSettings, ToggleSidebar, NewTab, CloseTab, Save, SaveAs, Find, FindReplace,
-            Copy, Cut, Paste, Undo, Redo, SelectAll,
+            Copy, Cut, Paste, PasteWithoutFormatting, Undo, Redo, SelectAll,
             Bold, Underline, Shrink, ClearFormatting,
             PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Emphasis,
             Highlight,
@@ -233,6 +234,7 @@ impl KeybindAction {
             Copy => "Copy",
             Cut => "Cut",
             Paste => "Paste",
+            PasteWithoutFormatting => "Paste Without Formatting",
             Undo => "Undo",
             Redo => "Redo",
             SelectAll => "Select All",
@@ -266,7 +268,7 @@ impl KeybindAction {
         match self {
             ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace
                 | ZoomIn | ZoomOut | ZoomReset => C::General,
-            Copy | Cut | Paste | Undo | Redo | SelectAll => C::Editing,
+            Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
             PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Emphasis => C::CardStyles,
             Highlight => C::Highlighting,
@@ -289,6 +291,7 @@ impl KeybindAction {
             Copy => "copy",
             Cut => "cut",
             Paste => "paste_raw",
+            PasteWithoutFormatting => "paste_plain",
             Undo => "undo",
             Redo => "redo",
             SelectAll => "select_all",
@@ -336,6 +339,7 @@ impl KeybindAction {
             Copy => KeyCombo::new(true, false, false, "c"),
             Cut => KeyCombo::new(true, false, false, "x"),
             Paste => KeyCombo::new(true, false, false, "v"),
+            PasteWithoutFormatting => KeyCombo::new(true, true, false, "v"),
             Undo => KeyCombo::new(true, false, false, "z"),
             Redo => KeyCombo::new(true, false, false, "y"),
             SelectAll => KeyCombo::new(true, false, false, "a"),
@@ -533,7 +537,7 @@ actions!(
     [
         ToggleSettingsAction, ToggleSidebarAction, NewTabAction, CloseTabAction, SaveAction,
         SaveAsAction, FindAction, FindReplaceAction,
-        CopyAction, CutAction, PasteAction, UndoAction, RedoAction, SelectAllAction,
+        CopyAction, CutAction, PasteAction, PasteWithoutFormattingAction, UndoAction, RedoAction, SelectAllAction,
         BoldAction, UnderlineAction, ShrinkAction, ClearFormattingAction,
         PasteSmartAction, CondenseAction, PocketAction, HatAction, BlockAction, TagAction,
         CiteAction, EmphasisAction,
@@ -571,6 +575,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         KeyBinding::new(&ks(Copy), CopyAction, None),
         KeyBinding::new(&ks(Cut), CutAction, None),
         KeyBinding::new(&ks(Paste), PasteAction, None),
+        KeyBinding::new(&ks(PasteWithoutFormatting), PasteWithoutFormattingAction, None),
         KeyBinding::new(&ks(Undo), UndoAction, None),
         KeyBinding::new(&ks(Redo), RedoAction, None),
         KeyBinding::new(&ks(SelectAll), SelectAllAction, None),
