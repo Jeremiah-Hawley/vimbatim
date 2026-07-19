@@ -1870,6 +1870,7 @@ impl AppState {
             self.delete_selection_raw();
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
             sync_insert_str(&mut tab.paragraphs, tab.cursor, text);
             tab.content.insert_str(tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
@@ -5790,6 +5791,23 @@ mod tests {
         state.insert_str("");
         assert_eq!(state.tabs[0].content, "hello");
         assert_eq!(state.tabs[0].cursor, 5);
+    }
+
+    #[test]
+    fn insert_str_does_not_panic_on_stale_out_of_bounds_cursor() {
+        // Simulate a stale cursor left over from before an undo/redo or tab
+        // swap shortened the content out from under it.
+        let mut state = make_state("hi", 9999, None);
+        state.insert_str("x"); // must not panic
+        assert!(state.tabs[0].content.contains('x'));
+    }
+
+    #[test]
+    fn insert_str_does_not_panic_on_mid_char_cursor() {
+        // 'é' is 2 bytes; cursor at position 2 lands inside 'é', not on a boundary
+        let mut state = make_state("héllo", 2, None);
+        state.insert_str("x"); // must not panic
+        assert!(state.tabs[0].content.contains('x'));
     }
 
     // ── move_left / move_right ──────────────────────────────────────────────
