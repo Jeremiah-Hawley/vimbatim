@@ -682,8 +682,10 @@ pub fn crash_log_path() -> PathBuf {
 }
 
 /// The file explorer's starting directory when there's no prior working
-/// directory to restore (always true today — nothing persists
-/// `working_directory` across launches). Prefers the user's home directory
+/// directory to restore — the fallback `AppState::new()` uses when
+/// `load_working_directory` finds no `working_directory` line in
+/// settings.conf (a fresh install, or a settings.conf predating this
+/// setting). Prefers the user's home directory
 /// (`Documents` on Windows, matching Explorer's own default save location)
 /// over the process's CWD: a packaged `.app`/`.exe` launched by
 /// double-click has no guaranteed CWD, and opening the file tree at some
@@ -705,6 +707,56 @@ fn default_working_directory() -> PathBuf {
         .join("Vimbatim");
     let _ = std::fs::create_dir_all(&path);
     path
+}
+
+/// Reads `working_directory` from settings.conf — mirrors
+/// `load_large_size_half_points`'s tolerant flat key=value scan. `None` when
+/// the file or key is missing, so callers can fall back to
+/// `default_working_directory()` rather than trusting a nonexistent path.
+fn load_working_directory(path: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_to_string(path).ok().and_then(|contents| {
+        contents.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "working_directory").then(|| PathBuf::from(value.trim()))
+        })
+    })
+}
+
+/// Persists `working_directory` to settings.conf via `theme`'s generic
+/// key=value upsert helper, so the file explorer reopens to the last folder
+/// the user picked (`set_working_directory`) instead of always resetting to
+/// `default_working_directory()`.
+fn save_working_directory(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
+    crate::theme::save_setting_line(path, "working_directory", &dir.display().to_string())
+}
+
+/// Reads `expanded_dirs` from settings.conf — a `|`-joined list of directory
+/// paths the nav-pane tree had expanded at last save (`save_expanded_dirs`).
+/// Empty when the file or key is missing.
+fn load_expanded_dirs(path: &std::path::Path) -> Vec<PathBuf> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|contents| {
+            contents
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once('=')?;
+                    (key.trim() == "expanded_dirs").then(|| {
+                        value.split('|').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+                    })
+                })
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+/// Persists every currently expanded nav-pane directory to settings.conf as
+/// a single `|`-joined `expanded_dirs` line, so `AppState::new()` can
+/// restore the same folders expanded on the next launch
+/// (`file_explorer::restore_expanded_dirs`).
+pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> std::io::Result<()> {
+    let joined = dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join("|");
+    crate::theme::save_setting_line(path, "expanded_dirs", &joined)
 }
 
 /// Reads `large_size` (points, `[FORMATTING]` section) from settings.conf —
@@ -731,19 +783,27 @@ impl AppState {
     pub fn new() -> Self {
         /*
          * Initialises the application with a single empty tab, the sidebar visible,
-         * the settings modal hidden, and the working directory defaulted per
-         * `default_working_directory()` (the user's home directory, since there's
-         * no persisted prior working directory to prefer). The file tree is
-         * populated immediately by scanning that directory for .docx files.
-         * Keybindings and vim mode are loaded from settings.conf, resolved via
-         * `settings_conf_path()` (next to the running executable, not the
-         * process's CWD — see that function's own doc comment).
+         * the settings modal hidden, and the working directory restored from
+         * settings.conf's `working_directory` line (`load_working_directory`),
+         * falling back to `default_working_directory()` (the user's home
+         * directory) when there's no persisted prior working directory. The
+         * file tree is populated by scanning that directory for .docx files,
+         * then persisted nav-pane expansion (`expanded_dirs`) is re-applied
+         * via `file_explorer::restore_expanded_dirs`. Keybindings and vim mode
+         * are loaded from settings.conf, resolved via `settings_conf_path()`
+         * (next to the running executable, not the process's CWD — see that
+         * function's own doc comment).
          */
-        let working_directory = default_working_directory();
-
-        let file_tree = scan_directory(&working_directory);
         let settings_path = settings_conf_path();
         let settings_path = settings_path.as_path();
+        let working_directory =
+            load_working_directory(settings_path).unwrap_or_else(default_working_directory);
+
+        let mut file_tree = scan_directory(&working_directory);
+        crate::file_explorer::restore_expanded_dirs(
+            &mut file_tree,
+            &load_expanded_dirs(settings_path),
+        );
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
         let theme = crate::theme::load_theme(settings_path);
@@ -2434,10 +2494,13 @@ impl AppState {
          * Re-roots the file explorer at `dir` (the "Open Folder" button) and
          * shows the sidebar, since picking a folder implies the user wants to
          * see it. Open tabs are untouched — this only affects the tree.
+         * Persists the new `working_directory` to settings.conf so the app
+         * reopens here next launch instead of resetting to the default.
          */
         self.working_directory = dir;
         self.sidebar_visible = true;
         self.refresh_file_tree();
+        let _ = save_working_directory(&settings_conf_path(), &self.working_directory);
     }
 
     // ── File explorer right-click menu (found_bugs.md Forgotten Implicit
@@ -6892,6 +6955,44 @@ mod tests {
         let dir = default_working_directory();
         assert_ne!(dir, PathBuf::from("."));
         assert!(dir.is_absolute());
+    }
+
+    // ── working_directory / expanded_dirs persistence (Task 4) ──────────────
+
+    #[test]
+    fn working_directory_round_trips_through_settings_conf() {
+        let dir = temp_test_dir("working_directory_round_trip");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "").unwrap();
+        let target = PathBuf::from("/some/nested/dir");
+        save_working_directory(&conf_path, &target).unwrap();
+        assert_eq!(load_working_directory(&conf_path), Some(target));
+    }
+
+    #[test]
+    fn expanded_dirs_round_trip_through_settings_conf() {
+        let dir = temp_test_dir("expanded_dirs_round_trip");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "").unwrap();
+        let dirs = vec![PathBuf::from("/a/b"), PathBuf::from("/a/c")];
+        save_expanded_dirs(&conf_path, &dirs).unwrap();
+        assert_eq!(load_expanded_dirs(&conf_path), dirs);
+    }
+
+    #[test]
+    fn load_working_directory_returns_none_when_key_missing() {
+        let dir = temp_test_dir("working_directory_missing_key");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "theme=dark\n").unwrap();
+        assert_eq!(load_working_directory(&conf_path), None);
+    }
+
+    #[test]
+    fn load_expanded_dirs_returns_empty_when_key_missing() {
+        let dir = temp_test_dir("expanded_dirs_missing_key");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "theme=dark\n").unwrap();
+        assert_eq!(load_expanded_dirs(&conf_path), Vec::<PathBuf>::new());
     }
 
     #[test]

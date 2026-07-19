@@ -146,6 +146,11 @@ impl FileExplorer {
                                 let p = path_clone.clone();
                                 state_clone.update(cx, |s, cx| {
                                     toggle_dir_expanded(&mut s.file_tree, &p);
+                                    let expanded = collect_expanded_dirs(&s.file_tree);
+                                    let _ = crate::state::save_expanded_dirs(
+                                        &crate::state::settings_conf_path(),
+                                        &expanded,
+                                    );
                                     cx.notify();
                                 });
                             })
@@ -864,6 +869,39 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
             }
             toggle_dir_expanded(children, target);
         }
+    }
+}
+
+/// Walks `tree` collecting the path of every currently-expanded directory
+/// (recursing into their children too), so the caller can persist the full
+/// expansion state to settings.conf (`state::save_expanded_dirs`).
+fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for node in tree {
+        if let FileNode::Dir { path, expanded, children, .. } = node {
+            if *expanded {
+                out.push(path.clone());
+                out.extend(collect_expanded_dirs(children));
+            }
+        }
+    }
+    out
+}
+
+/// Re-applies persisted expansion (`state::load_expanded_dirs`) onto a
+/// freshly scanned tree at startup. `scan_directory` always returns
+/// directories collapsed with empty `children`, so replaying
+/// `toggle_dir_expanded` for each persisted path both flips `expanded` to
+/// `true` and lazily populates `children` — the same on-demand scan a
+/// user's click would trigger. Paths are processed shallowest-first so a
+/// persisted child path can only be found once its parent has been expanded
+/// and its children populated (`toggle_dir_expanded` only recurses into
+/// children that already exist).
+pub(crate) fn restore_expanded_dirs(tree: &mut Vec<FileNode>, dirs: &[PathBuf]) {
+    let mut sorted = dirs.to_vec();
+    sorted.sort_by_key(|p| p.components().count());
+    for dir in &sorted {
+        toggle_dir_expanded(tree, dir);
     }
 }
 

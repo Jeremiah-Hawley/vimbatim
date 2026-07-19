@@ -348,7 +348,7 @@ pub fn save_theme_color_mode(path: &Path, mode: ThemeColorMode) -> std::io::Resu
     save_setting_line(path, "theme_color_mode", mode.conf_value())
 }
 
-fn save_setting_line(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
+pub(crate) fn save_setting_line(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
     let mut lines: Vec<String> = std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
