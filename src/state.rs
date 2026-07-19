@@ -1309,6 +1309,27 @@ impl AppState {
         }
     }
 
+    pub fn clear_formatting(&mut self) {
+        /*
+         * Clears formatting across the active selection if one exists,
+         * otherwise falls back to the current line (this codebase's
+         * pre-existing behavior for Clear/card-style operations with no
+         * selection). Root cause of the bug this method fixes: both call
+         * sites (ClearFormattingAction's keybind and the ribbon's Clear
+         * button) called `apply_formatting_to_line` unconditionally, which
+         * ignores `tab.selection` and only ever clears the cursor's own
+         * line — a multi-paragraph selection left every other paragraph
+         * still formatted.
+         */
+        let default_size = self.large_size_half_points;
+        let has_selection = self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false);
+        if has_selection {
+            self.apply_formatting_to_selection(FormatOp::ClearAll { default_size });
+        } else {
+            self.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+        }
+    }
+
     pub fn paste_text(&mut self, text: &str) {
         /*
          * Inserts clipboard text at cursor or replaces selection.
@@ -6855,6 +6876,43 @@ mod tests {
         state.apply_formatting_to_selection(FormatOp::Bold(true));
         state.apply_formatting_to_selection(FormatOp::Italic(true));
         assert_eq!(state.tabs[0].pending_format, Some(FormatOp::Italic(true)));
+    }
+
+    // ── clear_formatting: route to selection vs. current line ──────────────
+
+    #[test]
+    fn clear_formatting_spans_a_multi_paragraph_selection() {
+        // Bug: ClearFormattingAction always called apply_formatting_to_line,
+        // which only ever clears the cursor's own line — a selection
+        // spanning multiple paragraphs left the other paragraphs bold.
+        let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let content_len = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, content_len));
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+        for para in &state.tabs[0].paragraphs {
+            for run in &para.runs {
+                assert!(run.bold, "expected bold applied across every paragraph in the selection");
+            }
+        }
+
+        state.tabs[0].selection = Some((0, content_len));
+        state.clear_formatting();
+
+        for para in &state.tabs[0].paragraphs {
+            for run in &para.runs {
+                assert!(!run.bold, "expected bold cleared across every paragraph in the selection");
+            }
+        }
+    }
+
+    #[test]
+    fn clear_formatting_falls_back_to_current_line_with_no_selection() {
+        let paragraphs = vec![para_plain("one"), para_plain("two")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = None;
+        state.tabs[0].cursor = 5; // inside "two"
+        state.clear_formatting(); // should not panic, should behave like today's single-line clear
     }
 
     #[test]

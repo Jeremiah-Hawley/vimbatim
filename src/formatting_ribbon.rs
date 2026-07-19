@@ -455,8 +455,7 @@ impl FormattingRibbon {
                         // Clear: clear all formatting from the entire line.
                         FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
-                                let default_size = state.large_size_half_points;
-                                state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+                                state.clear_formatting();
                             });
                             cx.notify();
                         }

@@ -228,8 +228,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ClearFormattingAction, cx| {
             s.update(cx, |st, cx| {
-                let default_size = st.large_size_half_points;
-                st.apply_formatting_to_line(FormatOp::ClearAll { default_size });
+                st.clear_formatting();
                 cx.notify();
             });
         });
