@@ -102,16 +102,14 @@ fn sync_insert_str_impl(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, tex
             // inheriting whatever's already at the insertion point — still
             // driven one *character* at a time (matching sync_insert_str's
             // own "simple and correct" tradeoff above) so a `'\n'` inside a
-            // run's text (shouldn't happen — see below — but costs nothing
-            // extra to handle) still splits the paragraph structurally via
-            // the exact same primitive `sync_insert_char` uses, instead of
-            // corrupting the "no run's text contains '\n'" invariant the
-            // rest of this module relies on. In practice `rich_clipboard`'s
-            // `decode()` only ever succeeds for a single-paragraph copy —
-            // `runs_in_range` never emits '\n' as part of any run's text,
-            // so a multi-paragraph copy's runs undershoot the plain text's
-            // length and `decode` rejects it outright — so this never
-            // actually fires on data produced by this app's own `encode`.
+            // run's text splits the paragraph structurally via the exact
+            // same primitive `sync_insert_char` uses, instead of corrupting
+            // the "no run's text contains '\n'" invariant the rest of this
+            // module relies on. This *does* fire on data produced by this
+            // app's own `encode`/`decode`: `runs_in_range` emits a dedicated
+            // `"\n"` run for every paragraph boundary a copied selection
+            // crosses, so a multi-paragraph paste always sends at least one
+            // run through this branch.
             for run in runs {
                 for ch in run.text.chars() {
                     if ch == '\n' {
@@ -414,13 +412,19 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
 }
 
 /// Extracts the runs (with their own text sliced to the overlap) covering
-/// byte range `[start, end)` across `paragraphs`, in document order.
-/// Paragraph boundaries contribute a single `\n` to the cumulative offset,
-/// mirroring `apply_formatting`'s own walk.
+/// byte range `[start, end)` across `paragraphs`, in document order. A
+/// paragraph-separating `'\n'` crossed by the range is itself emitted as its
+/// own unformatted `Run` (text `"\n"`) — the plain text this is meant to
+/// pair with (e.g. `AppState::copy_selection`'s `tab.content[start..end]`)
+/// contains that literal byte for any multi-paragraph selection, and
+/// `rich_clipboard::decode` requires the returned runs' lengths to sum to
+/// exactly that text's length, so omitting it silently broke every
+/// multi-paragraph copy (see git history for the regression this fixes).
 pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<Run> {
     let mut out = Vec::new();
     let mut cumulative = 0usize;
-    for para in paragraphs {
+    let last_para_idx = paragraphs.len().saturating_sub(1);
+    for (para_idx, para) in paragraphs.iter().enumerate() {
         for run in &para.runs {
             let run_start = cumulative;
             let run_end = cumulative + run.text.len();
@@ -435,7 +439,14 @@ pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<
             }
             cumulative = run_end;
         }
-        cumulative += 1; // the paragraph-separating '\n'
+        if para_idx != last_para_idx {
+            // cumulative is now this paragraph's end; the separating '\n'
+            // occupies the single byte [cumulative, cumulative + 1).
+            if start <= cumulative && cumulative < end {
+                out.push(Run { text: "\n".to_string(), ..Run::default() });
+            }
+            cumulative += 1;
+        }
     }
     out
 }
@@ -1103,13 +1114,58 @@ mod tests {
             para(vec![Run { text: "hello ".into(), bold: true, ..Run::default() }]),
             para(vec![Run { text: "world".into(), italic: true, ..Run::default() }]),
         ];
-        // "hello \nworld" — select "lo \nwo" (indices 3..9)
+        // "hello \nworld" — select "lo \nwo" (indices 3..9), which crosses
+        // the paragraph-separating '\n' at index 6 — it must come back as
+        // its own unformatted run so the returned runs' lengths sum to 6
+        // (the full "lo \nwo"), matching what copy_selection's plain text
+        // actually contains.
         let result = runs_in_range(&paragraphs, 3, 9);
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 3);
         assert_eq!(result[0].text, "lo ");
         assert!(result[0].bold);
-        assert_eq!(result[1].text, "wo");
-        assert!(result[1].italic);
+        assert_eq!(result[1], Run { text: "\n".into(), ..Run::default() });
+        assert_eq!(result[2].text, "wo");
+        assert!(result[2].italic);
+    }
+
+    #[test]
+    fn test_runs_in_range_single_paragraph_selection_has_no_newline_run() {
+        // A selection that never crosses a paragraph boundary shouldn't gain
+        // a spurious '\n' run.
+        let paragraphs = vec![para(vec![Run { text: "hello world".into(), bold: true, ..Run::default() }])];
+        let result = runs_in_range(&paragraphs, 0, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "hello");
+    }
+
+    #[test]
+    fn test_runs_in_range_selection_stopping_exactly_at_paragraph_end_excludes_newline() {
+        // end is exclusive and lands exactly on the paragraph boundary (not
+        // past it) — the '\n' byte itself is [end, end+1) here, so it must
+        // NOT be included.
+        let paragraphs = vec![
+            para(vec![run("hello")]),
+            para(vec![run("world")]),
+        ];
+        let result = runs_in_range(&paragraphs, 0, 5); // "hello", stops before '\n'
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "hello");
+    }
+
+    #[test]
+    fn test_runs_in_range_spanning_three_paragraphs_emits_two_newline_runs() {
+        let paragraphs = vec![
+            para(vec![Run { text: "one".into(), bold: true, ..Run::default() }]),
+            para(vec![run("two")]),
+            para(vec![Run { text: "three".into(), highlight: true, ..Run::default() }]),
+        ];
+        // "one\ntwo\nthree" (13 bytes) — whole document.
+        let result = runs_in_range(&paragraphs, 0, 13);
+        assert_eq!(result.iter().map(|r| r.text.len()).sum::<usize>(), 13);
+        assert_eq!(
+            result.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            vec!["one", "\n", "two", "\n", "three"]
+        );
     }
 
     #[test]

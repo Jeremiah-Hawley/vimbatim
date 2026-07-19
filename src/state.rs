@@ -5912,6 +5912,59 @@ mod tests {
         assert_eq!(state.tabs[0].content, "hello world"); // unchanged
     }
 
+    // ── Rich clipboard round-trip: copy_selection_runs -> encode_with_lengths
+    // -> decode -> insert_str_with_runs, end-to-end, no GPUI involved ────────
+
+    #[test]
+    fn test_multi_paragraph_copy_paste_round_trip_preserves_per_line_formatting() {
+        // Regression test: runs_in_range never emitted a run for the
+        // paragraph-separating '\n', so the summed run lengths came up one
+        // byte short of the plain text for every multi-paragraph selection,
+        // and rich_clipboard::decode (which requires an exact match) rejected
+        // it outright -- silently falling back to plain-text paste and
+        // losing all per-line formatting. That defeats this app's primary
+        // "copy a formatted card spanning several lines" use case; only
+        // single-paragraph copies worked before this fix.
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "bold line".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            para_plain("plain line"),
+            Paragraph {
+                runs: vec![Run { text: "hi line".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let mut source = make_state_with_paragraphs(paragraphs, 0);
+        let doc_len = source.tabs[0].content.len();
+        source.tabs[0].selection = Some((0, doc_len)); // whole doc, crossing both paragraph boundaries
+
+        let plain_text = source.copy_selection().unwrap();
+        let runs = source.copy_selection_runs().unwrap();
+        let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+        let decoded = crate::rich_clipboard::decode(&metadata, &plain_text);
+        assert!(decoded.is_some(), "decode() rejected a multi-paragraph copy -- the bug this test guards against");
+        let decoded_runs = decoded.unwrap();
+
+        let mut dest = make_state("", 0, None);
+        dest.insert_str_with_runs(&plain_text, &decoded_runs);
+
+        assert_eq!(dest.tabs[0].content, plain_text);
+        assert_eq!(dest.tabs[0].paragraphs.len(), 3);
+        assert_eq!(dest.tabs[0].paragraphs[0].runs[0].text, "bold line");
+        assert!(dest.tabs[0].paragraphs[0].runs[0].bold);
+        assert_eq!(dest.tabs[0].paragraphs[1].runs[0].text, "plain line");
+        assert!(!dest.tabs[0].paragraphs[1].runs[0].bold);
+        assert_eq!(dest.tabs[0].paragraphs[2].runs[0].text, "hi line");
+        assert!(dest.tabs[0].paragraphs[2].runs[0].highlight);
+        assert_eq!(dest.tabs[0].paragraphs[2].runs[0].highlight_color, "yellow");
+    }
+
     // ── insert_str ────────────────────────────────────────────────────────────
 
     #[test]
