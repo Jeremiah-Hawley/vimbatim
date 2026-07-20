@@ -281,6 +281,7 @@ impl Render for TabBar {
                             // stop_propagation keeps clicks inside it from
                             // ever reaching here).
                             this.renaming_tab_id = None;
+                            this.rename_buffer.clear();
                             this.state.update(cx, |s, cx| {
                                 s.set_active_tab(idx);
                                 cx.notify();
@@ -315,6 +316,13 @@ impl Render for TabBar {
                     .child(title_area)
                     // Close button (×) — stop_propagation prevents the click from
                     // bubbling to the parent tab div's on_click (set_active_tab).
+                    // GPUI's on_click registers its own internal MouseDownEvent
+                    // listener that does NOT stop propagation (it ignores cx),
+                    // so the mouse-down phase alone would otherwise still reach
+                    // the parent tab div's on_mouse_down (switch/rename) before
+                    // this on_click's request_close_tab fires. Explicit
+                    // on_mouse_down + stop_propagation here closes that gap —
+                    // same pattern as the rename-input div above.
                     .child(
                         div()
                             .id(close_id)
@@ -328,6 +336,7 @@ impl Render for TabBar {
                             .text_color(rgb(p.text_muted))
                             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                             .active(move |s| s.bg(rgb(p.chrome_active)))
+                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
