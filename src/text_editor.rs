@@ -160,6 +160,22 @@ pub struct TextEditor {
     /// renders that don't change the document — see `RowCache`. `None`
     /// before the first render.
     row_cache: Option<RowCache>,
+    /// Per-tab scroll offsets, keyed by the tab's stable `id` (not its
+    /// positional index — matches the convention `tab_bar.rs` already uses
+    /// for keying GPUI element ids, so reordering/closing other tabs can't
+    /// scramble which offset belongs to which tab). There is only one
+    /// `scroll_handle`/`uniform_list_scroll_handle` pair for the whole
+    /// window (see `main_window.rs`, the sole `TextEditor::new` call), so
+    /// without this map every tab shares one scroll position and switching
+    /// tabs makes the old tab's scroll position "leak" into the new one.
+    /// Saved/restored at the top of `render()` whenever the active tab
+    /// changes. A tab with no entry yet (never visited) falls back to
+    /// `Point::default()`, i.e. scrolled to the top.
+    tab_scroll_offsets: std::collections::HashMap<usize, Point<Pixels>>,
+    /// The tab `id` seen on the previous render, used to detect a tab
+    /// switch at the top of the next `render()` call. `None` only before
+    /// the very first render.
+    last_seen_active_tab: Option<usize>,
 }
 
 impl TextEditor {
@@ -184,6 +200,8 @@ impl TextEditor {
             auto_scroller,
             macro_at_pending: false,
             row_cache: None,
+            tab_scroll_offsets: std::collections::HashMap::new(),
+            last_seen_active_tab: None,
         }
     }
 
@@ -797,6 +815,26 @@ impl Render for TextEditor {
         });
         if should_scroll {
             self.scroll_to_cursor_centered(cx);
+        }
+
+        // Tab-scroll isolation: this view has a single shared `scroll_handle`
+        // for the whole window (see the struct-field doc comment above), so
+        // without this check the previously active tab's scroll offset just
+        // stays put when the user switches tabs, "leaking" into whichever
+        // tab becomes active. Detect the switch by comparing the active
+        // tab's stable `id` (not its positional index) against what was
+        // seen last render: on a switch, stash the outgoing tab's current
+        // offset under its old id, then restore the incoming tab's saved
+        // offset — or `Point::default()` (scrolled to top) if this is the
+        // first time that tab has ever been active.
+        let active_tab_id = self.state.read(cx).tabs.get(self.state.read(cx).active_tab).map(|t| t.id);
+        if self.last_seen_active_tab != active_tab_id {
+            if let Some(prev_id) = self.last_seen_active_tab {
+                self.tab_scroll_offsets.insert(prev_id, self.scroll_handle.offset());
+            }
+            let restore = active_tab_id.and_then(|id| self.tab_scroll_offsets.get(&id)).copied().unwrap_or_default();
+            self.scroll_handle.set_offset(restore);
+            self.last_seen_active_tab = active_tab_id;
         }
 
         let state = self.state.read(cx);
