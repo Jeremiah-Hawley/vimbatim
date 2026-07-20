@@ -496,10 +496,23 @@ impl Render for SettingsModal {
                                         .border_color(rgb(0x464647))
                                         .child(
                                             div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(rgb(0xd4d4d4))
-                                                .child("Vim Mode"),
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(4.0))
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(rgb(0xd4d4d4))
+                                                        .child("Vim Mode"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(p.text_muted))
+                                                        .max_w(px(320.0))
+                                                        .child("Enables modal editing (Normal/Insert/Visual modes and motions), similar to the Vim text editor."),
+                                                ),
                                         )
                                         .child(
                                             div()
