@@ -1093,6 +1093,23 @@ impl AppState {
         }
     }
 
+    pub fn rename_tab(&mut self, id: usize, new_title: String) {
+        /*
+         * Renames the tab with the given stable id (double-click rename in
+         * TabBar). Looks up by id rather than index so the caller doesn't
+         * need to worry about tabs having shifted since the rename was
+         * armed. A blank/whitespace-only title is silently ignored — real
+         * vim/GUI editors don't let a document lose its name to an empty
+         * text field.
+         */
+        if new_title.trim().is_empty() {
+            return;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+            tab.title = new_title;
+        }
+    }
+
     fn push_undo_snapshot(&mut self) {
         /*
          * Pushes the active tab's current `content` onto its undo stack
@@ -5839,6 +5856,29 @@ mod tests {
         state.set_active_tab(99);
 
         assert!(!state.pending_focus_editor);
+    }
+
+    // ── rename_tab (double-click tab rename) ────────────────────────────
+
+    #[test]
+    fn rename_tab_updates_title_by_id() {
+        let mut state = make_state("hello", 0, None);
+        let id = state.tabs[state.active_tab].id;
+
+        state.rename_tab(id, "My Renamed Tab".to_string());
+
+        assert_eq!(state.tabs[state.active_tab].title, "My Renamed Tab");
+    }
+
+    #[test]
+    fn rename_tab_ignores_empty_title() {
+        let mut state = make_state("hello", 0, None);
+        let id = state.tabs[state.active_tab].id;
+        let original = state.tabs[state.active_tab].title.clone();
+
+        state.rename_tab(id, "".to_string());
+
+        assert_eq!(state.tabs[state.active_tab].title, original);
     }
 
     #[test]

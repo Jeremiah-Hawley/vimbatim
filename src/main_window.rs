@@ -62,7 +62,7 @@ impl MainWindow {
          */
         let state = cx.new(|_cx| AppState::new());
 
-        let tab_bar           = cx.new(|_cx| TabBar::new(state.clone()));
+        let tab_bar           = cx.new(|cx| TabBar::new(state.clone(), cx));
         let app_toolbar       = cx.new(|_cx| AppToolbar::new(state.clone()));
         let formatting_ribbon = cx.new(|cx| FormattingRibbon::new(state.clone(), cx));
         let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));

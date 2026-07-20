@@ -43,15 +43,72 @@ impl Render for TabDragPayload {
 /// the last tab, an empty drag region, and an "×" close-app button on the far right.
 pub struct TabBar {
     state: Entity<AppState>,
+    /// Id of the tab currently being renamed via double-click, if any.
+    /// `None` means every tab renders its plain (non-editable) title.
+    renaming_tab_id: Option<usize>,
+    /// The in-progress new title while `renaming_tab_id` is `Some` — not
+    /// written back to `AppState` until Enter commits it (`Escape` discards
+    /// it instead).
+    rename_buffer: String,
+    /// Claims keyboard focus for the inline rename input so `on_key_down`
+    /// actually receives keystrokes — mirrors `settings_modal.rs`'s
+    /// `focus_handle`/`track_focus`/`on_key_down` capture pattern, the only
+    /// working precedent for a focus-driven text-capture input in this
+    /// codebase (see `handle_rename_key`).
+    rename_focus: FocusHandle,
 }
 
 impl TabBar {
-    pub fn new(state: Entity<AppState>) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         /*
          * Constructs a TabBar backed by the shared AppState entity. All tab data
-         * lives in AppState so the bar is purely a rendering layer.
+         * lives in AppState so the bar is purely a rendering layer. Takes `cx`
+         * (matching `FormattingRibbon::new`'s and `SettingsModal::new`'s existing
+         * precedent) so it can mint its own `rename_focus` handle up front.
          */
-        TabBar { state }
+        TabBar {
+            state,
+            renaming_tab_id: None,
+            rename_buffer: String::new(),
+            rename_focus: cx.focus_handle(),
+        }
+    }
+
+    /// Key handler for the inline rename input, armed via `track_focus` +
+    /// `on_key_down` once double-click sets `renaming_tab_id`. Mirrors
+    /// `state.rs`'s `capture_vim_line_input` state machine (Escape cancels,
+    /// Enter commits, Backspace pops, everything else resolves to a literal
+    /// char via `vim_find_target_char` — the same helper vim's own
+    /// Command/Search line-input uses, so shifted punctuation etc. behaves
+    /// identically here) — reimplemented locally rather than shared since
+    /// that state machine lives on `AppState`/per-tab fields, and this
+    /// buffer is transient UI state that belongs on `TabBar` itself.
+    fn handle_rename_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        match ks.key.as_str() {
+            "escape" => {
+                self.renaming_tab_id = None;
+                self.rename_buffer.clear();
+            }
+            "enter" => {
+                if let Some(id) = self.renaming_tab_id.take() {
+                    let title = std::mem::take(&mut self.rename_buffer);
+                    self.state.update(cx, |s, cx| {
+                        s.rename_tab(id, title);
+                        cx.notify();
+                    });
+                }
+            }
+            "backspace" => {
+                self.rename_buffer.pop();
+            }
+            _ => {
+                if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                    self.rename_buffer.push(c);
+                }
+            }
+        }
+        cx.notify();
     }
 }
 
@@ -81,6 +138,9 @@ impl Render for TabBar {
         let tabs = state.tabs.clone();
         let active_idx = state.active_tab;
         let _ = state;
+        let renaming_tab_id = self.renaming_tab_id;
+        let rename_buffer = self.rename_buffer.clone();
+        let rename_focus = self.rename_focus.clone();
 
         let bar = div()
             .flex()
@@ -122,6 +182,48 @@ impl Render for TabBar {
                 // state when tabs are removed and remaining ones shift positions.
                 let tab_id = ElementId::named_usize("tab", tab.id);
                 let close_id = ElementId::named_usize("tab-close", tab.id);
+                let rename_input_id = ElementId::named_usize("tab-rename-input", tab.id);
+                // Raw (un-prefixed) title — `title` above may carry a "● "
+                // modified-indicator prefix, which the rename buffer should
+                // never start pre-populated with.
+                let tab_id_for_rename = tab.id;
+                let tab_title_for_rename = tab.title.clone();
+
+                // While this tab is being renamed, swap its title label for
+                // a focused, editable input; every other tab keeps the
+                // plain (unclickable-for-typing) title div. Both arms are
+                // boxed into AnyElement so the if/else can return one type —
+                // mirrors settings_modal.rs's `render_action_row` (its
+                // `right_side: AnyElement` local), the working precedent for
+                // this exact "swap a label for a focus-driven input" shape.
+                let is_renaming = renaming_tab_id == Some(tab.id);
+                let title_area: AnyElement = if is_renaming {
+                    div()
+                        .id(rename_input_id)
+                        .track_focus(&rename_focus)
+                        .on_key_down(cx.listener(Self::handle_rename_key))
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_sm()
+                        .text_color(tab_text)
+                        // Stop the mouse-down from bubbling to the parent tab
+                        // div's own on_mouse_down above, which would
+                        // otherwise immediately re-trigger set_active_tab or
+                        // (on a stray double-click) re-arm renaming.
+                        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                        .child(format!("{rename_buffer}\u{258f}")) // trailing "▏" as a simple text-cursor stand-in
+                        .into_any_element()
+                } else {
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_sm()
+                        .text_color(tab_text)
+                        .child(title.clone())
+                        .into_any_element()
+                };
 
                 div()
                     .id(tab_id)
@@ -161,12 +263,29 @@ impl Render for TabBar {
                             }
                         }),
                     )
-                    // Click tab body → switch to this tab (fires only when not dragging).
-                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.set_active_tab(idx);
-                            cx.notify();
-                        });
+                    // Click tab body → switch to this tab; double-click (or
+                    // more — matches file_explorer.rs's own `>= 2` double-click
+                    // threshold) instead arms inline rename mode and claims
+                    // keyboard focus for `rename_focus` so `handle_rename_key`
+                    // starts receiving keystrokes.
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        if ev.click_count >= 2 {
+                            this.renaming_tab_id = Some(tab_id_for_rename);
+                            this.rename_buffer = tab_title_for_rename.clone();
+                            this.rename_focus.clone().focus(window, cx);
+                        } else {
+                            // Switching tabs abandons any in-progress rename
+                            // on another tab (no separate blur-tracking
+                            // machinery — this covers the actual reachable
+                            // case, since the rename input's own
+                            // stop_propagation keeps clicks inside it from
+                            // ever reaching here).
+                            this.renaming_tab_id = None;
+                            this.state.update(cx, |s, cx| {
+                                s.set_active_tab(idx);
+                                cx.notify();
+                            });
+                        }
                         cx.notify();
                     }))
                     // Begin drag — carry the source index and title as payload.
@@ -188,11 +307,12 @@ impl Render for TabBar {
                             cx.new(|_| ghost)
                         },
                     )
-                    // Tab title label. `.truncate()` (overflow_hidden +
+                    // Tab title label (or, mid-rename, the inline input
+                    // built above). `.truncate()` (overflow_hidden +
                     // whitespace_nowrap + text_ellipsis) clips the back of a
                     // long name with "…" instead of wrapping it onto a
                     // second line.
-                    .child(div().min_w_0().flex_1().truncate().text_sm().text_color(tab_text).child(title))
+                    .child(title_area)
                     // Close button (×) — stop_propagation prevents the click from
                     // bubbling to the parent tab div's on_click (set_active_tab).
                     .child(
