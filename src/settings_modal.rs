@@ -489,7 +489,7 @@ impl Render for SettingsModal {
                                     div()
                                         .flex()
                                         .flex_row()
-                                        .items_center()
+                                        .items_start()
                                         .justify_between()
                                         .pb(px(8.0))
                                         .border_b_1()
