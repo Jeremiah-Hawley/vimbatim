@@ -1093,6 +1093,25 @@ impl AppState {
         }
     }
 
+    pub fn next_tab(&mut self) {
+        /*
+         * Cycles to the next tab (Ctrl+Tab), wrapping from the last tab back
+         * to the first. Routes through `set_active_tab` so keyboard focus
+         * gets reclaimed the same way clicking a tab does.
+         */
+        if self.tabs.is_empty() { return; }
+        self.set_active_tab((self.active_tab + 1) % self.tabs.len());
+    }
+
+    pub fn prev_tab(&mut self) {
+        /*
+         * Cycles to the previous tab (Ctrl+Shift+Tab), wrapping from the
+         * first tab back to the last.
+         */
+        if self.tabs.is_empty() { return; }
+        self.set_active_tab((self.active_tab + self.tabs.len() - 1) % self.tabs.len());
+    }
+
     pub fn rename_tab(&mut self, id: usize, new_title: String) {
         /*
          * Renames the tab with the given stable id (double-click rename in
@@ -5984,6 +6003,32 @@ mod tests {
         state.close_tab(0);
 
         assert!(state.pending_focus_editor);
+    }
+
+    // ── next_tab / prev_tab (Task 9: Ctrl+Tab / Ctrl+Shift+Tab cycling) ─────
+
+    #[test]
+    fn next_tab_wraps_around() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.new_tab(); // 3 tabs, active_tab at the last-created (index 2)
+        state.set_active_tab(2);
+
+        state.next_tab();
+
+        assert_eq!(state.active_tab, 0);
+    }
+
+    #[test]
+    fn prev_tab_wraps_around() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.new_tab();
+        state.set_active_tab(0);
+
+        state.prev_tab();
+
+        assert_eq!(state.active_tab, 2);
     }
 
     // ── pending_close (Task 6: confirm before closing a dirty tab/app) ──────

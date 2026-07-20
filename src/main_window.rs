@@ -9,8 +9,8 @@ use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
     BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
     CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction, FindAction,
-    FindReplaceAction, HatAction, HighlightAction, NewTabAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
+    FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
+    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
@@ -255,6 +255,16 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ZoomResetAction, cx| {
             s.update(cx, |st, cx| { st.zoom_reset(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &NextTabAction, cx| {
+            s.update(cx, |st, cx| { st.next_tab(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &PrevTabAction, cx| {
+            s.update(cx, |st, cx| { st.prev_tab(); cx.notify(); });
         });
 
         let s = state.clone();

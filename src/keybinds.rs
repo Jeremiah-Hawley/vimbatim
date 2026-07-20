@@ -204,6 +204,8 @@ pub enum KeybindAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    NextTab,
+    PrevTab,
 }
 
 impl KeybindAction {
@@ -217,6 +219,7 @@ impl KeybindAction {
             Highlight,
             DeleteTags, StartTimer, OpenStats, CiteFromLink, Wikifi,
             ZoomIn, ZoomOut, ZoomReset,
+            NextTab, PrevTab,
         ]
     }
 
@@ -259,6 +262,8 @@ impl KeybindAction {
             ZoomIn => "Zoom In",
             ZoomOut => "Zoom Out",
             ZoomReset => "Reset Zoom",
+            NextTab => "Next Tab",
+            PrevTab => "Previous Tab",
         }
     }
 
@@ -267,7 +272,7 @@ impl KeybindAction {
         use KeybindCategory as C;
         match self {
             ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace
-                | ZoomIn | ZoomOut | ZoomReset => C::General,
+                | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab => C::General,
             Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
             PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Emphasis => C::CardStyles,
@@ -316,6 +321,8 @@ impl KeybindAction {
             ZoomIn => "zoom_in",
             ZoomOut => "zoom_out",
             ZoomReset => "zoom_reset",
+            NextTab => "next_tab",
+            PrevTab => "prev_tab",
         }
     }
 
@@ -366,6 +373,12 @@ impl KeybindAction {
             ZoomIn => KeyCombo::new(true, false, false, "="),
             ZoomOut => KeyCombo::new(true, false, false, "-"),
             ZoomReset => KeyCombo::new(true, false, false, "0"),
+            // GPUI reports the Tab key as the literal string "tab" on both
+            // its Linux (`keystroke_from_xkb`, `Keysym::Tab => "tab"`) and
+            // macOS (`gpui_macos/src/events.rs`) keystroke-naming code —
+            // verified in the vendored crate before picking this literal.
+            NextTab => KeyCombo::new(true, false, false, "tab"),
+            PrevTab => KeyCombo::new(true, true, false, "tab"),
         }
     }
 
@@ -529,7 +542,7 @@ pub fn load_vim_enabled(path: &Path) -> bool {
 }
 
 // Every bindable action needs its own zero-sized GPUI action struct — this
-// is the one place all 35 are declared. `main_window.rs` registers a small
+// is the one place all 37 are declared. `main_window.rs` registers a small
 // `.on_action` handler per struct; `rebuild_keymap` below is the only place
 // that needs to know which struct corresponds to which `KeybindAction`.
 actions!(
@@ -544,6 +557,7 @@ actions!(
         HighlightAction,
         DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
         ZoomInAction, ZoomOutAction, ZoomResetAction,
+        NextTabAction, PrevTabAction,
     ]
 );
 
@@ -600,6 +614,8 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         KeyBinding::new(&ks(ZoomIn), ZoomInAction, None),
         KeyBinding::new(&ks(ZoomOut), ZoomOutAction, None),
         KeyBinding::new(&ks(ZoomReset), ZoomResetAction, None),
+        KeyBinding::new(&ks(NextTab), NextTabAction, None),
+        KeyBinding::new(&ks(PrevTab), PrevTabAction, None),
     ]);
 }
 
