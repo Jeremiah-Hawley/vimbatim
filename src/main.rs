@@ -13,6 +13,7 @@ mod color_picker;
 mod file_explorer;
 mod wikifi_export;
 mod settings_modal;
+mod close_confirm;
 mod main_window;
 mod theme;
 

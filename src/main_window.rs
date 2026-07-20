@@ -2,6 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_toolbar::AppToolbar;
+use crate::close_confirm::CloseConfirm;
 use crate::document_ops::FormatOp;
 use crate::file_explorer::{FileExplorer, SidebarResizePayload};
 use crate::formatting_ribbon::FormattingRibbon;
@@ -45,6 +46,7 @@ pub struct MainWindow {
     text_editor: Entity<TextEditor>,
     file_explorer: Entity<FileExplorer>,
     settings_modal: Entity<SettingsModal>,
+    close_confirm: Entity<CloseConfirm>,
 }
 
 impl MainWindow {
@@ -66,6 +68,7 @@ impl MainWindow {
         let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));
         let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
+        let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
 
         Self::register_global_actions(state.clone(), cx);
 
@@ -77,6 +80,7 @@ impl MainWindow {
             text_editor,
             file_explorer,
             settings_modal,
+            close_confirm,
         }
     }
 
@@ -99,8 +103,13 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &CloseTabAction, cx| {
+            // Routes through request_close_tab (not close_tab directly) so
+            // the Ctrl+W keybind gets the same Save/Discard/Cancel dialog
+            // as the tab bar's × button (tab_bar.rs) when the tab is dirty
+            // — otherwise this keybind would be a silent-discard backdoor
+            // around the whole point of this confirmation flow.
             let idx = s.read(cx).active_tab;
-            s.update(cx, |st, cx| { st.close_tab(idx); cx.notify(); });
+            s.update(cx, |st, cx| { st.request_close_tab(idx); cx.notify(); });
         });
 
         let s = state.clone();
@@ -360,6 +369,7 @@ impl Render for MainWindow {
          */
         let sidebar_visible  = self.state.read(cx).sidebar_visible;
         let settings_visible = self.state.read(cx).settings_visible;
+        let pending_close    = self.state.read(cx).pending_close;
         let theme = self.state.read(cx).theme;
         let p = palette(theme);
 
@@ -420,5 +430,10 @@ impl Render for MainWindow {
             // ── Settings modal overlay ─────────────────────────────────────
             // Added last so it paints on top of all other children
             .when(settings_visible, |d| d.child(self.settings_modal.clone()))
+            // ── Close-confirm overlay ───────────────────────────────────────
+            // Mounted only while a tab-close or app-close is awaiting a
+            // Save/Discard/Cancel answer; painted after the settings modal
+            // so it's still on top even if somehow both were open at once.
+            .when(pending_close.is_some(), |d| d.child(self.close_confirm.clone()))
     }
 }

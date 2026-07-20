@@ -470,6 +470,17 @@ pub struct FileContextMenu {
     pub confirming_delete: bool,
 }
 
+/// A close action (tab-close `×` or the app-close `×`) awaiting the user's
+/// answer to "save changes before closing?", set by `request_close_tab`/
+/// `request_close_app` whenever the target has unsaved changes. `None` means
+/// no confirmation is in flight — `close_confirm.rs` renders nothing in that
+/// case, and `MainWindow` only mounts it at all while this is `Some`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PendingClose {
+    Tab(usize),
+    App,
+}
+
 /// The shared application state, owned as a GPUI Model and read/written by all views.
 pub struct AppState {
     pub tabs: Vec<Tab>,
@@ -498,6 +509,9 @@ pub struct AppState {
     /// Nav button, and a Files/Nav button pair in the sidebar's own header.
     pub sidebar_mode: SidebarMode,
     pub settings_visible: bool,
+    /// Set while a tab-close or app-close is waiting on the user's
+    /// save/discard/cancel answer (`close_confirm.rs`). See `PendingClose`.
+    pub pending_close: Option<PendingClose>,
     pub working_directory: PathBuf,
     pub file_tree: Vec<FileNode>,
     /// Whether vim keybindings are active, loaded from settings.conf's
@@ -820,6 +834,7 @@ impl AppState {
             file_context_menu: None,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
+            pending_close: None,
             working_directory,
             file_tree,
             vim_enabled,
@@ -965,6 +980,65 @@ impl AppState {
         // Harmless when the active tab didn't actually change: GPUI's
         // `focus()` is a no-op if the handle is already focused.
         self.pending_focus_editor = true;
+    }
+
+    /// Entry point for the tab-bar's `×` button. Closes the tab immediately
+    /// when it has no unsaved changes (unchanged behavior); otherwise arms
+    /// `pending_close` so `close_confirm.rs` can ask Save/Discard/Cancel
+    /// instead of silently dropping edits.
+    pub fn request_close_tab(&mut self, idx: usize) {
+        if self.tabs.get(idx).map(|t| t.is_modified).unwrap_or(false) {
+            self.pending_close = Some(PendingClose::Tab(idx));
+        } else {
+            self.close_tab(idx);
+        }
+    }
+
+    /// Entry point for the app-close `×`. When any tab has unsaved changes,
+    /// arms `pending_close` so the confirm dialog can show. Otherwise
+    /// resolves it straight back to `None` via `confirm_close_discard` —
+    /// the GPUI caller reads "pending_close is None right after this call
+    /// returns" as its own signal to call `cx.quit()` immediately, since
+    /// this GPUI-free layer has no way to quit the app itself.
+    pub fn request_close_app(&mut self) {
+        self.pending_close = Some(PendingClose::App);
+        if !self.tabs.iter().any(|t| t.is_modified) {
+            self.confirm_close_discard();
+        }
+    }
+
+    /// Resolves the pending close by saving first: the target tab (or every
+    /// tab, for an app-close) via `save_tab`, then closing it (tab-close
+    /// only — an app-close still leaves the actual quitting to the caller).
+    pub fn confirm_close_save(&mut self) {
+        match self.pending_close.take() {
+            Some(PendingClose::Tab(idx)) => {
+                let _ = self.save_tab(idx);
+                self.close_tab(idx);
+            }
+            Some(PendingClose::App) => {
+                for idx in 0..self.tabs.len() {
+                    let _ = self.save_tab(idx);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Resolves the pending close by discarding unsaved changes: closes the
+    /// target tab without saving (or, for an app-close, just clears
+    /// `pending_close` — no tabs to remove, the caller quits).
+    pub fn confirm_close_discard(&mut self) {
+        match self.pending_close.take() {
+            Some(PendingClose::Tab(idx)) => self.close_tab(idx),
+            Some(PendingClose::App) | None => {}
+        }
+    }
+
+    /// Backs out of a pending close (Cancel button, or the confirm dialog's
+    /// backdrop click) — leaves everything untouched.
+    pub fn cancel_close(&mut self) {
+        self.pending_close = None;
     }
 
     pub fn move_tab(&mut self, from: usize, to: usize) {
@@ -5684,6 +5758,7 @@ mod tests {
             file_context_menu: None,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
+            pending_close: None,
             working_directory: std::path::PathBuf::from("."),
             file_tree: vec![],
             vim_enabled: true,
@@ -5808,6 +5883,114 @@ mod tests {
         state.close_tab(0);
 
         assert!(state.pending_focus_editor);
+    }
+
+    // ── pending_close (Task 6: confirm before closing a dirty tab/app) ──────
+
+    #[test]
+    fn request_close_tab_shows_confirm_when_modified() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs[0].is_modified = true;
+
+        state.request_close_tab(0);
+
+        assert_eq!(state.pending_close, Some(PendingClose::Tab(0)));
+        assert_eq!(state.tabs.len(), 1); // not yet closed
+    }
+
+    #[test]
+    fn request_close_tab_closes_immediately_when_unmodified() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.tabs[0].is_modified = false;
+
+        state.request_close_tab(0);
+
+        assert_eq!(state.pending_close, None);
+        assert_eq!(state.tabs.len(), 1); // closed immediately
+    }
+
+    #[test]
+    fn confirm_close_discard_closes_tab_without_saving() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.tabs[0].is_modified = true;
+        state.request_close_tab(0);
+
+        state.confirm_close_discard();
+
+        assert_eq!(state.pending_close, None);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn cancel_close_leaves_tab_open() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs[0].is_modified = true;
+
+        state.request_close_tab(0);
+        state.cancel_close();
+
+        assert_eq!(state.pending_close, None);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn request_close_app_shows_confirm_when_any_tab_modified() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.tabs[0].is_modified = true; // the *other* (inactive) tab is dirty
+
+        state.request_close_app();
+
+        assert_eq!(state.pending_close, Some(PendingClose::App));
+    }
+
+    #[test]
+    fn request_close_app_clears_pending_when_nothing_modified() {
+        // No modified tabs: request_close_app resolves pending_close back to
+        // None on its own (via confirm_close_discard) rather than leaving it
+        // Some(App) — the GPUI caller reads this "None after the call" as
+        // its signal to quit immediately without ever mounting the dialog.
+        let mut state = make_state("hello", 0, None);
+
+        state.request_close_app();
+
+        assert_eq!(state.pending_close, None);
+    }
+
+    #[test]
+    fn confirm_close_save_tab_clears_pending_and_closes() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.tabs[0].is_modified = true;
+        state.request_close_tab(0);
+
+        state.confirm_close_save();
+
+        assert_eq!(state.pending_close, None);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn confirm_close_save_app_clears_pending_without_closing_tabs() {
+        let mut state = make_state("hello", 0, None);
+        state.new_tab();
+        state.tabs[0].is_modified = true;
+        state.request_close_app();
+        assert_eq!(state.pending_close, Some(PendingClose::App));
+
+        state.confirm_close_save();
+
+        assert_eq!(state.pending_close, None);
+        assert_eq!(state.tabs.len(), 2); // saving the app doesn't remove tabs
+    }
+
+    #[test]
+    fn cancel_close_is_a_no_op_when_nothing_pending() {
+        let mut state = make_state("hello", 0, None);
+        state.cancel_close();
+        assert_eq!(state.pending_close, None);
     }
 
     // ── clamp_sidebar_width ──────────────────────────────────────────────────

@@ -211,7 +211,7 @@ impl Render for TabBar {
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
-                                    s.close_tab(idx);
+                                    s.request_close_tab(idx);
                                     cx.notify();
                                 });
                                 cx.notify();
@@ -336,9 +336,25 @@ impl Render for TabBar {
             .border_color(rgb(p.border))
             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
             .active(move |s| s.bg(rgb(p.chrome_active)))
-            .on_click(|_ev, _window, cx| {
-                cx.quit();
-            })
+            // Routes through AppState::request_close_app rather than
+            // quitting directly, so a dirty tab gets a Save/Discard/Cancel
+            // dialog (close_confirm.rs) instead of silently losing edits.
+            // request_close_app resolves pending_close back to None on its
+            // own (via confirm_close_discard) when nothing is unsaved — that
+            // "still None right after the call" is this GPUI layer's own
+            // signal to quit immediately, since the pure state layer has no
+            // way to call cx.quit() itself.
+            .on_click(cx.listener(|this, _ev, _window, cx| {
+                let should_quit = this.state.update(cx, |s, cx| {
+                    s.request_close_app();
+                    cx.notify();
+                    s.pending_close.is_none()
+                });
+                cx.notify();
+                if should_quit {
+                    cx.quit();
+                }
+            }))
             .child("×");
 
         bar.child(tab_scroll_area)
