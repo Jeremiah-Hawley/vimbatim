@@ -1271,12 +1271,28 @@ impl AppState {
         let Some((start, cursor)) = self.tabs.get(self.active_tab).map(|t| (word_backward(&t.content, t.cursor), t.cursor)) else { return };
         if start == cursor { return; }
         self.push_undo_snapshot();
+        let mut deleted_chars = 0;
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            deleted_chars = tab.content[start..cursor].chars().count();
             sync_delete_range(&mut tab.paragraphs, start, cursor);
             tab.content.replace_range(start..cursor, "");
             tab.cursor = start;
             tab.selection = None;
             tab.is_modified = true;
+        }
+        // Mirrors `backspace`'s per-char `rec.pop()`, scaled to a whole
+        // word: truncate the recording by the same number of chars actually
+        // removed, so vim's `.`-repeat (`VimChange::Insertion`) doesn't
+        // replay text this deletion already erased. Capped at the
+        // recording's own length — the deleted range can reach back past
+        // where the current insertion segment started, into text that was
+        // never part of this recording (same as `backspace`'s `pop()`
+        // being a no-op once `rec` runs out).
+        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+            let rec_chars = rec.chars().count();
+            let new_len = rec_chars.saturating_sub(deleted_chars);
+            let byte_idx = rec.char_indices().nth(new_len).map(|(i, _)| i).unwrap_or(rec.len());
+            rec.truncate(byte_idx);
         }
     }
 
@@ -6638,6 +6654,44 @@ mod tests {
         state.delete_word_backward();
         assert_eq!(state.tabs[0].content, "hello ");
         assert!(state.tabs[0].selection.is_none());
+    }
+
+    #[test]
+    fn test_delete_word_backward_across_paragraph_break_merges_lines() {
+        // Minor finding from the task-8 review: Ctrl+Backspace at the start
+        // of a line should walk back over the preceding newline (word_backward
+        // treats '\n' as whitespace, same as any other blank gap) and merge
+        // into the previous line, exactly like backspace already does.
+        let mut state = make_state("hello\nworld", 11, None); // cursor at end
+        state.delete_word_backward();
+        assert_eq!(state.tabs[0].content, "hello\n");
+        assert_eq!(state.tabs[0].cursor, 6);
+    }
+
+    #[test]
+    fn test_delete_word_backward_truncates_vim_insertion_recording() {
+        // Task-8 review bug: `backspace` pops one char off
+        // `vim_insertion_recording` per char deleted (so vim's `.`-repeat
+        // replays only what's actually still in the document), but
+        // `delete_word_backward` deleted a whole word without touching the
+        // recording at all — so a Ctrl+Backspace mid-insert left the
+        // deleted word's text stranded in the recording buffer, and `.`
+        // would incorrectly replay it too.
+        let mut state = make_state("", 0, None);
+        vim_key_recorded(&mut state, "i", false, None);
+        state.insert_str("hello world");
+        state.delete_word_backward();
+        assert_eq!(state.tabs[0].content, "hello ");
+        state.insert_str("there");
+        state.vim_exit_to_normal();
+        assert_eq!(state.tabs[0].content, "hello there");
+
+        // Repeat the insertion at the end of the document: if the deleted
+        // "world" text were still sitting in the recording, this would
+        // replay "hello worldthere" instead of just "hello there".
+        state.tabs[0].cursor = state.tabs[0].content.len();
+        state.vim_repeat_last_change();
+        assert_eq!(state.tabs[0].content, "hello therehello there");
     }
 
     // ── move_doc_start / move_doc_end / move_to_line ───────────────────────
