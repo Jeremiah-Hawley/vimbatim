@@ -374,6 +374,10 @@ impl Render for SettingsModal {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, window, cx| {
                 this.close(window, cx);
             }))
+            // Stops wheel events over the modal (including its padding, not
+            // just the inner scrollable list) from bubbling to the document
+            // editor underneath.
+            .on_scroll_wheel(|_ev, _window, cx| cx.stop_propagation())
             .child(
                 div()
                     .id("settings-panel")
