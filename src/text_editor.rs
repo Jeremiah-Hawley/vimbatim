@@ -1082,8 +1082,20 @@ impl Render for TextEditor {
                 let zoom = this.state.read(cx).zoom;
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
+                let click_count = ev.click_count;
                 this.state.update(cx, |state, cx| {
+                    // `set_cursor_from_line_col` does the line/col -> byte-offset
+                    // conversion (there's no standalone public helper for it) and
+                    // leaves the result in `tab.cursor`, so double/triple-click
+                    // reuse that single call instead of re-deriving the byte
+                    // position themselves.
                     state.set_cursor_from_line_col(line, col);
+                    let byte_pos = state.tabs.get(state.active_tab).map(|t| t.cursor).unwrap_or(0);
+                    match click_count {
+                        2 => state.select_word_at(byte_pos),
+                        3 => state.select_line_at(byte_pos),
+                        _ => {}
+                    }
                     cx.notify();
                 });
                 cx.notify();

@@ -2654,6 +2654,38 @@ impl AppState {
         }
     }
 
+    pub fn select_word_at(&mut self, byte_pos: usize) {
+        /*
+         * Double-click word selection: selects the same contiguous
+         * char-class run vim's `iw` text object would (an alphanumeric
+         * word run, a punctuation run, or a whitespace run — see
+         * `text_object_word`), reusing its boundary math rather than
+         * reimplementing word-boundary detection for the mouse gesture.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let (start, end) = text_object_word(&tab.content, byte_pos, true);
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.selection = Some((start, end));
+            tab.cursor = end;
+        }
+    }
+
+    pub fn select_line_at(&mut self, byte_pos: usize) {
+        /*
+         * Triple-click paragraph selection: reuses vim's `ip` text object
+         * (`text_object_paragraph`) — the blank-line-delimited block
+         * containing `byte_pos` — so a triple-click selects the whole
+         * paragraph, not just the clicked line.
+         */
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        if let Some((start, end)) = text_object_paragraph(&tab.content, byte_pos, true) {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.selection = Some((start, end));
+                tab.cursor = end;
+            }
+        }
+    }
+
     pub fn cursor_line_col(&self) -> (usize, usize) {
         /*
          * Maps the active tab's byte-offset cursor to a (line_index,
@@ -6991,6 +7023,47 @@ mod tests {
         state.extend_selection_to_line_col(1, 2);
         assert_eq!(state.tabs[0].selection, Some((1, 6))); // anchor = old cursor
         assert_eq!(state.tabs[0].cursor, 6); // line 1, col 2 -> "de|fgh"
+    }
+
+    // ── select_word_at / select_line_at (double/triple-click) ──────────────
+
+    #[test]
+    fn select_word_at_selects_the_word_under_the_position() {
+        let mut state = make_state("hello world foo", 0, None);
+        state.select_word_at(7); // inside "world"
+        assert_eq!(state.tabs[0].selection, Some((6, 11))); // "world"
+        assert_eq!(state.tabs[0].cursor, 11);
+    }
+
+    #[test]
+    fn select_word_at_on_punctuation_selects_just_the_punctuation_run() {
+        // Matches vim `iw`'s classification: a punctuation run is its own
+        // "word", distinct from the alphanumeric runs around it.
+        let mut state = make_state("foo, bar", 0, None);
+        state.select_word_at(3); // the ","
+        assert_eq!(state.tabs[0].selection, Some((3, 4)));
+    }
+
+    #[test]
+    fn select_line_at_selects_the_whole_paragraph() {
+        // No blank line separates these two lines, so per `ip` semantics
+        // (a paragraph is a blank-line-delimited block) they're one
+        // paragraph and both get selected.
+        let mut state = make_state("first line\nsecond line", 2, None);
+        state.select_line_at(2); // inside "first line"
+        assert_eq!(state.tabs[0].selection, Some((0, 22)));
+        assert_eq!(state.tabs[0].cursor, 22);
+    }
+
+    #[test]
+    fn select_line_at_stops_at_blank_line_boundary() {
+        // `ip`'s range includes the line's trailing newline (its usual
+        // linewise convention), so the end lands just past it rather than
+        // at the last content byte.
+        let mut state = make_state("first\n\nsecond", 0, None);
+        state.select_line_at(0); // inside "first"
+        assert_eq!(state.tabs[0].selection, Some((0, 6)));
+        assert_eq!(state.tabs[0].cursor, 6);
     }
 
     #[test]
