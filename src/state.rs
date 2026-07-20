@@ -1010,18 +1010,32 @@ impl AppState {
     /// Resolves the pending close by saving first: the target tab (or every
     /// tab, for an app-close) via `save_tab`, then closing it (tab-close
     /// only — an app-close still leaves the actual quitting to the caller).
-    pub fn confirm_close_save(&mut self) {
+    ///
+    /// `save_tab` silently no-ops for a tab with no `file_path` (there's no
+    /// "Save As" flow in this app to fall back to), and returns `Err` if the
+    /// write itself fails. Either way it leaves `is_modified` `true` — the
+    /// one reliable "did this actually get persisted?" signal available
+    /// here — so that's what gates whether we actually close/quit. Returns
+    /// whether it's now safe to proceed (close the tab / let the caller
+    /// `cx.quit()`): `false` means at least one tab is still dirty and was
+    /// deliberately left open rather than silently discarded.
+    pub fn confirm_close_save(&mut self) -> bool {
         match self.pending_close.take() {
             Some(PendingClose::Tab(idx)) => {
                 let _ = self.save_tab(idx);
-                self.close_tab(idx);
+                let persisted = self.tabs.get(idx).map(|t| !t.is_modified).unwrap_or(true);
+                if persisted {
+                    self.close_tab(idx);
+                }
+                persisted
             }
             Some(PendingClose::App) => {
                 for idx in 0..self.tabs.len() {
                     let _ = self.save_tab(idx);
                 }
+                self.tabs.iter().all(|t| !t.is_modified)
             }
-            None => {}
+            None => true,
         }
     }
 
@@ -5961,15 +5975,54 @@ mod tests {
 
     #[test]
     fn confirm_close_save_tab_clears_pending_and_closes() {
+        // Tab 0 needs a real file_path here — save_tab only actually
+        // persists (and confirm_close_save only actually closes) a tab that
+        // has somewhere to write to. See
+        // `confirm_close_save_does_not_discard_a_never_saved_tab` below for
+        // the no-file_path case.
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_confirm_close_save_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
         let mut state = make_state("hello", 0, None);
+        state.tabs[0].file_path = Some(path);
         state.new_tab();
         state.tabs[0].is_modified = true;
         state.request_close_tab(0);
 
-        state.confirm_close_save();
+        let persisted = state.confirm_close_save();
 
+        assert!(persisted);
         assert_eq!(state.pending_close, None);
         assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn confirm_close_save_does_not_discard_a_never_saved_tab() {
+        // A tab with no file_path (a plain "New Tab" that was never saved to
+        // disk) has nowhere for save_tab to persist to — this app has no
+        // "Save As" flow to fall back to. Before this fix, confirm_close_save
+        // ignored save_tab's no-op result and closed the tab anyway, silently
+        // discarding its content exactly as Discard would have, defeating the
+        // whole point of the confirmation dialog. Correct behavior: leave the
+        // tab open and dirty.
+        let mut state = make_state("unsaved scratch content", 0, None);
+        assert!(state.tabs[0].file_path.is_none());
+        state.tabs[0].is_modified = true;
+        state.new_tab(); // second tab so a wrongful close_tab would be observable
+        state.request_close_tab(0);
+
+        let persisted = state.confirm_close_save();
+
+        assert!(!persisted);
+        assert_eq!(state.pending_close, None); // dialog still resolves/closes
+        assert_eq!(state.tabs.len(), 2); // but the tab itself was NOT closed
+        assert_eq!(state.tabs[0].content, "unsaved scratch content"); // content preserved
+        assert!(state.tabs[0].is_modified); // still dirty, still needs a Save
     }
 
     #[test]
@@ -5980,8 +6033,12 @@ mod tests {
         state.request_close_app();
         assert_eq!(state.pending_close, Some(PendingClose::App));
 
-        state.confirm_close_save();
+        let persisted = state.confirm_close_save();
 
+        // tab 0 has no file_path, so the app-wide save can't fully persist —
+        // the caller (close_confirm.rs) reads this `false` as "don't
+        // cx.quit(), a dirty tab is still unsaved".
+        assert!(!persisted);
         assert_eq!(state.pending_close, None);
         assert_eq!(state.tabs.len(), 2); // saving the app doesn't remove tabs
     }

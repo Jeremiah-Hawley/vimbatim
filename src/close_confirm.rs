@@ -121,9 +121,21 @@ impl Render for CloseConfirm {
                                 cx.listener(|this, _ev, _window, cx| {
                                     let was_app =
                                         matches!(this.state.read(cx).pending_close, Some(PendingClose::App));
-                                    this.state.update(cx, |s, cx| { s.confirm_close_save(); cx.notify(); });
+                                    // confirm_close_save reports whether everything
+                                    // it touched actually persisted (a tab with no
+                                    // file_path — no "Save As" flow to fall back to
+                                    // — can't be saved, and is left open/dirty
+                                    // rather than silently discarded). Only quit
+                                    // when that's true; otherwise the dialog closes
+                                    // but the app stays up with the dirty tab(s)
+                                    // still open.
+                                    let persisted = this.state.update(cx, |s, cx| {
+                                        let persisted = s.confirm_close_save();
+                                        cx.notify();
+                                        persisted
+                                    });
                                     cx.notify();
-                                    if was_app {
+                                    if was_app && persisted {
                                         cx.quit();
                                     }
                                 }),
