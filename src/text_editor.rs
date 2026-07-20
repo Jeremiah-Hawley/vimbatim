@@ -491,6 +491,17 @@ impl TextEditor {
                 });
                 cx.notify();
             }
+            // Ctrl+Backspace deletes the previous word (spec bugfix/QoL
+            // task 8). Content-editing key, so it lives here rather than
+            // the global keybind/action system (`src/keybinds.rs`) —
+            // it only makes sense with editor focus, same reasoning as
+            // Ctrl+Left/Right/Home/End/O/I above.
+            "backspace" => {
+                self.state.update(cx, |state, cx| {
+                    state.delete_word_backward();
+                    cx.notify();
+                });
+            }
             _ => {} // Ctrl+S, Ctrl+T, Ctrl+W, etc. handled by global actions
         }
         self.scroll_to_cursor(cx);

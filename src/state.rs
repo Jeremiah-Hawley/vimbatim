@@ -1249,6 +1249,37 @@ impl AppState {
         self.delete_selection_raw();
     }
 
+    pub fn delete_word_backward(&mut self) {
+        /*
+         * Ctrl+Backspace: deletes the word immediately before the cursor.
+         * Reuses `word_backward` (the same boundary math vim's `b` motion
+         * is built on, see `move_word_backward` above) rather than
+         * reimplementing word-boundary detection — its walk-back-over-
+         * whitespace-then-over-the-word logic is exactly what "delete the
+         * previous word" needs, and it already handles the mid-word-cursor
+         * and start-of-document no-op cases vim's `b` has to.
+         *
+         * If a selection is active, deletes it instead (matching
+         * `backspace`'s convention) rather than word-deleting from one of
+         * its edges, which would be a confusing thing to do to a selection
+         * the user can already see.
+         */
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection();
+            return;
+        }
+        let Some((start, cursor)) = self.tabs.get(self.active_tab).map(|t| (word_backward(&t.content, t.cursor), t.cursor)) else { return };
+        if start == cursor { return; }
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, cursor);
+            tab.content.replace_range(start..cursor, "");
+            tab.cursor = start;
+            tab.selection = None;
+            tab.is_modified = true;
+        }
+    }
+
     pub fn apply_formatting_to_line(&mut self, op: FormatOp) {
         /*
          * Applies formatting to the entire line containing the cursor.
@@ -6580,6 +6611,33 @@ mod tests {
         let mut state = make_state("hello", 0, None);
         state.move_word_backward();
         assert_eq!(state.tabs[0].cursor, 0);
+    }
+
+    #[test]
+    fn test_delete_word_backward_removes_preceding_word() {
+        let mut state = make_state("hello world", 11, None); // cursor at end
+        state.delete_word_backward();
+        // Deletes "world" back to its start (6); the space before it
+        // belongs to the gap *preceding* "world", not to "world" itself,
+        // so it's left behind — same as vim's `b` landing on index 6.
+        assert_eq!(state.tabs[0].content, "hello ");
+        assert_eq!(state.tabs[0].cursor, 6);
+    }
+
+    #[test]
+    fn test_delete_word_backward_at_start_of_line_is_a_noop() {
+        let mut state = make_state("hello", 0, None);
+        state.delete_word_backward();
+        assert_eq!(state.tabs[0].content, "hello");
+        assert_eq!(state.tabs[0].cursor, 0);
+    }
+
+    #[test]
+    fn test_delete_word_backward_deletes_selection_instead_when_active() {
+        let mut state = make_state("hello world", 11, Some((6, 11)));
+        state.delete_word_backward();
+        assert_eq!(state.tabs[0].content, "hello ");
+        assert!(state.tabs[0].selection.is_none());
     }
 
     // ── move_doc_start / move_doc_end / move_to_line ───────────────────────
