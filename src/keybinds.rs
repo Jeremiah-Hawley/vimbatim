@@ -616,6 +616,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         KeyBinding::new(&ks(ZoomReset), ZoomResetAction, None),
         KeyBinding::new(&ks(NextTab), NextTabAction, None),
         KeyBinding::new(&ks(PrevTab), PrevTabAction, None),
+        KeyBinding::new("f9", UnderlineAction, None),
     ]);
 }
 
