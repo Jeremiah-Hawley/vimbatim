@@ -441,6 +441,13 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| state.apply_card_style(kind));
                             cx.notify();
                         }
+                        // Cite: apply the shared AppState::apply_cite_style,
+                        // also used by the `f8` keybind (main_window.rs) so
+                        // the ribbon button and hotkey behave identically.
+                        FormatAction::Cite => {
+                            st.update(cx, |state, _cx| state.apply_cite_style());
+                            cx.notify();
+                        }
                         // Align Left / Align Center: set the current line's
                         // alignment. Not a toggle — see AppState::apply_line_alignment.
                         FormatAction::AlignLeft | FormatAction::AlignCenter => {
@@ -479,27 +486,141 @@ impl FormattingRibbon {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let items: Vec<&'static str> = match action {
-            FormatAction::DocMenu => vec![
-                "Fix Fake Tags",
-                "Convert analytics to tags",
-                "Fix Formatting Gaps",
-                "Revert to default styles",
-                "Remove emphasis",
-                "Remove non highlighted underlining",
-                "Remove blank lines",
-                "Remove pilcrows",
-                "Select similar formatting",
-            ],
+        let rows: Vec<AnyElement> = match action {
+            FormatAction::DocMenu => Self::text_menu_rows(
+                "Doc Menu",
+                &[
+                    "Fix Fake Tags",
+                    "Convert analytics to tags",
+                    "Fix Formatting Gaps",
+                    "Revert to default styles",
+                    "Remove emphasis",
+                    "Remove non highlighted underlining",
+                    "Remove blank lines",
+                    "Remove pilcrows",
+                    "Select similar formatting",
+                ],
+                p,
+                cx,
+            ),
+            FormatAction::CardMenu => Self::text_menu_rows(
+                "Card Menu",
+                &[
+                    "Condense, no pilcrows",
+                    "Condense, pilcrows",
+                    "Uncondensed",
+                    "Standardize highlighting",
+                    "Standardize highlighting with exception",
+                    "Auto emphasis first",
+                    "Duplicate cite",
+                ],
+                p,
+                cx,
+            ),
+            FormatAction::FontColor => {
+                let mut rows: Vec<AnyElement> = [
+                    crate::color_picker::ColorChoice::Black,
+                    crate::color_picker::ColorChoice::Red,
+                    crate::color_picker::ColorChoice::Blue,
+                ]
+                .into_iter()
+                .map(|choice| {
+                    div()
+                        .id(ElementId::named_usize("font-color-choice", choice.hex_value() as usize))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _ev, _window, cx| {
+                                cx.stop_propagation();
+                                this.state.update(cx, |state, _cx| state.apply_font_color(choice));
+                                this.open_menu = None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(crate::color_picker::color_button(choice))
+                        .into_any_element()
+                })
+                .collect();
+                rows.push(self.render_custom_color_row(FormatAction::FontColor, p, cx));
+                rows
+            }
+            FormatAction::HighlightColorSelect => {
+                let mut rows: Vec<AnyElement> = [
+                    ("blue", 0x0000FFu32),
+                    ("green", 0x00FF00u32),
+                    ("yellow", 0xFFD700u32),
+                ]
+                .into_iter()
+                .map(|(name, hex)| {
+                    div()
+                        .id(ElementId::named_usize("highlight-color-choice", hex as usize))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _ev, _window, cx| {
+                                cx.stop_propagation();
+                                this.state.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(
+                                        name.to_string(),
+                                    )));
+                                });
+                                this.open_menu = None;
+                                cx.notify();
+                            }),
+                        )
+                        .child(crate::color_picker::color_button(
+                            crate::color_picker::ColorChoice::Custom(hex),
+                        ))
+                        .into_any_element()
+                })
+                .collect();
+                rows.push(self.render_custom_color_row(FormatAction::HighlightColorSelect, p, cx));
+                rows
+            }
+            FormatAction::FontFamily => {
+                let mut names = cx.text_system().all_font_names();
+                names.retain(|n| !n.starts_with('.'));
+                names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, name)| {
+                        let applied_name = name.clone();
+                        div()
+                            .id(ElementId::named_usize("font-family-choice", idx))
+                            .px(px(space::SM))
+                            .py(px(space::XXS))
+                            .rounded(px(radius::SM))
+                            .text_color(rgb(p.text))
+                            .text_sm()
+                            .font_family(name.clone())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(p.chrome_hover)))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.state.update(cx, |state, _cx| {
+                                        state.apply_formatting_to_selection(FormatOp::FontFamily(
+                                            Some(applied_name.clone()),
+                                        ));
+                                    });
+                                    this.open_menu = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(name)
+                            .into_any_element()
+                    })
+                    .collect()
+            }
             _ => vec![],
         };
 
-        let menu_label = "Doc Menu";
         div()
             .id("ribbon-menu-panel")
             .flex()
             .flex_col()
-            .min_w(px(220.0))
+            .min_w(px(200.0))
             .max_h(px(320.0))
             .overflow_y_scroll()
             .p(px(space::XS))
@@ -509,7 +630,21 @@ impl FormattingRibbon {
             .border_1()
             .border_color(rgb(p.border))
             .shadow_lg()
-            .children(items.into_iter().enumerate().map(|(idx, item)| {
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn text_menu_rows(
+        menu_label: &'static str,
+        items: &[&'static str],
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let item = *item;
                 div()
                     .id(ElementId::named_usize("ribbon-menu-item", idx))
                     .px(px(space::SM))
@@ -529,7 +664,112 @@ impl FormattingRibbon {
                         }),
                     )
                     .child(item)
-            }))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn handle_custom_hex_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.editing_custom else { return };
+        let key = event.keystroke.key.as_str();
+        match key {
+            "backspace" => {
+                self.custom_hex_buffer.pop();
+            }
+            "escape" => {
+                self.editing_custom = None;
+                self.custom_hex_buffer.clear();
+            }
+            "enter" => {
+                if self.custom_hex_buffer.len() == 6 {
+                    let hex = self.custom_hex_buffer.clone();
+                    self.apply_custom_color(target, hex, cx);
+                }
+                self.editing_custom = None;
+                self.custom_hex_buffer.clear();
+                self.open_menu = None;
+            }
+            k if k.len() == 1
+                && self.custom_hex_buffer.len() < 6
+                && k.chars().next().unwrap().is_ascii_hexdigit() =>
+            {
+                self.custom_hex_buffer.push_str(k);
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    fn apply_custom_color(&mut self, target: FormatAction, hex6: String, cx: &mut Context<Self>) {
+        match target {
+            FormatAction::FontColor => {
+                if let Ok(value) = u32::from_str_radix(&hex6, 16) {
+                    self.state.update(cx, |state, _cx| {
+                        state.apply_font_color(crate::color_picker::ColorChoice::Custom(value));
+                    });
+                }
+            }
+            FormatAction::HighlightColorSelect => {
+                self.state.update(cx, |state, _cx| {
+                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(hex6)));
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn render_custom_color_row(&self, target: FormatAction, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let editing = self.editing_custom == Some(target);
+        if !editing {
+            return div()
+                .id("custom-color-trigger")
+                .px(px(space::SM))
+                .py(px(space::XXS))
+                .rounded(px(radius::SM))
+                .text_color(rgb(p.text))
+                .text_sm()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(p.chrome_hover)))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, window, cx| {
+                        cx.stop_propagation();
+                        this.editing_custom = Some(target);
+                        this.custom_hex_buffer.clear();
+                        this.custom_color_focus.clone().focus(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child("Custom…")
+                .into_any_element();
+        }
+
+        let buffer_display = if self.custom_hex_buffer.is_empty() {
+            "______".to_string()
+        } else {
+            format!("{:_<6}", self.custom_hex_buffer)
+        };
+
+        div()
+            .id("custom-color-input")
+            .track_focus(&self.custom_color_focus)
+            .on_key_down(cx.listener(Self::handle_custom_hex_key))
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .px(px(space::SM))
+            .py(px(space::XXS))
+            .rounded(px(radius::SM))
+            .bg(rgb(p.chrome_active))
+            .text_color(rgb(p.text))
+            .text_sm()
+            .child(format!("#{buffer_display}"))
+            .child(
+                div()
+                    .text_color(rgb(p.text_muted))
+                    .text_xs()
+                    .child("Enter to apply, Esc to cancel"),
+            )
             .into_any_element()
     }
 

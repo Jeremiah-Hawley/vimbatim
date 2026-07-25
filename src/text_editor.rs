@@ -839,6 +839,7 @@ impl Render for TextEditor {
 
         let state = self.state.read(cx);
         let zoom = state.zoom;
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
         let content_version = state.tabs.get(state.active_tab).map(|t| t.content_version).unwrap_or(0);
@@ -1273,9 +1274,16 @@ impl Render for TextEditor {
                         // verification (this sandbox has no display) to
                         // confirm how it actually looks.
                         let heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
+                        // `normal_size_px` (settings.conf's `normal_text_size`,
+                        // read once above as `normal_text_size_half_points`)
+                        // is the visual default for any run with no explicit
+                        // `FontSize` override (`size == 0` — brand-new
+                        // documents' single default run, and any plain-typed
+                        // text) — a run-level or heading-level override still
+                        // wins underneath, same as before this was configurable.
                         let row_div = div()
                             .font_family(FONT_FAMILY)
-                            .text_size(px(FONT_SIZE_PX * zoom))
+                            .text_size(px(normal_size_px * zoom))
                             .text_color(rgb(0xd4d4d4));
                         let row_div = match heading_font_size_px(heading, zoom) {
                             Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
@@ -1560,10 +1568,14 @@ fn highlight_color_hex(name: &str) -> u32 {
     /*
      * Maps Word's highlight color names to their GPUI hex value (spec
      * 6.2's 15-entry table, plus a fallback for anything unrecognized).
+     * Falls back to parsing `name` as a raw 6-digit hex string before
+     * giving up — the HL Color dropdown's Custom option stores colors
+     * this way since there's no name for an arbitrary RGB value.
      */
     match name {
         "yellow" => 0xFFD700,
         "green" => 0x00FF00,
+        "blue" => 0x0000FF,
         "cyan" => 0x00FFFF,
         "magenta" => 0xFF00FF,
         "red" => 0xFF0000,
@@ -1577,7 +1589,7 @@ fn highlight_color_hex(name: &str) -> u32 {
         "lightGray" => 0xD3D3D3,
         "black" => 0x000000,
         "white" => 0xFFFFFF,
-        _ => 0x888888,
+        _ => u32::from_str_radix(name, 16).unwrap_or(0x888888),
     }
 }
 
@@ -1655,8 +1667,16 @@ fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32) -> usize {
         .filter(|r| r.size > 0)
         .map(|r| r.size as f32 / 2.0 * zoom)
         .fold(0.0_f32, f32::max);
+    // An explicit run-level size (card styles always set one, covering the
+    // whole line) already reflects what's actually drawn and wins over the
+    // heading fallback below it — using both would over-reserve whenever the
+    // card style's real size is smaller than its heading level's generic
+    // default (e.g. Tag: 13px run size vs. heading level 4's 16px fallback),
+    // padding in a spurious blank row under every Tag line. `heading_px` is
+    // only relevant when no run carries an explicit size — plain document
+    // headings with no card-style override.
     let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-    let font_px = run_max_px.max(heading_px).max(FONT_SIZE_PX * zoom);
+    let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }.max(FONT_SIZE_PX * zoom);
     let has_box = para.runs.iter().any(|r| r.box_format);
     let needed_px = font_px * (LINE_HEIGHT_PX / FONT_SIZE_PX)
         + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 };
@@ -2528,6 +2548,17 @@ mod tests {
     }
 
     #[test]
+    fn test_highlight_color_hex_raw_hex_string() {
+        assert_eq!(highlight_color_hex("00ff88"), 0x00ff88);
+        assert_eq!(highlight_color_hex("0000FF"), 0x0000ff);
+    }
+
+    #[test]
+    fn test_highlight_color_hex_blue_named() {
+        assert_eq!(highlight_color_hex("blue"), 0x0000ff);
+    }
+
+    #[test]
     fn test_heading_font_size_body_text_has_no_override() {
         assert_eq!(heading_font_size_px(0, 1.0), None);
     }
@@ -2890,6 +2921,22 @@ mod tests {
         let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
         let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5);
         assert!(at_half >= at_1x);
+    }
+
+    #[test]
+    fn test_slot_count_tag_needs_only_one_slot() {
+        // Mirrors AppState::apply_card_style(CardStyleKind::Tag): bold +
+        // FontSize(26 half-points = 13px), heading level 4. 13px is smaller
+        // than body text (14px), so despite heading level 4's generic 16px
+        // fallback, the actual rendered line fits comfortably in one slot —
+        // it must not reserve a spurious blank row underneath.
+        let para = Paragraph {
+            runs: vec![Run { size: 26, bold: true, ..Run::default() }],
+            heading: 4,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0), 1);
     }
 
     #[test]

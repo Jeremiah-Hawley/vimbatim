@@ -309,7 +309,7 @@ impl MainWindow {
             // Cite applies to the current selection only, not the whole
             // line (matching the ribbon's Cite button — formatting_ribbon.rs).
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_selection(FormatOp::Bold(true));
+                st.apply_cite_style();
                 cx.notify();
             });
         });

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::case_converter;
 use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
-use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, reset_card_style_in_range, resolve_position, sync_delete_range, sync_insert_char, sync_insert_str, toggled_off, FormatOp};
+use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, reset_card_style_in_range, resolve_position, runs_in_range, sync_delete_range, sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp};
 use crate::wikifi_export;
 
 /// Rapid edits within this window of the previous undo-stack push are
@@ -527,10 +527,29 @@ pub struct AppState {
     pub keybinds: crate::keybinds::Keybinds,
     pub theme: crate::theme::ThemeKind,
     pub theme_color_mode: crate::theme::ThemeColorMode,
-    /// `large_size` from settings.conf, in half-points (`Run.size`'s unit).
-    /// The size "Clear Formatting" resets a line back to. See
-    /// `load_large_size_half_points`.
-    pub large_size_half_points: u16,
+    /// `normal_text_size` from settings.conf, in half-points (`Run.size`'s
+    /// unit) — the default body text size: what any run with no explicit
+    /// `FontSize` override renders at (`text_editor.rs`'s `normal_size_px`,
+    /// which covers a brand-new document's single default run same as any
+    /// other plain-typed text), and the size "Clear Formatting" resets a
+    /// line back to. See `load_normal_text_size_half_points`.
+    pub normal_text_size_half_points: u16,
+    /// `pocket_size`/`block_size`/`tag_size`/`cite_size` from settings.conf,
+    /// in half-points (`Run.size`'s unit) — the font sizes `apply_card_style`
+    /// applies for those styles (Hat's stays fixed via
+    /// `CardStyleKind::font_size`; not requested as configurable). See
+    /// `load_font_size_half_points`.
+    pub pocket_size_half_points: u16,
+    pub block_size_half_points: u16,
+    pub tag_size_half_points: u16,
+    /// The size Cite applies alongside bold (`main_window.rs`'s `CiteAction`
+    /// handler and the ribbon's Cite button, `formatting_ribbon.rs`) — Cite
+    /// isn't a `CardStyleKind` (it targets the selection, not the whole
+    /// line), so it keeps its own field rather than sharing the enum.
+    pub cite_size_half_points: u16,
+    /// `small_size` from settings.conf, in half-points (`Run.size`'s unit) —
+    /// the size Shrink (`shrink_text`) sets non-underlined selected text to.
+    pub small_size_half_points: u16,
     /// Editor text zoom multiplier (`found_bugs.md`'s Ctrl+=/Ctrl+-/Ctrl+0
     /// zoom, rebuilt from scratch — no trace of a prior implementation
     /// survived in git history). Applied only to the document text
@@ -724,7 +743,7 @@ fn default_working_directory() -> PathBuf {
 }
 
 /// Reads `working_directory` from settings.conf — mirrors
-/// `load_large_size_half_points`'s tolerant flat key=value scan. `None` when
+/// `load_normal_text_size_half_points`'s tolerant flat key=value scan. `None` when
 /// the file or key is missing, so callers can fall back to
 /// `default_working_directory()` rather than trusting a nonexistent path.
 fn load_working_directory(path: &std::path::Path) -> Option<PathBuf> {
@@ -773,24 +792,34 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
     crate::theme::save_setting_line(path, "expanded_dirs", &joined)
 }
 
-/// Reads `large_size` (points, `[FORMATTING]` section) from settings.conf —
+/// Reads `normal_text_size` (points, `[FORMATTING]` section) from settings.conf —
 /// the size "Clear Formatting" (`found_bugs.md`) resets a line back to.
 /// Mirrors `keybinds::load_vim_enabled`'s tolerant flat key=value scan
 /// rather than pulling in the unused `config_parsing` crate (which panics
 /// on a missing file). Converted to half-points, `Run.size`'s own unit.
 /// Falls back to 22 (11pt) when the file or key is missing/unparseable,
 /// matching settings.conf's own shipped default.
-fn load_large_size_half_points(path: &std::path::Path) -> u16 {
+fn load_normal_text_size_half_points(path: &std::path::Path) -> u16 {
+    load_font_size_half_points(path, "normal_text_size", 22)
+}
+
+/// Reads a `[FORMATTING]` font-size setting (points) from settings.conf,
+/// converting to half-points (`Run.size`'s unit) — the shared scan behind
+/// `load_normal_text_size_half_points` and the `pocket_size`/`block_size`/
+/// `tag_size`/`cite_size` loads in `AppState::new()`. `default_half_points`
+/// is returned as-is (already in half-points) when the file or key is
+/// missing/unparseable.
+fn load_font_size_half_points(path: &std::path::Path, key: &str, default_half_points: u16) -> u16 {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|contents| {
             contents.lines().find_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                (key.trim() == "large_size").then(|| value.trim().parse::<u16>().ok()).flatten()
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == key).then(|| value.trim().parse::<u16>().ok()).flatten()
             })
         })
         .map(|points| points * 2)
-        .unwrap_or(22)
+        .unwrap_or(default_half_points)
 }
 
 impl AppState {
@@ -822,7 +851,12 @@ impl AppState {
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
         let theme = crate::theme::load_theme(settings_path);
         let theme_color_mode = crate::theme::load_theme_color_mode(settings_path);
-        let large_size_half_points = load_large_size_half_points(settings_path);
+        let normal_text_size_half_points = load_normal_text_size_half_points(settings_path);
+        let pocket_size_half_points = load_font_size_half_points(settings_path, "pocket_size", 52);
+        let block_size_half_points = load_font_size_half_points(settings_path, "block_size", 32);
+        let tag_size_half_points = load_font_size_half_points(settings_path, "tag_size", 26);
+        let cite_size_half_points = load_font_size_half_points(settings_path, "cite_size", 26);
+        let small_size_half_points = load_font_size_half_points(settings_path, "small_size", 12);
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
@@ -841,7 +875,12 @@ impl AppState {
             keybinds,
             theme,
             theme_color_mode,
-            large_size_half_points,
+            normal_text_size_half_points,
+            pocket_size_half_points,
+            block_size_half_points,
+            tag_size_half_points,
+            cite_size_half_points,
+            small_size_half_points,
             zoom: 1.0,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
@@ -1499,7 +1538,7 @@ impl AppState {
          * line — a multi-paragraph selection left every other paragraph
          * still formatted.
          */
-        let default_size = self.large_size_half_points;
+        let default_size = self.normal_text_size_half_points;
         let has_selection = self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false);
         if has_selection {
             self.apply_formatting_to_selection(FormatOp::ClearAll { default_size });
@@ -1529,8 +1568,16 @@ impl AppState {
 
     pub fn condense_selection(&mut self) {
         /*
-         * Removes newlines from selected text and replaces with spaces.
-         * Only works on active selection; no-op if no selection.
+         * Removes newlines from selected text and replaces with spaces,
+         * preserving each character's own formatting (bold/highlight/size/
+         * etc.) rather than flattening the condensed text down to a single
+         * unformatted run — `runs_in_range` (already used by copy/paste's
+         * rich-clipboard path) captures the original per-character runs
+         * before the delete below discards them, and
+         * `sync_insert_str_with_runs` (the same rich-paste primitive) puts
+         * them back instead of `sync_insert_str`'s plain, inherit-whatever's-
+         * at-the-insertion-point behavior. Only works on active selection;
+         * no-op if no selection.
          */
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let Some((a, f)) = tab.selection else { return };
@@ -1547,11 +1594,21 @@ impl AppState {
             return;
         }
 
+        // `runs_in_range` emits a dedicated unformatted `"\n"` run for every
+        // paragraph boundary the selection crosses (same contract
+        // copy/paste relies on) — replacing `\n` with `' '` inside each run's
+        // own text turns those into plain spaces too, matching `condensed`,
+        // without touching any real run's formatting.
+        let condensed_runs: Vec<Run> = runs_in_range(&tab.paragraphs, start, end)
+            .into_iter()
+            .map(|mut r| { r.text = r.text.replace('\n', " "); r })
+            .collect();
+
         self.push_undo_snapshot();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             sync_delete_range(&mut tab.paragraphs, start, end);
             tab.content.drain(start..end);
-            sync_insert_str(&mut tab.paragraphs, start, &condensed);
+            sync_insert_str_with_runs(&mut tab.paragraphs, start, &condensed, &condensed_runs);
             tab.content.insert_str(start, &condensed);
             tab.cursor = start;
             tab.selection = Some((start, start + condensed.len()));
@@ -1732,54 +1789,6 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Color(Some(next_color.to_string())));
     }
 
-    pub fn cycle_highlight_color(&mut self) {
-        /*
-         * Cycles through preset highlight colors: yellow -> green -> blue -> yellow.
-         * Detects current highlight uniformly applied to selection, then advances.
-         * Applies to selection or sets pending format if no selection.
-         */
-        let tab = self.tabs.get(self.active_tab);
-        let selection = tab.and_then(|t| t.selection);
-
-        let current_highlight = if let Some((a, f)) = selection {
-            let (start, end) = (a.min(f), a.max(f));
-            tab.and_then(|t| {
-                // Check if all runs in range have same highlight color
-                let mut uniform_highlight: Option<String> = None;
-                for para in &t.paragraphs {
-                    let mut pos = 0;
-                    for run in &para.runs {
-                        let run_end = pos + run.text.len();
-                        if run_end > start && pos < end {
-                            if run.highlight {
-                                if uniform_highlight.is_none() {
-                                    uniform_highlight = Some(run.highlight_color.clone());
-                                } else if uniform_highlight.as_ref() != Some(&run.highlight_color) {
-                                    return None; // not uniform
-                                }
-                            } else if uniform_highlight.is_some() {
-                                return None; // some have highlight, some don't
-                            }
-                        }
-                        pos = run_end;
-                    }
-                }
-                uniform_highlight
-            })
-        } else {
-            None
-        };
-
-        let next_color = match current_highlight.as_deref() {
-            Some("yellow") => "green",
-            Some("green") => "blue",
-            Some("blue") => "yellow",
-            _ => "yellow", // default to yellow
-        };
-
-        self.apply_formatting_to_selection(FormatOp::Highlight(Some(next_color.to_string())));
-    }
-
     /// Bounds and step for `AppState.zoom` — 50%-250% in 10% increments,
     /// matching common editors' (VS Code, Word) zoom granularity.
     pub const ZOOM_MIN: f32 = 0.5;
@@ -1809,9 +1818,14 @@ impl AppState {
 
     pub fn shrink_text(&mut self) {
         /*
-         * Reduces font size of all non-underlined text in selection by 1 point.
-         * Finds runs without underline and decreases their size.
+         * Sets the font size of every non-underlined run in the selection to
+         * settings.conf's `small_size` (user-requested: underlined text is
+         * left alone — e.g. a debate card's underlined emphasis shouldn't
+         * shrink along with the rest of the tag/cite). Runs are only
+         * touched when they fall fully inside the selection (no splitting
+         * at partial overlaps), matching this method's pre-existing scan.
          */
+        let small_size = self.small_size_half_points;
         let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
         match selection {
             Some((a, f)) => {
@@ -1823,8 +1837,8 @@ impl AppState {
                         for run in &mut para.runs {
                             let run_start = cumulative;
                             let run_end = cumulative + run.text.len();
-                            if run_start >= start && run_end <= end && !run.underline && run.size > 2 {
-                                run.size = run.size.saturating_sub(2); // 2 half-points = 1pt
+                            if run_start >= start && run_end <= end && !run.underline {
+                                run.size = small_size;
                             }
                             cumulative = run_end;
                         }
@@ -2014,7 +2028,15 @@ impl AppState {
     /// an earlier explicit fix; Emphasis was never line-based), so they
     /// keep going through `apply_formatting_to_selection` at each call site.
     pub fn apply_card_style(&mut self, kind: CardStyleKind) {
-        let size = kind.font_size();
+        // Pocket/Block/Tag read their configured size from settings.conf;
+        // Hat isn't user-configurable (not requested), so it keeps
+        // `CardStyleKind::font_size`'s fixed value.
+        let size = match kind {
+            CardStyleKind::Pocket => self.pocket_size_half_points,
+            CardStyleKind::Hat => kind.font_size(),
+            CardStyleKind::Block => self.block_size_half_points,
+            CardStyleKind::Tag => self.tag_size_half_points,
+        };
 
         self.apply_formatting_to_line(FormatOp::Bold(true));
         self.apply_formatting_to_line(FormatOp::FontSize(size));
@@ -2053,6 +2075,18 @@ impl AppState {
                 self.apply_center_alignment_with_selection(Some((line_start, line_end)));
             }
         }
+    }
+
+    /// Applies the Cite style — bold + `cite_size_half_points` — to the
+    /// current selection. Cite isn't a `CardStyleKind` (see the note on
+    /// `apply_card_style`: it targets the selection, not the whole line),
+    /// but shares the same reasoning for living here: the ribbon's Cite
+    /// button and the `f8` keybind (`main_window.rs`) both call this so
+    /// they can't drift apart.
+    pub fn apply_cite_style(&mut self) {
+        self.apply_formatting_to_selection(FormatOp::Bold(true));
+        let size = self.cite_size_half_points;
+        self.apply_formatting_to_selection(FormatOp::FontSize(size));
     }
 
     pub fn undo(&mut self) {
@@ -5894,7 +5928,12 @@ mod tests {
             keybinds: crate::keybinds::Keybinds::defaults(),
             theme: crate::theme::ThemeKind::WorkbenchDark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
-            large_size_half_points: 22,
+            normal_text_size_half_points: 22,
+            pocket_size_half_points: 52,
+            block_size_half_points: 32,
+            tag_size_half_points: 26,
+            cite_size_half_points: 26,
+            small_size_half_points: 12,
             zoom: 1.0,
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
@@ -10478,9 +10517,9 @@ mod tests {
         // apply_card_style also sets.
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Pocket);
-        state.large_size_half_points = 22; // 11pt, settings.conf's default
+        state.normal_text_size_half_points = 22; // 11pt, settings.conf's default
 
-        let default_size = state.large_size_half_points;
+        let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
         let para = &state.tabs[0].paragraphs[0];
@@ -10488,7 +10527,7 @@ mod tests {
         assert_eq!(para.alignment, Alignment::Left, "not left-aligned");
         assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared");
         assert!(para.runs.iter().all(|r| !r.box_format), "box not cleared");
-        assert!(para.runs.iter().all(|r| r.size == 22), "size not reset to large_size");
+        assert!(para.runs.iter().all(|r| r.size == 22), "size not reset to normal_text_size");
     }
 
     #[test]
@@ -10504,7 +10543,7 @@ mod tests {
         // inside a Pocket-styled line left it still boxed/centered.
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Pocket);
-        state.large_size_half_points = 22; // 11pt, settings.conf's default
+        state.normal_text_size_half_points = 22; // 11pt, settings.conf's default
 
         // Selection entirely inside the one (Pocket) paragraph.
         state.tabs[0].selection = Some((0, 5));
@@ -10534,7 +10573,7 @@ mod tests {
         // branch (gated on `is_line_empty`) never even runs.
         let mut state = make_state("", 0, None);
         state.apply_card_style(CardStyleKind::Pocket);
-        let default_size = state.large_size_half_points;
+        let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
         assert_eq!(state.tabs[0].pending_format, None, "stale pending_format should be cleared by Clear Formatting");
@@ -10552,7 +10591,7 @@ mod tests {
         // "cleared" line still ended up boxed too.
         let mut state = make_state("", 0, None);
         state.apply_card_style(CardStyleKind::Pocket);
-        let default_size = state.large_size_half_points;
+        let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
         state.insert_char('a');
@@ -10650,7 +10689,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Hat);
 
-        let default_size = state.large_size_half_points;
+        let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
         let para = &state.tabs[0].paragraphs[0];
@@ -10696,6 +10735,116 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.bold));
         assert!(para.runs.iter().all(|r| !r.box_format && !r.underline && !r.double_underline));
         assert_eq!(para.heading, 4);
+    }
+
+    #[test]
+    fn test_apply_card_style_pocket_block_tag_use_configured_sizes_not_hardcoded() {
+        // Regression: pocket_size/block_size/tag_size are now read from
+        // settings.conf (AppState::pocket_size_half_points etc.) rather than
+        // CardStyleKind::font_size()'s fixed table — a changed setting must
+        // actually take effect the next time the style is applied.
+        let mut state = make_state("hello world", 0, None);
+        state.pocket_size_half_points = 60;
+        state.block_size_half_points = 40;
+        state.tag_size_half_points = 20;
+
+        state.apply_card_style(CardStyleKind::Pocket);
+        assert!(state.tabs[0].paragraphs[0].runs.iter().all(|r| r.size == 60));
+
+        state.apply_card_style(CardStyleKind::Block);
+        assert!(state.tabs[0].paragraphs[0].runs.iter().all(|r| r.size == 40));
+
+        state.apply_card_style(CardStyleKind::Tag);
+        assert!(state.tabs[0].paragraphs[0].runs.iter().all(|r| r.size == 20));
+    }
+
+    #[test]
+    fn test_apply_cite_style_applies_bold_and_configured_size_to_selection() {
+        let paragraphs = vec![para_plain("hello")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 5));
+        state.cite_size_half_points = 30;
+        state.apply_cite_style();
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert!(para.runs.iter().all(|r| r.bold));
+        assert!(para.runs.iter().all(|r| r.size == 30));
+    }
+
+    #[test]
+    fn test_condense_selection_replaces_newlines_with_spaces() {
+        let paragraphs = vec![para_plain("one"), para_plain("two")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+        state.condense_selection();
+        assert_eq!(state.tabs[0].content, "one two");
+    }
+
+    #[test]
+    fn test_condense_selection_preserves_run_formatting() {
+        // Regression: condense used to delete the selection and reinsert it
+        // as plain text (`sync_insert_str`), flattening every condensed
+        // character down to a single unformatted run and losing bold/
+        // highlight/size/etc. Each character's original formatting must
+        // survive condensing, just with '\n' swapped for ' '.
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph { runs: vec![run_plain("plain")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+        state.condense_selection();
+
+        assert_eq!(state.tabs[0].content, "bold plain");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        let bold_run = runs.iter().find(|r| r.text.contains("bold")).unwrap();
+        assert!(bold_run.bold, "bold formatting should survive condensing");
+        let plain_run = runs.iter().find(|r| r.text.contains("plain")).unwrap();
+        assert!(!plain_run.bold, "plain run shouldn't pick up bold");
+    }
+
+    #[test]
+    fn test_shrink_text_sets_non_underlined_selection_to_small_size() {
+        let paragraphs = vec![para_plain("hello world")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 11));
+        state.small_size_half_points = 8;
+        state.shrink_text();
+
+        let para = &state.tabs[0].paragraphs[0];
+        assert!(para.runs.iter().all(|r| r.size == 8));
+    }
+
+    #[test]
+    fn test_shrink_text_leaves_underlined_runs_untouched() {
+        // User-clarified spec: Shrink sets non-underlined selected text to
+        // settings.conf's `small_size`, but skips underlined runs entirely
+        // (e.g. a debate card's underlined emphasis shouldn't shrink along
+        // with the rest of the tag).
+        let paragraphs = vec![Paragraph {
+            runs: vec![
+                Run { text: "under".into(), underline: true, size: 24, ..Run::default() },
+                Run { text: "plain".into(), size: 24, ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 10)); // whole line: "underplain"
+        state.small_size_half_points = 8;
+        state.shrink_text();
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert_eq!(runs[0].size, 24, "underlined run must be left alone");
+        assert_eq!(runs[1].size, 8, "non-underlined run should shrink to small_size");
     }
 
     #[test]
