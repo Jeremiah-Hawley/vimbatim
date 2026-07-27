@@ -2,6 +2,8 @@ mod docx_parser;
 mod document_ops;
 mod keybinds;
 mod rich_clipboard;
+mod recovery;
+mod recovery_prompt;
 mod state;
 mod tab_bar;
 mod app_toolbar;
@@ -34,6 +36,14 @@ fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         default_hook(info);
+
+        // Unsaved work is not replaceable; the crash log is. Write snapshots
+        // first, from the mirror the background task keeps current.
+        if let Some(slot) = recovery::PANIC_SNAPSHOT.get() {
+            if let Ok(tabs) = slot.lock() {
+                recovery::write_all_snapshots(&tabs);
+            }
+        }
 
         let build = format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VIMBATIM_GIT_SHA"));
         let backtrace = std::backtrace::Backtrace::force_capture();
@@ -77,7 +87,10 @@ fn main() {
             cx,
         );
 
-        cx.open_window(
+        let _ = recovery::PANIC_SNAPSHOT
+            .set(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+
+        let window = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -90,6 +103,34 @@ fn main() {
             |_window, cx| cx.new(|cx| MainWindow::new(cx)),
         )
         .expect("Failed to open main window");
+
+        // The native titlebar close button previously bypassed the
+        // Save/Discard/Cancel prompt entirely: every other quit path routes
+        // through AppState::request_close_app (see tab_bar.rs), but the OS
+        // button routed nowhere. Returning `false` here keeps the window
+        // open and lets close_confirm.rs drive the decision, exactly as the
+        // in-app × already does.
+        window
+            .update(cx, |view, window, cx| {
+                let state = view.state.clone();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    let quit_now = state.update(cx, |s, cx| {
+                        s.request_close_app();
+                        cx.notify();
+                        s.pending_close.is_none()
+                    });
+                    // Returning true only tells the platform not to veto the
+                    // close — it does not terminate the app. GPUI's default
+                    // QuitMode auto-quits when the last window closes on
+                    // Linux/Windows but NOT on macOS, so quit explicitly here,
+                    // exactly as tab_bar.rs and close_confirm.rs already do.
+                    if quit_now {
+                        cx.quit();
+                    }
+                    quit_now
+                });
+            })
+            .expect("Failed to install window close handler");
 
         cx.activate(true);
     });

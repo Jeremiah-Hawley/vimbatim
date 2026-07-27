@@ -366,7 +366,7 @@ pub enum FormatOp {
     /// Clears every character-formatting field (bold/italic/underline/
     /// highlight/font/color) back to the unformatted default, and size to
     /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
-    /// `large_size`, not to "no override").
+    /// `normal_text_size`, not to "no override").
     ClearAll { default_size: u16 },
 }
 
