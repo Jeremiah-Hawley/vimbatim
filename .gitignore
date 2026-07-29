@@ -3,7 +3,7 @@
 docs/
 notes/
 .worktrees/
-
+graphify-out/
 *.md
 !/README.md
 

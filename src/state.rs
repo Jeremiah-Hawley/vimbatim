@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,6 +7,7 @@ use crate::case_converter;
 use crate::color_picker;
 use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, reset_card_style_in_range, resolve_position, runs_in_range, sync_delete_range, sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp};
+use crate::recovery::RecoveryEntry;
 use crate::wikifi_export;
 
 /// Rapid edits within this window of the previous undo-stack push are
@@ -214,6 +215,15 @@ pub struct Tab {
     /// than one per keystroke. `None` means no edit has been made yet, or
     /// the coalescing window was deliberately broken (e.g. by an undo/redo).
     pub last_edit_at: Option<Instant>,
+    /// The `content_version` most recently written to a crash-recovery
+    /// snapshot. Equal to `content_version` means the snapshot on disk is
+    /// current and no write is due. Left unchanged on a failed write so the
+    /// next tick retries.
+    pub last_snapshot_version: u64,
+    /// How long this tab's last recovery snapshot took to write. Feeds
+    /// `recovery::snapshot_interval`, so an expensive document snapshots
+    /// less often than a cheap one. `None` until the first write.
+    pub last_snapshot_cost: Option<Duration>,
     /// The tab's current vim mode. Only meaningful when `AppState.vim_enabled`
     /// is true; unused otherwise.
     pub vim_mode: VimMode,
@@ -291,6 +301,21 @@ pub struct Tab {
     pub pending_scroll_to_cursor: bool,
 }
 
+/// A dirty tab reduced to exactly what a recovery snapshot needs, with no
+/// GPUI `Entity` borrow involved.
+///
+/// Exists so the panic hook — which fires on the panicking thread, outside
+/// any GPUI context — can still write snapshots. The background snapshot
+/// task refreshes a global copy of this on each tick.
+#[derive(Clone)]
+pub struct TabSnapshot {
+    pub id: usize,
+    pub paragraphs: Vec<Paragraph>,
+    pub origin: Option<Arc<DocxOrigin>>,
+    pub file_path: Option<PathBuf>,
+    pub title: String,
+}
+
 /// A single empty paragraph containing one default (unformatted) run — the
 /// starting state for `Tab.paragraphs` before any docx has been parsed into
 /// it. Never `vec![]`: every rich-text-aware function assumes at least one
@@ -332,6 +357,8 @@ impl Tab {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit_at: None,
+            last_snapshot_version: 0,
+            last_snapshot_cost: None,
             vim_mode: VimMode::Normal,
             vim_command_buf: String::new(),
             last_find: None,
@@ -377,6 +404,8 @@ impl Tab {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit_at: None,
+            last_snapshot_version: 0,
+            last_snapshot_cost: None,
             vim_mode: VimMode::Normal,
             vim_command_buf: String::new(),
             last_find: None,
@@ -503,6 +532,13 @@ pub struct AppState {
     /// Open state of the file explorer's right-click menu, `None` when
     /// closed. See `FileContextMenu`.
     pub file_context_menu: Option<FileContextMenu>,
+    /// Colors the user added from the Font Color and HL Color dropdowns'
+    /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
+    /// `[FORMATTING]` section so they survive a restart, capped at
+    /// `MAX_CUSTOM_COLORS`. Kept as two lists on purpose — see
+    /// `CustomColorTarget`.
+    pub custom_font_colors: Vec<u32>,
+    pub custom_highlight_colors: Vec<u32>,
     /// Which view the left sidebar shows — the file tree, or (Nav) a
     /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
     /// Toggled from two places that both flip the same field: the ribbon's
@@ -512,6 +548,10 @@ pub struct AppState {
     /// Set while a tab-close or app-close is waiting on the user's
     /// save/discard/cancel answer (`close_confirm.rs`). See `PendingClose`.
     pub pending_close: Option<PendingClose>,
+    /// Documents recovered from a previous session that ended without a
+    /// clean save, newest first. Non-empty makes `main_window.rs` mount
+    /// `RecoveryPrompt`; each recovery action pops one entry.
+    pub pending_recovery: Vec<RecoveryEntry>,
     pub working_directory: PathBuf,
     pub file_tree: Vec<FileNode>,
     /// Whether vim keybindings are active, loaded from settings.conf's
@@ -706,12 +746,7 @@ pub fn settings_conf_path() -> PathBuf {
 /// extra permissions, unlike the install directory a packaged `.app`/`.exe`
 /// may live in.
 pub fn crash_log_path() -> PathBuf {
-    let base = if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(PathBuf::from).map(|dir| dir.join("vimbatim"))
-    } else {
-        std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".vimbatim"))
-    };
-    base.unwrap_or_else(std::env::temp_dir).join("crash.log")
+    crate::recovery::app_data_dir().join("crash.log")
 }
 
 /// The file explorer's starting directory when there's no prior working
@@ -792,6 +827,63 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
     crate::theme::save_setting_line(path, "expanded_dirs", &joined)
 }
 
+/// Which dropdown a custom color belongs to. The two lists are deliberately
+/// separate: a highlight color added while highlighting shouldn't turn up as a
+/// font color option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomColorTarget {
+    Font,
+    Highlight,
+}
+
+impl CustomColorTarget {
+    /// The settings.conf `[FORMATTING]` key this list is stored under.
+    pub fn settings_key(self) -> &'static str {
+        match self {
+            CustomColorTarget::Font => "custom_font_colors",
+            CustomColorTarget::Highlight => "custom_highlight_colors",
+        }
+    }
+}
+
+/// ponytail: hard cap on saved custom colors, oldest dropped first — keeps
+/// settings.conf and the dropdown from growing without bound. Raise it (or add
+/// a "manage colors" UI) if users ask for more slots.
+pub const MAX_CUSTOM_COLORS: usize = 16;
+
+/// Reads one pipe-separated list of `RRGGBB` hex colors from settings.conf.
+/// Same `|` convention as `expanded_dirs`, and the same tolerant flat scan as
+/// `load_font_size_half_points`: a missing file, missing key, or unparseable
+/// entry costs that entry only, never an error.
+pub(crate) fn load_custom_colors(path: &std::path::Path, key: &str) -> Vec<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == key).then(|| value.trim().to_string())
+            })
+        })
+        .map(|value| {
+            value
+                .split('|')
+                .map(str::trim)
+                .filter(|entry| entry.len() == 6)
+                .filter_map(|entry| u32::from_str_radix(entry, 16).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_custom_colors(
+    path: &std::path::Path,
+    key: &str,
+    colors: &[u32],
+) -> std::io::Result<()> {
+    let joined = colors.iter().map(|c| format!("{c:06x}")).collect::<Vec<_>>().join("|");
+    crate::theme::save_setting_line(path, key, &joined)
+}
+
 /// Reads `normal_text_size` (points, `[FORMATTING]` section) from settings.conf —
 /// the size "Clear Formatting" (`found_bugs.md`) resets a line back to.
 /// Mirrors `keybinds::load_vim_enabled`'s tolerant flat key=value scan
@@ -857,6 +949,10 @@ impl AppState {
         let tag_size_half_points = load_font_size_half_points(settings_path, "tag_size", 26);
         let cite_size_half_points = load_font_size_half_points(settings_path, "cite_size", 26);
         let small_size_half_points = load_font_size_half_points(settings_path, "small_size", 12);
+        let custom_font_colors =
+            load_custom_colors(settings_path, CustomColorTarget::Font.settings_key());
+        let custom_highlight_colors =
+            load_custom_colors(settings_path, CustomColorTarget::Highlight.settings_key());
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
@@ -866,9 +962,12 @@ impl AppState {
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            custom_font_colors,
+            custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             pending_close: None,
+            pending_recovery: crate::recovery::scan_recovery_dir(&crate::recovery::recovery_dir()),
             working_directory,
             file_tree,
             vim_enabled,
@@ -987,8 +1086,17 @@ impl AppState {
             None => create_new_docx(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
         }
-        if let Some(tab) = self.tabs.get_mut(idx) {
+        let tab_id = if let Some(tab) = self.tabs.get_mut(idx) {
             tab.is_modified = false;
+            tab.last_snapshot_version = tab.content_version;
+            Some(tab.id)
+        } else {
+            None
+        };
+        // Persisted for real — the recovery snapshot is now redundant, and
+        // leaving it would prompt on next launch about work already saved.
+        if let Some(id) = tab_id {
+            crate::recovery::delete_snapshot(id);
         }
         Ok(())
     }
@@ -1003,6 +1111,10 @@ impl AppState {
         }
         if idx >= self.tabs.len() {
             return;
+        }
+        // A deliberately closed tab has no unsaved work worth recovering.
+        if let Some(tab) = self.tabs.get(idx) {
+            crate::recovery::delete_snapshot(tab.id);
         }
         self.tabs.remove(idx);
         // If a tab to the left of the active one was removed, shift active_tab left.
@@ -1084,7 +1196,15 @@ impl AppState {
     pub fn confirm_close_discard(&mut self) {
         match self.pending_close.take() {
             Some(PendingClose::Tab(idx)) => self.close_tab(idx),
-            Some(PendingClose::App) | None => {}
+            Some(PendingClose::App) => {
+                // Quitting with changes deliberately discarded: nothing here
+                // is worth recovering, so clear every snapshot rather than
+                // prompting about it on next launch.
+                for tab in &self.tabs {
+                    crate::recovery::delete_snapshot(tab.id);
+                }
+            }
+            None => {}
         }
     }
 
@@ -1092,6 +1212,108 @@ impl AppState {
     /// backdrop click) — leaves everything untouched.
     pub fn cancel_close(&mut self) {
         self.pending_close = None;
+    }
+
+    /// The dirty tabs, flattened for the panic hook.
+    pub fn dirty_tab_snapshots(&self) -> Vec<TabSnapshot> {
+        self.tabs
+            .iter()
+            .filter(|t| t.is_modified)
+            .map(|t| TabSnapshot {
+                id: t.id,
+                paragraphs: t.paragraphs.clone(),
+                origin: t.docx_origin.clone(),
+                file_path: t.file_path.clone(),
+                title: t.title.clone(),
+            })
+            .collect()
+    }
+
+    /// Recovery option 1: throw the recovered changes away and delete the
+    /// temporary file.
+    pub fn discard_recovery(&mut self) {
+        if self.pending_recovery.is_empty() {
+            return;
+        }
+        let entry = self.pending_recovery.remove(0);
+        crate::recovery::delete_entry(&entry);
+    }
+
+    /// Recovery option 2, part 1: hands the entry to the view so it can run
+    /// the native save-file picker (which this GPUI-free layer cannot
+    /// await), without popping it yet — a cancelled picker must leave the
+    /// entry in place. The view calls `complete_recovery_save_as` once it
+    /// has a destination.
+    pub fn take_recovery_for_save_as(&mut self) -> Option<RecoveryEntry> {
+        self.pending_recovery.first().cloned()
+    }
+
+    /// Recovery option 2, part 2: copies the snapshot to the user's chosen
+    /// path, then pops and deletes it.
+    ///
+    /// A plain file copy, not a re-save: the snapshot is already a valid
+    /// .docx carrying the original template, so copying is both cheaper and
+    /// lossless compared with parse-then-write.
+    pub fn complete_recovery_save_as(&mut self, entry: &RecoveryEntry, dest: &Path) -> Result<(), String> {
+        std::fs::copy(&entry.snapshot, dest).map_err(|e| format!("Save failed: {e}"))?;
+        self.pending_recovery.retain(|e| e.snapshot != entry.snapshot);
+        crate::recovery::delete_entry(entry);
+        Ok(())
+    }
+
+    /// Recovery option 3: reopen the document being edited with the
+    /// recovered changes applied but *not* saved, so the user decides
+    /// whether to keep them.
+    ///
+    /// Per the recovery spec, the original file is not validated: if it
+    /// moved, changed, or was deleted since the crash, the tab still points
+    /// at that path and a later save writes there.
+    pub fn resume_recovery(&mut self) {
+        if self.pending_recovery.is_empty() {
+            return;
+        }
+        let entry = self.pending_recovery.remove(0);
+
+        // A snapshot that won't parse has nothing to restore. Drop it rather
+        // than opening an empty tab that looks like the recovery succeeded —
+        // `scan_recovery_dir` deliberately doesn't parse every zip at launch,
+        // so this is where a corrupt snapshot is caught.
+        let Ok((paragraphs, origin)) = parse_docx(&entry.snapshot) else {
+            crate::recovery::delete_entry(&entry);
+            return;
+        };
+
+        let mut tab = match &entry.original_path {
+            Some(path) => Tab::from_path(self.next_tab_id, path.clone()),
+            // Never-saved tab: reopen untitled, exactly as it was pre-crash.
+            None => Tab::new_empty(self.next_tab_id),
+        };
+        tab.content = paragraphs_to_plain_text(&paragraphs);
+        tab.paragraphs = paragraphs;
+        tab.has_unsupported_blocks = origin.has_unsupported_blocks;
+        tab.docx_origin = Some(Arc::new(origin));
+        if entry.original_path.is_none() {
+            tab.title = entry.title.clone();
+        }
+        // The whole point of Resume: changes are present but unsaved.
+        tab.is_modified = true;
+        // `delete_entry` below removes the only on-disk copy of this content,
+        // so the tab must be eligible for a fresh snapshot without waiting
+        // for the user to type. A freshly built Tab has content_version ==
+        // last_snapshot_version == 0, which `needs_snapshot` reads as "this
+        // version is already written"; bumping the version clears that. The
+        // edit stamp then just starts the normal idle debounce from now, so
+        // the rewrite lands one interval after the resume rather than on the
+        // very next tick.
+        tab.content_version = 1;
+        tab.last_edit_at = Some(Instant::now());
+
+        self.next_tab_id += 1;
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.pending_focus_editor = true;
+
+        crate::recovery::delete_entry(&entry);
     }
 
     pub fn move_tab(&mut self, from: usize, to: usize) {
@@ -2783,6 +3005,56 @@ impl AppState {
 
     pub fn close_file_context_menu(&mut self) {
         self.file_context_menu = None;
+    }
+
+    pub fn custom_colors(&self, target: CustomColorTarget) -> &[u32] {
+        match target {
+            CustomColorTarget::Font => &self.custom_font_colors,
+            CustomColorTarget::Highlight => &self.custom_highlight_colors,
+        }
+    }
+
+    /// Appends `hex` to the target list and persists it. Re-adding an existing
+    /// color moves it to the end (most recent) rather than duplicating it.
+    pub fn add_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
+        let list = match target {
+            CustomColorTarget::Font => &mut self.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+        };
+        if let Some(pos) = list.iter().position(|c| *c == hex) {
+            list.remove(pos);
+        }
+        list.push(hex);
+        while list.len() > MAX_CUSTOM_COLORS {
+            list.remove(0);
+        }
+        self.persist_custom_colors(target);
+    }
+
+    /// Drops `hex` from the target list and persists the removal. Deliberately
+    /// not confirmed — unlike a file delete, re-adding a swatch costs one click
+    /// in the picker.
+    pub fn remove_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
+        let list = match target {
+            CustomColorTarget::Font => &mut self.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+        };
+        let Some(pos) = list.iter().position(|c| *c == hex) else { return };
+        list.remove(pos);
+        self.persist_custom_colors(target);
+    }
+
+    /// Writes one custom color list back to settings.conf. A failed write is
+    /// logged, not propagated — losing a saved swatch must never take the
+    /// applied color (or the user's edit) with it.
+    fn persist_custom_colors(&self, target: CustomColorTarget) {
+        if let Err(e) = save_custom_colors(
+            &settings_conf_path(),
+            target.settings_key(),
+            self.custom_colors(target),
+        ) {
+            eprintln!("[settings] failed to save custom colors: {e}");
+        }
     }
 
     pub fn request_context_menu_delete_confirmation(&mut self) {
@@ -5876,6 +6148,120 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
 mod tests {
     use super::*;
 
+    /// Makes a unique temp dir for one test. Mirrors `recovery.rs`'s helper —
+    /// no `tempfile` dependency.
+    fn custom_color_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("vimbatim-color-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_load_custom_colors_parses_pipe_separated_hex() {
+        let dir = custom_color_temp_dir("load");
+        let path = dir.join("settings.conf");
+        std::fs::write(&path, "[FORMATTING]\ncustom_highlight_colors=00ff88|aabbcc\n").unwrap();
+        assert_eq!(load_custom_colors(&path, "custom_highlight_colors"), vec![0x00ff88, 0xaabbcc]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_custom_colors_tolerates_missing_and_garbage() {
+        let dir = custom_color_temp_dir("tolerant");
+        let path = dir.join("settings.conf");
+
+        // Missing file.
+        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
+
+        // Missing key, empty value, and unparseable entries mixed with good ones.
+        std::fs::write(
+            &path,
+            "[FORMATTING]\ncustom_font_colors=\ncustom_highlight_colors=00ff88|zzzzzz|1234567|aabbcc\n",
+        )
+        .unwrap();
+        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
+        assert!(load_custom_colors(&path, "nonexistent_key").is_empty());
+        assert_eq!(
+            load_custom_colors(&path, "custom_highlight_colors"),
+            vec![0x00ff88, 0xaabbcc],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_then_load_custom_colors_round_trips() {
+        let dir = custom_color_temp_dir("roundtrip");
+        let path = dir.join("settings.conf");
+        std::fs::write(&path, "[FORMATTING]\ntheme=nord\n\n[KEYBINDS]\nvim=false\n").unwrap();
+
+        save_custom_colors(&path, "custom_font_colors", &[0x00ff88, 0x000000]).unwrap();
+        assert_eq!(load_custom_colors(&path, "custom_font_colors"), vec![0x00ff88, 0x000000]);
+
+        // An unrelated existing key survives the write.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("theme=nord"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_add_custom_color_dedups_by_moving_to_the_end() {
+        let mut state = make_state("", 0, None);
+        state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+        state.add_custom_color(CustomColorTarget::Highlight, 0x222222);
+        assert_eq!(state.custom_highlight_colors, vec![0x111111, 0x333333, 0x222222]);
+    }
+
+    #[test]
+    fn test_add_custom_color_caps_the_list_dropping_oldest() {
+        let mut state = make_state("", 0, None);
+        for i in 0..MAX_CUSTOM_COLORS as u32 {
+            state.add_custom_color(CustomColorTarget::Font, i);
+        }
+        assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
+        assert_eq!(state.custom_font_colors[0], 0);
+
+        state.add_custom_color(CustomColorTarget::Font, 0xFFFFFF);
+        assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
+        assert_eq!(state.custom_font_colors[0], 1, "oldest entry should be dropped");
+        assert_eq!(*state.custom_font_colors.last().unwrap(), 0xFFFFFF);
+    }
+
+    #[test]
+    fn test_remove_custom_color_drops_it_and_leaves_the_rest() {
+        let mut state = make_state("", 0, None);
+        state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+        state.remove_custom_color(CustomColorTarget::Highlight, 0x222222);
+        assert_eq!(state.custom_highlight_colors, vec![0x111111, 0x333333]);
+    }
+
+    #[test]
+    fn test_remove_custom_color_is_a_noop_for_an_absent_color() {
+        let mut state = make_state("", 0, None);
+        state.custom_font_colors = vec![0x111111];
+        state.remove_custom_color(CustomColorTarget::Font, 0x999999);
+        assert_eq!(state.custom_font_colors, vec![0x111111]);
+    }
+
+    #[test]
+    fn test_remove_custom_color_only_touches_its_own_list() {
+        let mut state = make_state("", 0, None);
+        state.custom_font_colors = vec![0x00ff88];
+        state.custom_highlight_colors = vec![0x00ff88];
+        state.remove_custom_color(CustomColorTarget::Highlight, 0x00ff88);
+        assert!(state.custom_highlight_colors.is_empty());
+        assert_eq!(state.custom_font_colors, vec![0x00ff88]);
+    }
+
+    #[test]
+    fn test_add_custom_color_keeps_the_two_lists_separate() {
+        let mut state = make_state("", 0, None);
+        state.add_custom_color(CustomColorTarget::Highlight, 0x00ff88);
+        assert_eq!(state.custom_highlight_colors, vec![0x00ff88]);
+        assert!(state.custom_font_colors.is_empty());
+    }
+
     /// Build a minimal AppState with one tab whose content, cursor, and
     /// selection are set to the given values. Avoids touching the filesystem
     /// or GPUI context.
@@ -5896,6 +6282,8 @@ mod tests {
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
                 last_edit_at: None,
+                last_snapshot_version: 0,
+                last_snapshot_cost: None,
                 vim_mode: VimMode::Normal,
                 vim_command_buf: String::new(),
                 last_find: None,
@@ -5919,9 +6307,12 @@ mod tests {
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            custom_font_colors: Vec::new(),
+            custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             pending_close: None,
+            pending_recovery: Vec::new(),
             working_directory: std::path::PathBuf::from("."),
             file_tree: vec![],
             vim_enabled: true,
@@ -11038,5 +11429,209 @@ mod tests {
         state.create_file_at_context_menu_location().unwrap();
 
         assert!(dir.join("Untitled.docx").exists());
+    }
+
+    // ── Document recovery ───────────────────────────────────────────────────
+
+    /// Builds a state with one dirty tab plus a fake pending recovery entry
+    /// pointing at real files in a temp dir, so the recovery actions have
+    /// something to act on.
+    fn make_state_with_recovery(tag: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("vimbatim-state-rec-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let snapshot = dir.join("111-0.docx");
+        let meta = dir.join("111-0.meta");
+        let original = dir.join("case.docx");
+
+        let mut para = crate::docx_parser::Paragraph::default();
+        para.runs.push(crate::docx_parser::Run { text: "recovered text".into(), ..Default::default() });
+        crate::docx_parser::create_new_docx(&[para], &snapshot).unwrap();
+        std::fs::write(&meta, crate::recovery::format_meta(Some(&original), "case.docx", 1)).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.pending_recovery = vec![crate::recovery::RecoveryEntry {
+            snapshot,
+            meta,
+            original_path: Some(original),
+            title: "case.docx".into(),
+            saved_at: 1,
+        }];
+        (state, dir)
+    }
+
+    #[test]
+    fn discard_recovery_pops_the_entry_and_deletes_both_files() {
+        let (mut state, _dir) = make_state_with_recovery("discard");
+        let entry = state.pending_recovery[0].clone();
+
+        state.discard_recovery();
+
+        assert!(state.pending_recovery.is_empty());
+        assert!(!entry.snapshot.exists());
+        assert!(!entry.meta.exists());
+    }
+
+    #[test]
+    fn resume_recovery_opens_a_modified_tab_pointed_at_the_original_path() {
+        let (mut state, _dir) = make_state_with_recovery("resume");
+        let entry = state.pending_recovery[0].clone();
+        let tabs_before = state.tabs.len();
+
+        state.resume_recovery();
+
+        assert!(state.pending_recovery.is_empty());
+        assert_eq!(state.tabs.len(), tabs_before + 1);
+        let tab = state.tabs.last().unwrap();
+        assert_eq!(tab.file_path, entry.original_path);
+        assert!(tab.is_modified, "resumed changes are unsaved by design");
+        assert!(tab.content.contains("recovered text"));
+        assert_eq!(state.active_tab, state.tabs.len() - 1);
+        // The snapshot is consumed — the content now lives in the editor.
+        assert!(!entry.snapshot.exists());
+    }
+
+    #[test]
+    fn a_resumed_tab_is_eligible_for_a_fresh_snapshot_without_any_further_typing() {
+        let (mut state, _dir) = make_state_with_recovery("resume-snapshot-eligible");
+
+        state.resume_recovery();
+
+        let tab = state.tabs.last().unwrap();
+        // Simulate the background task looking at this tab one interval later.
+        let later = tab.last_edit_at.unwrap() + crate::recovery::MIN_SNAPSHOT_INTERVAL;
+        assert!(
+            crate::recovery::needs_snapshot(
+                tab.is_modified,
+                tab.content_version,
+                tab.last_snapshot_version,
+                tab.last_edit_at,
+                later,
+                crate::recovery::MIN_SNAPSHOT_INTERVAL,
+            ),
+            "a resumed tab must be snapshot-eligible — its only on-disk copy was just deleted"
+        );
+    }
+
+    #[test]
+    fn resume_recovery_of_a_never_saved_tab_opens_an_untitled_modified_tab() {
+        let (mut state, _dir) = make_state_with_recovery("resume-untitled");
+        state.pending_recovery[0].original_path = None;
+        state.pending_recovery[0].title = "New Tab".into();
+
+        state.resume_recovery();
+
+        let tab = state.tabs.last().unwrap();
+        assert_eq!(tab.file_path, None);
+        assert!(tab.is_modified);
+        assert!(tab.content.contains("recovered text"));
+    }
+
+    #[test]
+    fn complete_recovery_save_as_copies_the_snapshot_and_deletes_it() {
+        let (mut state, dir) = make_state_with_recovery("save-as");
+        let entry = state.take_recovery_for_save_as().unwrap();
+        let dest = dir.join("saved-elsewhere.docx");
+
+        state.complete_recovery_save_as(&entry, &dest).unwrap();
+
+        assert!(dest.exists());
+        assert!(state.pending_recovery.is_empty());
+        assert!(!entry.snapshot.exists());
+        // The copy is a real docx, not a truncated one.
+        assert!(crate::docx_parser::parse_docx(&dest).is_ok());
+    }
+
+    #[test]
+    fn resume_recovery_drops_a_snapshot_that_will_not_parse_instead_of_opening_an_empty_tab() {
+        let (mut state, _dir) = make_state_with_recovery("resume-corrupt");
+        let entry = state.pending_recovery[0].clone();
+        std::fs::write(&entry.snapshot, b"not a zip at all").unwrap();
+        let tabs_before = state.tabs.len();
+
+        state.resume_recovery();
+
+        assert!(state.pending_recovery.is_empty());
+        assert_eq!(state.tabs.len(), tabs_before, "no tab for an unreadable snapshot");
+        assert!(!entry.snapshot.exists());
+    }
+
+    #[test]
+    fn take_recovery_for_save_as_returns_none_when_nothing_is_pending() {
+        let mut state = make_state("", 0, None);
+        assert!(state.take_recovery_for_save_as().is_none());
+    }
+
+    #[test]
+    fn recovery_actions_walk_through_multiple_entries_one_at_a_time() {
+        let (mut state, _dir) = make_state_with_recovery("multi");
+        let first = state.pending_recovery[0].clone();
+        state.pending_recovery.push(crate::recovery::RecoveryEntry {
+            title: "second.docx".into(),
+            saved_at: 0,
+            ..first
+        });
+        assert_eq!(state.pending_recovery.len(), 2);
+
+        state.discard_recovery();
+        assert_eq!(state.pending_recovery.len(), 1);
+        assert_eq!(state.pending_recovery[0].title, "second.docx");
+
+        state.discard_recovery();
+        assert!(state.pending_recovery.is_empty());
+    }
+
+    #[test]
+    fn close_tab_deletes_that_tabs_snapshot() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs.push(Tab::new_empty(1));
+        let (docx, meta) = crate::recovery::snapshot_paths(state.tabs[1].id);
+        std::fs::create_dir_all(crate::recovery::recovery_dir()).unwrap();
+        std::fs::write(&docx, b"x").unwrap();
+        std::fs::write(&meta, b"x").unwrap();
+
+        state.close_tab(1);
+
+        assert!(!docx.exists());
+        assert!(!meta.exists());
+    }
+
+    #[test]
+    fn confirm_close_discard_for_an_app_close_deletes_every_snapshot() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs[0].is_modified = true;
+        let (docx, meta) = crate::recovery::snapshot_paths(state.tabs[0].id);
+        std::fs::create_dir_all(crate::recovery::recovery_dir()).unwrap();
+        std::fs::write(&docx, b"x").unwrap();
+        std::fs::write(&meta, b"x").unwrap();
+
+        state.request_close_app();
+        state.confirm_close_discard();
+
+        assert!(!docx.exists());
+        assert!(!meta.exists());
+    }
+
+    #[test]
+    fn dirty_tab_snapshots_includes_only_modified_tabs() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs[0].is_modified = true;
+        state.tabs[0].title = "dirty".into();
+        let mut clean = Tab::new_empty(1);
+        clean.title = "clean".into();
+        state.tabs.push(clean);
+
+        let mirror = state.dirty_tab_snapshots();
+
+        assert_eq!(mirror.len(), 1);
+        assert_eq!(mirror[0].title, "dirty");
+        assert_eq!(mirror[0].id, state.tabs[0].id);
+    }
+
+    #[test]
+    fn dirty_tab_snapshots_is_empty_when_nothing_is_modified() {
+        let state = make_state("hello", 0, None);
+        assert!(state.dirty_tab_snapshots().is_empty());
     }
 }

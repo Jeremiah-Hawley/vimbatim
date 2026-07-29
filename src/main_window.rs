@@ -1,8 +1,13 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use gpui::prelude::*;
 use gpui::*;
 
 use crate::app_toolbar::AppToolbar;
 use crate::close_confirm::CloseConfirm;
+use crate::docx_parser::{DocxOrigin, Paragraph};
 use crate::document_ops::FormatOp;
 use crate::file_explorer::{FileExplorer, SidebarResizePayload};
 use crate::formatting_ribbon::FormattingRibbon;
@@ -14,6 +19,7 @@ use crate::keybinds::{
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
+use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
 use crate::state::{clamp_sidebar_width, AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
@@ -39,7 +45,7 @@ use crate::theme::palette;
 /// need: they're meant to work everywhere in the app, not just inside one
 /// specific view.
 pub struct MainWindow {
-    state: Entity<AppState>,
+    pub state: Entity<AppState>,
     tab_bar: Entity<TabBar>,
     app_toolbar: Entity<AppToolbar>,
     formatting_ribbon: Entity<FormattingRibbon>,
@@ -47,6 +53,7 @@ pub struct MainWindow {
     file_explorer: Entity<FileExplorer>,
     settings_modal: Entity<SettingsModal>,
     close_confirm: Entity<CloseConfirm>,
+    recovery_prompt: Entity<RecoveryPrompt>,
 }
 
 impl MainWindow {
@@ -69,6 +76,130 @@ impl MainWindow {
         let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
+        let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
+
+        // ── Crash-recovery snapshots ────────────────────────────────────
+        // One task for the whole app, not one per tab: it wakes on a fixed
+        // 1s tick and asks each tab whether it is due, using that tab's own
+        // interval (derived from what its last snapshot actually cost). So
+        // a cheap tab and an expensive one in the same window snapshot at
+        // 3s and 30s off the same tick.
+        //
+        // The write itself runs on the background executor so a slow zip
+        // never blocks the tick, and never blocks the UI thread.
+        //
+        // Held as a *weak* handle: this task must not be the thing keeping
+        // AppState alive. When the window (and with it `state`) is dropped,
+        // `read_with`/`update` start returning `Err` and the loop exits
+        // instead of spinning forever on a dead entity.
+        let snapshot_state = state.downgrade();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+
+                // Collect the work under one short read, then release it
+                // before doing any (potentially slow) I/O. Keyed by the
+                // tab's stable `id` rather than its index into `tabs`: a tab
+                // can close while an earlier entry in this same batch is
+                // being written (each write below is awaited in turn), which
+                // would shift every later index — the id is immune to that.
+                let due: Vec<(usize, u64, Vec<Paragraph>, Option<Arc<DocxOrigin>>, Option<PathBuf>, String)> =
+                    match snapshot_state.read_with(cx, |s, _| {
+                        let now = Instant::now();
+                        s.tabs
+                            .iter()
+                            .filter(|t| {
+                                crate::recovery::needs_snapshot(
+                                    t.is_modified,
+                                    t.content_version,
+                                    t.last_snapshot_version,
+                                    t.last_edit_at,
+                                    now,
+                                    crate::recovery::snapshot_interval(t.last_snapshot_cost),
+                                )
+                            })
+                            .map(|t| {
+                                (
+                                    t.id,
+                                    t.content_version,
+                                    t.paragraphs.clone(),
+                                    t.docx_origin.clone(),
+                                    t.file_path.clone(),
+                                    t.title.clone(),
+                                )
+                            })
+                            .collect()
+                    }) {
+                        Ok(due) => due,
+                        // The AppState entity is gone: the app is shutting
+                        // down, so stop ticking.
+                        Err(_) => return,
+                    };
+
+                // Keep the panic hook's view of the dirty tabs current. Cheap
+                // relative to the snapshot writes below, and it must be fresh
+                // at the instant of a panic, which we cannot predict.
+                if let Ok(mirror) = snapshot_state.read_with(cx, |s, _| s.dirty_tab_snapshots()) {
+                    if let Some(slot) = crate::recovery::PANIC_SNAPSHOT.get() {
+                        if let Ok(mut guard) = slot.lock() {
+                            *guard = mirror;
+                        }
+                    }
+                }
+
+                for (tab_id, version, paragraphs, origin, path, title) in due {
+                    // `version` is the content_version captured above, before
+                    // the write — not re-read afterwards, or an edit landing
+                    // mid-write would be silently marked as snapshotted.
+                    let cost = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::recovery::write_snapshot(
+                                tab_id,
+                                &paragraphs,
+                                origin.as_deref(),
+                                path.as_deref(),
+                                &title,
+                            )
+                        })
+                        .await;
+
+                    // Only record success. A failed write leaves
+                    // last_snapshot_version untouched so the next tick
+                    // retries — snapshotting is best-effort and never
+                    // surfaces an error to the user mid-edit.
+                    if let Ok(cost) = cost {
+                        let _ = snapshot_state.update(cx, |s, _| {
+                            // Look up by id, not index: the tab may have
+                            // moved, been saved, or closed while this write
+                            // was in flight.
+                            match s.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                Some(tab) if tab.is_modified => {
+                                    tab.last_snapshot_version = version;
+                                    tab.last_snapshot_cost = Some(cost);
+                                }
+                                /*
+                                 * Saved (Ctrl+S) or closed during the await.
+                                 * Both call `delete_snapshot` on the
+                                 * foreground — but they ran before the write
+                                 * landed, so they deleted files that did not
+                                 * exist yet and the write has just recreated
+                                 * them. Nothing else would ever remove them:
+                                 * a clean tab is never due again, and a
+                                 * closed tab's id is swept by no quit path,
+                                 * so the next launch would prompt to recover
+                                 * work the user had already saved or
+                                 * deliberately discarded. Delete here, where
+                                 * both cases converge.
+                                 */
+                                _ => crate::recovery::delete_snapshot(tab_id),
+                            }
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
 
         Self::register_global_actions(state.clone(), cx);
 
@@ -81,6 +212,7 @@ impl MainWindow {
             file_explorer,
             settings_modal,
             close_confirm,
+            recovery_prompt,
         }
     }
 
@@ -380,6 +512,7 @@ impl Render for MainWindow {
         let sidebar_visible  = self.state.read(cx).sidebar_visible;
         let settings_visible = self.state.read(cx).settings_visible;
         let pending_close    = self.state.read(cx).pending_close;
+        let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
         let theme = self.state.read(cx).theme;
         let p = palette(theme);
 
@@ -445,5 +578,10 @@ impl Render for MainWindow {
             // Save/Discard/Cancel answer; painted after the settings modal
             // so it's still on top even if somehow both were open at once.
             .when(pending_close.is_some(), |d| d.child(self.close_confirm.clone()))
+            // ── Recovery prompt overlay ─────────────────────────────────────
+            // Mounted at launch when a previous session left unsaved work
+            // behind. Painted last so it sits above both other modals — it
+            // must be answered before anything else is usable.
+            .when(has_recovery, |d| d.child(self.recovery_prompt.clone()))
     }
 }

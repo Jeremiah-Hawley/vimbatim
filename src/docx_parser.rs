@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -117,14 +117,33 @@ impl DocxOrigin {
     /// Saves `paragraphs` back to `path` as a .docx file, using this
     /// origin's preserved preamble/sectPr/raw ZIP as the template.
     pub fn save(&self, paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Generate the new XML from the given paragraph model, then hand
-         * the bytes off to `write_docx`, which handles the ZIP round-trip.
-         */
-        let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, paragraphs);
-        write_docx(&self.raw_zip, &new_xml, path)
+        self.save_with_compression(paragraphs, path, zip::CompressionMethod::Deflated)
     }
 
+    /// `save` for a crash-recovery snapshot. Identical today; it exists as a
+    /// separate entry point so the snapshot's compression can be changed
+    /// (to `Stored`, skipping deflate) without touching any real-save path.
+    /// See the recovery spec's Performance section — do not change this to
+    /// `Stored` until Task 10's measurement justifies it.
+    pub fn save_snapshot(&self, paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        self.save_with_compression(paragraphs, path, zip::CompressionMethod::Deflated)
+    }
+
+    fn save_with_compression(
+        &self,
+        paragraphs: &[Paragraph],
+        path: &Path,
+        method: zip::CompressionMethod,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Generate the new XML from the given paragraph model, then hand the
+         * bytes off to `write_docx`, which handles the ZIP round-trip. Shared
+         * by `save` and `save_snapshot` so the two differ only in the
+         * compression they ask for.
+         */
+        let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, paragraphs);
+        write_docx(&self.raw_zip, &new_xml, path, method)
+    }
 }
 
 /// Returns all paragraph text joined by newlines. This is the plain-text
@@ -197,11 +216,42 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
 ///
 /// An atomic temp-file rename (`path + ".tmp"`) prevents partial writes from
 /// corrupting the original if the process is interrupted.
-fn write_docx(raw_zip: &[u8], new_xml: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+///
+///  - `document_compression` applies only to word/document.xml. Real saves
+///    pass Deflated; recovery snapshots may pass Stored to skip the deflate
+///    cost on a transient file (see the recovery spec's Performance section).
+/// Temp path for the atomic write that ends in a rename onto `path`.
+///
+/// Unique per call, because two writers really can target one destination at
+/// the same moment: the panic hook snapshots every dirty tab on the panicking
+/// thread while the background snapshot task may already be mid-write on the
+/// same tab. With one shared `.docx.tmp` name both `File::create` it, both
+/// interleave their zip output into it, and whichever renames last publishes
+/// a corrupt archive — with a perfectly valid `.meta` beside it, so recovery
+/// offers the entry and then silently drops the document when it won't parse.
+///
+/// The pid disambiguates two processes saving the same user file; the counter
+/// disambiguates threads within one process. `.tmp` stays the final extension
+/// so `recovery::scan_recovery_dir` can still recognise abandoned leftovers,
+/// and the pid stays the first `-`-separated segment of the file stem so that
+/// sweep can tell whether the owning process is still alive.
+fn tmp_write_path(path: &Path) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("docx.{}.{}.tmp", std::process::id(), n))
+}
+
+fn write_docx(
+    raw_zip: &[u8],
+    new_xml: &str,
+    path: &Path,
+    document_compression: zip::CompressionMethod,
+) -> Result<(), Box<dyn std::error::Error>> {
     /*
      * Open the original ZIP from the in-memory byte slice, then stream each
      * entry into a new ZIP writer:
-     *  - For word/document.xml: write the freshly generated XML with Deflate.
+     *  - For word/document.xml: write the freshly generated XML using
+     *    `document_compression` (the caller decides Deflated vs. Stored).
      *  - For everything else: raw_copy_file copies the compressed bytes without
      *    decompressing, preserving the original compression level and metadata.
      *
@@ -211,7 +261,7 @@ fn write_docx(raw_zip: &[u8], new_xml: &str, path: &Path) -> Result<(), Box<dyn 
     let cursor = std::io::Cursor::new(raw_zip);
     let mut archive = ZipArchive::new(cursor)?;
 
-    let tmp_path = path.with_extension("docx.tmp");
+    let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
     let mut writer = ZipWriter::new(tmp_file);
 
@@ -222,7 +272,7 @@ fn write_docx(raw_zip: &[u8], new_xml: &str, path: &Path) -> Result<(), Box<dyn 
             // Drop the borrow on `archive` before writing to `writer`.
             drop(file);
             let options = SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+                .compression_method(document_compression);
             writer.start_file(&name, options)?;
             writer.write_all(new_xml.as_bytes())?;
         } else {
@@ -671,8 +721,52 @@ fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<Str
 }
 
 /// Applies a run-property element to `run` based on the element's tag name.
+/// The only values Word accepts for `<w:highlight w:val="…">` (ECMA-376
+/// ST_HighlightColor). Anything else has to be written as shading instead —
+/// see `run_props_xml`. `text_editor::highlight_color_hex` maps these same
+/// names to their on-screen color, and a test there asserts the two agree.
+pub(crate) const WORD_HIGHLIGHT_NAMES: [&str; 16] = [
+    "yellow", "green", "cyan", "magenta", "blue", "red", "darkBlue", "darkCyan", "darkGreen",
+    "darkMagenta", "darkRed", "darkYellow", "darkGray", "lightGray", "black", "white",
+];
+
+/// The `<w:rPr>` inner XML for one run. Split out of `write_docx` so the
+/// highlight-vs-shading branch below can be tested directly.
+fn run_props_xml(run: &Run) -> String {
+    let mut out = String::new();
+    if run.bold { out.push_str("<w:b/>"); }
+    if run.italic { out.push_str("<w:i/>"); }
+    if run.strikethrough { out.push_str("<w:strike/>"); }
+    if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
+    else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
+    if run.highlight {
+        // `w:highlight` only accepts the 16 names above — Word silently drops
+        // anything else. A custom hex color goes out as shading, which Word
+        // does honor.
+        if WORD_HIGHLIGHT_NAMES.contains(&run.highlight_color.as_str()) {
+            out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
+        } else {
+            out.push_str(&format!(
+                "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+                run.highlight_color,
+            ));
+        }
+    }
+    if run.size > 0 {
+        out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
+    }
+    if let Some(font) = &run.font {
+        out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
+    }
+    if let Some(color) = &run.color {
+        out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
+    }
+    out
+}
+
 /// Handles `w:b` (bold), `w:u` (underline), `w:highlight` (highlight colour),
-/// and `w:sz` (font size in half-points).  Unknown tags are silently ignored.
+/// `w:shd` (custom hex highlight, written as shading), and `w:sz` (font size
+/// in half-points).  Unknown tags are silently ignored.
 fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     /*
      * This function is called for both `Event::Start` and `Event::Empty`
@@ -704,6 +798,21 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:val" {
                     run.highlight_color = String::from_utf8_lossy(&attr.value).into_owned();
+                }
+            }
+        }
+        // Word writes arbitrary background colors as shading, not highlight.
+        // `w:fill="auto"` means "no fill", and anything that isn't 6 hex digits
+        // isn't a color we can render — both are ignored so ordinary Word
+        // documents don't gain phantom highlights.
+        b"w:shd" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"w:fill" {
+                    let fill = String::from_utf8_lossy(&attr.value).into_owned();
+                    if fill.len() == 6 && fill.chars().all(|c| c.is_ascii_hexdigit()) {
+                        run.highlight = true;
+                        run.highlight_color = fill.to_lowercase();
+                    }
                 }
             }
         }
@@ -806,23 +915,7 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 || run.color.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
-                if run.bold      { out.push_str("<w:b/>"); }
-                if run.italic    { out.push_str("<w:i/>"); }
-                if run.strikethrough { out.push_str("<w:strike/>"); }
-                if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
-                else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
-                if run.highlight {
-                    out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
-                }
-                if run.size > 0 {
-                    out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
-                }
-                if let Some(font) = &run.font {
-                    out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
-                }
-                if let Some(color) = &run.color {
-                    out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
-                }
+                out.push_str(&run_props_xml(run));
                 out.push_str("</w:rPr>");
             }
             // Emit xml:space="preserve" only when the run needs it.
@@ -894,7 +987,7 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
     let preamble = fallback_preamble();
     let document_xml = rebuild_document_xml(&preamble, "", paragraphs);
 
-    let tmp_path = path.with_extension("docx.tmp");
+    let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
     let mut writer = ZipWriter::new(tmp_file);
     let opts = SimpleFileOptions::default()
@@ -943,6 +1036,97 @@ fn escape_xml_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_named_highlight_still_writes_w_highlight() {
+        let run = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
+        };
+        let xml = run_props_xml(&run);
+        assert!(xml.contains("<w:highlight w:val=\"yellow\"/>"), "got {xml}");
+        assert!(!xml.contains("w:shd"), "got {xml}");
+    }
+
+    #[test]
+    fn test_custom_hex_highlight_writes_w_shd() {
+        let run = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "00ff88".into(),
+            ..Run::default()
+        };
+        let xml = run_props_xml(&run);
+        assert!(
+            xml.contains("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"00ff88\"/>"),
+            "got {xml}",
+        );
+        assert!(!xml.contains("w:highlight"), "got {xml}");
+    }
+
+    #[test]
+    fn test_w_shd_fill_is_read_back_as_a_highlight() {
+        let mut run = Run::default();
+        apply_run_prop(
+            &BytesStart::from_content(r#"w:shd w:val="clear" w:color="auto" w:fill="00FF88""#, 5),
+            &mut run,
+        );
+        assert!(run.highlight);
+        assert_eq!(run.highlight_color, "00ff88");
+    }
+
+    #[test]
+    fn test_w_shd_auto_fill_is_not_a_highlight() {
+        for content in [
+            r#"w:shd w:val="clear" w:color="auto" w:fill="auto""#,
+            r#"w:shd w:val="clear" w:color="auto""#,
+            r#"w:shd w:val="clear" w:fill="nothex""#,
+        ] {
+            let mut run = Run::default();
+            apply_run_prop(&BytesStart::from_content(content, 5), &mut run);
+            assert!(!run.highlight, "should not highlight for: {content}");
+        }
+    }
+
+    #[test]
+    fn test_custom_highlight_survives_a_write_read_round_trip() {
+        let source = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "00ff88".into(),
+            ..Run::default()
+        };
+        // Feed the emitted `w:shd` element straight back through the parser.
+        let xml = run_props_xml(&source);
+        let inner = xml.trim_start_matches("<w:shd ").trim_end_matches("/>");
+        let mut run = Run::default();
+        apply_run_prop(&BytesStart::from_content(format!("w:shd {inner}"), 5), &mut run);
+        assert!(run.highlight);
+        assert_eq!(run.highlight_color, source.highlight_color);
+    }
+
+    #[test]
+    fn two_concurrent_writes_to_one_path_get_different_temp_files() {
+        // The panic hook writes snapshots on the panicking thread while the
+        // background snapshot task may already be mid-write on the same tab's
+        // file. A shared temp name lets both truncate and interleave into one
+        // file, then rename a corrupt zip into place.
+        let dest = Path::new("/tmp/vimbatim-example.docx");
+        assert_ne!(tmp_write_path(dest), tmp_write_path(dest));
+    }
+
+    #[test]
+    fn the_temp_write_path_keeps_tmp_as_its_final_extension() {
+        // `scan_recovery_dir` sweeps abandoned leftovers by this extension.
+        let tmp = tmp_write_path(Path::new("/tmp/1234-5678-0.docx"));
+        assert_eq!(tmp.extension().unwrap(), "tmp");
+        // ...and the pid stays the first '-'-separated segment, which is how
+        // the sweeper decides whether the owning process is still alive.
+        let stem = tmp.file_stem().unwrap().to_str().unwrap();
+        assert_eq!(stem.split('-').next().unwrap(), "1234");
+    }
 
     fn wrap_run_xml(run_xml: &str) -> String {
         format!(
@@ -1621,5 +1805,30 @@ mod tests {
         assert_eq!(reparsed[0].runs[0].italic, true);
         assert_eq!(reparsed[0].runs[0].font, Some("Georgia".to_string()));
         assert_eq!(reparsed[0].runs[0].color, Some("00FF00".to_string()));
+    }
+
+    // ── recovery snapshot round trip (DocxOrigin::save_snapshot) ────────────
+
+    #[test]
+    fn save_snapshot_produces_a_docx_that_parses_back_to_the_same_paragraphs() {
+        let dir = std::env::temp_dir().join(format!("vimbatim-snap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.docx");
+        let snapshot = dir.join("snapshot.docx");
+
+        // Build a real docx, then reload it to get a genuine DocxOrigin.
+        let mut para = Paragraph::default();
+        para.runs.push(Run { text: "hello world".into(), ..Default::default() });
+        create_new_docx(&[para.clone()], &original).unwrap();
+        let (paragraphs, origin) = parse_docx(&original).unwrap();
+
+        origin.save_snapshot(&paragraphs, &snapshot).unwrap();
+
+        let (restored, _) = parse_docx(&snapshot).unwrap();
+        assert_eq!(restored, paragraphs);
+
+        std::fs::remove_file(&original).ok();
+        std::fs::remove_file(&snapshot).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 }

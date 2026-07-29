@@ -129,10 +129,23 @@ pub struct FormattingRibbon {
     state: Entity<AppState>,
     collapsed: std::collections::HashMap<&'static str, bool>,
     open_menu: Option<FormatAction>,
-    menu_anchor: Point<Pixels>,
+    /// Which menu the panel's `on_mouse_down_out` just closed, valid only for
+    /// the remainder of that one mouse-down dispatch — `render` clears it, the
+    /// same check-and-clear-once-per-frame idiom as
+    /// `AppState::pending_focus_editor`.
+    ///
+    /// ponytail: exists solely for the reopen race. `on_mouse_down_out` fires
+    /// in the capture phase, so clicking an *open* menu's own button closes it
+    /// before the button's bubble-phase toggle runs, and that toggle would see
+    /// `open_menu == None` and reopen it — the menu could never be closed by
+    /// clicking its own button. If GPUI ever grows a "was this click inside
+    /// element X" test, delete this field and ask that instead.
+    dismissed: Option<FormatAction>,
     editing_custom: Option<FormatAction>,
     custom_hex_buffer: String,
     custom_color_focus: FocusHandle,
+    /// `pub(crate)` so `color_picker::render_picker`'s listeners can reach it.
+    pub(crate) picker: crate::color_picker::CustomColorPicker,
 }
 
 impl FormattingRibbon {
@@ -141,10 +154,11 @@ impl FormattingRibbon {
             state,
             collapsed: std::collections::HashMap::new(),
             open_menu: None,
-            menu_anchor: Point::default(),
+            dismissed: None,
             editing_custom: None,
             custom_hex_buffer: String::new(),
             custom_color_focus: cx.focus_handle(),
+            picker: crate::color_picker::CustomColorPicker::new(),
         }
     }
 
@@ -156,6 +170,7 @@ impl FormattingRibbon {
     }
 
     fn make_button(
+        &self,
         label: &'static str,
         action: FormatAction,
         tone: RibbonTone,
@@ -223,7 +238,7 @@ impl FormattingRibbon {
                 ),
             };
 
-        div()
+        let button = div()
             .id(ElementId::named_usize("ribbon-btn", action_id))
             .flex()
             .items_center()
@@ -248,7 +263,7 @@ impl FormattingRibbon {
                 let label_text = label;
                 let act = action;
                 let st = state.clone();
-                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
                     println!("Button pressed: {}", label_text);
                     if !matches!(
                         act,
@@ -337,11 +352,14 @@ impl FormattingRibbon {
                         | FormatAction::FontFamily
                         | FormatAction::FontColor
                         | FormatAction::HighlightColorSelect => {
-                            if this.open_menu == Some(act) {
+                            // `dismissed` means the panel's capture-phase
+                            // out-handler already closed this menu during this
+                            // same click — treat it as "was open" so clicking
+                            // an open menu's own button closes it.
+                            if this.open_menu == Some(act) || this.dismissed == Some(act) {
                                 this.open_menu = None;
                             } else {
                                 this.open_menu = Some(act);
-                                this.menu_anchor = ev.position;
                                 this.editing_custom = None;
                             }
                             cx.notify();
@@ -477,7 +495,29 @@ impl FormattingRibbon {
                     }
                 })
             })
-            .child(label)
+            .child(label);
+
+        // The menu is a child of its own button, and `anchored()` with no
+        // `.position()` resolves to the element's own laid-out origin (gpui's
+        // `AnchoredPositionMode::Window` falls back to `bounds.origin`). That's
+        // what makes the panel open under the button rather than under
+        // wherever inside the button the user happened to click.
+        div()
+            .relative()
+            .child(button)
+            .when(self.open_menu == Some(action), |d| {
+                let panel = self.render_menu_panel(action, p, cx);
+                d.child(
+                    deferred(
+                        anchored()
+                            .snap_to_window()
+                            // Button height (24px) + a 2px gap.
+                            .offset(point(px(0.0), px(26.0)))
+                            .child(panel),
+                    )
+                    .with_priority(100),
+                )
+            })
     }
 
     fn render_menu_panel(
@@ -537,21 +577,27 @@ impl FormattingRibbon {
                                 cx.notify();
                             }),
                         )
-                        .child(crate::color_picker::color_button(choice))
+                        .child(crate::color_picker::color_button(
+                            choice.hex_value(),
+                            choice.label(),
+                        ))
                         .into_any_element()
                 })
                 .collect();
+                rows.extend(self.custom_color_rows(FormatAction::FontColor, p, cx));
                 rows.push(self.render_custom_color_row(FormatAction::FontColor, p, cx));
                 rows
             }
             FormatAction::HighlightColorSelect => {
+                // First element is the Word highlight name written into the
+                // document; second is what the user reads.
                 let mut rows: Vec<AnyElement> = [
-                    ("blue", 0x0000FFu32),
-                    ("green", 0x00FF00u32),
-                    ("yellow", 0xFFD700u32),
+                    ("blue", "Blue", 0x0000FFu32),
+                    ("green", "Green", 0x00FF00u32),
+                    ("yellow", "Yellow", 0xFFD700u32),
                 ]
                 .into_iter()
-                .map(|(name, hex)| {
+                .map(|(name, label, hex)| {
                     div()
                         .id(ElementId::named_usize("highlight-color-choice", hex as usize))
                         .cursor_pointer()
@@ -568,12 +614,11 @@ impl FormattingRibbon {
                                 cx.notify();
                             }),
                         )
-                        .child(crate::color_picker::color_button(
-                            crate::color_picker::ColorChoice::Custom(hex),
-                        ))
+                        .child(crate::color_picker::color_button(hex, label))
                         .into_any_element()
                 })
                 .collect();
+                rows.extend(self.custom_color_rows(FormatAction::HighlightColorSelect, p, cx));
                 rows.push(self.render_custom_color_row(FormatAction::HighlightColorSelect, p, cx));
                 rows
             }
@@ -618,6 +663,18 @@ impl FormattingRibbon {
 
         div()
             .id("ribbon-menu-panel")
+            // Dispatched in the *capture* phase, so it fires no matter who
+            // stops propagation later in the bubble phase — which is the whole
+            // point: `text_editor.rs` stops propagation on its own mouse-down,
+            // which is why the root-level handler in `main_window.rs` never
+            // sees editor clicks.
+            .on_mouse_down_out(cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
+                this.open_menu = None;
+                this.editing_custom = None;
+                this.custom_hex_buffer.clear();
+                this.dismissed = Some(action);
+                cx.notify();
+            }))
             .flex()
             .flex_col()
             .min_w(px(200.0))
@@ -669,9 +726,121 @@ impl FormattingRibbon {
             .collect()
     }
 
-    fn handle_custom_hex_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Which saved-color list a menu writes to. `None` for the menus that have
+    /// no colors at all (Doc/Card/Font Family).
+    fn custom_color_target(action: FormatAction) -> Option<crate::state::CustomColorTarget> {
+        match action {
+            FormatAction::FontColor => Some(crate::state::CustomColorTarget::Font),
+            FormatAction::HighlightColorSelect => Some(crate::state::CustomColorTarget::Highlight),
+            _ => None,
+        }
+    }
+
+    /// One row per saved custom color, oldest first, labelled by its hex —
+    /// there's no name for an arbitrary RGB value, and the hex is what the user
+    /// typed in the first place. Each row carries a delete button on its right
+    /// that drops the color from the list and from settings.conf.
+    fn custom_color_rows(
+        &self,
+        target: FormatAction,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(storage) = Self::custom_color_target(target) else {
+            return vec![];
+        };
+        let colors: Vec<u32> = self.state.read(cx).custom_colors(storage).to_vec();
+        colors
+            .into_iter()
+            .map(|hex| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(space::XXS))
+                    // The swatch and the delete button are siblings, not
+                    // nested — so clicking delete can't also apply the color,
+                    // no `stop_propagation` gymnastics needed.
+                    .child(
+                        div()
+                            .id(ElementId::named_usize("custom-color-row", hex as usize))
+                            .flex_1()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.apply_custom_color(target, hex, cx);
+                                    this.open_menu = None;
+                                    this.editing_custom = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(crate::color_picker::color_button(
+                                hex,
+                                format!("#{hex:06X}"),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id(ElementId::named_usize("custom-color-delete", hex as usize))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(20.0))
+                            .h(px(20.0))
+                            .rounded(px(radius::SM))
+                            .text_color(rgb(p.text_muted))
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(move |s| {
+                                s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
+                            })
+                            // Deleting leaves the menu open — you're usually
+                            // tidying several swatches at once, not picking one.
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.state.update(cx, |state, _cx| {
+                                        state.remove_custom_color(storage, hex);
+                                    });
+                                    cx.notify();
+                                }),
+                            )
+                            // ponytail: `×`, not a trash can — no font on this
+                            // system covers U+1F5D1, and it's the same glyph
+                            // every other delete/close in this app uses. Swap
+                            // to "🗑" once an emoji font ships with the build.
+                            .child("×"),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn handle_custom_hex_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.editing_custom else { return };
         let key = event.keystroke.key.as_str();
+        let mods = event.keystroke.modifiers;
+
+        // Paste: accept the clipboard only if it really is a color.
+        if (mods.control || mods.platform) && key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                if let Some(hex) = crate::color_picker::parse_hex(&text) {
+                    self.picker.set_color(hex);
+                    self.custom_hex_buffer = format!("{hex:06X}");
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         match key {
             "backspace" => {
                 self.custom_hex_buffer.pop();
@@ -681,41 +850,49 @@ impl FormattingRibbon {
                 self.custom_hex_buffer.clear();
             }
             "enter" => {
-                if self.custom_hex_buffer.len() == 6 {
-                    let hex = self.custom_hex_buffer.clone();
-                    self.apply_custom_color(target, hex, cx);
-                }
+                let hex = crate::color_picker::parse_hex(&self.custom_hex_buffer)
+                    .unwrap_or_else(|| self.picker.hex());
+                self.apply_custom_color(target, hex, cx);
                 self.editing_custom = None;
                 self.custom_hex_buffer.clear();
                 self.open_menu = None;
             }
+            // A leading `#` is accepted and ignored — people paste and type it
+            // out of habit.
+            "#" => {}
             k if k.len() == 1
                 && self.custom_hex_buffer.len() < 6
                 && k.chars().next().unwrap().is_ascii_hexdigit() =>
             {
-                self.custom_hex_buffer.push_str(k);
+                self.custom_hex_buffer.push_str(&k.to_uppercase());
+                if let Some(hex) = crate::color_picker::parse_hex(&self.custom_hex_buffer) {
+                    self.picker.set_color(hex);
+                }
             }
             _ => return,
         }
         cx.notify();
     }
 
-    fn apply_custom_color(&mut self, target: FormatAction, hex6: String, cx: &mut Context<Self>) {
-        match target {
-            FormatAction::FontColor => {
-                if let Ok(value) = u32::from_str_radix(&hex6, 16) {
-                    self.state.update(cx, |state, _cx| {
-                        state.apply_font_color(crate::color_picker::ColorChoice::Custom(value));
-                    });
+    /// Applies `hex` to the selection **and** saves it to the matching custom
+    /// color list, so it comes back as its own row next time — and after a
+    /// restart, since `add_custom_color` persists to settings.conf.
+    fn apply_custom_color(&mut self, target: FormatAction, hex: u32, cx: &mut Context<Self>) {
+        let Some(storage) = Self::custom_color_target(target) else { return };
+        self.state.update(cx, |state, _cx| {
+            match target {
+                FormatAction::FontColor => {
+                    state.apply_font_color(crate::color_picker::ColorChoice::Custom(hex));
                 }
+                FormatAction::HighlightColorSelect => {
+                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(format!(
+                        "{hex:06x}"
+                    ))));
+                }
+                _ => {}
             }
-            FormatAction::HighlightColorSelect => {
-                self.state.update(cx, |state, _cx| {
-                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(hex6)));
-                });
-            }
-            _ => {}
-        }
+            state.add_custom_color(storage, hex);
+        });
     }
 
     fn render_custom_color_row(&self, target: FormatAction, p: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -744,8 +921,10 @@ impl FormattingRibbon {
                 .into_any_element();
         }
 
-        let buffer_display = if self.custom_hex_buffer.is_empty() {
-            "______".to_string()
+        // An empty buffer means the user hasn't typed — show what the picker is
+        // currently on rather than six blanks.
+        let typed = if self.custom_hex_buffer.is_empty() {
+            self.picker.hex_text.clone()
         } else {
             format!("{:_<6}", self.custom_hex_buffer)
         };
@@ -755,25 +934,53 @@ impl FormattingRibbon {
             .track_focus(&self.custom_color_focus)
             .on_key_down(cx.listener(Self::handle_custom_hex_key))
             .flex()
-            .items_center()
+            .flex_col()
             .gap(px(space::XS))
-            .px(px(space::SM))
+            .px(px(space::XS))
             .py(px(space::XXS))
             .rounded(px(radius::SM))
             .bg(rgb(p.chrome_active))
             .text_color(rgb(p.text))
             .text_sm()
-            .child(format!("#{buffer_display}"))
+            .child(crate::color_picker::render_picker(&self.picker, p, cx))
+            .child(div().text_sm().child(format!("#{typed}")))
+            .child(
+                div()
+                    .id("custom-color-add")
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .bg(rgb(p.accent_muted))
+                    .text_color(rgb(p.text))
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(p.accent_strong)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            let hex = crate::color_picker::parse_hex(&this.custom_hex_buffer)
+                                .unwrap_or_else(|| this.picker.hex());
+                            this.apply_custom_color(target, hex, cx);
+                            this.editing_custom = None;
+                            this.custom_hex_buffer.clear();
+                            this.open_menu = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child("Add"),
+            )
             .child(
                 div()
                     .text_color(rgb(p.text_muted))
                     .text_xs()
-                    .child("Enter to apply, Esc to cancel"),
+                    .child("Drag, or type/paste a hex. Enter to add, Esc to cancel"),
             )
             .into_any_element()
     }
 
     fn render_group(
+        &self,
         name: &'static str,
         label: &'static str,
         buttons: &[Vec<RibbonBtn>],
@@ -845,7 +1052,7 @@ impl FormattingRibbon {
                                 .flex_row()
                                 .gap(px(space::XS))
                                 .children(row.iter().map(|btn| {
-                                    Self::make_button(
+                                    self.make_button(
                                         btn.label,
                                         btn.action,
                                         btn.tone,
@@ -910,6 +1117,10 @@ impl FormattingRibbon {
 
 impl Render for FormattingRibbon {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Valid only for the duration of one mouse-down dispatch (see the
+        // field's doc comment) — this is the clear half of that contract.
+        self.dismissed = None;
+
         let state = self.state.clone();
         let (p, color_mode) = {
             let state_read = state.read(cx);
@@ -919,7 +1130,6 @@ impl Render for FormattingRibbon {
         let all_collapsed = ribbon_groups
             .iter()
             .all(|name| self.collapsed.get(name).copied().unwrap_or(false));
-        let open_menu = self.open_menu;
         div()
             .id("ribbon-root")
             .relative()
@@ -929,39 +1139,8 @@ impl Render for FormattingRibbon {
             .gap(px(0.0))
             .p(px(0.0))
             .bg(rgb(p.chrome))
-            .when_some(open_menu, |d, action| {
-                let anchor = self.menu_anchor;
-                let panel = self.render_menu_panel(action, p, cx);
-                d.child(
-                    deferred(
-                        div()
-                            .id("ribbon-menu-backdrop")
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|this, _ev, _window, cx| {
-                                    this.open_menu = None;
-                                    this.editing_custom = None;
-                                    cx.notify();
-                                }),
-                            )
-                            .child(
-                                anchored()
-                                    .position(anchor)
-                                    .snap_to_window()
-                                    .offset(point(px(-8.0), px(4.0)))
-                                    .child(panel),
-                            ),
-                    )
-                    .with_priority(100),
-                )
-            })
             .child(Self::render_global_controls(all_collapsed, p, cx))
-            .child(Self::render_group(
+            .child(self.render_group(
                 "cards",
                 "CARDS",
                 &[
@@ -990,7 +1169,7 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(Self::render_group(
+            .child(self.render_group(
                 "text",
                 "TEXT",
                 &[
@@ -1016,7 +1195,7 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(Self::render_group(
+            .child(self.render_group(
                 "document",
                 "DOCUMENT",
                 &[
@@ -1046,7 +1225,7 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(Self::render_group(
+            .child(self.render_group(
                 "view",
                 "VIEW",
                 &[
@@ -1065,7 +1244,7 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(Self::render_group(
+            .child(self.render_group(
                 "caselist",
                 "CASELIST",
                 &[
