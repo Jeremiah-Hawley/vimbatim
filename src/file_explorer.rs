@@ -424,9 +424,29 @@ impl FileExplorer {
                 .into_any_element()
         };
 
-        deferred(anchored().position(point(px(x), px(y))).snap_to_window().child(panel))
-            .with_priority(1)
-            .into_any_element()
+        // The root-level dismiss handler in main_window.rs never sees editor
+        // clicks — text_editor.rs stops propagation on its own mouse-down.
+        // `on_mouse_down_out` is dispatched in the capture phase, so it fires
+        // regardless of who stops the bubble phase later. Wrapping here covers
+        // both panel branches with one handler.
+        let dismiss_state = state_handle.clone();
+        deferred(
+            anchored().position(point(px(x), px(y))).snap_to_window().child(
+                div()
+                    .id("file-context-menu-dismiss")
+                    .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                        dismiss_state.update(cx, |s, cx| {
+                            if s.file_context_menu.is_some() {
+                                s.close_file_context_menu();
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(panel),
+            ),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// One half of the Files/Nav header toggle: highlighted when it

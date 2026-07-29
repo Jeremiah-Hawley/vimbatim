@@ -2547,6 +2547,20 @@ mod tests {
         assert_eq!(highlight_color_hex("nonexistent"), 0x888888);
     }
 
+    /// The 16 names `docx_parser` writes as `w:highlight` must all render as a
+    /// real color here — otherwise a document Word accepts would come back
+    /// grey. This is what keeps the two lists from drifting apart.
+    #[test]
+    fn test_every_word_highlight_name_has_a_color() {
+        for name in crate::docx_parser::WORD_HIGHLIGHT_NAMES {
+            assert_ne!(
+                highlight_color_hex(name),
+                0x888888,
+                "{name} falls through to the unknown-color fallback",
+            );
+        }
+    }
+
     #[test]
     fn test_highlight_color_hex_raw_hex_string() {
         assert_eq!(highlight_color_hex("00ff88"), 0x00ff88);

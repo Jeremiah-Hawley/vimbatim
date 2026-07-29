@@ -721,8 +721,52 @@ fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<Str
 }
 
 /// Applies a run-property element to `run` based on the element's tag name.
+/// The only values Word accepts for `<w:highlight w:val="…">` (ECMA-376
+/// ST_HighlightColor). Anything else has to be written as shading instead —
+/// see `run_props_xml`. `text_editor::highlight_color_hex` maps these same
+/// names to their on-screen color, and a test there asserts the two agree.
+pub(crate) const WORD_HIGHLIGHT_NAMES: [&str; 16] = [
+    "yellow", "green", "cyan", "magenta", "blue", "red", "darkBlue", "darkCyan", "darkGreen",
+    "darkMagenta", "darkRed", "darkYellow", "darkGray", "lightGray", "black", "white",
+];
+
+/// The `<w:rPr>` inner XML for one run. Split out of `write_docx` so the
+/// highlight-vs-shading branch below can be tested directly.
+fn run_props_xml(run: &Run) -> String {
+    let mut out = String::new();
+    if run.bold { out.push_str("<w:b/>"); }
+    if run.italic { out.push_str("<w:i/>"); }
+    if run.strikethrough { out.push_str("<w:strike/>"); }
+    if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
+    else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
+    if run.highlight {
+        // `w:highlight` only accepts the 16 names above — Word silently drops
+        // anything else. A custom hex color goes out as shading, which Word
+        // does honor.
+        if WORD_HIGHLIGHT_NAMES.contains(&run.highlight_color.as_str()) {
+            out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
+        } else {
+            out.push_str(&format!(
+                "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+                run.highlight_color,
+            ));
+        }
+    }
+    if run.size > 0 {
+        out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
+    }
+    if let Some(font) = &run.font {
+        out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
+    }
+    if let Some(color) = &run.color {
+        out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
+    }
+    out
+}
+
 /// Handles `w:b` (bold), `w:u` (underline), `w:highlight` (highlight colour),
-/// and `w:sz` (font size in half-points).  Unknown tags are silently ignored.
+/// `w:shd` (custom hex highlight, written as shading), and `w:sz` (font size
+/// in half-points).  Unknown tags are silently ignored.
 fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     /*
      * This function is called for both `Event::Start` and `Event::Empty`
@@ -754,6 +798,21 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:val" {
                     run.highlight_color = String::from_utf8_lossy(&attr.value).into_owned();
+                }
+            }
+        }
+        // Word writes arbitrary background colors as shading, not highlight.
+        // `w:fill="auto"` means "no fill", and anything that isn't 6 hex digits
+        // isn't a color we can render — both are ignored so ordinary Word
+        // documents don't gain phantom highlights.
+        b"w:shd" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"w:fill" {
+                    let fill = String::from_utf8_lossy(&attr.value).into_owned();
+                    if fill.len() == 6 && fill.chars().all(|c| c.is_ascii_hexdigit()) {
+                        run.highlight = true;
+                        run.highlight_color = fill.to_lowercase();
+                    }
                 }
             }
         }
@@ -856,23 +915,7 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 || run.color.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
-                if run.bold      { out.push_str("<w:b/>"); }
-                if run.italic    { out.push_str("<w:i/>"); }
-                if run.strikethrough { out.push_str("<w:strike/>"); }
-                if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
-                else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
-                if run.highlight {
-                    out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
-                }
-                if run.size > 0 {
-                    out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
-                }
-                if let Some(font) = &run.font {
-                    out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
-                }
-                if let Some(color) = &run.color {
-                    out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
-                }
+                out.push_str(&run_props_xml(run));
                 out.push_str("</w:rPr>");
             }
             // Emit xml:space="preserve" only when the run needs it.
@@ -993,6 +1036,76 @@ fn escape_xml_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_named_highlight_still_writes_w_highlight() {
+        let run = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
+        };
+        let xml = run_props_xml(&run);
+        assert!(xml.contains("<w:highlight w:val=\"yellow\"/>"), "got {xml}");
+        assert!(!xml.contains("w:shd"), "got {xml}");
+    }
+
+    #[test]
+    fn test_custom_hex_highlight_writes_w_shd() {
+        let run = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "00ff88".into(),
+            ..Run::default()
+        };
+        let xml = run_props_xml(&run);
+        assert!(
+            xml.contains("<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"00ff88\"/>"),
+            "got {xml}",
+        );
+        assert!(!xml.contains("w:highlight"), "got {xml}");
+    }
+
+    #[test]
+    fn test_w_shd_fill_is_read_back_as_a_highlight() {
+        let mut run = Run::default();
+        apply_run_prop(
+            &BytesStart::from_content(r#"w:shd w:val="clear" w:color="auto" w:fill="00FF88""#, 5),
+            &mut run,
+        );
+        assert!(run.highlight);
+        assert_eq!(run.highlight_color, "00ff88");
+    }
+
+    #[test]
+    fn test_w_shd_auto_fill_is_not_a_highlight() {
+        for content in [
+            r#"w:shd w:val="clear" w:color="auto" w:fill="auto""#,
+            r#"w:shd w:val="clear" w:color="auto""#,
+            r#"w:shd w:val="clear" w:fill="nothex""#,
+        ] {
+            let mut run = Run::default();
+            apply_run_prop(&BytesStart::from_content(content, 5), &mut run);
+            assert!(!run.highlight, "should not highlight for: {content}");
+        }
+    }
+
+    #[test]
+    fn test_custom_highlight_survives_a_write_read_round_trip() {
+        let source = Run {
+            text: "hi".into(),
+            highlight: true,
+            highlight_color: "00ff88".into(),
+            ..Run::default()
+        };
+        // Feed the emitted `w:shd` element straight back through the parser.
+        let xml = run_props_xml(&source);
+        let inner = xml.trim_start_matches("<w:shd ").trim_end_matches("/>");
+        let mut run = Run::default();
+        apply_run_prop(&BytesStart::from_content(format!("w:shd {inner}"), 5), &mut run);
+        assert!(run.highlight);
+        assert_eq!(run.highlight_color, source.highlight_color);
+    }
 
     #[test]
     fn two_concurrent_writes_to_one_path_get_different_temp_files() {

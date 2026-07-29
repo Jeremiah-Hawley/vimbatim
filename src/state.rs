@@ -532,6 +532,13 @@ pub struct AppState {
     /// Open state of the file explorer's right-click menu, `None` when
     /// closed. See `FileContextMenu`.
     pub file_context_menu: Option<FileContextMenu>,
+    /// Colors the user added from the Font Color and HL Color dropdowns'
+    /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
+    /// `[FORMATTING]` section so they survive a restart, capped at
+    /// `MAX_CUSTOM_COLORS`. Kept as two lists on purpose — see
+    /// `CustomColorTarget`.
+    pub custom_font_colors: Vec<u32>,
+    pub custom_highlight_colors: Vec<u32>,
     /// Which view the left sidebar shows — the file tree, or (Nav) a
     /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
     /// Toggled from two places that both flip the same field: the ribbon's
@@ -820,6 +827,63 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
     crate::theme::save_setting_line(path, "expanded_dirs", &joined)
 }
 
+/// Which dropdown a custom color belongs to. The two lists are deliberately
+/// separate: a highlight color added while highlighting shouldn't turn up as a
+/// font color option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomColorTarget {
+    Font,
+    Highlight,
+}
+
+impl CustomColorTarget {
+    /// The settings.conf `[FORMATTING]` key this list is stored under.
+    pub fn settings_key(self) -> &'static str {
+        match self {
+            CustomColorTarget::Font => "custom_font_colors",
+            CustomColorTarget::Highlight => "custom_highlight_colors",
+        }
+    }
+}
+
+/// ponytail: hard cap on saved custom colors, oldest dropped first — keeps
+/// settings.conf and the dropdown from growing without bound. Raise it (or add
+/// a "manage colors" UI) if users ask for more slots.
+pub const MAX_CUSTOM_COLORS: usize = 16;
+
+/// Reads one pipe-separated list of `RRGGBB` hex colors from settings.conf.
+/// Same `|` convention as `expanded_dirs`, and the same tolerant flat scan as
+/// `load_font_size_half_points`: a missing file, missing key, or unparseable
+/// entry costs that entry only, never an error.
+pub(crate) fn load_custom_colors(path: &std::path::Path, key: &str) -> Vec<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == key).then(|| value.trim().to_string())
+            })
+        })
+        .map(|value| {
+            value
+                .split('|')
+                .map(str::trim)
+                .filter(|entry| entry.len() == 6)
+                .filter_map(|entry| u32::from_str_radix(entry, 16).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_custom_colors(
+    path: &std::path::Path,
+    key: &str,
+    colors: &[u32],
+) -> std::io::Result<()> {
+    let joined = colors.iter().map(|c| format!("{c:06x}")).collect::<Vec<_>>().join("|");
+    crate::theme::save_setting_line(path, key, &joined)
+}
+
 /// Reads `normal_text_size` (points, `[FORMATTING]` section) from settings.conf —
 /// the size "Clear Formatting" (`found_bugs.md`) resets a line back to.
 /// Mirrors `keybinds::load_vim_enabled`'s tolerant flat key=value scan
@@ -885,6 +949,10 @@ impl AppState {
         let tag_size_half_points = load_font_size_half_points(settings_path, "tag_size", 26);
         let cite_size_half_points = load_font_size_half_points(settings_path, "cite_size", 26);
         let small_size_half_points = load_font_size_half_points(settings_path, "small_size", 12);
+        let custom_font_colors =
+            load_custom_colors(settings_path, CustomColorTarget::Font.settings_key());
+        let custom_highlight_colors =
+            load_custom_colors(settings_path, CustomColorTarget::Highlight.settings_key());
 
         AppState {
             tabs: vec![Tab::new_empty(0)],
@@ -894,6 +962,8 @@ impl AppState {
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            custom_font_colors,
+            custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             pending_close: None,
@@ -2935,6 +3005,56 @@ impl AppState {
 
     pub fn close_file_context_menu(&mut self) {
         self.file_context_menu = None;
+    }
+
+    pub fn custom_colors(&self, target: CustomColorTarget) -> &[u32] {
+        match target {
+            CustomColorTarget::Font => &self.custom_font_colors,
+            CustomColorTarget::Highlight => &self.custom_highlight_colors,
+        }
+    }
+
+    /// Appends `hex` to the target list and persists it. Re-adding an existing
+    /// color moves it to the end (most recent) rather than duplicating it.
+    pub fn add_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
+        let list = match target {
+            CustomColorTarget::Font => &mut self.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+        };
+        if let Some(pos) = list.iter().position(|c| *c == hex) {
+            list.remove(pos);
+        }
+        list.push(hex);
+        while list.len() > MAX_CUSTOM_COLORS {
+            list.remove(0);
+        }
+        self.persist_custom_colors(target);
+    }
+
+    /// Drops `hex` from the target list and persists the removal. Deliberately
+    /// not confirmed — unlike a file delete, re-adding a swatch costs one click
+    /// in the picker.
+    pub fn remove_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
+        let list = match target {
+            CustomColorTarget::Font => &mut self.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+        };
+        let Some(pos) = list.iter().position(|c| *c == hex) else { return };
+        list.remove(pos);
+        self.persist_custom_colors(target);
+    }
+
+    /// Writes one custom color list back to settings.conf. A failed write is
+    /// logged, not propagated — losing a saved swatch must never take the
+    /// applied color (or the user's edit) with it.
+    fn persist_custom_colors(&self, target: CustomColorTarget) {
+        if let Err(e) = save_custom_colors(
+            &settings_conf_path(),
+            target.settings_key(),
+            self.custom_colors(target),
+        ) {
+            eprintln!("[settings] failed to save custom colors: {e}");
+        }
     }
 
     pub fn request_context_menu_delete_confirmation(&mut self) {
@@ -6028,6 +6148,120 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
 mod tests {
     use super::*;
 
+    /// Makes a unique temp dir for one test. Mirrors `recovery.rs`'s helper —
+    /// no `tempfile` dependency.
+    fn custom_color_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("vimbatim-color-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_load_custom_colors_parses_pipe_separated_hex() {
+        let dir = custom_color_temp_dir("load");
+        let path = dir.join("settings.conf");
+        std::fs::write(&path, "[FORMATTING]\ncustom_highlight_colors=00ff88|aabbcc\n").unwrap();
+        assert_eq!(load_custom_colors(&path, "custom_highlight_colors"), vec![0x00ff88, 0xaabbcc]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_custom_colors_tolerates_missing_and_garbage() {
+        let dir = custom_color_temp_dir("tolerant");
+        let path = dir.join("settings.conf");
+
+        // Missing file.
+        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
+
+        // Missing key, empty value, and unparseable entries mixed with good ones.
+        std::fs::write(
+            &path,
+            "[FORMATTING]\ncustom_font_colors=\ncustom_highlight_colors=00ff88|zzzzzz|1234567|aabbcc\n",
+        )
+        .unwrap();
+        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
+        assert!(load_custom_colors(&path, "nonexistent_key").is_empty());
+        assert_eq!(
+            load_custom_colors(&path, "custom_highlight_colors"),
+            vec![0x00ff88, 0xaabbcc],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_then_load_custom_colors_round_trips() {
+        let dir = custom_color_temp_dir("roundtrip");
+        let path = dir.join("settings.conf");
+        std::fs::write(&path, "[FORMATTING]\ntheme=nord\n\n[KEYBINDS]\nvim=false\n").unwrap();
+
+        save_custom_colors(&path, "custom_font_colors", &[0x00ff88, 0x000000]).unwrap();
+        assert_eq!(load_custom_colors(&path, "custom_font_colors"), vec![0x00ff88, 0x000000]);
+
+        // An unrelated existing key survives the write.
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("theme=nord"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_add_custom_color_dedups_by_moving_to_the_end() {
+        let mut state = make_state("", 0, None);
+        state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+        state.add_custom_color(CustomColorTarget::Highlight, 0x222222);
+        assert_eq!(state.custom_highlight_colors, vec![0x111111, 0x333333, 0x222222]);
+    }
+
+    #[test]
+    fn test_add_custom_color_caps_the_list_dropping_oldest() {
+        let mut state = make_state("", 0, None);
+        for i in 0..MAX_CUSTOM_COLORS as u32 {
+            state.add_custom_color(CustomColorTarget::Font, i);
+        }
+        assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
+        assert_eq!(state.custom_font_colors[0], 0);
+
+        state.add_custom_color(CustomColorTarget::Font, 0xFFFFFF);
+        assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
+        assert_eq!(state.custom_font_colors[0], 1, "oldest entry should be dropped");
+        assert_eq!(*state.custom_font_colors.last().unwrap(), 0xFFFFFF);
+    }
+
+    #[test]
+    fn test_remove_custom_color_drops_it_and_leaves_the_rest() {
+        let mut state = make_state("", 0, None);
+        state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+        state.remove_custom_color(CustomColorTarget::Highlight, 0x222222);
+        assert_eq!(state.custom_highlight_colors, vec![0x111111, 0x333333]);
+    }
+
+    #[test]
+    fn test_remove_custom_color_is_a_noop_for_an_absent_color() {
+        let mut state = make_state("", 0, None);
+        state.custom_font_colors = vec![0x111111];
+        state.remove_custom_color(CustomColorTarget::Font, 0x999999);
+        assert_eq!(state.custom_font_colors, vec![0x111111]);
+    }
+
+    #[test]
+    fn test_remove_custom_color_only_touches_its_own_list() {
+        let mut state = make_state("", 0, None);
+        state.custom_font_colors = vec![0x00ff88];
+        state.custom_highlight_colors = vec![0x00ff88];
+        state.remove_custom_color(CustomColorTarget::Highlight, 0x00ff88);
+        assert!(state.custom_highlight_colors.is_empty());
+        assert_eq!(state.custom_font_colors, vec![0x00ff88]);
+    }
+
+    #[test]
+    fn test_add_custom_color_keeps_the_two_lists_separate() {
+        let mut state = make_state("", 0, None);
+        state.add_custom_color(CustomColorTarget::Highlight, 0x00ff88);
+        assert_eq!(state.custom_highlight_colors, vec![0x00ff88]);
+        assert!(state.custom_font_colors.is_empty());
+    }
+
     /// Build a minimal AppState with one tab whose content, cursor, and
     /// selection are set to the given values. Avoids touching the filesystem
     /// or GPUI context.
@@ -6073,6 +6307,8 @@ mod tests {
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            custom_font_colors: Vec::new(),
+            custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
             pending_close: None,
