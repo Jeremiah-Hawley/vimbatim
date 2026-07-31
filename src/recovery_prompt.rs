@@ -33,7 +33,7 @@ impl RecoveryPrompt {
 impl Render for RecoveryPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let p = palette(state.theme);
+        let p = palette(state.theme, state.theme_mode);
 
         let Some(entry) = state.pending_recovery.first() else {
             return div();
@@ -121,7 +121,16 @@ impl Render for RecoveryPrompt {
                                     // reuse the app's own working directory
                                     // rather than inventing a new default.
                                     let directory = this.state.read(cx).working_directory.clone();
-                                    let dest_rx = cx.prompt_for_new_path(&directory, Some(&entry.title));
+                                    // Suggest the name *with* .docx so the
+                                    // dialog shows it up front — a never-saved
+                                    // tab's title is bare ("New Tab"). The
+                                    // extension is enforced again on whatever
+                                    // comes back, in complete_recovery_save_as.
+                                    let suggested = crate::state::with_docx_extension(
+                                        std::path::Path::new(&entry.title),
+                                    );
+                                    let suggested = suggested.to_string_lossy().into_owned();
+                                    let dest_rx = cx.prompt_for_new_path(&directory, Some(&suggested));
                                     let state = this.state.clone();
                                     cx.spawn_in(window, async move |_this, cx| {
                                         let Ok(Ok(Some(dest))) = dest_rx.await else { return };

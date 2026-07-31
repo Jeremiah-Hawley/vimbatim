@@ -22,6 +22,42 @@ pub enum ThemeKind {
     Kanagawa,
 }
 
+/// Light or dark variant of whichever `ThemeKind` is selected. Orthogonal to
+/// the theme itself: every theme ships both, so switching mode keeps the user's
+/// chosen palette family and only swaps its lightness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn all() -> &'static [ThemeMode] {
+        &[ThemeMode::Light, ThemeMode::Dark]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "Dark",
+            ThemeMode::Light => "Light",
+        }
+    }
+
+    pub fn conf_value(self) -> &'static str {
+        match self {
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+    }
+
+    pub fn from_conf_value(value: &str) -> ThemeMode {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "light" => ThemeMode::Light,
+            _ => ThemeMode::Dark,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeColorMode {
     Minimal,
@@ -133,7 +169,14 @@ pub struct Palette {
     pub selection: u32,
 }
 
-pub const fn palette(kind: ThemeKind) -> Palette {
+pub const fn palette(kind: ThemeKind, mode: ThemeMode) -> Palette {
+    match mode {
+        ThemeMode::Dark => dark_palette(kind),
+        ThemeMode::Light => light_palette(kind),
+    }
+}
+
+const fn dark_palette(kind: ThemeKind) -> Palette {
     match kind {
         ThemeKind::WorkbenchDark => Palette {
             app_bg: color::APP_BG,
@@ -314,6 +357,201 @@ pub const fn palette(kind: ThemeKind) -> Palette {
     }
 }
 
+/// The light counterpart of each theme, taken from that palette family's own
+/// published light variant rather than computed — Catppuccin Latte, Tokyo Night
+/// Day, Gruvbox light, Nord's Snow Storm, Everforest light, Rosé Pine Dawn, and
+/// Kanagawa Lotus. Mechanically inverting a dark palette's lightness gives
+/// accents that were tuned against a dark background and wash out on a light
+/// one, so these are authored, not derived. Workbench Light has no upstream and
+/// mirrors Workbench Dark's structure.
+const fn light_palette(kind: ThemeKind) -> Palette {
+    match kind {
+        ThemeKind::WorkbenchDark => Palette {
+            app_bg: 0xf3f3f3,
+            editor_bg: 0xffffff,
+            editor_bg_raised: 0xf7f7f7,
+            chrome: 0xececec,
+            chrome_elevated: 0xe4e4e4,
+            chrome_hover: 0xdcdcdc,
+            chrome_active: 0xd2d2d2,
+            sidebar: 0xf0f0f0,
+            border: 0xc4c4c4,
+            border_subtle: 0xe0e0e0,
+            text: 0x1f2023,
+            text_muted: 0x55585f,
+            text_faint: 0x8a8f98,
+            accent: 0x0a66c2,
+            accent_strong: 0x09549f,
+            accent_muted: 0xbcd8f5,
+            accent_wash: 0xe3effb,
+            accent_alt: 0x8250df,
+            highlight: 0xc79100,
+            selection: 0xcfe3fb,
+        },
+        // Catppuccin Latte
+        ThemeKind::CatppuccinMocha => Palette {
+            app_bg: 0xdce0e8,
+            editor_bg: 0xeff1f5,
+            editor_bg_raised: 0xe6e9ef,
+            chrome: 0xe6e9ef,
+            chrome_elevated: 0xccd0da,
+            chrome_hover: 0xbcc0cc,
+            chrome_active: 0xdce0e8,
+            sidebar: 0xe6e9ef,
+            border: 0xbcc0cc,
+            border_subtle: 0xccd0da,
+            text: 0x4c4f69,
+            text_muted: 0x6c6f85,
+            text_faint: 0x9ca0b0,
+            accent: 0x1e66f5,
+            accent_strong: 0x209fb5,
+            accent_muted: 0xc5d3f8,
+            accent_wash: 0xdce4fb,
+            accent_alt: 0x8839ef,
+            highlight: 0xdf8e1d,
+            selection: 0xbfd0f5,
+        },
+        // Tokyo Night Day
+        ThemeKind::TokyoNight => Palette {
+            app_bg: 0xd0d5e3,
+            editor_bg: 0xe1e2e7,
+            editor_bg_raised: 0xd9dae3,
+            chrome: 0xd6d8e0,
+            chrome_elevated: 0xc4c8da,
+            chrome_hover: 0xb7bcd1,
+            chrome_active: 0xd0d5e3,
+            sidebar: 0xd6d8e0,
+            border: 0xa8aecb,
+            border_subtle: 0xc4c8da,
+            text: 0x3760bf,
+            text_muted: 0x6172b0,
+            text_faint: 0x848cb5,
+            accent: 0x2e7de9,
+            accent_strong: 0x007197,
+            accent_muted: 0xb8cdf2,
+            accent_wash: 0xd5e2f8,
+            accent_alt: 0x9854f1,
+            highlight: 0xb15c00,
+            selection: 0xb6bfe2,
+        },
+        // Gruvbox light
+        ThemeKind::GruvboxDark => Palette {
+            app_bg: 0xf2e5bc,
+            editor_bg: 0xfbf1c7,
+            editor_bg_raised: 0xf9f5d7,
+            chrome: 0xebdbb2,
+            chrome_elevated: 0xd5c4a1,
+            chrome_hover: 0xc8b795,
+            chrome_active: 0xebdbb2,
+            sidebar: 0xebdbb2,
+            border: 0xbdae93,
+            border_subtle: 0xd5c4a1,
+            text: 0x3c3836,
+            text_muted: 0x504945,
+            text_faint: 0x7c6f64,
+            accent: 0x076678,
+            accent_strong: 0x427b58,
+            accent_muted: 0xadc6cc,
+            accent_wash: 0xd4e2e5,
+            accent_alt: 0x8f3f71,
+            highlight: 0xb57614,
+            selection: 0xd5c4a1,
+        },
+        // Nord — Snow Storm backgrounds, Polar Night text
+        ThemeKind::Nord => Palette {
+            app_bg: 0xd8dee9,
+            editor_bg: 0xeceff4,
+            editor_bg_raised: 0xe5e9f0,
+            chrome: 0xe5e9f0,
+            chrome_elevated: 0xd8dee9,
+            chrome_hover: 0xc9d2e0,
+            chrome_active: 0xd8dee9,
+            sidebar: 0xe5e9f0,
+            border: 0xc0cadb,
+            border_subtle: 0xd8dee9,
+            text: 0x2e3440,
+            text_muted: 0x4c566a,
+            text_faint: 0x7b88a1,
+            accent: 0x5e81ac,
+            accent_strong: 0x4c7095,
+            accent_muted: 0xbdd0e3,
+            accent_wash: 0xdbe6f1,
+            accent_alt: 0xb48ead,
+            highlight: 0xbf8b30,
+            selection: 0xc4d4e6,
+        },
+        // Everforest light
+        ThemeKind::EverforestDark => Palette {
+            app_bg: 0xf4f0d9,
+            editor_bg: 0xfdf6e3,
+            editor_bg_raised: 0xf4f0d9,
+            chrome: 0xefebd4,
+            chrome_elevated: 0xe6e2cc,
+            chrome_hover: 0xdcd8c0,
+            chrome_active: 0xefebd4,
+            sidebar: 0xefebd4,
+            border: 0xd8d3ba,
+            border_subtle: 0xe6e2cc,
+            text: 0x5c6a72,
+            text_muted: 0x829181,
+            text_faint: 0x939f91,
+            accent: 0x3a94c5,
+            accent_strong: 0x35a77c,
+            accent_muted: 0xbcd9e8,
+            accent_wash: 0xdcebf3,
+            accent_alt: 0xdf69ba,
+            highlight: 0xdfa000,
+            selection: 0xe1e7c8,
+        },
+        // Rosé Pine Dawn
+        ThemeKind::RosePine => Palette {
+            app_bg: 0xf2e9e1,
+            editor_bg: 0xfaf4ed,
+            editor_bg_raised: 0xfffaf3,
+            chrome: 0xf2e9e1,
+            chrome_elevated: 0xdfdad9,
+            chrome_hover: 0xcecacd,
+            chrome_active: 0xf4ede8,
+            sidebar: 0xf2e9e1,
+            border: 0xcecacd,
+            border_subtle: 0xdfdad9,
+            text: 0x575279,
+            text_muted: 0x797593,
+            text_faint: 0x9893a5,
+            accent: 0x286983,
+            accent_strong: 0x56949f,
+            accent_muted: 0xbcd4dc,
+            accent_wash: 0xdde9ee,
+            accent_alt: 0x907aa9,
+            highlight: 0xea9d34,
+            selection: 0xdfdad9,
+        },
+        // Kanagawa Lotus
+        ThemeKind::Kanagawa => Palette {
+            app_bg: 0xe5ddb0,
+            editor_bg: 0xf2ecbc,
+            editor_bg_raised: 0xe7dba0,
+            chrome: 0xe5ddb0,
+            chrome_elevated: 0xd5cea3,
+            chrome_hover: 0xc9c093,
+            chrome_active: 0xe5ddb0,
+            sidebar: 0xe5ddb0,
+            border: 0xc7bf94,
+            border_subtle: 0xd5cea3,
+            text: 0x545464,
+            text_muted: 0x716e61,
+            text_faint: 0x8a8980,
+            accent: 0x4d699b,
+            accent_strong: 0x597b75,
+            accent_muted: 0xb3c0d5,
+            accent_wash: 0xd6dfeb,
+            accent_alt: 0x766b90,
+            highlight: 0xcc6d00,
+            selection: 0xc9cbd1,
+        },
+    }
+}
+
 pub fn load_theme(path: &Path) -> ThemeKind {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return ThemeKind::WorkbenchDark;
@@ -338,6 +576,22 @@ pub fn load_theme_color_mode(path: &Path) -> ThemeColorMode {
             (key.trim() == "theme_color_mode").then(|| ThemeColorMode::from_conf_value(value))
         })
         .unwrap_or(ThemeColorMode::Minimal)
+}
+
+pub fn load_theme_mode(path: &Path) -> ThemeMode {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return ThemeMode::Dark;
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(key, value)| (key.trim() == "theme_mode").then(|| ThemeMode::from_conf_value(value)))
+        .unwrap_or(ThemeMode::Dark)
+}
+
+pub fn save_theme_mode(path: &Path, mode: ThemeMode) -> std::io::Result<()> {
+    save_setting_line(path, "theme_mode", mode.conf_value())
 }
 
 pub fn save_theme(path: &Path, theme: ThemeKind) -> std::io::Result<()> {
@@ -411,4 +665,110 @@ pub mod radius {
     pub const XS: f32 = 2.0;
     pub const SM: f32 = 3.0;
     pub const MD: f32 = 4.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Perceived brightness, 0.0 (black) to 1.0 (white). Same BT.601 weighting
+    /// `text_editor::relative_luminance` uses, duplicated here rather than made
+    /// public — this is a test-only sanity check, not a rendering path.
+    fn brightness(hex: u32) -> f32 {
+        let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+        let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+        let b = (hex & 0xFF) as f32 / 255.0;
+        r * 0.299 + g * 0.587 + b * 0.114
+    }
+
+    #[test]
+    fn test_theme_mode_conf_values_round_trip() {
+        for mode in ThemeMode::all() {
+            assert_eq!(ThemeMode::from_conf_value(mode.conf_value()), *mode);
+        }
+        // Tolerant of case and padding, like every other conf reader here.
+        assert_eq!(ThemeMode::from_conf_value("  LIGHT "), ThemeMode::Light);
+        // Unknown or missing falls back to the mode every theme shipped as.
+        assert_eq!(ThemeMode::from_conf_value("sepia"), ThemeMode::Dark);
+        assert_eq!(ThemeMode::from_conf_value(""), ThemeMode::Dark);
+    }
+
+    /// Guards the 160 hand-authored light hex values: a digit slipped in any
+    /// background or text entry shows up here as a light palette that isn't
+    /// actually light, or one whose text would vanish into its own background.
+    #[test]
+    fn test_light_palettes_are_light_and_dark_palettes_are_dark() {
+        for kind in ThemeKind::all() {
+            let light = palette(*kind, ThemeMode::Light);
+            let dark = palette(*kind, ThemeMode::Dark);
+
+            assert!(
+                brightness(light.editor_bg) > 0.7,
+                "{}'s light editor_bg is not light: {:06x}",
+                kind.label(),
+                light.editor_bg,
+            );
+            assert!(
+                brightness(dark.editor_bg) < 0.3,
+                "{}'s dark editor_bg is not dark: {:06x}",
+                kind.label(),
+                dark.editor_bg,
+            );
+            assert!(
+                brightness(light.text) < brightness(light.editor_bg),
+                "{}'s light text is not darker than its background",
+                kind.label(),
+            );
+            assert!(
+                brightness(dark.text) > brightness(dark.editor_bg),
+                "{}'s dark text is not lighter than its background",
+                kind.label(),
+            );
+        }
+    }
+
+    /// Chrome has to sit on the same side of the light/dark divide as the
+    /// editor, or the app frame fights the page it surrounds.
+    #[test]
+    fn test_light_palette_chrome_stays_light() {
+        for kind in ThemeKind::all() {
+            let light = palette(*kind, ThemeMode::Light);
+            for (name, value) in [
+                ("app_bg", light.app_bg),
+                ("chrome", light.chrome),
+                ("chrome_elevated", light.chrome_elevated),
+                ("sidebar", light.sidebar),
+            ] {
+                assert!(
+                    brightness(value) > 0.55,
+                    "{}'s light {name} is too dark: {value:06x}",
+                    kind.label(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_save_then_load_theme_mode_round_trips() {
+        let dir = std::env::temp_dir()
+            .join(format!("vimbatim-theme-mode-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.conf");
+        std::fs::write(&path, "[FORMATTING]\ntheme=nord\ntheme_mode=dark\n").unwrap();
+
+        save_theme_mode(&path, ThemeMode::Light).unwrap();
+        assert_eq!(load_theme_mode(&path), ThemeMode::Light);
+        // The neighbouring key is untouched.
+        assert_eq!(load_theme(&path), ThemeKind::Nord);
+
+        save_theme_mode(&path, ThemeMode::Dark).unwrap();
+        assert_eq!(load_theme_mode(&path), ThemeMode::Dark);
+
+        // A file with no theme_mode line at all reads as Dark.
+        std::fs::write(&path, "theme=nord\n").unwrap();
+        assert_eq!(load_theme_mode(&path), ThemeMode::Dark);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

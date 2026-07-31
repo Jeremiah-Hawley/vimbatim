@@ -26,6 +26,19 @@ Windows
 
 After that first launch, the app opens normally like anything else.
 
+Your settings
+-------------
+Preferences (theme, keybindings, spellcheck) are written to:
+  macOS/Linux: ~/.vimbatim/settings.conf
+  Windows:     %APPDATA%\vimbatim\settings.conf
+
+It's a plain text file — you can edit it directly, though most of it is
+reachable from the Settings panel. It's created on first launch; delete it
+to start over from the defaults, or use "Reset to Defaults" in Settings.
+
+Words you add via right-click > Add to Dictionary go in user_dictionary.txt
+in that same folder.
+
 Found a bug or crash?
 ----------------------
 If the app crashes, a log is written automatically:

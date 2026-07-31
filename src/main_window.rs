@@ -514,7 +514,8 @@ impl Render for MainWindow {
         let pending_close    = self.state.read(cx).pending_close;
         let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
         let theme = self.state.read(cx).theme;
-        let p = palette(theme);
+        let theme_mode = self.state.read(cx).theme_mode;
+        let p = palette(theme, theme_mode);
 
         let ctx_menu_state = self.state.clone();
         let resize_state = self.state.clone();
@@ -526,8 +527,9 @@ impl Render for MainWindow {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
                 ctx_menu_state.update(cx, |s, cx| {
-                    if s.file_context_menu.is_some() {
+                    if s.file_context_menu.is_some() || s.editor_context_menu.is_some() {
                         s.close_file_context_menu();
+                        s.editor_context_menu = None;
                         cx.notify();
                     }
                 });

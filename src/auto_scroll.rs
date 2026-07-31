@@ -163,13 +163,14 @@ impl AutoScroller {
         // through the cache too if edge-drag scrolling ever measures as a real cost.
         let scroll_y = self.scroll_handle.offset().y.as_f32();
         let zoom = self.state.read(cx).zoom;
+        let font_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
         let content = self.state.read(cx).active_content().to_string();
         let paragraphs = self.state.read(cx).tabs.get(self.state.read(cx).active_tab)
             .map(|t| t.paragraphs.clone()).unwrap_or_default();
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom);
+        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, font_size_px);
         let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom);
-        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
+        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);
             cx.notify();

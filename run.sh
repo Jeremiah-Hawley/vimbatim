@@ -54,6 +54,20 @@ fi
 echo "==> cargo build $RELEASE"
 cargo build $RELEASE
 
+# ── Bundled defaults placement ────────────────────────────────────────────────
+# The user's own settings.conf lives in the per-user data directory
+# (~/.vimbatim on macOS/Linux, %APPDATA%\vimbatim on Windows) and is seeded on
+# first launch — nothing to place for it here.
+#
+# default_settings.conf is different: it's the read-only seed, shipped with the
+# build and looked up next to the executable (src/state.rs's
+# bundled_default_settings_path()). A dev build's executable lives in
+# target/{debug,release}/, so copy it there to match the packaged layout —
+# otherwise a fresh ~/.vimbatim seeds from the repo-root fallback instead,
+# which works but doesn't exercise the path testers actually get.
+if [ -n "$RELEASE" ]; then TARGET_DIR="target/release"; else TARGET_DIR="target/debug"; fi
+cp default_settings.conf "$TARGET_DIR/default_settings.conf"
+
 # ── Cursor size ───────────────────────────────────────────────────────────────
 # GPUI's X11/WSLg backend can double-scale cursors on HiDPI. Setting
 # XCURSOR_SIZE to 24 (standard for 96 dpi) corrects the oversized cursor.

@@ -17,6 +17,7 @@ mod wikifi_export;
 mod settings_modal;
 mod close_confirm;
 mod main_window;
+mod spellcheck;
 mod theme;
 
 use gpui::prelude::*;
@@ -72,6 +73,12 @@ fn main() {
      * `cx.activate(true)` brings the window to the foreground on platforms that
      * require it (macOS).
      */
+    // Must run before the first read of any setting: settings.conf now lives
+    // in the per-user data directory (see `state::settings_conf_path`), which
+    // on a fresh install contains nothing at all until this seeds it from the
+    // bundled defaults.
+    state::ensure_settings_file();
+
     application().run(|cx: &mut App| {
         // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
         // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are

@@ -14,15 +14,22 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui
 regex         = "1"
 quick-xml     = "0.30"
 zip           = "2"
+spellbook = "0.4.2"
 
 # cargo-bundle (closed_beta_plan.md §1) reads this to build Vimbatim.app on
 # macOS. `icon` is deliberately omitted — no .icns exists in the repo yet;
 # cargo-bundle falls back to a generic app icon until one is added.
-# `resources` copies settings.conf into Contents/Resources/ itself — without
+# `resources` copies the bundled defaults into Contents/Resources/ — without
 # it, cargo-bundle never creates a Resources dir at all (no cp target to
 # copy into after the fact).
+#
+# Only default_settings.conf ships. The user's own settings.conf is no longer
+# read from the bundle at all: it lives in the per-user data directory and is
+# seeded from this file on first launch (src/state.rs's `ensure_settings_file`),
+# because a bundle is read-only under Gatekeeper translocation and writing into
+# one breaks its code signature.
 [package.metadata.bundle]
 name = "Vimbatim"
 identifier = "com.vimbatim.app"
 short_description = ".docx editor for collegiate policy debate"
-resources = ["settings.conf"]
+resources = ["default_settings.conf"]

@@ -1,12 +1,18 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::auto_scroll::AutoScroller;
 use crate::docx_parser::{Paragraph, Run};
 use crate::document_ops::paragraph_run_char_spans;
-use crate::state::{matches_shifted_symbol, vim_find_target_char, AppState, VimMode};
+use crate::keybinds::{CopyAction, CutAction, PasteAction};
+use crate::state::{
+    matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, SpellTarget, VimMode,
+};
+use crate::theme::{palette, Palette, ThemeMode};
 
 /// `CHAR_WIDTH_PX`/`FONT_SIZE_PX`/`LINE_HEIGHT_PX` below are the 100%-zoom
 /// baseline (`AppState.zoom == 1.0`) — every call site multiplies by the
@@ -34,6 +40,15 @@ const CHAR_WIDTH_PX: f32 = 8.4;
 /// needs an explicit font size rather than reading it from render()'s
 /// ambient text style.
 const FONT_SIZE_PX: f32 = 14.0;
+/// A monospace glyph's advance as a fraction of its font size, derived from
+/// the two constants above (8.4px at 14px = 0.6) — `CHAR_WIDTH_PX` alone is
+/// only correct when the document actually renders at `FONT_SIZE_PX`, which it
+/// does not: body text renders at settings.conf's `normal_text_size`
+/// (`AppState.normal_text_size_half_points`, 11pt by default, i.e. 11px).
+/// Click-to-position multiplies this by the *real* rendered size so a click
+/// maps to the character under the pointer rather than one computed for a
+/// larger font.
+const CHAR_ADVANCE_RATIO: f32 = CHAR_WIDTH_PX / FONT_SIZE_PX;
 /// Matches the `.min_h(px(20.0))` set on each line div in render().
 const LINE_HEIGHT_PX: f32 = 20.0;
 /// Matches the `.p(px(16.0))` set on the outer editor div in render().
@@ -61,11 +76,6 @@ const SCROLL_MARGIN_LINES: f32 = 6.0;
 /// Oblique faces under one family name on essentially all Linux/WSL
 /// systems, giving `find_best_match` real candidates to choose between.
 const FONT_FAMILY: &str = "DejaVu Sans Mono";
-/// The editor's default (un-styled) text color, matching the literal used
-/// at each row/placeholder `.text_color(rgb(0xd4d4d4))` call site — used by
-/// `apply_run_style` as the "effective" text color when a run has no
-/// explicit `color` override, to decide whether a highlight needs darkening.
-const DEFAULT_TEXT_COLOR_HEX: u32 = 0xd4d4d4;
 
 /// Caches the word-wrapped row table (and the intermediate data it's built
 /// from — split lines, per-line chars, line byte offsets, and the cloned
@@ -176,6 +186,80 @@ pub struct TextEditor {
     /// switch at the top of the next `render()` call. `None` only before
     /// the very first render.
     last_seen_active_tab: Option<usize>,
+    /// Memoized spellcheck results, keyed by the *line's own text* rather
+    /// than by tab id + `content_version`.
+    ///
+    /// Keying on the text is what makes this cheap and correct at once:
+    /// editing one line leaves every other line's key untouched, so a
+    /// keystroke re-checks exactly the line being typed instead of the whole
+    /// document (which is what a `content_version` key would have forced).
+    /// Scrolling, switching tabs, and resizing hit warm entries. There is no
+    /// invalidation logic at all — a line that changed simply has a different
+    /// key, and a stale entry is unreachable rather than wrong.
+    ///
+    /// `Rc<RefCell<..>>` because the `uniform_list` render closure must be
+    /// `'static` and so cannot borrow `self`; `Rc<Vec<..>>` values so a cache
+    /// hit clones a pointer, not the ranges. Cleared wholesale past
+    /// `SPELL_CACHE_MAX_LINES` — see `spell_ranges_cached`.
+    spell_cache: Rc<RefCell<SpellCache>>,
+}
+
+/// The spellcheck memo plus the one thing besides line text that its results
+/// depend on.
+#[derive(Default)]
+struct SpellCache {
+    /// Size of the user dictionary the cached entries were computed against.
+    ///
+    /// Without this, "Add to Dictionary" would leave every *already-cached*
+    /// line still squiggling that word until the line happened to be edited —
+    /// the cache key is the line's text, which the dictionary edit doesn't
+    /// change. `add_to_user_dictionary` only ever inserts (deduplicated), so
+    /// the set's length is a monotonic generation counter and needs no
+    /// separate plumbing between `AppState` and this view.
+    dict_len: usize,
+    entries: HashMap<String, Rc<Vec<(usize, usize)>>>,
+}
+
+/// How many distinct lines the spellcheck memo holds before it's cleared.
+///
+/// Entries are keyed by line text and nothing ever removes one individually,
+/// so without a bound a long editing session would accumulate every
+/// intermediate state of every line ever typed. 4096 comfortably covers any
+/// document's live line set plus a long tail of edits, and a clear costs one
+/// re-check of the ~40 visible rows.
+const SPELL_CACHE_MAX_LINES: usize = 4096;
+
+/// Looks up (or computes and stores) one line's misspelled char-column ranges.
+///
+/// Free function rather than a method: its only caller is the `'static`
+/// `uniform_list` closure, which holds a clone of the `Rc` cache rather than
+/// `self`.
+fn spell_ranges_cached(
+    cache: &Rc<RefCell<SpellCache>>,
+    line: &str,
+    user_dictionary: &HashSet<String>,
+) -> Rc<Vec<(usize, usize)>> {
+    {
+        let mut cache = cache.borrow_mut();
+        // A dictionary addition invalidates every entry, since any of them
+        // could contain the newly-accepted word.
+        if cache.dict_len != user_dictionary.len() {
+            cache.entries.clear();
+            cache.dict_len = user_dictionary.len();
+        } else if let Some(hit) = cache.entries.get(line) {
+            return hit.clone();
+        }
+    }
+
+    let ranges = Rc::new(crate::spellcheck::misspelled_ranges(line, user_dictionary));
+    let mut cache = cache.borrow_mut();
+    // Clear rather than evict: there's no recency data to evict *by*, and the
+    // refill cost is one screenful of checks.
+    if cache.entries.len() >= SPELL_CACHE_MAX_LINES {
+        cache.entries.clear();
+    }
+    cache.entries.insert(line.to_string(), ranges.clone());
+    ranges
 }
 
 impl TextEditor {
@@ -202,6 +286,7 @@ impl TextEditor {
             row_cache: None,
             tab_scroll_offsets: std::collections::HashMap::new(),
             last_seen_active_tab: None,
+            spell_cache: Rc::new(RefCell::new(SpellCache::default())),
         }
     }
 
@@ -330,8 +415,11 @@ impl TextEditor {
         }
         let content = state.active_content().to_string();
         let paragraphs = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let lines = document_lines(&content);
-        let rows = Rc::new(visual_rows_for_viewport(cx, &lines, viewport_width, zoom));
+        let rows = Rc::new(visual_rows_for_viewport(
+            cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
+        ));
         let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
         (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
@@ -374,10 +462,19 @@ impl TextEditor {
         let content = state.active_content().to_string();
         let (cursor_line, cursor_col) = state.cursor_line_col();
         let zoom = state.zoom;
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let paragraphs = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let _ = state;
 
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, self.scroll_handle.bounds().size.width.as_f32(), zoom);
+        let rows = visual_rows_for_viewport(
+            cx,
+            &lines,
+            self.scroll_handle.bounds().size.width.as_f32(),
+            zoom,
+            &paragraphs,
+            normal_size_px,
+        );
 
         let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         let (_, row_start, _) = rows[current_row];
@@ -405,6 +502,21 @@ impl TextEditor {
          * re-invoke the exact same dispatch for a recorded keystroke
          * without a real `KeyDownEvent` to hand it.
          */
+        // Any real keystroke dismisses the right-click menu — it's a mouse
+        // gesture's transient state, and leaving it floating over text the
+        // user has started typing into reads as a stuck overlay. The key is
+        // still dispatched normally below, so this never swallows input.
+        //
+        // Here rather than in `process_key`: that one is also the macro-replay
+        // path (`@<register>`), which has no live menu to dismiss and
+        // shouldn't pay for the check per replayed keystroke.
+        if self.state.read(cx).editor_context_menu.is_some() {
+            self.state.update(cx, |s, cx| {
+                s.editor_context_menu = None;
+                cx.notify();
+            });
+        }
+
         let ks = &event.keystroke;
         self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), cx);
     }
@@ -599,9 +711,18 @@ impl TextEditor {
                 {
                     let zoom = self.state.read(cx).zoom;
                     let content = self.state.read(cx).active_content().to_string();
+                    let (paragraphs, normal_size_px) = {
+                        let st = self.state.read(cx);
+                        (
+                            st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default(),
+                            st.normal_text_size_half_points as f32 / 2.0,
+                        )
+                    };
                     let lines = document_lines(&content);
                     let bounds = self.scroll_handle.bounds();
-                    let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom);
+                    let rows = visual_rows_for_viewport(
+                        cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, normal_size_px,
+                    );
                     if !rows.is_empty() {
                         let line_height = LINE_HEIGHT_PX * zoom;
                         let viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
@@ -839,6 +960,12 @@ impl Render for TextEditor {
 
         let state = self.state.read(cx);
         let zoom = state.zoom;
+        // The editor pane is themed like the rest of the chrome — every color
+        // below comes from the palette so light mode reaches the document
+        // surface too, not just the frame around it.
+        let p = palette(state.theme, state.theme_mode);
+        let theme_mode = state.theme_mode;
+        let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
@@ -982,7 +1109,9 @@ impl Render for TextEditor {
             // rebuild this exact same row table (via the same helper
             // functions) so all three always agree on where each row's
             // boundaries fall.
-            let rows = visual_rows_for_viewport(cx, &lines, viewport_width, zoom);
+            let rows = visual_rows_for_viewport(
+                cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
+            );
             let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
 
             self.row_cache = Some(RowCache {
@@ -1044,8 +1173,18 @@ impl Render for TextEditor {
                         .justify_between()
                         .px(px(12.0))
                         .py(px(6.0))
-                        .bg(rgb(0x5a3d1a))
-                        .text_color(rgb(0xf0d9a8))
+                        // A warning strip, so it keeps its amber identity
+                        // rather than becoming palette chrome — but the dark
+                        // amber is illegible on a light theme, so each mode
+                        // gets its own pairing.
+                        .bg(rgb(match theme_mode {
+                            ThemeMode::Dark => 0x5a3d1a,
+                            ThemeMode::Light => 0xfaecc8,
+                        }))
+                        .text_color(rgb(match theme_mode {
+                            ThemeMode::Dark => 0xf0d9a8,
+                            ThemeMode::Light => 0x6b4e10,
+                        }))
                         .text_sm()
                         .child("This document contains a table — Vimbatim can't edit or preserve it; saving will remove it.")
                         .child(
@@ -1081,10 +1220,16 @@ impl Render for TextEditor {
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
+                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let paragraphs = {
+                    let st = this.state.read(cx);
+                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
                 let click_count = ev.click_count;
                 this.state.update(cx, |state, cx| {
+                    state.editor_context_menu = None;
                     // `set_cursor_from_line_col` does the line/col -> byte-offset
                     // conversion (there's no standalone public helper for it) and
                     // leaves the result in `tab.cursor`, so double/triple-click
@@ -1100,6 +1245,72 @@ impl Render for TextEditor {
                     cx.notify();
                 });
                 cx.notify();
+            }))
+            // Right-click opens the Cut/Copy/Paste menu (rendered by
+            // `render_context_menu` at the bottom of this wrapper).
+            //
+            // ponytail: an existing selection is left alone rather than
+            // hit-tested against the click point — right-clicking *inside* a
+            // selection must keep it (that's the whole point of the Copy
+            // item), and right-clicking outside one is rare enough that
+            // "menu opens, selection unchanged" beats redoing the byte-offset
+            // math just to decide whether to clear it. Add the hit-test if
+            // that ever bites.
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.focus_handle.clone().focus(window, cx);
+                let has_selection = {
+                    let st = this.state.read(cx);
+                    st.tabs.get(st.active_tab).is_some_and(|t| t.selection.is_some())
+                };
+                // Resolve the click to a (line, col) whether or not there's a
+                // selection — without a selection it also moves the caret,
+                // but either way it's what locates a misspelled word below.
+                let bounds = this.scroll_handle.bounds();
+                let scroll_y = this.scroll_handle.offset().y.as_f32();
+                let zoom = this.state.read(cx).zoom;
+                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let paragraphs = {
+                    let st = this.state.read(cx);
+                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                };
+                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+                if !has_selection {
+                    this.state.update(cx, |state, _cx| state.set_cursor_from_line_col(line, col));
+                }
+
+                // Did the click land on a squiggle? `suggest` runs here, once,
+                // rather than during render — it's a dictionary search, far
+                // slower than the per-word `check` the squiggles use.
+                let spell_target = {
+                    let st = this.state.read(cx);
+                    if !st.spellcheck_enabled {
+                        None
+                    } else {
+                        let content = st.tabs.get(st.active_tab).map(|t| t.content.clone()).unwrap_or_default();
+                        let lines = document_lines(&content);
+                        lines.get(line).and_then(|text| {
+                            crate::spellcheck::misspelled_ranges(text, &st.user_dictionary)
+                                .into_iter()
+                                .find(|&(s, e)| col >= s && col < e)
+                                .map(|(start_col, end_col)| {
+                                    let word: String =
+                                        text.chars().skip(start_col).take(end_col - start_col).collect();
+                                    let suggestions = crate::spellcheck::suggest(&word);
+                                    SpellTarget { line, start_col, end_col, word, suggestions }
+                                })
+                        })
+                    }
+                };
+
+                this.state.update(cx, |state, cx| {
+                    state.editor_context_menu = Some(EditorContextMenu {
+                        position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                        spell_target,
+                    });
+                    cx.notify();
+                });
             }))
             // Dragging with the left button held extends a selection from
             // wherever on_mouse_down landed (spec 4.3 "mouse click-drag
@@ -1117,8 +1328,13 @@ impl Render for TextEditor {
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
+                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let paragraphs = {
+                    let st = this.state.read(cx);
+                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom);
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
                 this.state.update(cx, |state, cx| {
                     state.extend_selection_to_line_col(line, col);
                     cx.notify();
@@ -1151,7 +1367,7 @@ impl Render for TextEditor {
             // the div past the wrapper's allocated height instead of
             // scrolling internally.
             .min_h_0()
-            .bg(rgb(0x1e1e1e))
+            .bg(rgb(p.editor_bg))
             // No `.overflow_y_scroll()`/`.track_scroll()`/`.p()`/`.border_1()`
             // here anymore — `uniform_list` below owns the actual scrolling
             // now (it sets its own vertical overflow internally and is
@@ -1172,7 +1388,7 @@ impl Render for TextEditor {
                 d.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0x555555))
+                        .text_color(rgb(p.text_faint))
                         .font_family(FONT_FAMILY)
                         .p(px(16.0))
                         .child("Open a file from the sidebar, or start typing…"),
@@ -1186,6 +1402,14 @@ impl Render for TextEditor {
                     let rows = rows.clone();
                     let paragraphs = paragraphs.clone();
                     let display_to_wrap = display_to_wrap.clone();
+                    // Spellcheck inputs, read once per frame rather than per
+                    // row. `user_dictionary` is `Rc` in `AppState` precisely
+                    // so this is a refcount bump, not a deep clone.
+                    let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
+                    let user_dictionary = self.state.read(cx).user_dictionary.clone();
+                    let spell_cache = self.spell_cache.clone();
+                    let spellcheck_color =
+                        highlight_color_hex(&self.state.read(cx).spellcheck_underline_color);
                     move |range: std::ops::Range<usize>, _window, _cx| {
                         range.map(|display_idx| {
                         // A `None` slot is a blank spacer reserved after an
@@ -1246,6 +1470,29 @@ impl Render for TextEditor {
                             })
                             .collect();
 
+                        // Spellcheck: the logical line's misspelled ranges,
+                        // clipped and rebased onto this row exactly like
+                        // `row_selection` and `row_run_spans` above.
+                        //
+                        // Memoized per line text (see `spell_ranges_cached`),
+                        // so a keystroke re-checks only the line being edited
+                        // and scrolling is free. Measured uncached, for
+                        // reference: ~10µs per realistic card paragraph in
+                        // release, ~6x that in debug.
+                        let row_misspelled: Vec<(usize, usize)> = if spellcheck_enabled {
+                            spell_ranges_cached(&spell_cache, &lines[li], &user_dictionary)
+                                .iter()
+                                .filter_map(|&(ms, me)| {
+                                    let clipped_start = ms.max(row_start);
+                                    let clipped_end = me.min(row_end);
+                                    (clipped_start < clipped_end)
+                                        .then(|| (clipped_start - row_start, clipped_end - row_start))
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+
                         // Check if previous paragraph also has box_format (for merging boxes)
                         let prev_has_box = li > 0 && paragraphs.get(li - 1)
                             .is_some_and(|p| p.runs.iter().any(|r| r.box_format));
@@ -1258,6 +1505,10 @@ impl Render for TextEditor {
                             paragraphs.get(li),
                             prev_has_box,
                             zoom,
+                            p,
+                            cursor_style,
+                            &row_misspelled,
+                            spellcheck_color,
                         );
                         // Heading styles (spec 6.5): a paragraph-wide default
                         // that per-run formatting (bold/size/etc., applied
@@ -1284,7 +1535,7 @@ impl Render for TextEditor {
                         let row_div = div()
                             .font_family(FONT_FAMILY)
                             .text_size(px(normal_size_px * zoom))
-                            .text_color(rgb(0xd4d4d4));
+                            .text_color(rgb(p.text));
                         let row_div = match heading_font_size_px(heading, zoom) {
                             Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
                             None => row_div,
@@ -1348,7 +1599,7 @@ impl Render for TextEditor {
                 .p(px(16.0))
                 // Thin focus ring so the user can tell where key input lands
                 .border_1()
-                .border_color(if is_focused { rgb(0x007acc) } else { rgb(0x1e1e1e) })
+                .border_color(if is_focused { rgb(p.accent) } else { rgb(p.editor_bg) })
             ) // closes the "text-editor" div's .child(uniform_list...)
             ) // closes the scrollable-editor .child(...) on the wrapper
             .child({
@@ -1366,13 +1617,168 @@ impl Render for TextEditor {
                 div()
                     .h(px(LINE_HEIGHT_PX))
                     .px(px(16.0))
-                    .bg(rgb(0x1e1e1e))
+                    .bg(rgb(p.editor_bg))
                     .font_family(FONT_FAMILY)
                     .text_sm()
-                    .text_color(rgb(0xd4d4d4))
+                    .text_color(rgb(p.text))
                     .child(line)
             })
+            .when_some(self.state.read(cx).editor_context_menu.clone(), |el, menu| {
+                let has_selection = self
+                    .state
+                    .read(cx)
+                    .tabs
+                    .get(self.state.read(cx).active_tab)
+                    .is_some_and(|t| t.selection.is_some());
+                el.child(render_context_menu(menu, p, has_selection, &self.state))
+            })
     }
+}
+
+/// The editor's right-click menu, pinned to the click position with the same
+/// `deferred(anchored(...))` pair the file explorer's menu uses
+/// (`file_explorer.rs::render_context_menu`) so it paints above the row list
+/// regardless of tree position.
+///
+/// Always shows Cut / Copy / Paste. When the click landed on a misspelled word
+/// (`EditorContextMenu.spell_target`), spelling suggestions are prepended and
+/// "Add to Dictionary" is appended.
+///
+/// The clipboard items dispatch the *existing* keybind actions rather than
+/// re-implementing clipboard handling — `main_window.rs` already owns those
+/// three handlers (including rich-run metadata on copy/cut and rich paste),
+/// and they're registered as global actions, so `Window::dispatch_action`
+/// reaches them regardless of focus.
+fn render_context_menu(
+    menu: EditorContextMenu,
+    p: Palette,
+    has_selection: bool,
+    state_handle: &Entity<AppState>,
+) -> AnyElement {
+    let (x, y) = menu.position;
+
+    // Shared row chrome. Every item closes the menu; what it does *after* that
+    // is the caller's closure.
+    let row = |id: ElementId, label: String, enabled: bool, color: u32| {
+        div()
+            .id(id)
+            .h(px(26.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .text_sm()
+            .text_color(rgb(if enabled { color } else { p.text_faint }))
+            .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(rgb(p.chrome_hover))))
+            .child(label)
+    };
+    let separator = || div().h(px(1.0)).my(px(4.0)).bg(rgb(p.border_subtle));
+
+    // Cut/Copy are no-ops without a selection; show them muted rather than
+    // hiding them so the menu doesn't change shape between clicks.
+    let action_item = |id: &'static str, label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>, state: Entity<AppState>| {
+        row(id.into(), label.to_string(), enabled, p.text).when(enabled, |d| {
+            d.on_click(move |_ev, window, cx| {
+                state.update(cx, |s, cx| {
+                    s.editor_context_menu = None;
+                    cx.notify();
+                });
+                window.dispatch_action(action(), cx);
+            })
+        })
+    };
+
+    let mut panel = div()
+        .flex()
+        .flex_col()
+        // Wide enough for "Add to Dictionary" without wrapping; suggestions
+        // are single words and comfortably shorter.
+        .w(px(180.0))
+        .bg(rgb(p.chrome))
+        .border_1()
+        .border_color(rgb(p.border))
+        .rounded(px(6.0))
+        .shadow_lg()
+        .py(px(4.0))
+        // Keeps the editor's own left-mouse-down (which closes this menu and
+        // moves the caret) from firing before the item's on_click.
+        .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation());
+
+    // ── Suggestions ────────────────────────────────────────────────────────
+    // Above the clipboard items, matching Word: they're the reason the user
+    // right-clicked a squiggle, so they get the top of the menu.
+    if let Some(target) = &menu.spell_target {
+        if target.suggestions.is_empty() {
+            panel = panel.child(
+                div()
+                    .h(px(26.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .text_sm()
+                    .italic()
+                    .text_color(rgb(p.text_faint))
+                    .child("No suggestions"),
+            );
+        } else {
+            for (i, suggestion) in target.suggestions.iter().enumerate() {
+                let state = state_handle.clone();
+                let target = target.clone();
+                let replacement = suggestion.clone();
+                panel = panel.child(
+                    row(("editor-ctx-suggestion", i).into(), suggestion.clone(), true, p.text)
+                        .on_click(move |_ev, _window, cx| {
+                            state.update(cx, |s, cx| {
+                                s.replace_spell_target(&target, &replacement);
+                                s.editor_context_menu = None;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+        }
+        panel = panel.child(separator());
+    }
+
+    // ── Clipboard ──────────────────────────────────────────────────────────
+    panel = panel
+        .child(action_item("editor-ctx-cut", "Cut", has_selection, || Box::new(CutAction), state_handle.clone()))
+        .child(action_item("editor-ctx-copy", "Copy", has_selection, || Box::new(CopyAction), state_handle.clone()))
+        .child(action_item("editor-ctx-paste", "Paste", true, || Box::new(PasteAction), state_handle.clone()));
+
+    // ── Add to Dictionary ──────────────────────────────────────────────────
+    if let Some(target) = &menu.spell_target {
+        let state = state_handle.clone();
+        let word = target.word.clone();
+        panel = panel.child(separator()).child(
+            row("editor-ctx-add-to-dict".into(), "Add to Dictionary".to_string(), true, p.text)
+                .on_click(move |_ev, _window, cx| {
+                    state.update(cx, |s, cx| {
+                        s.add_to_user_dictionary(&word);
+                        s.editor_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+
+    let dismiss_state = state_handle.clone();
+    deferred(
+        anchored().position(point(px(x), px(y))).snap_to_window().child(
+            div()
+                .id("editor-context-menu-dismiss")
+                .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                    dismiss_state.update(cx, |s, cx| {
+                        if s.editor_context_menu.is_some() {
+                            s.editor_context_menu = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .child(panel),
+        ),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 fn render_line(
@@ -1383,6 +1789,13 @@ fn render_line(
     para: Option<&Paragraph>,
     prev_has_box: bool,
     zoom: f32,
+    pal: Palette,
+    cursor_style: CursorStyle,
+    // Row-relative char-column ranges to draw a spellcheck squiggle under,
+    // and the color to draw it in. Empty when spellcheck is off or this row
+    // is clean.
+    misspelled: &[(usize, usize)],
+    misspelled_color: u32,
 ) -> AnyElement {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
@@ -1405,7 +1818,7 @@ fn render_line(
      */
     let chars: Vec<char> = line.chars().collect();
 
-    if cursor_col.is_none() && selection.is_none() {
+    if cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
         if run_spans.is_empty() {
             return line.to_string().into_any_element();
         }
@@ -1419,7 +1832,7 @@ fn render_line(
                 use crate::docx_parser::Alignment;
                 let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
                 if !needs_alignment {
-                    return apply_run_style(div(), run, zoom).child(line.to_string()).into_any_element();
+                    return apply_run_style(div(), run, zoom, pal).child(line.to_string()).into_any_element();
                 }
             }
         }
@@ -1441,10 +1854,20 @@ fn render_line(
                 let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
                 (clipped_start < clipped_end).then(|| (clipped_start - run_start, clipped_end - run_start))
             });
-            let segments = line_segments(sub_len, sub_cursor, sub_selection);
+            // Same clip-and-rebase as `sub_selection`, for each squiggle
+            // range that overlaps this run.
+            let sub_misspelled: Vec<(usize, usize)> = misspelled
+                .iter()
+                .filter_map(|&(s, e)| {
+                    let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
+                    (clipped_start < clipped_end)
+                        .then(|| (clipped_start - run_start, clipped_end - run_start))
+                })
+                .collect();
+            let segments = line_segments(sub_len, sub_cursor, sub_selection, &sub_misspelled);
             segments
                 .into_iter()
-                .map(|(start, end, style)| {
+                .map(|(start, end, style, is_misspelled)| {
                     // A zero-width segment only ever occurs for the cursor
                     // sitting past the last character (end of line) — render
                     // it as a single space so the highlighted cell still has
@@ -1454,7 +1877,15 @@ fn render_line(
                     } else {
                         chars[run_start + start..run_start + end].iter().collect()
                     };
-                    render_segment(text, run, style, zoom)
+                    render_segment(
+                        text,
+                        run,
+                        style,
+                        zoom,
+                        pal,
+                        cursor_style,
+                        is_misspelled.then_some(misspelled_color),
+                    )
                 })
                 .collect::<Vec<_>>()
         })
@@ -1478,7 +1909,7 @@ fn render_line(
         if has_box {
             let mut box_div = div()
                 .w_full()
-                .border_color(rgb(0xd4d4d4))
+                .border_color(rgb(pal.text))
                 .px(px(8.0))
                 .py(px(8.0))
                 .child(line_div);
@@ -1496,7 +1927,15 @@ fn render_line(
     line_div.into_any_element()
 }
 
-fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle, zoom: f32) -> AnyElement {
+fn render_segment(
+    text: String,
+    run: Option<&Run>,
+    style: SegmentStyle,
+    zoom: f32,
+    pal: Palette,
+    cursor_style: CursorStyle,
+    misspelled: Option<u32>,
+) -> AnyElement {
     /*
      * Applies the run's formatting first, then layers the cursor/selection
      * overlay on top — each of GPUI's style calls simply overwrites the
@@ -1509,17 +1948,80 @@ fn render_segment(text: String, run: Option<&Run>, style: SegmentStyle, zoom: f3
      * Use flex_shrink(0.0) to prevent the div from expanding beyond the text width,
      * so highlights only extend as far as the text itself.
      */
-    let el = apply_run_style(div().flex_shrink(0.0), run, zoom);
+    let el = apply_run_style(div().flex_shrink(0.0), run, zoom, pal);
     let el = match style {
-        SegmentStyle::Cursor => el.bg(rgb(0xd4d4d4)).text_color(rgb(0x1e1e1e)),
-        // #264F78 at ~50% opacity, per spec 6.4's selection-highlight color.
-        SegmentStyle::Selection => el.bg(rgba(0x264F7880)),
+        SegmentStyle::Cursor => match cursor_style {
+            // Inverted block cursor: the page's text color as the block, the
+            // page's background as the glyph on top of it.
+            CursorStyle::Block => el.bg(rgb(pal.text)).text_color(rgb(pal.editor_bg)),
+            // A caret belongs *between* two characters, so it's an overlay on
+            // the left edge of the character the cursor is on, not a background
+            // on the character itself. Absolutely positioned so the character
+            // keeps its own colors and the line never shifts by the caret's
+            // width as the cursor moves through it.
+            CursorStyle::Line => el.relative().child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px((2.0 * zoom).max(1.0)))
+                    .bg(rgb(pal.text)),
+            ),
+        },
+        // The theme's selection color at ~50% opacity (spec 6.4 fixed this at
+        // #264F78; it now follows the palette so it stays visible on light
+        // backgrounds). `<< 8 | 0x80` packs the RGB into RGBA's high bits.
+        SegmentStyle::Selection => el.bg(rgba((pal.selection << 8) | 0x80)),
         SegmentStyle::Plain => el,
     };
-    el.child(text).into_any_element()
+    /*
+     * Spellcheck squiggle.
+     *
+     * A GPUI div has exactly one `underline` field, so a run that is *both*
+     * formatting-underlined (`apply_run_style` above) and misspelled can't
+     * express both decorations on one element — whichever is set last wins.
+     * Word draws both, so on that collision the text is painted twice: the
+     * real child keeps the formatting underline, and a second copy sits on
+     * top with transparent glyphs and only the wavy decoration visible.
+     *
+     * The overlay is a child of this same element, so it inherits font
+     * family/size/weight/style and its glyph advances match the real text
+     * exactly — the squiggle can't drift out of alignment with the word.
+     * `left_0().top_0()` (not `inset_0()`) lets it size to its own content
+     * instead of stretching to the parent box.
+     *
+     * The common cases stay single-element: no squiggle, or a squiggle with
+     * no competing formatting underline.
+     */
+    let formatting_underline = run.is_some_and(|r| r.underline || r.double_underline);
+    match misspelled {
+        Some(color) if formatting_underline => el
+            .relative()
+            .child(text.clone())
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .text_color(transparent_black())
+                    .underline()
+                    .text_decoration_wavy()
+                    .text_decoration_color(rgb(color))
+                    .child(text),
+            )
+            .into_any_element(),
+        Some(color) => el
+            .underline()
+            .text_decoration_wavy()
+            .text_decoration_color(rgb(color))
+            .child(text)
+            .into_any_element(),
+        None => el.child(text).into_any_element(),
+    }
 }
 
-fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32) -> Div {
+fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     /*
      * Maps a `Run`'s fields onto GPUI style calls per spec 6.2 (extended
      * with italic/font/color, rich-text formatting plan Phase 1's scope
@@ -1538,11 +2040,13 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32) -> Div {
         let base_hex = highlight_color_hex(&run.highlight_color);
         let text_hex = run.color.as_deref()
             .and_then(|c| u32::from_str_radix(c, 16).ok())
-            .unwrap_or(DEFAULT_TEXT_COLOR_HEX);
-        // Word darkens light highlights under light text in dark mode so
-        // the text stays legible (e.g. white text on yellow highlight is
-        // otherwise unreadable) — this app is always dark-themed, so the
-        // check is unconditional rather than gated on a light/dark toggle.
+            .unwrap_or(pal.text);
+        // Word darkens a light highlight sitting under light text so the text
+        // stays legible (white on yellow is otherwise unreadable). This used
+        // to be unconditional because the app was dark-only; now that the
+        // default text color follows the theme, the condition does the gating
+        // by itself — in light mode `p.text` is dark, so a yellow highlight
+        // is left alone, which is what Word does there too.
         let highlight_hex = if is_light_color(base_hex) && is_light_color(text_hex) {
             darken_for_light_text(base_hex)
         } else {
@@ -1788,7 +2292,14 @@ fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) ->
     }
 }
 
-pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_width_px: f32, zoom: f32) -> Vec<(usize, usize, usize)> {
+pub(crate) fn visual_rows_for_viewport(
+    cx: &App,
+    lines: &[String],
+    viewport_width_px: f32,
+    zoom: f32,
+    paragraphs: &[Paragraph],
+    normal_size_px: f32,
+) -> Vec<(usize, usize, usize)> {
     /*
      * Convenience wrapper combining `char_width_fn` + `usable_wrap_width` +
      * `build_visual_rows` — the single entry point every cx-having call
@@ -1798,11 +2309,48 @@ pub(crate) fn visual_rows_for_viewport(cx: &App, lines: &[String], viewport_widt
      * the font size wrapping is measured against, so a zoomed-in document
      * re-wraps at the same visual width it renders at.
      */
-    let mut width_of = char_width_fn(cx, font(FONT_FAMILY), FONT_SIZE_PX * zoom);
-    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &mut width_of)
+    let reference_px = FONT_SIZE_PX * zoom;
+    let mut measure = char_width_fn(cx, font(FONT_FAMILY), reference_px);
+
+    // Wrapping has to measure each character at the size it actually paints
+    // at, not one fixed size for the whole document: enlarging a run makes its
+    // characters wider, and a row wrapped for the old size then overflows the
+    // right edge instead of breaking.
+    //
+    // `build_visual_rows` walks lines in order, so a single-slot cache of the
+    // current line's run-span table is enough to avoid rebuilding it per
+    // character.
+    let mut cached_spans: Option<(usize, Vec<(usize, usize, usize)>)> = None;
+    let mut width_at = |line_idx: usize, char_idx: usize, ch: char| {
+        if cached_spans.as_ref().map(|(i, _)| *i) != Some(line_idx) {
+            let spans = paragraphs
+                .get(line_idx)
+                .map(paragraph_run_char_spans)
+                .unwrap_or_default();
+            cached_spans = Some((line_idx, spans));
+        }
+        let spans = cached_spans.as_ref().map(|(_, s)| s.as_slice()).unwrap_or(&[]);
+        let size = effective_char_size_px(
+            paragraphs.get(line_idx),
+            spans,
+            char_idx,
+            normal_size_px,
+            zoom,
+        );
+        let measured = measure(ch);
+        // A monospace advance scales linearly with font size, so one real
+        // glyph measurement at the reference size covers every size on the row.
+        if reference_px > 0.0 { measured * (size / reference_px) } else { measured }
+    };
+
+    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &mut width_at)
 }
 
-fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &mut impl FnMut(char) -> f32) -> Vec<(usize, usize)> {
+fn wrap_line_into_rows(
+    chars: &[char],
+    wrap_width_px: f32,
+    width_of: &mut impl FnMut(usize, char) -> f32,
+) -> Vec<(usize, usize)> {
     /*
      * Word-wraps one logical line's characters into visual rows whose
      * accumulated real glyph width (via `width_of`) stays within
@@ -1832,7 +2380,7 @@ fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &mut impl F
         let mut i = row_start;
         let mut last_space: Option<usize> = None;
         while i < chars.len() {
-            let char_width = width_of(chars[i]);
+            let char_width = width_of(i, chars[i]);
             // `i > row_start` forces at least one character onto every row,
             // even one whose width alone exceeds the budget — otherwise a
             // very narrow viewport (or a single unusually wide glyph) could
@@ -1859,7 +2407,11 @@ fn wrap_line_into_rows(chars: &[char], wrap_width_px: f32, width_of: &mut impl F
     rows
 }
 
-fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &mut impl FnMut(char) -> f32) -> Vec<(usize, usize, usize)> {
+fn build_visual_rows(
+    lines: &[String],
+    wrap_width_px: f32,
+    width_at: &mut impl FnMut(usize, usize, char) -> f32,
+) -> Vec<(usize, usize, usize)> {
     /*
      * Flattens every logical line into an ordered list of visual rows, each
      * tagged with its owning logical line index and its [start, end) char
@@ -1871,7 +2423,8 @@ fn build_visual_rows(lines: &[String], wrap_width_px: f32, width_of: &mut impl F
     let mut rows = Vec::new();
     for (li, line) in lines.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, &mut *width_of) {
+        let mut width_of = |idx: usize, ch: char| width_at(li, idx, ch);
+        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, &mut width_of) {
             rows.push((li, start, end));
         }
     }
@@ -1955,15 +2508,68 @@ pub(crate) fn document_lines(content: &str) -> Vec<String> {
     }
 }
 
-fn column_for_x(x: f32, char_width: f32) -> usize {
-    /*
-     * Converts an x pixel offset (relative to the start of the text, i.e.
-     * after subtracting the container's left padding) into a character
-     * column, rounding to the nearest column and clamping negative input
-     * to 0.
-     */
-    if char_width <= 0.0 || x <= 0.0 { return 0; }
-    (x / char_width).round() as usize
+/// The font size one character actually paints at, mirroring exactly how
+/// `render()` layers its three sources: a run-level `FontSize` wins (card
+/// styles Pocket/Hat/Block/Tag/Cite and Shrink all set one), otherwise the
+/// paragraph's heading level, otherwise the configured body size. Already
+/// multiplied by `zoom`.
+fn effective_char_size_px(
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    char_idx: usize,
+    normal_size_px: f32,
+    zoom: f32,
+) -> f32 {
+    let run = spans
+        .iter()
+        .find(|(start, end, _)| char_idx >= *start && char_idx < *end)
+        .and_then(|(_, _, run_idx)| para.and_then(|p| p.runs.get(*run_idx)));
+    if let Some(run) = run {
+        if run.size > 0 {
+            return run.size as f32 / 2.0 * zoom;
+        }
+    }
+    if let Some(size) = para.and_then(|p| heading_font_size_px(p.heading, zoom)) {
+        return size;
+    }
+    normal_size_px * zoom
+}
+
+/// Converts an x pixel offset (relative to the start of the text, i.e. after
+/// subtracting the container's left padding) into a character column *within
+/// one visual row*, rounding to the nearest character boundary and clamping
+/// negative input to 0.
+///
+/// Walks the row character by character rather than dividing by a single
+/// width: a row can mix font sizes (a Cite run inside a body line, a Shrunk
+/// span, a heading), so no one width describes it. Dividing by a uniform
+/// estimate put the cursor increasingly far from the pointer the further into
+/// a differently-sized line the user clicked.
+fn column_for_x_in_row(
+    x: f32,
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    row_start: usize,
+    row_end: usize,
+    normal_size_px: f32,
+    zoom: f32,
+) -> usize {
+    if x <= 0.0 || row_end <= row_start {
+        return 0;
+    }
+    let mut left = 0.0f32;
+    for char_idx in row_start..row_end {
+        let width =
+            effective_char_size_px(para, spans, char_idx, normal_size_px, zoom) * CHAR_ADVANCE_RATIO;
+        if x < left + width {
+            // Past this character's midpoint means the nearer boundary is the
+            // one after it — same round-to-nearest feel as clicking in Word.
+            let col = char_idx - row_start;
+            return if x - left > width / 2.0 { col + 1 } else { col };
+        }
+        left += width;
+    }
+    row_end - row_start
 }
 
 fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
@@ -1985,6 +2591,8 @@ pub(crate) fn line_col_from_mouse_position(
     rows: &[(usize, usize, usize)],
     display_to_wrap: &[Option<usize>],
     zoom: f32,
+    font_size_px: f32,
+    paragraphs: &[Paragraph],
 ) -> (usize, usize) {
     /*
      * Converts a window-space mouse position into a (logical_line,
@@ -2016,7 +2624,6 @@ pub(crate) fn line_col_from_mouse_position(
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
     let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
-    let col_in_row = column_for_x(local_x, CHAR_WIDTH_PX * zoom);
     let display_row = line_for_y(local_y, LINE_HEIGHT_PX * zoom, display_to_wrap.len());
 
     // A click landing on a blank spacer slot (the empty space an oversized
@@ -2024,7 +2631,15 @@ pub(crate) fn line_col_from_mouse_position(
     // whatever comes after it — walk back to the nearest real content row.
     let visual_row = (0..=display_row).rev().find_map(|i| display_to_wrap[i]).unwrap_or(0);
 
+    // The row has to be resolved *before* the column: which characters are on
+    // this row determines what they're sized at, and therefore how wide each
+    // one is.
     let (logical_line, row_start, row_end) = rows[visual_row];
+    let para = paragraphs.get(logical_line);
+    let spans = para.map(paragraph_run_char_spans).unwrap_or_default();
+    let col_in_row = column_for_x_in_row(
+        local_x, para, &spans, row_start, row_end, font_size_px, zoom,
+    );
     let col = row_start + col_in_row.min(row_end - row_start);
     (logical_line, col)
 }
@@ -2057,6 +2672,16 @@ fn selection_span_for_line(line: &str, line_byte_start: usize, sel_start: usize,
 
 /// How a single rendered line segment should be styled — plain text, the
 /// cursor's highlighted cell, or the selection's background overlay.
+/// How the caret is drawn. Vim users expect the block cursor that sits *on* a
+/// character (that's what vim's own motions address); everyone else expects the
+/// thin line *between* characters that Word and every other editor uses.
+/// Follows the `vim` setting itself, not the current vim mode.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum CursorStyle {
+    Block,
+    Line,
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum SegmentStyle {
     Plain,
@@ -2064,7 +2689,12 @@ enum SegmentStyle {
     Selection,
 }
 
-fn line_segments(len: usize, cursor_col: Option<usize>, selection: Option<(usize, usize)>) -> Vec<(usize, usize, SegmentStyle)> {
+fn line_segments(
+    len: usize,
+    cursor_col: Option<usize>,
+    selection: Option<(usize, usize)>,
+    misspelled: &[(usize, usize)],
+) -> Vec<(usize, usize, SegmentStyle, bool)> {
     /*
      * Splits a line of `len` characters into styled segments by merging the
      * cursor position (if this is the cursor's line) and the selection's
@@ -2075,9 +2705,15 @@ fn line_segments(len: usize, cursor_col: Option<usize>, selection: Option<(usize
      * highlighting, not the other way around. A cursor sitting past the
      * last character (end of line) produces a synthetic zero-width segment
      * (`len, len`) that the renderer turns into a single highlighted space.
+     *
+     * Misspelled ranges are a *third*, orthogonal overlay rather than another
+     * `SegmentStyle` variant: a misspelled word can also be selected, or sit
+     * under the cursor, and those have to keep their own background. So they
+     * contribute breakpoints like the others but come back as the trailing
+     * `bool` on each segment — "paint a squiggle under this run too".
      */
-    if cursor_col.is_none() && selection.is_none() {
-        return vec![(0, len, SegmentStyle::Plain)];
+    if cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
+        return vec![(0, len, SegmentStyle::Plain, false)];
     }
 
     let mut breaks: Vec<usize> = vec![0, len];
@@ -2087,6 +2723,10 @@ fn line_segments(len: usize, cursor_col: Option<usize>, selection: Option<(usize
         if c < len { breaks.push(c + 1); }
     }
     if let Some((s, e)) = selection {
+        breaks.push(s.min(len));
+        breaks.push(e.min(len));
+    }
+    for &(s, e) in misspelled {
         breaks.push(s.min(len));
         breaks.push(e.min(len));
     }
@@ -2107,14 +2747,17 @@ fn line_segments(len: usize, cursor_col: Option<usize>, selection: Option<(usize
         } else {
             SegmentStyle::Plain
         };
-        segments.push((start, end, style));
+        let is_misspelled = misspelled
+            .iter()
+            .any(|&(s, e)| start >= s.min(len) && end <= e.min(len));
+        segments.push((start, end, style, is_misspelled));
     }
 
     // A cursor at (or past) the end of the line has no character to occupy,
     // so the main loop above never produces a segment for it — append one.
     if let Some(c) = cursor_col {
         if c >= len {
-            segments.push((len, len, SegmentStyle::Cursor));
+            segments.push((len, len, SegmentStyle::Cursor, false));
         }
     }
     segments
@@ -2128,37 +2771,171 @@ mod tests {
     // sends the test-attribute expansion into infinite recursion if it's in
     // scope here.
     use super::{
-        column_for_x, line_for_y, selection_span_for_line, line_segments, SegmentStyle,
+        column_for_x_in_row, effective_char_size_px, line_for_y, selection_span_for_line,
+        line_segments, SegmentStyle, CHAR_ADVANCE_RATIO,
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
         row_cache_is_valid, RowCache, slot_count_for_paragraph, expand_rows_for_display,
+        spell_ranges_cached, SpellCache,
     };
+    use std::cell::RefCell;
+    use std::collections::HashSet;
     use std::rc::Rc;
     use crate::state::AppState;
     use crate::docx_parser::{Paragraph, Run, Alignment};
     use std::time::Instant;
 
+    /// A plain body-text row: 11px text (settings.conf's `normal_text_size`)
+    /// means 6.6px characters, so a click N characters in resolves to column N.
+    /// The old uniform-width math divided by 8.4px and landed short.
+    /// The reported bug: bumping the font size on text near the right edge let
+    /// it run off the editor instead of re-wrapping. Wrapping measured every
+    /// character at one fixed size, so a row wrapped for 11px text still held
+    /// the same characters after they grew to 24px — and the extra width spilled
+    /// past the right border. Widths now come from each character's own size,
+    /// so a larger run breaks sooner.
     #[test]
-    fn test_column_for_x_zero_is_first_column() {
-        assert_eq!(column_for_x(0.0, 8.4), 0);
+    fn test_wrap_breaks_sooner_when_characters_are_larger() {
+        let chars: Vec<char> = "aaaa aaaa aaaa aaaa".chars().collect();
+
+        // 6.6px characters (11pt body) — plenty fits in 100px.
+        let mut small = |_: usize, _: char| 6.6f32;
+        let small_rows = wrap_line_into_rows(&chars, 100.0, &mut small);
+
+        // 14.4px characters (24pt) — the same text needs more rows.
+        let mut large = |_: usize, _: char| 14.4f32;
+        let large_rows = wrap_line_into_rows(&chars, 100.0, &mut large);
+
+        assert!(
+            large_rows.len() > small_rows.len(),
+            "larger text must wrap into more rows: {} vs {}",
+            large_rows.len(),
+            small_rows.len(),
+        );
+        // And no row may exceed the budget at the larger size.
+        for (start, end) in &large_rows {
+            let width = (end - start) as f32 * 14.4;
+            assert!(width <= 100.0, "row {start}..{end} is {width}px, over budget");
+        }
+    }
+
+    /// A size change partway along a row has to be respected mid-row, which is
+    /// why the width callback receives the character's index.
+    #[test]
+    fn test_wrap_respects_a_size_change_partway_through_a_row() {
+        let chars: Vec<char> = "aaaaaaaaaaaaaaaaaaaa".chars().collect(); // 20
+        // First 10 characters small, the rest large.
+        let mut width_of = |i: usize, _: char| if i < 10 { 5.0f32 } else { 20.0 };
+        let rows = wrap_line_into_rows(&chars, 100.0, &mut width_of);
+
+        // 10 small chars fill exactly 50px, then two large ones reach 90px and
+        // a third would overflow — so the first row must stop before char 13.
+        assert!(rows[0].1 <= 13, "first row ran to {} despite the larger tail", rows[0].1);
+        assert!(rows.len() > 1, "the larger tail must be pushed onto another row");
     }
 
     #[test]
-    fn test_column_for_x_rounds_to_nearest_column() {
-        assert_eq!(column_for_x(4.0, 8.4), 0); // 4.0/8.4 = 0.48 -> rounds down
-        assert_eq!(column_for_x(5.0, 8.4), 1); // 5.0/8.4 = 0.60 -> rounds up
-        assert_eq!(column_for_x(8.4, 8.4), 1);
+    fn test_column_in_row_uses_the_rendered_body_size() {
+        let char_width = 11.0 * CHAR_ADVANCE_RATIO;
+        assert!((char_width - 6.6).abs() < 0.01, "got {char_width}");
+        for col in [0usize, 1, 5, 20, 60] {
+            let x = col as f32 * char_width;
+            assert_eq!(
+                column_for_x_in_row(x, None, &[], 0, 80, 11.0, 1.0),
+                col,
+                "click at column {col}",
+            );
+        }
     }
 
     #[test]
-    fn test_column_for_x_clamps_negative_to_zero() {
-        assert_eq!(column_for_x(-3.0, 8.4), 0);
+    fn test_column_in_row_rounds_to_the_nearest_boundary() {
+        let w = 11.0 * CHAR_ADVANCE_RATIO; // 6.6
+        assert_eq!(column_for_x_in_row(w * 0.4, None, &[], 0, 10, 11.0, 1.0), 0);
+        assert_eq!(column_for_x_in_row(w * 0.6, None, &[], 0, 10, 11.0, 1.0), 1);
     }
 
     #[test]
-    fn test_column_for_x_zero_char_width_is_zero() {
-        assert_eq!(column_for_x(5.0, 0.0), 0);
+    fn test_column_in_row_clamps_negative_and_past_the_end() {
+        assert_eq!(column_for_x_in_row(-30.0, None, &[], 0, 10, 11.0, 1.0), 0);
+        assert_eq!(column_for_x_in_row(9999.0, None, &[], 0, 10, 11.0, 1.0), 10);
+        // An empty row has no column but 0.
+        assert_eq!(column_for_x_in_row(50.0, None, &[], 4, 4, 11.0, 1.0), 0);
+    }
+
+    #[test]
+    fn test_column_in_row_tracks_zoom() {
+        for zoom in [0.5f32, 1.0, 1.5, 2.0] {
+            let w = 11.0 * CHAR_ADVANCE_RATIO * zoom;
+            assert_eq!(column_for_x_in_row(12.0 * w, None, &[], 0, 40, 11.0, zoom), 12, "zoom {zoom}");
+        }
+    }
+
+    /// The reported regression: a line rendered at a *different* size than the
+    /// body default. A Block card style sets a run-level 16pt (32 half-points),
+    /// so its characters are 9.6px, not 6.6px — clicking 10 characters in must
+    /// still land on column 10.
+    #[test]
+    fn test_column_in_row_follows_a_run_level_font_size() {
+        let para = Paragraph {
+            runs: vec![Run { text: "0123456789abcdef".into(), size: 32, ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let spans = crate::document_ops::paragraph_run_char_spans(&para);
+        let block_char = 16.0 * CHAR_ADVANCE_RATIO; // 9.6px
+        for col in [1usize, 5, 10] {
+            assert_eq!(
+                column_for_x_in_row(col as f32 * block_char, Some(&para), &spans, 0, 16, 11.0, 1.0),
+                col,
+                "block-sized column {col}",
+            );
+        }
+        // Read through the body-size estimate the same pixel lands far right.
+        let body_char = 11.0 * CHAR_ADVANCE_RATIO;
+        assert!((10.0 * block_char / body_char).round() as usize > 10);
+    }
+
+    /// A row mixing sizes — a Cite-sized run after body text — has no single
+    /// character width at all, which is why the column is walked rather than
+    /// divided.
+    #[test]
+    fn test_column_in_row_handles_mixed_sizes_within_one_row() {
+        let para = Paragraph {
+            runs: vec![
+                Run { text: "aaaaa".into(), ..Run::default() },          // body 11px
+                Run { text: "bbbbb".into(), size: 26, ..Run::default() }, // 13pt
+            ],
+            ..Paragraph::default()
+        };
+        let spans = crate::document_ops::paragraph_run_char_spans(&para);
+        let body = 11.0 * CHAR_ADVANCE_RATIO;
+        let cite = 13.0 * CHAR_ADVANCE_RATIO;
+
+        // Boundary between the two runs.
+        assert_eq!(column_for_x_in_row(5.0 * body, Some(&para), &spans, 0, 10, 11.0, 1.0), 5);
+        // Three characters into the larger run.
+        let x = 5.0 * body + 3.0 * cite;
+        assert_eq!(column_for_x_in_row(x, Some(&para), &spans, 0, 10, 11.0, 1.0), 8);
+    }
+
+    #[test]
+    fn test_effective_char_size_prefers_run_then_heading_then_body() {
+        let body = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], ..Paragraph::default() };
+        let spans = crate::document_ops::paragraph_run_char_spans(&body);
+        assert_eq!(effective_char_size_px(Some(&body), &spans, 0, 11.0, 1.0), 11.0);
+
+        let heading = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], heading: 1, ..Paragraph::default() };
+        let hspans = crate::document_ops::paragraph_run_char_spans(&heading);
+        assert_eq!(effective_char_size_px(Some(&heading), &hspans, 0, 11.0, 1.0), 24.0);
+
+        // A run-level size wins over the heading level.
+        let both = Paragraph { runs: vec![Run { text: "ab".into(), size: 32, ..Run::default() }], heading: 1, ..Paragraph::default() };
+        let bspans = crate::document_ops::paragraph_run_char_spans(&both);
+        assert_eq!(effective_char_size_px(Some(&both), &bspans, 0, 11.0, 1.0), 16.0);
+
+        // No paragraph data at all falls back to the body size.
+        assert_eq!(effective_char_size_px(None, &[], 0, 11.0, 2.0), 22.0);
     }
 
     #[test]
@@ -2250,62 +3027,99 @@ mod tests {
 
     #[test]
     fn test_line_segments_no_cursor_no_selection() {
-        assert_eq!(line_segments(5, None, None), vec![(0, 5, SegmentStyle::Plain)]);
+        assert_eq!(line_segments(5, None, None, &[]), vec![(0, 5, SegmentStyle::Plain, false)]);
     }
 
     #[test]
     fn test_line_segments_cursor_mid_line() {
         assert_eq!(
-            line_segments(5, Some(2), None),
-            vec![(0, 2, SegmentStyle::Plain), (2, 3, SegmentStyle::Cursor), (3, 5, SegmentStyle::Plain)]
+            line_segments(5, Some(2), None, &[]),
+            vec![
+                (0, 2, SegmentStyle::Plain, false),
+                (2, 3, SegmentStyle::Cursor, false),
+                (3, 5, SegmentStyle::Plain, false),
+            ]
         );
     }
 
     #[test]
     fn test_line_segments_cursor_at_line_start() {
         assert_eq!(
-            line_segments(5, Some(0), None),
-            vec![(0, 1, SegmentStyle::Cursor), (1, 5, SegmentStyle::Plain)]
+            line_segments(5, Some(0), None, &[]),
+            vec![(0, 1, SegmentStyle::Cursor, false), (1, 5, SegmentStyle::Plain, false)]
         );
     }
 
     #[test]
     fn test_line_segments_cursor_past_end_of_line() {
         assert_eq!(
-            line_segments(5, Some(5), None),
-            vec![(0, 5, SegmentStyle::Plain), (5, 5, SegmentStyle::Cursor)]
+            line_segments(5, Some(5), None, &[]),
+            vec![(0, 5, SegmentStyle::Plain, false), (5, 5, SegmentStyle::Cursor, false)]
         );
     }
 
     #[test]
     fn test_line_segments_selection_only() {
         assert_eq!(
-            line_segments(6, None, Some((1, 4))),
-            vec![(0, 1, SegmentStyle::Plain), (1, 4, SegmentStyle::Selection), (4, 6, SegmentStyle::Plain)]
+            line_segments(6, None, Some((1, 4)), &[]),
+            vec![
+                (0, 1, SegmentStyle::Plain, false),
+                (1, 4, SegmentStyle::Selection, false),
+                (4, 6, SegmentStyle::Plain, false),
+            ]
         );
     }
 
     #[test]
     fn test_line_segments_selection_covers_full_line() {
-        assert_eq!(line_segments(6, None, Some((0, 6))), vec![(0, 6, SegmentStyle::Selection)]);
+        assert_eq!(
+            line_segments(6, None, Some((0, 6)), &[]),
+            vec![(0, 6, SegmentStyle::Selection, false)]
+        );
     }
 
     #[test]
     fn test_line_segments_cursor_inside_selection_wins_its_own_cell() {
         assert_eq!(
-            line_segments(6, Some(2), Some((2, 5))),
+            line_segments(6, Some(2), Some((2, 5)), &[]),
             vec![
-                (0, 2, SegmentStyle::Plain),
-                (2, 3, SegmentStyle::Cursor),
-                (3, 5, SegmentStyle::Selection),
-                (5, 6, SegmentStyle::Plain),
+                (0, 2, SegmentStyle::Plain, false),
+                (2, 3, SegmentStyle::Cursor, false),
+                (3, 5, SegmentStyle::Selection, false),
+                (5, 6, SegmentStyle::Plain, false),
             ]
         );
     }
 
     #[test]
     fn test_line_segments_empty_line_with_cursor() {
-        assert_eq!(line_segments(0, Some(0), None), vec![(0, 0, SegmentStyle::Cursor)]);
+        assert_eq!(
+            line_segments(0, Some(0), None, &[]),
+            vec![(0, 0, SegmentStyle::Cursor, false)]
+        );
+    }
+
+    #[test]
+    fn test_line_segments_misspelled_range_splits_and_flags() {
+        assert_eq!(
+            line_segments(9, None, None, &[(4, 9)]),
+            vec![(0, 4, SegmentStyle::Plain, false), (4, 9, SegmentStyle::Plain, true)]
+        );
+    }
+
+    #[test]
+    fn test_line_segments_misspelled_word_keeps_selection_and_cursor_styles() {
+        // A selected, cursor-bearing, misspelled word must keep all three:
+        // the squiggle is an overlay, not a competing SegmentStyle.
+        assert_eq!(
+            line_segments(6, Some(1), Some((0, 4)), &[(0, 4)]),
+            vec![
+                (0, 1, SegmentStyle::Selection, true),
+                (1, 2, SegmentStyle::Cursor, true),
+                (2, 4, SegmentStyle::Selection, true),
+                (4, 6, SegmentStyle::Plain, false),
+            ]
+        );
     }
 
     // ── usable_wrap_width ────────────────────────────────────────────────────
@@ -2330,13 +3144,13 @@ mod tests {
 
     #[test]
     fn test_wrap_line_into_rows_empty_line_is_one_row() {
-        assert_eq!(wrap_line_into_rows(&[], 80.0, &mut |_| 8.0), vec![(0, 0)]);
+        assert_eq!(wrap_line_into_rows(&[], 80.0, &mut |_, _| 8.0), vec![(0, 0)]);
     }
 
     #[test]
     fn test_wrap_line_into_rows_fits_in_one_row() {
         let chars: Vec<char> = "hello".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 80.0, &mut |_| 8.0), vec![(0, 5)]);
+        assert_eq!(wrap_line_into_rows(&chars, 80.0, &mut |_, _| 8.0), vec![(0, 5)]);
     }
 
     #[test]
@@ -2345,7 +3159,7 @@ mod tests {
         // (8 chars); last space within budget is at index 5, so row 1 is
         // [0,5)="hello", the space at 5 is consumed, row 2 starts at 6: "world".
         let chars: Vec<char> = "hello world".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 64.0, &mut |_| 8.0), vec![(0, 5), (6, 11)]);
+        assert_eq!(wrap_line_into_rows(&chars, 64.0, &mut |_, _| 8.0), vec![(0, 5), (6, 11)]);
     }
 
     #[test]
@@ -2353,13 +3167,13 @@ mod tests {
         // No spaces at all within budget -> hard break exactly at the pixel
         // budget (32px / 8px-per-char = 4 chars per row).
         let chars: Vec<char> = "abcdefghij".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
     }
 
     #[test]
     fn test_wrap_line_into_rows_exact_multiple_of_width() {
         let chars: Vec<char> = "abcdefgh".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_| 8.0), vec![(0, 4), (4, 8)]);
+        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0), vec![(0, 4), (4, 8)]);
     }
 
     #[test]
@@ -2367,7 +3181,7 @@ mod tests {
         // Two words separated by exactly one space at the wrap point: the
         // space must not reappear as a leading character on the next row.
         let chars: Vec<char> = "aaaa bbbb".chars().collect();
-        let rows = wrap_line_into_rows(&chars, 40.0, &mut |_| 8.0);
+        let rows = wrap_line_into_rows(&chars, 40.0, &mut |_, _| 8.0);
         for (start, end) in &rows {
             let text: String = chars[*start..*end].iter().collect();
             assert!(!text.starts_with(' '), "row {:?} starts with a space", text);
@@ -2380,7 +3194,7 @@ mod tests {
         // character's width must still advance one character per row rather
         // than looping forever or producing an empty row.
         let chars: Vec<char> = "ab".chars().collect();
-        let rows = wrap_line_into_rows(&chars, 10.0, &mut |_| 100.0);
+        let rows = wrap_line_into_rows(&chars, 10.0, &mut |_, _| 100.0);
         assert_eq!(rows, vec![(0, 1), (1, 2)]);
     }
 
@@ -2393,7 +3207,7 @@ mod tests {
         // 20px budget — a uniform 8px/char estimate would have wrapped
         // after only 2.
         let chars: Vec<char> = vec!['.'; 20];
-        let mut width_of = |c: char| if c == '.' { 2.0 } else { 8.0 };
+        let mut width_of = |_: usize, c: char| if c == '.' { 2.0 } else { 8.0 };
         let rows = wrap_line_into_rows(&chars, 20.0, &mut width_of);
         assert_eq!(rows[0], (0, 10));
     }
@@ -2413,7 +3227,7 @@ mod tests {
         // function now requires.
         let chars: Vec<char> = "caf\u{e9} caf\u{e9} \u{201c}word\u{201d}".chars().collect();
         let mut cache: std::collections::HashMap<char, f32> = std::collections::HashMap::new();
-        let mut width_of = |c: char| *cache.entry(c).or_insert(8.0);
+        let mut width_of = |_: usize, c: char| *cache.entry(c).or_insert(8.0);
         let rows = wrap_line_into_rows(&chars, 200.0, &mut width_of);
         assert_eq!(rows, vec![(0, chars.len())]);
     }
@@ -2433,14 +3247,14 @@ mod tests {
     #[test]
     fn test_build_visual_rows_one_row_per_short_line() {
         let lines = document_lines("hi\nthere");
-        let rows = build_visual_rows(&lines, 800.0, &mut |_| 8.0);
+        let rows = build_visual_rows(&lines, 800.0, &mut |_, _, _| 8.0);
         assert_eq!(rows, vec![(0, 0, 2), (1, 0, 5)]);
     }
 
     #[test]
     fn test_build_visual_rows_wraps_long_line_into_multiple_rows() {
         let lines = document_lines("hello world");
-        let rows = build_visual_rows(&lines, 64.0, &mut |_| 8.0);
+        let rows = build_visual_rows(&lines, 64.0, &mut |_, _, _| 8.0);
         assert_eq!(rows, vec![(0, 0, 5), (0, 6, 11)]);
     }
 
@@ -2550,6 +3364,25 @@ mod tests {
     /// The 16 names `docx_parser` writes as `w:highlight` must all render as a
     /// real color here — otherwise a document Word accepts would come back
     /// grey. This is what keeps the two lists from drifting apart.
+    /// `render_segment` packs the palette's selection color into RGBA as
+    /// `(rgb << 8) | 0x80`. Spec 6.4 fixed the selection at #264F78 at ~50%
+    /// opacity, so packing that exact value must still reproduce the literal
+    /// this refactor replaced — that's what proves the theming didn't quietly
+    /// change how a selection looks.
+    #[test]
+    fn test_selection_alpha_packing_preserves_the_original_color() {
+        assert_eq!((0x264F78u32 << 8) | 0x80, 0x264F7880);
+        // Every theme's selection keeps its RGB intact and gains the alpha.
+        for kind in crate::theme::ThemeKind::all() {
+            for mode in crate::theme::ThemeMode::all() {
+                let selection = crate::theme::palette(*kind, *mode).selection;
+                let packed = (selection << 8) | 0x80;
+                assert_eq!(packed >> 8, selection, "{} lost its RGB", kind.label());
+                assert_eq!(packed & 0xFF, 0x80, "{} lost its alpha", kind.label());
+            }
+        }
+    }
+
     #[test]
     fn test_every_word_highlight_name_has_a_color() {
         for name in crate::docx_parser::WORD_HIGHLIGHT_NAMES {
@@ -2720,7 +3553,7 @@ mod tests {
         //     cost from real font-shaping cost (which this headless sandbox
         //     cannot measure without a live GPUI App).
         let lines = document_lines(&state.tabs[0].content);
-        let mut synthetic_width_of = |c: char| if c == ' ' { 4.0 } else { 8.4 };
+        let mut synthetic_width_of = |_: usize, _: usize, c: char| if c == ' ' { 4.0 } else { 8.4 };
         let t2 = Instant::now();
         let _rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
         let wrap_elapsed = t2.elapsed();
@@ -2796,7 +3629,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let mut synthetic_width_of = |c: char| if c == ' ' { 4.0 } else { 8.4 };
+        let mut synthetic_width_of = |_: usize, _: usize, c: char| if c == ' ' { 4.0 } else { 8.4 };
         let lines = document_lines(&content);
 
         // (1) Cache MISS: the full rebuild render() pays without a cached
@@ -2853,6 +3686,49 @@ mod tests {
             display_to_wrap: Rc::new(Vec::new()),
             wrap_to_display: Rc::new(Vec::new()),
         }
+    }
+
+    // ── spell cache ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_spell_cache_returns_same_allocation_on_hit() {
+        let cache = Rc::new(RefCell::new(SpellCache::default()));
+        let dict = HashSet::new();
+        let first = spell_ranges_cached(&cache, "hello wrold", &dict);
+        let second = spell_ranges_cached(&cache, "hello wrold", &dict);
+        assert_eq!(*first, vec![(6, 11)]);
+        // Same `Rc`, i.e. the second call didn't re-run the checker.
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(cache.borrow().entries.len(), 1);
+    }
+
+    #[test]
+    fn test_spell_cache_keyed_on_line_text_not_position() {
+        let cache = Rc::new(RefCell::new(SpellCache::default()));
+        let dict = HashSet::new();
+        spell_ranges_cached(&cache, "hello wrold", &dict);
+        spell_ranges_cached(&cache, "a different line", &dict);
+        // Editing one line must not evict the other — that's the whole reason
+        // this is keyed on text rather than on `content_version`.
+        assert_eq!(cache.borrow().entries.len(), 2);
+        assert!(cache.borrow().entries.contains_key("hello wrold"));
+    }
+
+    /// The staleness path: adding a word to the user dictionary has to drop
+    /// cached entries, or already-checked lines keep squiggling a word the
+    /// user just accepted. The cache key is the line's text, which a
+    /// dictionary edit doesn't change, so nothing else would catch this.
+    #[test]
+    fn test_spell_cache_invalidated_by_user_dictionary_growth() {
+        let cache = Rc::new(RefCell::new(SpellCache::default()));
+        let mut dict = HashSet::new();
+
+        let before = spell_ranges_cached(&cache, "hello wrold", &dict);
+        assert_eq!(*before, vec![(6, 11)]);
+
+        dict.insert("wrold".to_string());
+        let after = spell_ranges_cached(&cache, "hello wrold", &dict);
+        assert!(after.is_empty(), "squiggle should clear after Add to Dictionary");
     }
 
     #[test]

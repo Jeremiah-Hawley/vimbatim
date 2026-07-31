@@ -1,13 +1,48 @@
 use gpui::prelude::*;
 use gpui::*;
-use std::path::Path;
 
 use crate::keybinds::{rebuild_keymap, KeyCombo, KeybindAction, KeybindCategory, Keybinds};
-use crate::state::AppState;
-use crate::theme::{palette, save_theme, save_theme_color_mode, ThemeColorMode, ThemeKind};
+use crate::state::{bundled_default_settings_path, settings_conf_path, AppState};
+use crate::theme::{palette, save_theme, save_theme_color_mode, save_theme_mode, ThemeColorMode, ThemeKind, ThemeMode};
 
-const SETTINGS_PATH: &str = "settings.conf";
-const DEFAULT_SETTINGS_PATH: &str = "default_settings.conf";
+/// Where this modal *writes* every setting it changes.
+///
+/// Must stay `settings_conf_path()` — the exact path `AppState::new()` uses to
+/// *read* settings at startup. This was previously a bare relative
+/// `"settings.conf"`, resolved against the process's current working
+/// directory, while startup read from next to the executable: the modal wrote
+/// one file and startup read another, so every change made here — vim toggle,
+/// theme, Reset to Defaults — silently reverted on the next launch.
+fn settings_path() -> std::path::PathBuf {
+    settings_conf_path()
+}
+
+/// The pristine copy `Reset to Defaults` restores from — the read-only one
+/// shipped with the build, not a sibling of the user's settings.conf (which
+/// now lives in the user data directory and has no defaults file beside it).
+fn default_settings_path() -> std::path::PathBuf {
+    bundled_default_settings_path()
+}
+
+/// Underline colors offered for spellcheck, as `(settings.conf value, swatch
+/// hex)`. The names are Word highlight-color names, which is what
+/// `text_editor::highlight_color_hex` resolves at paint time — so what's
+/// written here stays hand-editable in settings.conf rather than becoming an
+/// opaque hex blob.
+///
+/// ponytail: a fixed set, not the ribbon's full HSL picker. Reusing that would
+/// mean generifying `color_picker::render_picker`, which is hardcoded to
+/// `Context<FormattingRibbon>` and whose drag listeners reach back into that
+/// view's own `picker` field — real work, for a setting nobody changes twice.
+/// `highlight_color_hex` already accepts a raw 6-digit hex, so anyone who
+/// wants an exact shade can still type it into settings.conf directly.
+const SPELLCHECK_COLORS: [(&str, u32); 5] = [
+    ("red", 0xFF0000),
+    ("darkRed", 0x8B0000),
+    ("blue", 0x0000FF),
+    ("green", 0x00FF00),
+    ("magenta", 0xFF00FF),
+];
 
 /// `{version} ({git_sha})`, e.g. `0.1.0-beta.1 (a1b2c3d)` — both baked in at
 /// compile time (`Cargo.toml`'s version, and `build.rs`'s
@@ -141,7 +176,7 @@ impl SettingsModal {
 
         self.state.update(cx, |s, _cx| {
             s.keybinds.set(action, combo.clone());
-            let _ = s.keybinds.save_to(Path::new(SETTINGS_PATH), s.vim_enabled, &[]);
+            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
         cx.notify();
@@ -150,7 +185,36 @@ impl SettingsModal {
     fn toggle_vim(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, _cx| {
             s.vim_enabled = !s.vim_enabled;
-            let _ = s.keybinds.save_to(Path::new(SETTINGS_PATH), s.vim_enabled, &[]);
+            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+        });
+        cx.notify();
+    }
+
+    fn toggle_spellcheck(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.spellcheck_enabled = !s.spellcheck_enabled;
+            // `save_setting_line` is the generic single-key writer the theme
+            // saves already use — it updates the key in place if present and
+            // appends it otherwise, so there's no spellcheck-specific writer.
+            let _ = crate::theme::save_setting_line(
+                &settings_path(),
+                "spellcheck",
+                if s.spellcheck_enabled { "true" } else { "false" },
+            );
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn set_spellcheck_color(&mut self, name: &'static str, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.spellcheck_underline_color = name.to_string();
+            let _ = crate::theme::save_setting_line(
+                &settings_path(),
+                "spellcheck_underline_color",
+                name,
+            );
+            cx.notify();
         });
         cx.notify();
     }
@@ -158,7 +222,7 @@ impl SettingsModal {
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme = theme;
-            let _ = save_theme(Path::new(SETTINGS_PATH), theme);
+            let _ = save_theme(&settings_path(), theme);
             cx.notify();
         });
         cx.notify();
@@ -167,7 +231,52 @@ impl SettingsModal {
     fn set_theme_color_mode(&mut self, mode: ThemeColorMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme_color_mode = mode;
-            let _ = save_theme_color_mode(Path::new(SETTINGS_PATH), mode);
+            let _ = save_theme_color_mode(&settings_path(), mode);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// One selectable pill in the Theme Color / Mode rows. Both groups render
+    /// identically and differ only in what their click writes, so the styling
+    /// (including the settings modal's own "not previewing the theme yet" dark
+    /// fallback colors) lives here once.
+    fn mode_pill(
+        id: ElementId,
+        label: &'static str,
+        is_current: bool,
+        theme_preview: bool,
+        p: crate::theme::Palette,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .cursor_pointer()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(4.0))
+            .text_xs()
+            .border_1()
+            .when(is_current, |d| {
+                d.bg(rgb(if theme_preview { p.accent_wash } else { 0x334155 }))
+                    .border_color(rgb(if theme_preview { p.accent_muted } else { 0x64748b }))
+                    .text_color(rgb(if theme_preview { p.text } else { 0xf8fafc }))
+            })
+            .when(!is_current, |d| {
+                d.bg(rgb(if theme_preview { p.chrome_active } else { 0x3c3c3c }))
+                    .border_color(rgb(if theme_preview { p.border_subtle } else { 0x555555 }))
+                    .text_color(rgb(if theme_preview { p.text_muted } else { 0xd4d4d4 }))
+            })
+            .hover(move |s| s.bg(rgb(if theme_preview { p.chrome_hover } else { 0x4a4a4a })))
+            .active(move |s| s.bg(rgb(if theme_preview { p.chrome_active } else { 0x252526 })))
+            .on_click(on_click)
+            .child(label)
+    }
+
+    fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.theme_mode = mode;
+            let _ = save_theme_mode(&settings_path(), mode);
             cx.notify();
         });
         cx.notify();
@@ -188,19 +297,22 @@ impl SettingsModal {
     /// keybind registry and the vim flag from the now-reset file, rebuilds
     /// the live keymap, and cancels any in-progress capture.
     fn reset_to_defaults(&mut self, cx: &mut Context<Self>) {
-        if std::fs::copy(DEFAULT_SETTINGS_PATH, SETTINGS_PATH).is_err() {
+        if std::fs::copy(default_settings_path(), settings_path()).is_err() {
             return;
         }
-        let path = Path::new(SETTINGS_PATH);
+        let path = settings_path();
+        let path = path.as_path();
         let keybinds = Keybinds::load(path);
         let vim_enabled = crate::keybinds::load_vim_enabled(path);
         let theme = crate::theme::load_theme(path);
+        let theme_mode = crate::theme::load_theme_mode(path);
         let theme_color_mode = crate::theme::load_theme_color_mode(path);
 
         self.state.update(cx, |s, _cx| {
             s.keybinds = keybinds;
             s.vim_enabled = vim_enabled;
             s.theme = theme;
+            s.theme_mode = theme_mode;
             s.theme_color_mode = theme_color_mode;
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
@@ -355,10 +467,13 @@ impl Render for SettingsModal {
          * clicked to arm capture.
          */
         let vim_enabled = self.state.read(cx).vim_enabled;
+        let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
+        let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
         let current_theme = self.state.read(cx).theme;
+        let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
-        let p = palette(current_theme);
+        let p = palette(current_theme, current_theme_mode);
         let theme_preview = self.theme_preview;
 
         div()
@@ -531,6 +646,108 @@ impl Render for SettingsModal {
                                         ),
                                 )
                             })
+                            // ── Spellcheck row ────────────────────────────────
+                            // Toggle mirrors Vim Mode above; the color row is
+                            // a fixed swatch set rather than the ribbon's full
+                            // HSL picker — see the `ponytail:` note below.
+                            .when(!theme_preview, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(8.0))
+                                        .pb(px(8.0))
+                                        .border_b_1()
+                                        .border_color(rgb(0x464647))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_start()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(4.0))
+                                                        .child(
+                                                            div()
+                                                                .text_sm()
+                                                                .font_weight(FontWeight::BOLD)
+                                                                .text_color(rgb(0xd4d4d4))
+                                                                .child("Spellcheck"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgb(p.text_muted))
+                                                                .max_w(px(320.0))
+                                                                .child("Underlines misspelled words. Right-click one for suggestions, or to add it to your dictionary."),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("spellcheck-toggle")
+                                                        .cursor_pointer()
+                                                        .px(px(10.0))
+                                                        .py(px(4.0))
+                                                        .rounded(px(4.0))
+                                                        .text_xs()
+                                                        .when(spellcheck_enabled, |d| d.bg(rgb(0x007acc)).text_color(rgb(0xffffff)))
+                                                        .when(!spellcheck_enabled, |d| d.bg(rgb(0x3c3c3c)).text_color(rgb(0x999999)))
+                                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
+                                                            this.toggle_spellcheck(cx);
+                                                        }))
+                                                        .child(if spellcheck_enabled { "On" } else { "Off" }),
+                                                ),
+                                        )
+                                        // Underline color — only meaningful
+                                        // while spellcheck is on.
+                                        .when(spellcheck_enabled, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(rgb(p.text_muted))
+                                                            .child("Underline color"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .gap(px(6.0))
+                                                            .children(SPELLCHECK_COLORS.iter().map(
+                                                                |&(name, hex)| {
+                                                                    let selected = spellcheck_color == name;
+                                                                    div()
+                                                                        .id(SharedString::from(format!("spellcheck-color-{name}")))
+                                                                        .w(px(20.0))
+                                                                        .h(px(20.0))
+                                                                        .rounded(px(4.0))
+                                                                        .bg(rgb(hex))
+                                                                        .cursor_pointer()
+                                                                        .border_2()
+                                                                        // The selected swatch gets a
+                                                                        // light ring; the rest get a
+                                                                        // border the same color as the
+                                                                        // swatch, so all five stay the
+                                                                        // same size either way.
+                                                                        .border_color(rgb(if selected { 0xffffff } else { hex }))
+                                                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                                                                            this.set_spellcheck_color(name, cx);
+                                                                        }))
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            })
                             // ── Theme selector ────────────────────────────────
                             .child(
                                 div()
@@ -584,7 +801,7 @@ impl Render for SettingsModal {
                                             .children(ThemeKind::all().iter().map(|theme| {
                                                 let theme = *theme;
                                                 let is_current = theme == current_theme;
-                                                let theme_palette = palette(theme);
+                                                let theme_palette = palette(theme, current_theme_mode);
                                                 div()
                                                     .id(ElementId::named_usize("theme-choice", theme as usize))
                                                     .flex()
@@ -644,54 +861,92 @@ impl Render for SettingsModal {
                                             })),
                                     ),
                             )
+                            // ── Theme Color │ Mode ───────────────────────────────
+                            // Two labelled groups side by side, split by a thin
+                            // vertical rule. `pill` is the shared button styling
+                            // both groups use — identical apart from which
+                            // setting each one writes.
                             .child(
                                 div()
                                     .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
+                                    .flex_row()
+                                    .items_start()
+                                    .gap(px(12.0))
                                     .pb(px(10.0))
                                     .border_b_1()
                                     .border_color(rgb(if theme_preview { p.border_subtle } else { 0x464647 }))
                                     .child(
                                         div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
-                                            .child("Theme Color"),
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
+                                                    .child("Theme Color"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(6.0))
+                                                    .children(ThemeColorMode::all().iter().map(|mode| {
+                                                        let mode = *mode;
+                                                        Self::mode_pill(
+                                                            ElementId::named_usize("theme-color-mode", mode as usize),
+                                                            mode.label(),
+                                                            mode == current_theme_color_mode,
+                                                            theme_preview,
+                                                            p,
+                                                            cx.listener(move |this, _ev, _window, cx| {
+                                                                this.set_theme_color_mode(mode, cx);
+                                                            }),
+                                                        )
+                                                    })),
+                                            ),
+                                    )
+                                    // The separating rule. Height is fixed rather
+                                    // than stretched so it spans the label+buttons
+                                    // pair without pinning the row's height.
+                                    .child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h(px(44.0))
+                                            .bg(rgb(if theme_preview { p.border_subtle } else { 0x464647 })),
                                     )
                                     .child(
                                         div()
                                             .flex()
-                                            .flex_row()
-                                            .gap(px(6.0))
-                                            .children(ThemeColorMode::all().iter().map(|mode| {
-                                                let mode = *mode;
-                                                let is_current = mode == current_theme_color_mode;
+                                            .flex_col()
+                                            .gap(px(8.0))
+                                            .child(
                                                 div()
-                                                    .id(ElementId::named_usize("theme-color-mode", mode as usize))
-                                                    .cursor_pointer()
-                                                    .px(px(10.0))
-                                                    .py(px(4.0))
-                                                    .rounded(px(4.0))
-                                                    .text_xs()
-                                                    .border_1()
-                                                    .when(is_current, |d| {
-                                                        d.bg(rgb(if theme_preview { p.accent_wash } else { 0x334155 }))
-                                                            .border_color(rgb(if theme_preview { p.accent_muted } else { 0x64748b }))
-                                                            .text_color(rgb(if theme_preview { p.text } else { 0xf8fafc }))
-                                                    })
-                                                    .when(!is_current, |d| {
-                                                        d.bg(rgb(if theme_preview { p.chrome_active } else { 0x3c3c3c }))
-                                                            .border_color(rgb(if theme_preview { p.border_subtle } else { 0x555555 }))
-                                                            .text_color(rgb(if theme_preview { p.text_muted } else { 0xd4d4d4 }))
-                                                    })
-                                                    .hover(move |s| s.bg(rgb(if theme_preview { p.chrome_hover } else { 0x4a4a4a })))
-                                                    .active(move |s| s.bg(rgb(if theme_preview { p.chrome_active } else { 0x252526 })))
-                                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                                        this.set_theme_color_mode(mode, cx);
-                                                    }))
-                                                    .child(mode.label())
-                                            })),
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
+                                                    .child("Mode"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_row()
+                                                    .gap(px(6.0))
+                                                    .children(ThemeMode::all().iter().map(|mode| {
+                                                        let mode = *mode;
+                                                        Self::mode_pill(
+                                                            ElementId::named_usize("theme-mode", mode as usize),
+                                                            mode.label(),
+                                                            mode == current_theme_mode,
+                                                            theme_preview,
+                                                            p,
+                                                            cx.listener(move |this, _ev, _window, cx| {
+                                                                this.set_theme_mode(mode, cx);
+                                                            }),
+                                                        )
+                                                    })),
+                                            ),
                                     ),
                             )
                             // ── Keybind categories ───────────────────────────────

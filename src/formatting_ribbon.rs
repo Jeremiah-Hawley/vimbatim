@@ -107,21 +107,12 @@ impl RibbonBtn {
             tone: RibbonTone::Secondary,
         }
     }
-
-    fn quiet(label: &'static str, action: FormatAction) -> Self {
-        Self {
-            label,
-            action,
-            tone: RibbonTone::Quiet,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 enum RibbonTone {
     Primary,
     Secondary,
-    Quiet,
 }
 
 pub struct FormattingRibbon {
@@ -144,12 +135,24 @@ pub struct FormattingRibbon {
     editing_custom: Option<FormatAction>,
     custom_hex_buffer: String,
     custom_color_focus: FocusHandle,
+    /// What the user is typing into the font-size box, `None` when not
+    /// editing (the box then shows the selection's actual size). Mirrors
+    /// `custom_hex_buffer`'s arrangement.
+    font_size_buffer: Option<String>,
+    font_size_focus: FocusHandle,
     /// `pub(crate)` so `color_picker::render_picker`'s listeners can reach it.
     pub(crate) picker: crate::color_picker::CustomColorPicker,
 }
 
 impl FormattingRibbon {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        // The ribbon reads live document state (the font-size box shows the
+        // size at the cursor), but GPUI doesn't track cross-entity reads: a
+        // view only re-renders when something calls `notify` on *it*. Moving
+        // the cursor notifies AppState and the text editor, so without this
+        // the size box kept whatever value it had at the ribbon's last render.
+        cx.observe(&state, |_this, _state, cx| cx.notify()).detach();
+
         FormattingRibbon {
             state,
             collapsed: std::collections::HashMap::new(),
@@ -158,6 +161,8 @@ impl FormattingRibbon {
             editing_custom: None,
             custom_hex_buffer: String::new(),
             custom_color_focus: cx.focus_handle(),
+            font_size_buffer: None,
+            font_size_focus: cx.focus_handle(),
             picker: crate::color_picker::CustomColorPicker::new(),
         }
     }
@@ -178,7 +183,13 @@ impl FormattingRibbon {
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
+        // Font Size is a spinner (box + steppers), not a button — it occupies a
+        // normal button slot in the TEXT group so the ribbon's layout and
+        // grouping stay untouched.
+        if action == FormatAction::FontSize {
+            return self.render_font_size_control(p, cx);
+        }
         let action_id = action as usize;
         let (bg, text, border, hover_bg, hover_border, active_bg, min_width) =
             match (tone, color_mode) {
@@ -217,24 +228,6 @@ impl FormattingRibbon {
                     p.border,
                     p.chrome_active,
                     60.0,
-                ),
-                (RibbonTone::Quiet, ThemeColorMode::Vivid) => (
-                    p.chrome_active,
-                    p.text_muted,
-                    p.border_subtle,
-                    p.accent_wash,
-                    p.accent_muted,
-                    p.selection,
-                    56.0,
-                ),
-                (RibbonTone::Quiet, _) => (
-                    p.chrome_active,
-                    p.text_muted,
-                    p.border_subtle,
-                    p.chrome_hover,
-                    p.border,
-                    p.chrome_active,
-                    56.0,
                 ),
             };
 
@@ -302,12 +295,6 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::FontSize => {
-                            st.update(cx, |state, _cx| {
-                                state.cycle_font_size();
-                            });
-                            cx.notify();
-                        }
                         FormatAction::Shrink => {
                             st.update(cx, |state, _cx| {
                                 state.shrink_text();
@@ -364,39 +351,18 @@ impl FormattingRibbon {
                             }
                             cx.notify();
                         }
+                        // GPUI's own opener rather than spawning `xdg-open`
+                        // ourselves: on Linux it tries every opener the `open`
+                        // crate knows about (including the WSL-aware ones) and
+                        // falls back to the XDG desktop portal, instead of
+                        // failing silently on a machine with no `xdg-open`.
+                        // It also logs failures, which a bare
+                        // `let _ = Command::spawn()` cannot.
                         FormatAction::OpenWiki => {
-                            let url = "https://opencaselist.com/";
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open").arg(url).spawn();
-                            }
-                            #[cfg(target_os = "linux")]
-                            {
-                                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                            }
-                            #[cfg(target_os = "windows")]
-                            {
-                                let _ = std::process::Command::new("cmd")
-                                    .args(&["/C", "start", url])
-                                    .spawn();
-                            }
+                            cx.open_url("https://opencaselist.com/");
                         }
                         FormatAction::OpenTabroom => {
-                            let url = "https://www.tabroom.com/index/index.mhtml";
-                            #[cfg(target_os = "macos")]
-                            {
-                                let _ = std::process::Command::new("open").arg(url).spawn();
-                            }
-                            #[cfg(target_os = "linux")]
-                            {
-                                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                            }
-                            #[cfg(target_os = "windows")]
-                            {
-                                let _ = std::process::Command::new("cmd")
-                                    .args(&["/C", "start", url])
-                                    .spawn();
-                            }
+                            cx.open_url("https://www.tabroom.com/index/index.mhtml");
                         }
                         FormatAction::Nav => {
                             // Toggles the same AppState.sidebar_mode the
@@ -518,6 +484,167 @@ impl FormattingRibbon {
                     .with_priority(100),
                 )
             })
+            .into_any_element()
+    }
+
+    /// Word's font-size control: a typable box with a small up and a small down
+    /// stepper. Replaces the old single button that cycled 24 -> 32 -> 48pt,
+    /// which could neither show the current size nor reach any other value.
+    fn render_font_size_control(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        // What the box shows: whatever the user is mid-typing, else the
+        // selection's actual size in points, else blank when the selection
+        // mixes sizes (same as Word). A run size of 0 carries no override, so
+        // it displays as the configured body size, which is what it paints at.
+        let current_points = {
+            let state = self.state.read(cx);
+            let default_points = state.normal_text_size_half_points as f32 / 2.0;
+            state.selection_font_size_half_points().map(|half| {
+                if half == 0 { default_points } else { half as f32 / 2.0 }
+            })
+        };
+
+        let shown = match &self.font_size_buffer {
+            Some(buffer) => buffer.clone(),
+            None => match current_points {
+                Some(points) if points.fract() == 0.0 => format!("{}", points as u32),
+                Some(points) => format!("{points}"),
+                None => String::new(),
+            },
+        };
+
+        let stepper = |id: &'static str, glyph: &'static str, delta: i32, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(14.0))
+                .h(px(11.0))
+                .rounded(px(radius::XS))
+                .bg(rgb(p.chrome_elevated))
+                .text_color(rgb(p.text_muted))
+                .text_xs()
+                .cursor_pointer()
+                .border_1()
+                .border_color(rgb(p.border_subtle))
+                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                .active(move |s| s.bg(rgb(p.chrome_active)))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        this.step_font_size(delta, cx);
+                    }),
+                )
+                .child(glyph)
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(space::XXS))
+            // ── the typable box ──────────────────────────────────────────
+            .child(
+                div()
+                    .id("font-size-box")
+                    .track_focus(&self.font_size_focus)
+                    .on_key_down(cx.listener(Self::handle_font_size_key))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(34.0))
+                    .h(px(24.0))
+                    .rounded(px(radius::MD))
+                    .bg(rgb(p.chrome_elevated))
+                    .text_color(rgb(p.text))
+                    .text_sm()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(if self.font_size_buffer.is_some() {
+                        p.accent
+                    } else {
+                        p.border_subtle
+                    }))
+                    .hover(move |s| s.border_color(rgb(p.border)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, window, cx| {
+                            cx.stop_propagation();
+                            // Start from empty so typing replaces the size
+                            // rather than appending to it, the way clicking
+                            // Word's box selects what's already there.
+                            this.font_size_buffer = Some(String::new());
+                            this.font_size_focus.clone().focus(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(shown),
+            )
+            // ── the steppers, stacked like Word's ────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(stepper("font-size-up", "\u{25b4}", 1, cx))
+                    .child(stepper("font-size-down", "\u{25be}", -1, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// Nudges the size by `delta` points, starting from whatever the selection
+    /// currently is (or the configured body size when it's mixed or unset).
+    /// Clamped to 1..=409pt, Word's own range.
+    fn step_font_size(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.state.update(cx, |state, _cx| {
+            let default_half = state.normal_text_size_half_points;
+            let current_half = match state.selection_font_size_half_points() {
+                Some(0) | None => default_half,
+                Some(half) => half,
+            };
+            let points = (current_half as i32 / 2 + delta).clamp(1, 409);
+            state.set_font_size_half_points((points * 2) as u16);
+        });
+        // Typing then stepping should continue from the stepped value, not the
+        // half-finished text.
+        self.font_size_buffer = None;
+        cx.notify();
+    }
+
+    fn handle_font_size_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(buffer) = self.font_size_buffer.as_mut() else { return };
+        match event.keystroke.key.as_str() {
+            "backspace" => {
+                buffer.pop();
+            }
+            "escape" => {
+                self.font_size_buffer = None;
+            }
+            "enter" => {
+                let points = buffer.parse::<i32>().ok().map(|p| p.clamp(1, 409));
+                self.font_size_buffer = None;
+                if let Some(points) = points {
+                    self.state.update(cx, |state, _cx| {
+                        state.set_font_size_half_points((points * 2) as u16);
+                    });
+                }
+            }
+            // Three digits is enough for Word's 409pt ceiling.
+            k if k.len() == 1
+                && buffer.len() < 3
+                && k.chars().next().unwrap().is_ascii_digit() =>
+            {
+                buffer.push_str(k);
+            }
+            _ => return,
+        }
+        cx.notify();
     }
 
     fn render_menu_panel(
@@ -1124,7 +1251,7 @@ impl Render for FormattingRibbon {
         let state = self.state.clone();
         let (p, color_mode) = {
             let state_read = state.read(cx);
-            (palette(state_read.theme), state_read.theme_color_mode)
+            (palette(state_read.theme, state_read.theme_mode), state_read.theme_color_mode)
         };
         let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
         let all_collapsed = ribbon_groups
@@ -1160,7 +1287,7 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Highlight", FormatAction::Highlight),
                         RibbonBtn::secondary("Shrink", FormatAction::Shrink),
                         RibbonBtn::secondary("Clear", FormatAction::Clear),
-                        RibbonBtn::quiet("Fold", FormatAction::FoldToggle),
+                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle),
                     ],
                 ],
                 *self.collapsed.get("cards").unwrap_or(&false),
@@ -1180,7 +1307,7 @@ impl Render for FormattingRibbon {
                     ],
                     vec![
                         RibbonBtn::secondary("Font Size", FormatAction::FontSize),
-                        RibbonBtn::quiet("Font Family", FormatAction::FontFamily),
+                        RibbonBtn::secondary("Font Family", FormatAction::FontFamily),
                         RibbonBtn::secondary("Font Color", FormatAction::FontColor),
                     ],
                     vec![
@@ -1211,8 +1338,8 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Pilcrows", FormatAction::TogglePilcrows),
                     ],
                     vec![
-                        RibbonBtn::quiet("Doc Menu", FormatAction::DocMenu),
-                        RibbonBtn::quiet("Card Menu", FormatAction::CardMenu),
+                        RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu),
+                        RibbonBtn::secondary("Card Menu", FormatAction::CardMenu),
                     ],
                     vec![
                         RibbonBtn::secondary("Align Left", FormatAction::AlignLeft),
@@ -1230,7 +1357,7 @@ impl Render for FormattingRibbon {
                 "VIEW",
                 &[
                     vec![
-                        RibbonBtn::quiet("Nav", FormatAction::Nav),
+                        RibbonBtn::secondary("Nav", FormatAction::Nav),
                         RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode),
                     ],
                     vec![

@@ -57,7 +57,7 @@ impl Render for AppToolbar {
          * command surface.
          */
         let state = self.state.read(cx);
-        let p = palette(state.theme);
+        let p = palette(state.theme, state.theme_mode);
         let sidebar_visible = state.sidebar_visible;
         let _ = state;
 

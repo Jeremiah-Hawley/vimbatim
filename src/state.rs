@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -499,6 +500,36 @@ pub struct FileContextMenu {
     pub confirming_delete: bool,
 }
 
+/// State for the text editor's right-click menu. `position` is window-relative
+/// `(x, y)` in pixels, same plain-tuple convention (and same reason) as
+/// `FileContextMenu` — `state.rs` stays gpui-free and the view converts at its
+/// own boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorContextMenu {
+    pub position: (f32, f32),
+    /// The misspelled word under the click, or `None` if the right-click
+    /// didn't land on one — which is what gates the suggestions and the
+    /// "Add to Dictionary" item.
+    pub spell_target: Option<SpellTarget>,
+}
+
+/// A misspelled word a right-click landed on, resolved once at click time.
+///
+/// `suggestions` is filled here rather than at render time on purpose:
+/// `spellcheck::suggest` is a dictionary *search*, orders of magnitude slower
+/// than the per-word `check` the squiggles use, so it must never run on a
+/// frame. The `line`/`start_col`/`end_col` triple is what "replace with this
+/// suggestion" feeds back to `set_cursor_from_line_col`/
+/// `extend_selection_to_line_col`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpellTarget {
+    pub line: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub word: String,
+    pub suggestions: Vec<String>,
+}
+
 /// A close action (tab-close `×` or the app-close `×`) awaiting the user's
 /// answer to "save changes before closing?", set by `request_close_tab`/
 /// `request_close_app` whenever the target has unsaved changes. `None` means
@@ -532,6 +563,9 @@ pub struct AppState {
     /// Open state of the file explorer's right-click menu, `None` when
     /// closed. See `FileContextMenu`.
     pub file_context_menu: Option<FileContextMenu>,
+    /// Open state of the text editor's right-click menu, `None` when closed.
+    /// See `EditorContextMenu`.
+    pub editor_context_menu: Option<EditorContextMenu>,
     /// Colors the user added from the Font Color and HL Color dropdowns'
     /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
     /// `[FORMATTING]` section so they survive a restart, capped at
@@ -566,6 +600,10 @@ pub struct AppState {
     /// take effect immediately and persist.
     pub keybinds: crate::keybinds::Keybinds,
     pub theme: crate::theme::ThemeKind,
+    /// Light or dark variant of `theme`. Orthogonal to the theme itself —
+    /// every `ThemeKind` ships both, so this only swaps the palette's
+    /// lightness, keeping the user's chosen color family.
+    pub theme_mode: crate::theme::ThemeMode,
     pub theme_color_mode: crate::theme::ThemeColorMode,
     /// `normal_text_size` from settings.conf, in half-points (`Run.size`'s
     /// unit) — the default body text size: what any run with no explicit
@@ -656,6 +694,29 @@ pub struct AppState {
     vim_pending_change_before_insert: Option<(char, Vec<RecordedVimKey>)>,
     pub paragraph_integrity: bool,
     pub pilcrows: bool,
+    /// The settings.conf this state reads from and writes back to.
+    ///
+    /// Held as a field rather than calling `settings_conf_path()` at each
+    /// write site so the test constructor can point at a temp file. Without
+    /// it, running `cargo test` writes through the real
+    /// `~/.vimbatim/settings.conf` — `persist_custom_colors` alone would
+    /// overwrite a developer's actual saved swatches with a test fixture's.
+    pub settings_path: PathBuf,
+    /// settings.conf `[SPELLCHECK]`. When false the editor skips the whole
+    /// spellcheck path for the cost of one bool check per row.
+    pub spellcheck_enabled: bool,
+    /// The squiggle color, kept as the raw settings.conf string (a Word
+    /// color name like `red`, or a bare 6-digit hex) and resolved through
+    /// `text_editor::highlight_color_hex` at paint time — that function
+    /// already handles both forms, so there's nothing to parse here.
+    pub spellcheck_underline_color: String,
+    /// Words the user added via the right-click menu's "Add to Dictionary",
+    /// lowercased. Backed by `user_dictionary.txt` next to settings.conf.
+    ///
+    /// `Rc`-wrapped so `TextEditor::render` can hand it to the `uniform_list`
+    /// closure (which must be `'static`, so it can't borrow) for the price of
+    /// a refcount bump instead of deep-cloning every word on every frame.
+    pub user_dictionary: Rc<HashSet<String>>,
     pub fold_all: bool,
     pub invisibility_mode: bool,
     pub split_view: bool,
@@ -722,20 +783,79 @@ impl CardStyleKind {
     }
 }
 
-/// Resolves settings.conf's real path: next to the running executable
-/// (`std::env::current_exe()`'s parent directory), not the process's
-/// current working directory. A double-clicked packaged `.app`/`.exe` has
-/// no guaranteed CWD (macOS Finder launches typically start at `/`;
-/// Windows depends on the shortcut's "Start in" field) — reading relative
-/// to CWD would silently fall back to every setting's hardcoded default on
-/// a tester's very first launch (`closed_beta_plan.md` §0). Falls back to
-/// the bare relative path (today's `cargo run`/`./run.sh` behavior) if the
-/// executable's own path can't be resolved.
+/// Resolves settings.conf's real path: inside the per-user application data
+/// directory (`recovery::app_data_dir()` — `~/.vimbatim` on macOS/Linux,
+/// `%APPDATA%\vimbatim` on Windows), the same place crash.log and the
+/// recovery snapshots already live.
+///
+/// This used to resolve next to the running executable, which was wrong in
+/// three separate ways on a packaged macOS `.app`:
+///
+/// 1. cargo-bundle puts the binary in `Contents/MacOS/` but everything in
+///    `[package.metadata.bundle] resources` in `Contents/Resources/`, so the
+///    shipped settings.conf was never in the directory being read.
+/// 2. Writing settings back (the settings modal) meant writing *inside* the
+///    app bundle, which invalidates its code signature.
+/// 3. That write fails outright when the app runs from a read-only DMG or has
+///    been Gatekeeper-translocated to a random read-only path.
+///
+/// It was also wrong for plain `cargo run`, where the executable lives in
+/// `target/debug/` rather than the repo root — settings written by the modal
+/// (to a CWD-relative path) and settings read at startup were two different
+/// files, so every change appeared to revert on relaunch.
+///
+/// The user data directory has none of these problems, is writable on every
+/// platform without extra permissions, and is already the one path
+/// `FIRST_LAUNCH.txt` tells testers about. `ensure_settings_file` seeds it
+/// from the bundled defaults on first launch.
 pub fn settings_conf_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("settings.conf")))
-        .unwrap_or_else(|| PathBuf::from("settings.conf"))
+    crate::recovery::app_data_dir().join("settings.conf")
+}
+
+/// Locates the pristine `default_settings.conf` that ships *with the build* —
+/// the seed for a first launch, and what "Reset to Defaults" restores from.
+///
+/// Unlike settings.conf this one is read-only and ships alongside the
+/// executable, so it has to be hunted in the platform's install layout:
+/// next to the binary (Windows/Linux, and `cargo build`'s `target/<profile>/`
+/// once `run.sh` has placed it), then `../Resources/` (a macOS `.app`, where
+/// cargo-bundle puts declared resources), and finally the bare relative path
+/// so running from a source checkout works with no setup at all.
+pub fn bundled_default_settings_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let beside = dir.join("default_settings.conf");
+            if beside.exists() {
+                return beside;
+            }
+            // macOS .app: Contents/MacOS/vimbatim -> Contents/Resources/
+            let resources = dir.join("../Resources/default_settings.conf");
+            if resources.exists() {
+                return resources;
+            }
+        }
+    }
+    PathBuf::from("default_settings.conf")
+}
+
+/// Creates the user data directory and seeds settings.conf from the bundled
+/// defaults if it isn't there yet. Called once at startup, before anything
+/// reads a setting.
+///
+/// Best-effort throughout: with no settings.conf every loader already falls
+/// back to its own hardcoded default, so a failure here costs the user their
+/// *preferred* defaults, never the ability to launch.
+pub fn ensure_settings_file() {
+    let path = settings_conf_path();
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::copy(bundled_default_settings_path(), &path) {
+        eprintln!("[settings] couldn't seed {}: {e}", path.display());
+    }
 }
 
 /// Fixed crash-log location for the panic hook (`main.rs`) — always the
@@ -827,6 +947,27 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
     crate::theme::save_setting_line(path, "expanded_dirs", &joined)
 }
 
+/// Guarantees `path` ends in `.docx` — every Save As destination goes through
+/// this, both the name suggested to the native picker and whatever the user
+/// actually types back.
+///
+/// Appends rather than using `Path::set_extension`, which would rewrite
+/// anything after the last dot: `set_extension` turns "neg.v2" into "neg.docx",
+/// silently eating part of the name. An existing `.docx` (in any case — Windows
+/// pickers hand back `.DOCX`) is left exactly as the user wrote it.
+pub fn with_docx_extension(path: &Path) -> PathBuf {
+    let already_docx = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("docx"));
+    if already_docx {
+        return path.to_path_buf();
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".docx");
+    path.with_file_name(name)
+}
+
 /// Which dropdown a custom color belongs to. The two lists are deliberately
 /// separate: a highlight color added while highlighting shouldn't turn up as a
 /// font color option.
@@ -914,6 +1055,67 @@ fn load_font_size_half_points(path: &std::path::Path, key: &str, default_half_po
         .unwrap_or(default_half_points)
 }
 
+/// Reads a `true`/`false` settings.conf key, mirroring
+/// `keybinds::load_vim_enabled`'s tolerant flat key=value scan. `default` is
+/// returned when the file or key is missing.
+///
+/// Note the scan is *section-agnostic* — every loader in this file is, and
+/// the `[...]` headers are cosmetic to it. That's why the spellcheck keys are
+/// prefixed (`spellcheck`, `spellcheck_underline_color`) rather than relying
+/// on `[SPELLCHECK]` to disambiguate a bare `enabled=`.
+fn load_bool_setting(path: &std::path::Path, key: &str, default: bool) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == key).then(|| value.trim() == "true")
+            })
+        })
+        .unwrap_or(default)
+}
+
+/// Reads a free-form string settings.conf key. Same flat scan as above; an
+/// empty value counts as missing so a blank line falls back to the default.
+fn load_string_setting(path: &std::path::Path, key: &str, default: &str) -> String {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                let value = value.trim();
+                (k.trim() == key && !value.is_empty()).then(|| value.to_string())
+            })
+        })
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// Where the user's added-word list lives: alongside settings.conf, one
+/// lowercased word per line.
+///
+/// A separate file rather than a settings.conf key because it grows without
+/// bound as the user clicks "Add to Dictionary", and `theme::save_setting_line`
+/// (settings.conf's writer) works a whole line at a time — a thousand-word
+/// value on one line is not a config file anyone can edit by hand.
+pub fn user_dictionary_path() -> PathBuf {
+    settings_conf_path().with_file_name("user_dictionary.txt")
+}
+
+/// Loads the user dictionary, lowercasing as it goes so lookups can be
+/// case-insensitive without normalizing at every call site. A missing file is
+/// the normal first-launch state, not an error.
+fn load_user_dictionary(path: &std::path::Path) -> HashSet<String> {
+    std::fs::read_to_string(path)
+        .map(|contents| {
+            contents
+                .lines()
+                .map(|l| l.trim().to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl AppState {
     pub fn new() -> Self {
         /*
@@ -942,6 +1144,7 @@ impl AppState {
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
         let theme = crate::theme::load_theme(settings_path);
+        let theme_mode = crate::theme::load_theme_mode(settings_path);
         let theme_color_mode = crate::theme::load_theme_color_mode(settings_path);
         let normal_text_size_half_points = load_normal_text_size_half_points(settings_path);
         let pocket_size_half_points = load_font_size_half_points(settings_path, "pocket_size", 52);
@@ -962,6 +1165,7 @@ impl AppState {
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            editor_context_menu: None,
             custom_font_colors,
             custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
@@ -973,6 +1177,7 @@ impl AppState {
             vim_enabled,
             keybinds,
             theme,
+            theme_mode,
             theme_color_mode,
             normal_text_size_half_points,
             pocket_size_half_points,
@@ -994,10 +1199,67 @@ impl AppState {
             vim_pending_change_before_insert: None,
             paragraph_integrity: false,
             pilcrows: false,
+            settings_path: settings_path.to_path_buf(),
+            spellcheck_enabled: load_bool_setting(settings_path, "spellcheck", true),
+            spellcheck_underline_color: load_string_setting(
+                settings_path,
+                "spellcheck_underline_color",
+                "red",
+            ),
+            user_dictionary: Rc::new(load_user_dictionary(&user_dictionary_path())),
             fold_all: false,
             invisibility_mode: false,
             split_view: false,
         }
+    }
+
+    /// Adds a word to the user dictionary and appends it to
+    /// `user_dictionary.txt`, so it survives a restart.
+    ///
+    /// The in-memory insert is what makes the squiggles vanish: the editor
+    /// recomputes misspelled ranges for visible rows every frame, so there is
+    /// nothing to invalidate — the next paint simply doesn't flag it, in this
+    /// document and every other open tab at once.
+    pub fn add_to_user_dictionary(&mut self, word: &str) {
+        // Sibling of whichever settings.conf this state is bound to, so a
+        // test's temp settings path carries its dictionary along with it.
+        let path = self.settings_path.with_file_name("user_dictionary.txt");
+        self.add_to_user_dictionary_at(word, &path);
+    }
+
+    /// `add_to_user_dictionary` with the backing file named explicitly —
+    /// matching the `load_custom_colors`/`save_custom_colors` convention in
+    /// this file, and so that tests can point at a temp path instead of
+    /// appending to the real user's dictionary.
+    pub fn add_to_user_dictionary_at(&mut self, word: &str, path: &Path) {
+        let word = word.trim().to_lowercase();
+        if word.is_empty() || !Rc::make_mut(&mut self.user_dictionary).insert(word.clone()) {
+            return;
+        }
+        // Best-effort, same as every other settings write in this file — an
+        // unwritable directory shouldn't break the in-memory add.
+        use std::io::Write;
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| writeln!(f, "{word}"));
+        if let Err(e) = appended {
+            eprintln!("[spellcheck] couldn't write {}: {e}", path.display());
+        }
+    }
+
+    /// Replaces a misspelled word with a chosen suggestion.
+    ///
+    /// Composed entirely from methods the mouse handlers already use — select
+    /// the word's (line, col) span, then type over it. That's not just brevity:
+    /// `insert_str` already pushes to the undo stack and bumps
+    /// `content_version`, so a spelling fix is undoable and re-snapshotted for
+    /// crash recovery without this method knowing either concept exists.
+    pub fn replace_spell_target(&mut self, target: &SpellTarget, replacement: &str) {
+        self.set_cursor_from_line_col(target.line, target.start_col);
+        self.extend_selection_to_line_col(target.line, target.end_col);
+        self.insert_str(replacement);
     }
 
     pub fn new_tab(&mut self) {
@@ -1255,7 +1517,12 @@ impl AppState {
     /// .docx carrying the original template, so copying is both cheaper and
     /// lossless compared with parse-then-write.
     pub fn complete_recovery_save_as(&mut self, entry: &RecoveryEntry, dest: &Path) -> Result<(), String> {
-        std::fs::copy(&entry.snapshot, dest).map_err(|e| format!("Save failed: {e}"))?;
+        // Forced here, at the funnel, rather than trusting the picker: a
+        // never-saved tab's title is literally "New Tab" (`Tab::new_empty`),
+        // so accepting the suggested name verbatim would otherwise write an
+        // extension-less file that nothing will reopen as a document.
+        let dest = with_docx_extension(dest);
+        std::fs::copy(&entry.snapshot, &dest).map_err(|e| format!("Save failed: {e}"))?;
         self.pending_recovery.retain(|e| e.snapshot != entry.snapshot);
         crate::recovery::delete_entry(entry);
         Ok(())
@@ -1923,48 +2190,57 @@ impl AppState {
         }
     }
 
-    pub fn cycle_font_size(&mut self) {
-        /*
-         * Cycles through preset font sizes: 24pt -> 32pt -> 48pt -> 24pt (in half-points).
-         * Detects the current size uniformly applied to selection, then advances to next.
-         * Applies to selection or sets pending format if no selection.
-         */
-        let tab = self.tabs.get(self.active_tab);
-        let selection = tab.and_then(|t| t.selection);
+    /// The font size (in half-points, `Run.size`'s unit) shared by every run
+    /// the selection touches — or by the run under the cursor when nothing is
+    /// selected — and `None` when the range mixes sizes. A `0` means the run
+    /// carries no explicit override and therefore paints at the configured
+    /// body size (`normal_text_size_half_points`).
+    ///
+    /// Byte offsets accumulate across paragraphs and count the separating
+    /// newline, matching `document_ops::is_uniformly_active`. (The old
+    /// `cycle_font_size` did neither, so on any multi-paragraph document it
+    /// read the size off the wrong runs.)
+    pub fn selection_font_size_half_points(&self) -> Option<u16> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let (start, end) = match tab.selection {
+            Some((a, f)) if a != f => (a.min(f), a.max(f)),
+            // No selection: report what typing here would inherit — the
+            // character *before* the caret, the way Word's size box does —
+            // falling back to the one after it at the very start of the
+            // document. Using the character after would blank the box every
+            // time the caret sat at the end of a line, where nothing follows.
+            //
+            // The range needn't land on a char boundary: runs are matched by
+            // byte *overlap*, so any byte inside the run identifies it.
+            _ if tab.cursor > 0 => (tab.cursor - 1, tab.cursor),
+            _ => (0, 1),
+        };
 
-        let current_size = if let Some((a, f)) = selection {
-            let (start, end) = (a.min(f), a.max(f));
-            tab.and_then(|t| {
-                // Check if all runs in range have same size
-                let mut uniform_size: Option<u16> = None;
-                for para in &t.paragraphs {
-                    let mut pos = 0;
-                    for run in &para.runs {
-                        let run_end = pos + run.text.len();
-                        if run_end > start && pos < end {
-                            if uniform_size.is_none() {
-                                uniform_size = Some(run.size);
-                            } else if uniform_size != Some(run.size) {
-                                return None; // not uniform
-                            }
-                        }
-                        pos = run_end;
-                    }
+        let mut cumulative = 0usize;
+        let mut uniform: Option<u16> = None;
+        for para in &tab.paragraphs {
+            for run in &para.runs {
+                let run_start = cumulative;
+                let run_end = cumulative + run.text.len();
+                cumulative = run_end;
+                if run_start.max(start) >= run_end.min(end) {
+                    continue;
                 }
-                uniform_size
-            })
-        } else {
-            None
-        };
+                match uniform {
+                    None => uniform = Some(run.size),
+                    Some(size) if size != run.size => return None,
+                    _ => {}
+                }
+            }
+            cumulative += 1; // the paragraph-separating '\n'
+        }
+        uniform
+    }
 
-        let next_size = match current_size {
-            Some(24) => 32,
-            Some(32) => 48,
-            Some(48) => 24,
-            _ => 24, // default to first size
-        };
-
-        self.apply_formatting_to_selection(FormatOp::FontSize(next_size));
+    /// Applies an explicit font size (half-points) to the selection, or arms it
+    /// as the pending format when nothing is selected.
+    pub fn set_font_size_half_points(&mut self, half_points: u16) {
+        self.apply_formatting_to_selection(FormatOp::FontSize(half_points));
     }
 
     pub fn cycle_text_color(&mut self) {
@@ -2987,7 +3263,7 @@ impl AppState {
         self.working_directory = dir;
         self.sidebar_visible = true;
         self.refresh_file_tree();
-        let _ = save_working_directory(&settings_conf_path(), &self.working_directory);
+        let _ = save_working_directory(&self.settings_path, &self.working_directory);
     }
 
     // ── File explorer right-click menu (found_bugs.md Forgotten Implicit
@@ -3049,7 +3325,7 @@ impl AppState {
     /// applied color (or the user's edit) with it.
     fn persist_custom_colors(&self, target: CustomColorTarget) {
         if let Err(e) = save_custom_colors(
-            &settings_conf_path(),
+            &self.settings_path,
             target.settings_key(),
             self.custom_colors(target),
         ) {
@@ -6307,6 +6583,7 @@ mod tests {
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            editor_context_menu: None,
             custom_font_colors: Vec::new(),
             custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
@@ -6318,6 +6595,7 @@ mod tests {
             vim_enabled: true,
             keybinds: crate::keybinds::Keybinds::defaults(),
             theme: crate::theme::ThemeKind::WorkbenchDark,
+            theme_mode: crate::theme::ThemeMode::Dark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
             normal_text_size_half_points: 22,
             pocket_size_half_points: 52,
@@ -6339,6 +6617,14 @@ mod tests {
             vim_pending_change_before_insert: None,
             paragraph_integrity: false,
             pilcrows: false,
+            // A temp file, never the real ~/.vimbatim/settings.conf — see
+            // the field's doc comment.
+            settings_path: std::env::temp_dir().join("vimbatim_test_settings.conf"),
+            // Off in tests: on would mean every fixture string gets run
+            // through the bundled dictionary, for no assertion's benefit.
+            spellcheck_enabled: false,
+            spellcheck_underline_color: "red".to_string(),
+            user_dictionary: Rc::new(HashSet::new()),
             fold_all: false,
             invisibility_mode: false,
             split_view: false,
@@ -6693,6 +6979,139 @@ mod tests {
         let mut state = make_state(&content, cursor, None);
         state.tabs[0].paragraphs = paragraphs;
         state
+    }
+
+    // ── Font size box (ribbon spinner) ──────────────────────────────────────
+
+    fn sized_run(text: &str, size: u16) -> Run {
+        Run { text: text.into(), size, ..Run::default() }
+    }
+
+    fn sized_para(runs: Vec<Run>) -> Paragraph {
+        Paragraph { runs, ..Paragraph::default() }
+    }
+
+    #[test]
+    fn test_selection_font_size_reports_a_uniform_selection() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("hello world", 32)])],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 11));
+        assert_eq!(state.selection_font_size_half_points(), Some(32));
+    }
+
+    #[test]
+    fn test_selection_font_size_is_none_when_sizes_are_mixed() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("big", 48), sized_run("small", 20)])],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 8));
+        assert_eq!(state.selection_font_size_half_points(), None);
+    }
+
+    #[test]
+    fn test_selection_font_size_reads_the_run_under_the_cursor_with_no_selection() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("abc", 48), sized_run("defgh", 20)])],
+            4, // inside the second run
+        );
+        state.tabs[0].selection = None;
+        assert_eq!(state.selection_font_size_half_points(), Some(20));
+    }
+
+    /// The old inline detector in `cycle_font_size` restarted its byte offset
+    /// at every paragraph and never counted the separating newline, so on a
+    /// multi-paragraph document it read the size off the wrong runs. Offsets
+    /// now accumulate the way `document_ops::is_uniformly_active` does.
+    #[test]
+    fn test_selection_font_size_offsets_accumulate_across_paragraphs() {
+        let mut state = make_state_with_paragraphs(
+            vec![
+                sized_para(vec![sized_run("first", 48)]),   // bytes 0..5, newline at 5
+                sized_para(vec![sized_run("second", 20)]),  // bytes 6..12
+            ],
+            0,
+        );
+        // A selection wholly inside the *second* paragraph.
+        state.tabs[0].selection = Some((6, 12));
+        assert_eq!(state.selection_font_size_half_points(), Some(20));
+
+        // Spanning both paragraphs is mixed.
+        state.tabs[0].selection = Some((0, 12));
+        assert_eq!(state.selection_font_size_half_points(), None);
+    }
+
+    /// `size == 0` means "no explicit override" — the box turns that into the
+    /// configured body size, but the getter reports it verbatim.
+    #[test]
+    fn test_selection_font_size_reports_zero_for_an_unstyled_run() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("plain", 0)])],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 5));
+        assert_eq!(state.selection_font_size_half_points(), Some(0));
+    }
+
+    /// With the caret at the very end of the text there is no character
+    /// *after* it, so reading forward blanked the box. It reports the
+    /// character before the caret instead — what typing there would inherit.
+    #[test]
+    fn test_selection_font_size_at_end_of_text_reports_the_preceding_run() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("hello", 48)])],
+            5, // one past the last character
+        );
+        state.tabs[0].selection = None;
+        assert_eq!(state.selection_font_size_half_points(), Some(48));
+    }
+
+    /// At the very start there is nothing before the caret, so it falls
+    /// forward to the first character rather than reporting nothing.
+    #[test]
+    fn test_selection_font_size_at_start_of_text_reports_the_first_run() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("hello", 48)])],
+            0,
+        );
+        state.tabs[0].selection = None;
+        assert_eq!(state.selection_font_size_half_points(), Some(48));
+    }
+
+    /// Between two differently-sized runs the caret inherits the left one,
+    /// matching Word.
+    #[test]
+    fn test_selection_font_size_between_runs_reports_the_left_one() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("abc", 48), sized_run("defgh", 20)])],
+            3, // exactly on the boundary
+        );
+        state.tabs[0].selection = None;
+        assert_eq!(state.selection_font_size_half_points(), Some(48));
+    }
+
+    /// An empty (zero-width) selection is a caret, not a range.
+    #[test]
+    fn test_selection_font_size_treats_a_collapsed_selection_as_a_caret() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("hello", 48)])],
+            5,
+        );
+        state.tabs[0].selection = Some((5, 5));
+        assert_eq!(state.selection_font_size_half_points(), Some(48));
+    }
+
+    #[test]
+    fn test_set_font_size_applies_to_the_selection() {
+        let mut state = make_state_with_paragraphs(
+            vec![sized_para(vec![sized_run("hello", 0)])],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 5));
+        state.set_font_size_half_points(36); // 18pt
+        assert_eq!(state.selection_font_size_half_points(), Some(36));
     }
 
     // ── Rich text formatting Phase 1: choke-point mutation sync ─────────────
@@ -7928,14 +8347,14 @@ mod tests {
     // against the executable's location, not CWD ─────────────────────────────
 
     #[test]
-    fn test_settings_conf_path_resolves_next_to_executable() {
+    fn test_settings_conf_path_resolves_under_the_user_data_dir() {
         let path = settings_conf_path();
         assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("settings.conf")));
-        // A packaged .app/.exe has no guaranteed CWD, so this must resolve
-        // relative to the running executable's own directory, not wherever
-        // the process happened to be launched from.
-        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-        assert_eq!(path.parent(), Some(exe_dir.as_path()));
+        // Deliberately NOT next to the executable: a packaged macOS .app is
+        // read-only under Gatekeeper translocation, and writing inside one
+        // breaks its code signature. Must be the same writable per-user
+        // directory crash.log and the recovery snapshots already use.
+        assert_eq!(path.parent(), Some(crate::recovery::app_data_dir().as_path()));
     }
 
     #[test]
@@ -11311,6 +11730,62 @@ mod tests {
         dir
     }
 
+    // ── Spellcheck ────────────────────────────────────────────────────────
+
+    /// The one branch worth protecting here: `replace_spell_target` composes
+    /// three existing methods, and getting the (line, col) span wrong would
+    /// silently eat the wrong characters.
+    #[test]
+    fn test_replace_spell_target_swaps_only_the_flagged_word() {
+        let mut state = make_state("hello wrold there", 0, None);
+        let target = SpellTarget {
+            line: 0,
+            start_col: 6,
+            end_col: 11,
+            word: "wrold".to_string(),
+            suggestions: vec!["world".to_string()],
+        };
+        state.replace_spell_target(&target, "world");
+        assert_eq!(state.tabs[0].content, "hello world there");
+    }
+
+    /// On a later line, so the line→byte-offset conversion is actually
+    /// exercised rather than trivially passing at offset 0.
+    #[test]
+    fn test_replace_spell_target_on_second_line() {
+        let mut state = make_state("first line\nsecond teh line", 0, None);
+        let target = SpellTarget {
+            line: 1,
+            start_col: 7,
+            end_col: 10,
+            word: "teh".to_string(),
+            suggestions: vec![],
+        };
+        state.replace_spell_target(&target, "the");
+        assert_eq!(state.tabs[0].content, "first line\nsecond the line");
+    }
+
+    #[test]
+    fn test_add_to_user_dictionary_is_lowercased_and_deduped() {
+        // Explicit temp path — the no-arg `add_to_user_dictionary` appends to
+        // the *real* ~/.vimbatim/user_dictionary.txt, which a test must never
+        // touch.
+        let path = std::env::temp_dir().join("vimbatim_test_user_dict.txt");
+        let _ = std::fs::remove_file(&path);
+
+        let mut state = make_state("", 0, None);
+        state.add_to_user_dictionary_at("Kritik", &path);
+        state.add_to_user_dictionary_at("kritik", &path);
+        assert!(state.user_dictionary.contains("kritik"));
+        assert_eq!(state.user_dictionary.len(), 1);
+
+        // The dedup must reach the file too, not just the in-memory set —
+        // otherwise the list grows without bound across sessions.
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written.lines().collect::<Vec<_>>(), vec!["kritik"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn test_open_file_context_menu_sets_state() {
         let mut state = make_state("", 0, None);
@@ -11541,6 +12016,44 @@ mod tests {
         assert!(!entry.snapshot.exists());
         // The copy is a real docx, not a truncated one.
         assert!(crate::docx_parser::parse_docx(&dest).is_ok());
+    }
+
+    #[test]
+    fn test_with_docx_extension_appends_when_missing() {
+        assert_eq!(with_docx_extension(Path::new("New Tab")), Path::new("New Tab.docx"));
+        assert_eq!(with_docx_extension(Path::new("/tmp/aff")), Path::new("/tmp/aff.docx"));
+    }
+
+    #[test]
+    fn test_with_docx_extension_leaves_an_existing_one_alone() {
+        assert_eq!(with_docx_extension(Path::new("card.docx")), Path::new("card.docx"));
+        // Case-insensitive: Windows pickers hand back `.DOCX`.
+        assert_eq!(with_docx_extension(Path::new("card.DOCX")), Path::new("card.DOCX"));
+        assert_eq!(with_docx_extension(Path::new("card.Docx")), Path::new("card.Docx"));
+    }
+
+    #[test]
+    fn test_with_docx_extension_appends_rather_than_replacing_other_suffixes() {
+        // `set_extension` would turn these into "neg.docx" and "1ac.docx",
+        // silently eating part of the name the user typed.
+        assert_eq!(with_docx_extension(Path::new("neg.v2")), Path::new("neg.v2.docx"));
+        assert_eq!(with_docx_extension(Path::new("1ac.txt")), Path::new("1ac.txt.docx"));
+    }
+
+    #[test]
+    fn complete_recovery_save_as_forces_the_docx_extension() {
+        let (mut state, dir) = make_state_with_recovery("save-as-no-ext");
+        let entry = state.take_recovery_for_save_as().unwrap();
+        // What the picker hands back when the user accepts the "New Tab"
+        // suggestion verbatim.
+        let typed = dir.join("New Tab");
+
+        state.complete_recovery_save_as(&entry, &typed).unwrap();
+
+        assert!(!typed.exists(), "must not write an extension-less file");
+        let expected = dir.join("New Tab.docx");
+        assert!(expected.exists(), "should have written {expected:?}");
+        assert!(crate::docx_parser::parse_docx(&expected).is_ok());
     }
 
     #[test]
