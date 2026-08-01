@@ -183,6 +183,7 @@ pub enum KeybindAction {
     ToggleSidebar,
     NewTab,
     CloseTab,
+    ReopenClosedTab,
     Save,
     SaveAs,
     Find,
@@ -225,7 +226,7 @@ impl KeybindAction {
     pub fn all() -> &'static [KeybindAction] {
         use KeybindAction::*;
         &[
-            ToggleSettings, ToggleSidebar, NewTab, CloseTab, Save, SaveAs, Find, FindReplace,
+            ToggleSettings, ToggleSidebar, NewTab, CloseTab, ReopenClosedTab, Save, SaveAs, Find, FindReplace,
             Copy, Cut, Paste, PasteWithoutFormatting, Undo, Redo, SelectAll,
             SelectSimilarFormatting,
             Bold, Underline, Shrink, ClearFormatting,
@@ -244,6 +245,7 @@ impl KeybindAction {
             ToggleSidebar => "Toggle Sidebar",
             NewTab => "New Document",
             CloseTab => "Close Tab",
+            ReopenClosedTab => "Reopen Closed Tab",
             Save => "Save",
             SaveAs => "Save As",
             Find => "Find",
@@ -291,8 +293,8 @@ impl KeybindAction {
         use KeybindAction::*;
         use KeybindCategory as C;
         match self {
-            ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace
-                | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab => C::General,
+            ToggleSettings | ToggleSidebar | NewTab | CloseTab | ReopenClosedTab | Save | SaveAs
+                | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab => C::General,
             Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
                 | SelectSimilarFormatting => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
@@ -310,6 +312,7 @@ impl KeybindAction {
             ToggleSidebar => "sidebar",
             NewTab => "new_document",
             CloseTab => "close_tab",
+            ReopenClosedTab => "reopen_closed_tab",
             Save => "save",
             SaveAs => "save_as",
             Find => "find",
@@ -362,6 +365,7 @@ impl KeybindAction {
             ToggleSidebar => KeyCombo::new(true, true, false, "b"),
             NewTab => KeyCombo::new(true, false, false, "n"),
             CloseTab => KeyCombo::new(true, false, false, "w"),
+            ReopenClosedTab => KeyCombo::new(true, true, false, "w"),
             Save => KeyCombo::new(true, false, false, "s"),
             SaveAs => KeyCombo::new(true, true, false, "s"),
             Find => KeyCombo::new(true, false, false, "f"),
@@ -416,12 +420,11 @@ impl KeybindAction {
     /// Doc Menu / Card Menu — still fully bindable and shown in the UI, the
     /// handler just logs instead of doing nothing silently).
     pub fn is_stub(&self) -> bool {
-        matches!(
-            self,
-            KeybindAction::SaveAs | KeybindAction::Find | KeybindAction::FindReplace
-                | KeybindAction::DeleteTags | KeybindAction::StartTimer
-                | KeybindAction::OpenStats | KeybindAction::CiteFromLink
-        )
+        // SaveAs/Find/FindReplace/DeleteTags/StartTimer/OpenStats all shipped
+        // real functionality (`main_window.rs`'s own action handlers) since
+        // this list was written — Cite From Link is the one still genuinely a
+        // `println!` no-op.
+        matches!(self, KeybindAction::CiteFromLink)
     }
 }
 
@@ -584,7 +587,7 @@ pub fn load_vim_enabled(path: &Path) -> bool {
 actions!(
     keybinds,
     [
-        ToggleSettingsAction, ToggleSidebarAction, NewTabAction, CloseTabAction, SaveAction,
+        ToggleSettingsAction, ToggleSidebarAction, NewTabAction, CloseTabAction, ReopenClosedTabAction, SaveAction,
         SaveAsAction, FindAction, FindReplaceAction,
         CopyAction, CutAction, PasteAction, PasteWithoutFormattingAction, UndoAction, RedoAction, SelectAllAction,
         SelectSimilarFormattingAction,
@@ -625,6 +628,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         bind(ToggleSidebar).map(|k| KeyBinding::new(&k, ToggleSidebarAction, None)),
         bind(NewTab).map(|k| KeyBinding::new(&k, NewTabAction, None)),
         bind(CloseTab).map(|k| KeyBinding::new(&k, CloseTabAction, None)),
+        bind(ReopenClosedTab).map(|k| KeyBinding::new(&k, ReopenClosedTabAction, None)),
         bind(Save).map(|k| KeyBinding::new(&k, SaveAction, None)),
         bind(SaveAs).map(|k| KeyBinding::new(&k, SaveAsAction, None)),
         bind(Find).map(|k| KeyBinding::new(&k, FindAction, None)),
@@ -663,6 +667,11 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         bind(NextTab).map(|k| KeyBinding::new(&k, NextTabAction, None)),
         bind(PrevTab).map(|k| KeyBinding::new(&k, PrevTabAction, None)),
         Some(KeyBinding::new("f9", UnderlineAction, None)),
+        // A second, fixed binding for New Document — Ctrl+T is the
+        // browser-tab convention, not user-configurable like NewTab's own
+        // combo (Ctrl+N by default). Free: Start Timer owns Ctrl+Shift+T,
+        // not plain Ctrl+T.
+        Some(KeyBinding::new("ctrl-t", NewTabAction, None)),
     ]
     .into_iter()
     .flatten());
@@ -671,6 +680,21 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: these six all shipped real handlers in `main_window.rs`
+    /// (Find/Find & Replace, Delete Tags, Start Timer, Open Stats, Save As)
+    /// but the settings modal kept flagging them "(not yet implemented)".
+    /// Cite From Link is the one action still a `println!` no-op.
+    #[test]
+    fn is_stub_only_flags_cite_from_link() {
+        for action in KeybindAction::all() {
+            assert_eq!(
+                action.is_stub(),
+                *action == KeybindAction::CiteFromLink,
+                "{action:?} stub flag is stale"
+            );
+        }
+    }
 
     #[test]
     fn parses_simple_key() {

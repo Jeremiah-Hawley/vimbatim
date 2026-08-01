@@ -57,7 +57,6 @@ pub enum FormatAction {
     CloseBlock,
     NormalSize,
     Timer,
-    DeleteTags,
 }
 
 impl FormatAction {
@@ -614,10 +613,6 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::DeleteTags => {
-                            st.update(cx, |state, _cx| state.delete_tags());
-                            cx.notify();
-                        }
                         FormatAction::Nav => {
                             // Toggles the same AppState.sidebar_mode the
                             // file explorer's own Files/Nav header buttons
@@ -943,15 +938,19 @@ impl FormattingRibbon {
                 // `None` = not implemented yet, and rendered red. Give an
                 // entry its `AppState` method as it lands.
                 &[
+                    ("Delete tags", Some(AppState::delete_tags)),
                     ("Delete analytics", Some(AppState::delete_analytics)),
                     (
                         "Convert analytics to tags",
                         Some(AppState::convert_analytics_to_tags),
                     ),
-                    ("Remove emphasis", None),
-                    ("Remove non highlighted underlining", None),
-                    ("Remove blank lines", None),
-                    ("Remove pilcrows", None),
+                    ("Remove emphasis", Some(AppState::remove_emphasis)),
+                    (
+                        "Remove non highlighted underlining",
+                        Some(AppState::remove_non_highlighted_underlining),
+                    ),
+                    ("Remove blank lines", Some(AppState::remove_blank_lines)),
+                    ("Remove pilcrows", Some(AppState::remove_pilcrows)),
                     (
                         "Select similar formatting",
                         Some(AppState::select_similar_formatting),
@@ -1936,6 +1935,8 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Nav", FormatAction::Nav),
                         RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode)
                             .engaged(invisibility_mode),
+                        RibbonBtn::secondary("Timer", FormatAction::Timer)
+                            .engaged(timer_visible),
                     ],
                     vec![
                         RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
@@ -1953,15 +1954,8 @@ impl Render for FormattingRibbon {
                 "caselist",
                 "CASELIST",
                 &[
-                    vec![
-                        RibbonBtn::primary("Wikifi", FormatAction::Wikifi),
-                        RibbonBtn::secondary("Timer", FormatAction::Timer)
-                            .engaged(timer_visible),
-                    ],
-                    vec![
-                        RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki),
-                        RibbonBtn::secondary("Del Tags", FormatAction::DeleteTags),
-                    ],
+                    vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)],
+                    vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)],
                     vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)],
                 ],
                 *self.collapsed.get("caselist").unwrap_or(&false),

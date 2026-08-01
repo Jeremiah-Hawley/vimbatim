@@ -1043,6 +1043,7 @@ impl TextEditor {
         let consumed = self.state.update(cx, |state, cx| {
             match key {
                 "backspace" => { state.backspace(); cx.notify(); true }
+                "delete"    => { state.delete_forward(); cx.notify(); true }
                 "enter"     => { state.insert_char('\n'); cx.notify(); true }
                 "space"     => { state.insert_char(' '); cx.notify(); true }
                 "tab"       => { state.insert_char('\t'); cx.notify(); true }
@@ -1885,6 +1886,21 @@ impl Render for TextEditor {
                             // fix, still not clipped since overflow stays
                             // visible — see the comment on `heading` above).
                             .h(px(LINE_HEIGHT_PX * zoom))
+                            // Column direction + justify_end bottom-aligns
+                            // `content_el` within this fixed-height slot when
+                            // it's shorter (a Shrunk line next to normal-size
+                            // ones) instead of the block-layout default of
+                            // sitting flush at the top with empty space below.
+                            // Column's *cross* axis is horizontal and defaults
+                            // to `Stretch`, so this doesn't change width
+                            // behavior — `content_el` still fills the row
+                            // exactly as it did as a plain block child, which
+                            // is what its own internal justify_center/
+                            // justify_end (paragraph alignment) and the
+                            // Pocket box's `w_full()` depend on.
+                            .flex()
+                            .flex_col()
+                            .justify_end()
                             // Marks this row as the hover group the fold
                             // marker inside it watches.
                             .group(FOLD_ROW_GROUP)
@@ -2171,10 +2187,16 @@ fn render_line(
                 if run.is_none() {
                     return line.to_string().into_any_element();
                 }
-                // Don't take the fast path if alignment is needed — fall through to normal rendering
+                // Don't take the fast path if alignment or a box border is
+                // needed — both are only drawn by the full path below (the
+                // box wrapper in particular: this bare-div return skipped it
+                // entirely, which was the bug where a Pocket's box only drew
+                // once the cursor — or a selection, forcing the same fall
+                // through — put the line on the slow path).
                 use crate::docx_parser::Alignment;
                 let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
-                if !needs_alignment {
+                let needs_box = run.is_some_and(|r| r.box_format);
+                if !needs_alignment && !needs_box {
                     return apply_run_style(div(), run, zoom, pal).child(line.to_string()).into_any_element();
                 }
             }
@@ -2287,7 +2309,12 @@ fn render_line(
         }
     }
 
-    let mut line_div = div().flex().flex_row().children(spans);
+    // `items_end()`: when a line mixes run sizes (e.g. Shrink applied to only
+    // part of it), each span's own div is as tall as its own font's line
+    // height — cross-axis alignment decides where a shorter span sits inside
+    // the row, and the default (effectively top) is what made smaller text
+    // "float" above the baseline the surrounding text sits on.
+    let mut line_div = div().flex().flex_row().items_end().children(spans);
     // Apply paragraph-level alignment if available (Phase 4.3)
     if let Some(p) = para {
         use crate::docx_parser::Alignment;

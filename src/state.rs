@@ -658,6 +658,11 @@ pub struct AppState {
     /// mirroring `Tab::pending_scroll_to_cursor`'s same check-and-clear idiom.
     pub pending_focus_editor: Option<Pane>,
     pub next_tab_id: usize,
+    /// Closed tabs' file paths, most-recently-closed last — a LIFO stack
+    /// `reopen_closed_tab` pops from. Only file-backed tabs push onto it;
+    /// a blank "New Tab" has nothing on disk to reopen. Deliberately not
+    /// persisted — a fresh session starts with nothing to reopen.
+    pub closed_tabs: Vec<PathBuf>,
     pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
@@ -1454,6 +1459,7 @@ impl AppState {
             active_tab: 0,
             pending_focus_editor: None,
             next_tab_id: 1,
+            closed_tabs: Vec::new(),
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
@@ -2145,6 +2151,11 @@ impl AppState {
         if let Some(id) = closed_id {
             crate::recovery::delete_snapshot(id);
         }
+        // Only a file-backed tab can be reopened — a blank "New Tab" has
+        // nothing on disk for `reopen_closed_tab` to load back.
+        if let Some(path) = self.tabs.get(idx).and_then(|t| t.file_path.clone()) {
+            self.closed_tabs.push(path);
+        }
         self.tabs.remove(idx);
 
         // Two panes need two tabs. Collapse the split when the closed tab was
@@ -2169,6 +2180,17 @@ impl AppState {
         // Harmless when the active tab didn't actually change: GPUI's
         // `focus()` is a no-op if the handle is already focused.
         self.pending_focus_editor = Some(self.focused_pane);
+    }
+
+    /// Settings → Keybinds "open a closed tab" (`Ctrl+Shift+W` by default):
+    /// reopens the most recently closed file-backed tab, popping it off
+    /// `closed_tabs`. Repeating the keybind walks back through however many
+    /// tabs were closed, most-recent first. A no-op with nothing on the
+    /// stack.
+    pub fn reopen_closed_tab(&mut self) {
+        if let Some(path) = self.closed_tabs.pop() {
+            self.open_file(path);
+        }
     }
 
     /// Entry point for the tab-bar's `×` button. Closes the tab immediately
@@ -2575,6 +2597,32 @@ impl AppState {
         }
         if let Some(rec) = self.vim_insertion_recording.as_mut() {
             rec.pop();
+        }
+    }
+
+    /// The Delete key: deletes the character immediately *after* the cursor —
+    /// `backspace`'s forward counterpart. If a selection is active the whole
+    /// selection is deleted instead, same as `backspace`. Doesn't touch
+    /// `vim_insertion_recording`: that tracks characters just typed for `.`
+    /// repeat, and this removes a character ahead of the cursor, never one of
+    /// those.
+    pub fn delete_forward(&mut self) {
+        if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
+            self.delete_selection(); // already pushes its own undo snapshot
+            return;
+        }
+        let at_document_end = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.cursor >= t.content.len())
+            .unwrap_or(true);
+        if at_document_end { return; }
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let next = char_right(&tab.content, tab.cursor);
+            sync_delete_range(&mut tab.paragraphs, tab.cursor, next);
+            tab.content.remove(tab.cursor);
+            tab.is_modified = true;
         }
     }
 
@@ -4419,6 +4467,223 @@ impl AppState {
         };
         tab.similar_ranges = ranges_matching_format(&tab.paragraphs, &target.clone());
         tab.selection = None;
+    }
+
+    /// The range a Doc Menu cleanup command acts on: the active selection
+    /// when there is one, else the whole document. Shared by every Doc Menu
+    /// cleanup command below.
+    fn selection_or_whole_document(&self) -> Option<(usize, usize)> {
+        let tab = self.tabs.get(self.active_tab)?;
+        Some(match tab.selection {
+            Some((a, f)) => (a.min(f), a.max(f)),
+            None => (0, tab.content.len()),
+        })
+    }
+
+    /// Doc Menu → Remove emphasis: clears bold/underline/box from any run
+    /// whose formatting matches the Emphasis button's own configured
+    /// combination (`emphasis_bold`/`emphasis_underline`/`emphasis_box`)
+    /// *exactly* — highlight doesn't factor in, so a highlighted emphasis
+    /// run is fair game exactly like a plain one. Scope is the active
+    /// selection, or the whole document with none, same as its three
+    /// siblings below.
+    ///
+    /// Runs carrying a card-style marker (Tag/Cite/Analytic — Pocket/Hat/
+    /// Block too, via `apply_card_style`'s `FormatOp::Style`) are excluded
+    /// even when their formatting happens to coincide: Emphasis itself has
+    /// no marker of its own, so "exactly that formatting" has to mean
+    /// *unstyled* text, or emphasis configured to bold-only would eat every
+    /// Tag in the document.
+    pub fn remove_emphasis(&mut self) {
+        let (want_bold, want_underline, want_box) =
+            (self.emphasis_bold, self.emphasis_underline, self.emphasis_box);
+        // All three off means Emphasis applies no formatting at all — matching
+        // "exactly that" would otherwise mean every plain unstyled run in the
+        // document, which is not what this command is for.
+        if !want_bold && !want_underline && !want_box {
+            return;
+        }
+        let matches = |r: &Run| {
+            r.style.is_none()
+                && r.bold == want_bold
+                && r.underline == want_underline
+                && r.box_format == want_box
+        };
+
+        let Some((start, end)) = self.selection_or_whole_document() else { return };
+        if start >= end {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let any = runs_in_range(&tab.paragraphs, start, end).iter().any(&matches);
+        // No undo entry for a no-op — Ctrl+Z should undo what the user did.
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let (start_para, start_run, start_char) = resolve_position(&tab.paragraphs, start);
+            let (end_para, end_run, end_char) = resolve_position(&tab.paragraphs, end);
+            // Same end-then-start split order as `apply_formatting`, so the
+            // already-resolved start position isn't shifted by the end split.
+            crate::document_ops::split_run_at_position(&mut tab.paragraphs, end_para, end_run, end_char);
+            crate::document_ops::split_run_at_position(&mut tab.paragraphs, start_para, start_run, start_char);
+
+            let mut cumulative = 0usize;
+            for para in tab.paragraphs.iter_mut() {
+                for run in para.runs.iter_mut() {
+                    let run_start = cumulative;
+                    let run_end = cumulative + run.text.len();
+                    if run_start >= start && run_end <= end && matches(run) {
+                        run.bold = false;
+                        run.underline = false;
+                        run.box_format = false;
+                    }
+                    cumulative = run_end;
+                }
+                cumulative += 1;
+                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+            }
+            tab.is_modified = true;
+        }
+    }
+
+    /// Doc Menu → Remove non highlighted underlining: clears `underline`
+    /// (not `double_underline` — that's Hat's own marker, never plain
+    /// "underlining") from every run in scope that isn't highlighted. Scope
+    /// is the active selection, or the whole document with none.
+    ///
+    /// Blunt by design, like every Doc Menu command here: there's no per-run
+    /// marker distinguishing a Block heading's structural underline from a
+    /// user's own, so an unhighlighted Block gets cleared too — reapplying
+    /// Block afterward is one click.
+    pub fn remove_non_highlighted_underlining(&mut self) {
+        let Some((start, end)) = self.selection_or_whole_document() else { return };
+        if start >= end {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let any = runs_in_range(&tab.paragraphs, start, end)
+            .iter()
+            .any(|r| r.underline && !r.highlight);
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let (start_para, start_run, start_char) = resolve_position(&tab.paragraphs, start);
+            let (end_para, end_run, end_char) = resolve_position(&tab.paragraphs, end);
+            // Same end-then-start split order as `apply_formatting`, so the
+            // already-resolved start position isn't shifted by the end split.
+            crate::document_ops::split_run_at_position(&mut tab.paragraphs, end_para, end_run, end_char);
+            crate::document_ops::split_run_at_position(&mut tab.paragraphs, start_para, start_run, start_char);
+
+            let mut cumulative = 0usize;
+            for para in tab.paragraphs.iter_mut() {
+                for run in para.runs.iter_mut() {
+                    let run_start = cumulative;
+                    let run_end = cumulative + run.text.len();
+                    if run_start >= start && run_end <= end && run.underline && !run.highlight {
+                        run.underline = false;
+                    }
+                    cumulative = run_end;
+                }
+                cumulative += 1;
+                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+            }
+            tab.is_modified = true;
+        }
+    }
+
+    /// Doc Menu → Remove blank lines: deletes every paragraph with no text
+    /// (blank however it's styled), across the whole document, or — with an
+    /// active selection — only those whose line falls inside it.
+    pub fn remove_blank_lines(&mut self) {
+        let is_blank = |p: &Paragraph| p.runs.iter().all(|r| r.text.trim().is_empty());
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        // Inclusive [first_line, last_line] the selection's bytes fall
+        // across, in the same "count '\n's before the offset" terms every
+        // other line-index lookup here uses (see `cursor_line_col`). `None`
+        // means no selection: every paragraph is in scope.
+        let line_range = tab.selection.map(|(a, f)| {
+            let (start, end) = (a.min(f), a.max(f));
+            (
+                tab.content[..start].matches('\n').count(),
+                tab.content[..end].matches('\n').count(),
+            )
+        });
+        let in_scope = |idx: usize| line_range.is_none_or(|(first, last)| idx >= first && idx <= last);
+        let any = tab
+            .paragraphs
+            .iter()
+            .enumerate()
+            .any(|(i, p)| in_scope(i) && is_blank(p));
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            let mut idx = 0usize;
+            tab.paragraphs.retain(|p| {
+                let drop = in_scope(idx) && is_blank(p);
+                idx += 1;
+                !drop
+            });
+            // Every rich-text-aware function assumes at least one paragraph
+            // and one run always exist (`default_paragraphs`).
+            if tab.paragraphs.is_empty() {
+                tab.paragraphs = default_paragraphs();
+            }
+            tab.content = paragraphs_to_plain_text(&tab.paragraphs);
+            tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor.min(tab.content.len()));
+            tab.selection = None;
+            tab.is_modified = true;
+        }
+    }
+
+    /// Doc Menu → Remove pilcrows: strips every literal `¶` — the marker
+    /// `condense_with_pilcrows`/a pilcrow-marked paste leaves behind for a
+    /// collapsed newline — from the selection, or the whole document with
+    /// none.
+    ///
+    /// Distinct from the `pilcrows` *setting* (`toggle_pilcrows`): that one
+    /// only decides what a future condense/paste leaves behind, not what to
+    /// do with `¶`s already sitting in the document.
+    pub fn remove_pilcrows(&mut self) {
+        let Some((start, end)) = self.selection_or_whole_document() else { return };
+        if start >= end {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        if !tab.content[start..end].contains('¶') {
+            return;
+        }
+
+        let stripped = tab.content[start..end].replace('¶', "");
+        // Mirrors `condense_selection_with`: capture the range's own runs
+        // first, strip `¶` out of each run's text, then delete-and-reinsert
+        // so every surviving character keeps its original formatting. A run
+        // that was only a `¶` strips down to an empty string, which
+        // `sync_insert_str_with_runs` silently contributes zero characters
+        // for — nothing else to special-case.
+        let stripped_runs: Vec<Run> = runs_in_range(&tab.paragraphs, start, end)
+            .into_iter()
+            .map(|mut r| { r.text = r.text.replace('¶', ""); r })
+            .collect();
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, end);
+            tab.content.drain(start..end);
+            sync_insert_str_with_runs(&mut tab.paragraphs, start, &stripped, &stripped_runs);
+            tab.content.insert_str(start, &stripped);
+            tab.cursor = start + stripped.len();
+            tab.selection = None;
+            tab.is_modified = true;
+        }
     }
 
     /// Drops any "select similar formatting" highlight. Called from the
@@ -7896,6 +8161,7 @@ mod tests {
             active_tab: 0,
             pending_focus_editor: None,
             next_tab_id: 1,
+            closed_tabs: Vec::new(),
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
@@ -9260,6 +9526,57 @@ mod tests {
         state.close_tab(0);
 
         assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
+    }
+
+    #[test]
+    fn close_tab_pushes_a_file_backed_tabs_path_onto_closed_tabs() {
+        let mut state = make_state("hello", 0, None);
+        let path = PathBuf::from("/tmp/vimbatim_reopen_test_a.docx");
+        state.tabs.push(Tab::from_path(1, path.clone()));
+
+        state.close_tab(1);
+
+        assert_eq!(state.closed_tabs, vec![path]);
+    }
+
+    #[test]
+    fn close_tab_does_not_stack_a_blank_new_tab() {
+        let mut state = make_state("hello", 0, None);
+        state.tabs.push(Tab::new_empty(1)); // no file_path
+        state.closed_tabs.clear();
+
+        state.close_tab(1);
+
+        assert!(state.closed_tabs.is_empty());
+    }
+
+    #[test]
+    fn reopen_closed_tab_reopens_most_recently_closed_first() {
+        let mut state = make_state("hello", 0, None);
+        let a = PathBuf::from("/tmp/vimbatim_reopen_test_a.docx");
+        let b = PathBuf::from("/tmp/vimbatim_reopen_test_b.docx");
+        state.tabs.push(Tab::from_path(1, a.clone()));
+        state.tabs.push(Tab::from_path(2, b.clone()));
+        state.close_tab(1); // closes a
+        state.close_tab(1); // closes b (shifted down after a's removal)
+
+        state.reopen_closed_tab();
+        assert!(state.tabs.iter().any(|t| t.file_path.as_ref() == Some(&b)), "b (closed last) reopens first");
+
+        state.reopen_closed_tab();
+        assert!(state.tabs.iter().any(|t| t.file_path.as_ref() == Some(&a)), "a reopens second");
+
+        assert!(state.closed_tabs.is_empty());
+    }
+
+    #[test]
+    fn reopen_closed_tab_is_a_noop_with_nothing_closed() {
+        let mut state = make_state("hello", 0, None);
+        let tabs_before = state.tabs.len();
+
+        state.reopen_closed_tab();
+
+        assert_eq!(state.tabs.len(), tabs_before);
     }
 
     // ── next_tab / prev_tab (Task 9: Ctrl+Tab / Ctrl+Shift+Tab cycling) ─────
@@ -11164,6 +11481,29 @@ mod tests {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.backspace();
         assert_eq!(undo_contents(&state), vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn delete_forward_removes_the_character_after_the_cursor() {
+        let mut state = make_state("abc", 1, None);
+        state.delete_forward();
+        assert_eq!(state.tabs[0].content, "ac");
+        assert_eq!(state.tabs[0].cursor, 1, "cursor doesn't move for a forward delete");
+    }
+
+    #[test]
+    fn delete_forward_deletes_the_selection_when_one_is_active() {
+        let mut state = make_state("hello world", 5, Some((0, 5)));
+        state.delete_forward();
+        assert_eq!(state.tabs[0].content, " world");
+    }
+
+    #[test]
+    fn delete_forward_is_a_no_op_at_document_end() {
+        let mut state = make_state("abc", 3, None);
+        state.delete_forward();
+        assert_eq!(state.tabs[0].content, "abc");
+        assert!(state.tabs[0].undo_stack.is_empty());
     }
 
     #[test]
@@ -14267,6 +14607,165 @@ mod tests {
         let runs = &state.tabs[0].paragraphs[0].runs;
         assert!(runs.iter().find(|r| r.text.contains("bold")).unwrap().bold);
         assert!(!runs.iter().find(|r| r.text.contains("plain")).unwrap().bold);
+    }
+
+    // ── Doc Menu cleanup commands ───────────────────────────────────────────
+
+    #[test]
+    fn remove_emphasis_strips_bold_from_unstyled_runs_only() {
+        let paragraphs = vec![
+            para_plain("plain"),
+            Paragraph {
+                runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            tag_para("a tag"),
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        // Default settings.conf: emphasis_bold=true, underline/box=false.
+        state.remove_emphasis();
+
+        assert!(!state.tabs[0].paragraphs[1].runs[0].bold, "bold-only run should be cleared");
+        assert!(state.tabs[0].paragraphs[2].runs[0].bold, "a Tag's own bold must survive");
+    }
+
+    #[test]
+    fn remove_emphasis_is_a_no_op_when_nothing_is_configured() {
+        let paragraphs = vec![para_plain("plain text")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.emphasis_bold = false;
+        state.emphasis_underline = false;
+        state.emphasis_box = false;
+        let before = state.tabs[0].undo_stack.len();
+
+        state.remove_emphasis();
+
+        assert_eq!(state.tabs[0].undo_stack.len(), before, "no formatting is defined, so nothing to undo");
+    }
+
+    #[test]
+    fn remove_emphasis_respects_an_active_selection() {
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run { text: "two".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        // Selection covers only the first line ("one").
+        state.tabs[0].selection = Some((0, 3));
+
+        state.remove_emphasis();
+
+        assert!(!state.tabs[0].paragraphs[0].runs[0].bold);
+        assert!(state.tabs[0].paragraphs[1].runs[0].bold, "unselected line must survive");
+    }
+
+    #[test]
+    fn remove_non_highlighted_underlining_skips_highlighted_runs() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![
+                Run { text: "plain-underline".into(), underline: true, ..Run::default() },
+                Run { text: "highlighted-underline".into(), underline: true, highlight: true, ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+
+        state.remove_non_highlighted_underlining();
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(!runs.iter().find(|r| r.text.contains("plain")).unwrap().underline);
+        assert!(runs.iter().find(|r| r.text.contains("highlighted")).unwrap().underline);
+    }
+
+    #[test]
+    fn remove_non_highlighted_underlining_respects_an_active_selection() {
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "one".into(), underline: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run { text: "two".into(), underline: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        // Selection covers only the first line ("one").
+        state.tabs[0].selection = Some((0, 3));
+
+        state.remove_non_highlighted_underlining();
+
+        assert!(!state.tabs[0].paragraphs[0].runs[0].underline);
+        assert!(state.tabs[0].paragraphs[1].runs[0].underline, "unselected line must survive");
+    }
+
+    #[test]
+    fn remove_blank_lines_deletes_only_empty_paragraphs() {
+        let paragraphs = vec![para_plain("one"), para_plain(""), para_plain("two")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+
+        state.remove_blank_lines();
+
+        assert_eq!(state.tabs[0].content, "one\ntwo");
+    }
+
+    #[test]
+    fn remove_blank_lines_with_a_selection_only_touches_selected_lines() {
+        let paragraphs = vec![para_plain(""), para_plain("kept"), para_plain("")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        // Select only the middle + last line, leaving the leading blank alone.
+        let start = state.tabs[0].content.find("kept").unwrap();
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((start, end));
+
+        state.remove_blank_lines();
+
+        assert_eq!(state.tabs[0].content, "\nkept");
+    }
+
+    #[test]
+    fn remove_pilcrows_strips_the_marker_and_keeps_formatting() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "bold¶text".into(), bold: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+
+        state.remove_pilcrows();
+
+        assert_eq!(state.tabs[0].content, "boldtext");
+        assert!(state.tabs[0].paragraphs[0].runs.iter().all(|r| r.bold));
+    }
+
+    #[test]
+    fn remove_pilcrows_is_a_no_op_without_any() {
+        let paragraphs = vec![para_plain("no marker here")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let before = state.tabs[0].undo_stack.len();
+
+        state.remove_pilcrows();
+
+        assert_eq!(state.tabs[0].undo_stack.len(), before);
     }
 
     // ── Delete tags / spoken-word counting ────────────────────────────────

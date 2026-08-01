@@ -17,7 +17,7 @@ use crate::keybinds::{
     AnalyticAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction,
     FindAction,
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
+    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
@@ -278,6 +278,11 @@ impl MainWindow {
             // around the whole point of this confirmation flow.
             let idx = s.read(cx).active_tab;
             s.update(cx, |st, cx| { st.request_close_tab(idx); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &ReopenClosedTabAction, cx| {
+            s.update(cx, |st, cx| { st.reopen_closed_tab(); cx.notify(); });
         });
 
         let s = state.clone();

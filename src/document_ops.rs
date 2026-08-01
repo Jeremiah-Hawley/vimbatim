@@ -520,7 +520,7 @@ pub fn ranges_matching_format(paragraphs: &[Paragraph], target: &Run) -> Vec<(us
     out
 }
 
-fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usize, run_idx: usize, byte_offset: usize) {
+pub(crate) fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usize, run_idx: usize, byte_offset: usize) {
     /*
      * Splits `paragraphs[para_idx].runs[run_idx]` into two runs (same
      * formatting, just the text divided) at `byte_offset` — unless
