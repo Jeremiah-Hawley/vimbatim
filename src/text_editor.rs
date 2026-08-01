@@ -41,6 +41,19 @@ const CHAR_WIDTH_PX: f32 = 8.4;
 /// needs an explicit font size rather than reading it from render()'s
 /// ambient text style.
 const FONT_SIZE_PX: f32 = 14.0;
+/// Width of the separator painted where invisibility mode dropped text between
+/// two visible fragments, at 100% zoom.
+///
+/// A fixed width rather than a space character on purpose: a space is
+/// font-metric-dependent, so the gap after a 26pt cite would be far wider than
+/// one in body text, and the row would read unevenly. This is one number to
+/// tune, and it scales with zoom like everything else.
+const HIDDEN_TEXT_GAP_PX: f32 = 4.0;
+/// Hover-group name tying a heading row to the fold marker inside it, so the
+/// marker appears when the cursor is anywhere on that line rather than only
+/// over the marker itself.
+const FOLD_ROW_GROUP: &str = "fold-row";
+
 /// A monospace glyph's advance as a fraction of its font size, derived from
 /// the two constants above (8.4px at 14px = 0.6) — `CHAR_WIDTH_PX` alone is
 /// only correct when the document actually renders at `FONT_SIZE_PX`, which it
@@ -101,6 +114,11 @@ struct RowCache {
     /// comparison that would need its own tuning.
     viewport_width_bits: u32,
     zoom_bits: u32,
+    /// Invisibility mode and fold both drop rows from `display_to_wrap`, so
+    /// toggling either changes the tables and must invalidate — otherwise the
+    /// editor keeps painting the previous mode's row list.
+    invisibility: bool,
+    fold_version: u64,
     lines: Rc<Vec<String>>,
     line_chars: Rc<Vec<Vec<char>>>,
     line_byte_starts: Rc<Vec<usize>>,
@@ -112,6 +130,38 @@ struct RowCache {
     /// already part of this cache's invalidation key.
     display_to_wrap: Rc<Vec<Option<usize>>>,
     wrap_to_display: Rc<Vec<usize>>,
+}
+
+/// Whether a run should be left unpainted in invisibility mode.
+///
+/// What survives is highlighted text plus every card style:
+/// * `heading != 0` covers Pocket/Hat/Block/Tag, which are paragraph-level
+///   (`CardStyleKind::heading_level`), so the whole line stays.
+/// * Cite is run-level and has no marker of its own — `apply_cite_style` only
+///   sets bold plus `cite_size_half_points` — so it is identified by exactly
+///   that pair. Any other bold run at the configured cite size is
+///   indistinguishable from a real cite and will also stay visible; that is a
+///   limit of how cites are stored, not a choice made here.
+///
+/// Hiding is purely visual — the run keeps its space, so wrap points, click
+/// mapping and cursor math are untouched, and the document itself is never
+/// modified.
+fn run_is_hidden(
+    invisibility: bool,
+    heading: u8,
+    highlighted: bool,
+    bold: bool,
+    size_half_points: u16,
+    cite_size_half_points: u16,
+) -> bool {
+    if !invisibility {
+        return false;
+    }
+    let card_style_line = heading != 0;
+    // `size == 0` means "inherit the body size" in this codebase, so it can
+    // never be a cite even if the setting were somehow zero.
+    let is_cite = bold && size_half_points != 0 && size_half_points == cite_size_half_points;
+    !(card_style_line || highlighted || is_cite)
 }
 
 /// The scroll arithmetic behind reading mode's Left/Right paging, split out
@@ -156,11 +206,15 @@ fn row_cache_is_valid_for(
     viewport_width: f32,
     zoom: f32,
     ignore_width: bool,
+    invisibility: bool,
+    fold_version: u64,
 ) -> bool {
     cache.tab_id == tab_id
         && cache.content_version == content_version
         && (ignore_width || cache.viewport_width_bits == viewport_width.to_bits())
         && cache.zoom_bits == zoom.to_bits()
+        && cache.invisibility == invisibility
+        && cache.fold_version == fold_version
 }
 
 /// The main document editing area.
@@ -469,11 +523,18 @@ impl TextEditor {
         let idx = self.tab_index(cx);
         let state = self.state.read(cx);
         let dragging = state.split_dragging;
+        let invisibility = state.invisibility_mode;
+        let cite_size = state.cite_size_half_points;
+        let fold_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.fold_version).unwrap_or(0);
+        let folds = idx
+            .and_then(|i| state.tabs.get(i))
+            .map(|t| t.folded_headings.clone())
+            .unwrap_or_default();
         let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
         let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
         let zoom = state.zoom;
         if let Some(cache) = self.row_cache.as_ref() {
-            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, dragging) {
+            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, dragging, invisibility, fold_version) {
                 return (cache.rows.clone(), cache.display_to_wrap.clone(), cache.wrap_to_display.clone());
             }
         }
@@ -484,7 +545,10 @@ impl TextEditor {
         let rows = Rc::new(visual_rows_for_viewport(
             cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
         ));
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
+        let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
+        let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
+        let (display_to_wrap, wrap_to_display) =
+            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
         (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
 
@@ -1097,12 +1161,19 @@ impl Render for TextEditor {
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let dragging = state.split_dragging;
+        let invisibility = state.invisibility_mode;
+        let cite_size = state.cite_size_half_points;
+        let fold_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.fold_version).unwrap_or(0);
+        let folds = idx
+            .and_then(|i| state.tabs.get(i))
+            .map(|t| t.folded_headings.clone())
+            .unwrap_or_default();
         let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
         let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
         let cache_valid = self
             .row_cache
             .as_ref()
-            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, dragging));
+            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, dragging, invisibility, fold_version));
         // Only pay for the full content/paragraphs clone on a cache miss.
         // `document_lines`/word-wrap need `cx` free of `state`'s borrow (see
         // `let _ = state;` below), so the actual wrap happens further down —
@@ -1241,11 +1312,16 @@ impl Render for TextEditor {
             let rows = visual_rows_for_viewport(
                 cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
             );
-            let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, zoom);
+            let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
+        let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
+            let (display_to_wrap, wrap_to_display) =
+                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
 
             self.row_cache = Some(RowCache {
                 tab_id,
                 content_version,
+                invisibility,
+                fold_version,
                 viewport_width_bits: viewport_width.to_bits(),
                 zoom_bits: zoom.to_bits(),
                 lines: Rc::new(lines),
@@ -1551,6 +1627,13 @@ impl Render for TextEditor {
                     let spell_cache = self.spell_cache.clone();
                     let spellcheck_color =
                         highlight_color_hex(&self.state.read(cx).spellcheck_underline_color);
+                    let invisibility_mode = self.state.read(cx).invisibility_mode;
+                    let cite_size_half_points = self.state.read(cx).cite_size_half_points;
+                    let folded_headings = {
+                        let st = self.state.read(cx);
+                        st.tabs.get(st.active_tab).map(|t| t.folded_headings.clone()).unwrap_or_default()
+                    };
+                    let fold_state = self.state.clone();
                     move |range: std::ops::Range<usize>, _window, _cx| {
                         range.map(|display_idx| {
                         // A `None` slot is a blank spacer reserved after an
@@ -1638,6 +1721,53 @@ impl Render for TextEditor {
                         let prev_has_box = li > 0 && paragraphs.get(li - 1)
                             .is_some_and(|p| p.runs.iter().any(|r| r.box_format));
 
+                        // Fold marker, on a heading's *first* row only — a
+                        // wrapped heading gets one marker, not one per visual
+                        // row. Hidden until the row is hovered, so a folded
+                        // outline reads as clean text rather than a column of
+                        // arrows.
+                        let row_heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
+                        let fold_toggle = (row_heading != 0 && row_start == 0).then(|| {
+                            let collapsed = folded_headings.contains(&li);
+                            let state = fold_state.clone();
+                            div()
+                                .id(ElementId::named_usize("fold-toggle", li))
+                                .w(px(12.0 * zoom))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                // Independent of the heading's own (possibly
+                                // very large) font size, so markers stay a
+                                // consistent size down the outline.
+                                .text_size(px(9.0 * zoom))
+                                .font_weight(FontWeight::NORMAL)
+                                // Transparent rather than absent: the marker
+                                // keeps its width at all times, so hovering a
+                                // heading doesn't shift its text sideways.
+                                .text_color(transparent_black())
+                                .group_hover(FOLD_ROW_GROUP, move |s| s.text_color(rgb(p.text_muted)))
+                                .cursor_pointer()
+                                .hover(move |s| s.text_color(rgb(p.text)))
+                                .on_mouse_down(MouseButton::Left, {
+                                    // A plain closure over a cloned handle,
+                                    // not `cx.listener` — the `uniform_list`
+                                    // closure is `'static` and cannot borrow
+                                    // the view's context.
+                                    move |_ev, _window, cx: &mut App| {
+                                        // Stops the click also placing the
+                                        // caret in the heading.
+                                        cx.stop_propagation();
+                                        state.update(cx, |st, cx| {
+                                            st.toggle_paragraph_fold(li);
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                                .child(if collapsed { "▶" } else { "▼" })
+                                .into_any_element()
+                        });
+
                         let content_el = render_line(
                             &row_text,
                             row_cursor_col,
@@ -1650,6 +1780,9 @@ impl Render for TextEditor {
                             cursor_style,
                             &row_misspelled,
                             spellcheck_color,
+                            invisibility_mode,
+                            cite_size_half_points,
+                            fold_toggle,
                         );
                         // Heading styles (spec 6.5): a paragraph-wide default
                         // that per-run formatting (bold/size/etc., applied
@@ -1717,6 +1850,9 @@ impl Render for TextEditor {
                             // fix, still not clipped since overflow stays
                             // visible — see the comment on `heading` above).
                             .h(px(LINE_HEIGHT_PX * zoom))
+                            // Marks this row as the hover group the fold
+                            // marker inside it watches.
+                            .group(FOLD_ROW_GROUP)
                             .child(content_el)
                             .into_any_element()
                         }).collect()
@@ -1937,6 +2073,22 @@ fn render_line(
     // is clean.
     misspelled: &[(usize, usize)],
     misspelled_color: u32,
+    // Invisibility mode (ribbon VIEW group): paint only the parts of the
+    // document that get read aloud — highlighted runs, and every run of a Tag
+    // line. Everything else keeps its space and its layout and is simply not
+    // drawn, so wrap points, click mapping and cursor math all stay exactly as
+    // they are. Nothing about the document itself changes.
+    invisibility: bool,
+    cite_size_half_points: u16,
+    // The fold marker for this row, when it is a heading's first row.
+    //
+    // Placed here rather than by the caller because a Pocket's content is
+    // wrapped in a border box, and the marker belongs *inside* that box. It
+    // also has to sit beside a `flex_1` wrapper around the line, or the line
+    // stops filling the row and its own `justify_center` has nothing to centre
+    // within — which is what silently un-centred every card style the first
+    // time this marker was added.
+    fold_toggle: Option<AnyElement>,
 ) -> AnyElement {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
@@ -1959,7 +2111,18 @@ fn render_line(
      */
     let chars: Vec<char> = line.chars().collect();
 
-    if cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
+    // Tag is the card style at heading level 4 (`CardStyleKind::heading_level`),
+    // and a Tag line is read aloud in full.
+    let heading = para.map(|p| p.heading).unwrap_or(0);
+    // Cheap pre-check: a card-style line hides nothing, so it keeps the fast
+    // path. Passing a non-bold, size-0 run means "could plain body text hide
+    // here?" — if not, nothing on this line can.
+    let hides_anything = run_is_hidden(invisibility, heading, false, false, 0, cite_size_half_points);
+
+    // The fast paths below emit one element for the whole row, which cannot
+    // express "some runs drawn, some not" — fall through to the per-run path
+    // whenever anything might be hidden.
+    if !hides_anything && cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
         if run_spans.is_empty() {
             return line.to_string().into_any_element();
         }
@@ -1985,52 +2148,101 @@ fn render_line(
         run_spans.to_vec()
     };
 
-    let spans: Vec<AnyElement> = effective_spans
-        .into_iter()
-        .flat_map(|(run_start, run_end, run_idx)| {
-            let run = para.and_then(|p| p.runs.get(run_idx));
-            let sub_len = run_end - run_start;
-            let sub_cursor = cursor_col.filter(|&c| c >= run_start && c <= run_end).map(|c| c - run_start);
-            let sub_selection = selection.and_then(|(s, e)| {
+    // Built as a fold rather than a filter/map chain so a single separator can
+    // be carried across run *and* segment boundaries — hidden text between two
+    // highlights is usually its own run, so the state has to outlive one run's
+    // iteration.
+    let mut spans: Vec<AnyElement> = Vec::new();
+    // Something was dropped since the last painted fragment.
+    let mut pending_gap = false;
+    // A fragment has already been painted on this row, so a gap would sit
+    // between two things rather than indenting the row.
+    let mut emitted_any = false;
+
+    for (run_start, run_end, run_idx) in effective_spans {
+        let run = para.and_then(|p| p.runs.get(run_idx));
+        let sub_len = run_end - run_start;
+        let sub_cursor = cursor_col.filter(|&c| c >= run_start && c <= run_end).map(|c| c - run_start);
+        let sub_selection = selection.and_then(|(s, e)| {
+            let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
+            (clipped_start < clipped_end).then(|| (clipped_start - run_start, clipped_end - run_start))
+        });
+        // Same clip-and-rebase as `sub_selection`, for each squiggle
+        // range that overlaps this run.
+        let sub_misspelled: Vec<(usize, usize)> = misspelled
+            .iter()
+            .filter_map(|&(s, e)| {
                 let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
-                (clipped_start < clipped_end).then(|| (clipped_start - run_start, clipped_end - run_start))
-            });
-            // Same clip-and-rebase as `sub_selection`, for each squiggle
-            // range that overlaps this run.
-            let sub_misspelled: Vec<(usize, usize)> = misspelled
-                .iter()
-                .filter_map(|&(s, e)| {
-                    let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
-                    (clipped_start < clipped_end)
-                        .then(|| (clipped_start - run_start, clipped_end - run_start))
-                })
-                .collect();
-            let segments = line_segments(sub_len, sub_cursor, sub_selection, &sub_misspelled);
-            segments
-                .into_iter()
-                .map(|(start, end, style, is_misspelled)| {
-                    // A zero-width segment only ever occurs for the cursor
-                    // sitting past the last character (end of line) — render
-                    // it as a single space so the highlighted cell still has
-                    // visible width.
-                    let text: String = if start == end {
-                        " ".to_string()
-                    } else {
-                        chars[run_start + start..run_start + end].iter().collect()
-                    };
-                    render_segment(
-                        text,
-                        run,
-                        style,
-                        zoom,
-                        pal,
-                        cursor_style,
-                        is_misspelled.then_some(misspelled_color),
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+                (clipped_start < clipped_end)
+                    .then(|| (clipped_start - run_start, clipped_end - run_start))
+            })
+            .collect();
+        // A run survives invisibility only by being highlighted; the
+        // whole-line exemption for Tag lines is folded into
+        // `hides_anything` above.
+        let hidden = run_is_hidden(
+            invisibility,
+            heading,
+            run.is_some_and(|r| r.highlight),
+            run.is_some_and(|r| r.bold),
+            run.map(|r| r.size).unwrap_or(0),
+            cite_size_half_points,
+        );
+
+        for (start, end, style, is_misspelled) in
+            line_segments(sub_len, sub_cursor, sub_selection, &sub_misspelled)
+        {
+            // Hidden text is dropped from the layout rather than painted
+            // transparently, so visible fragments close up instead of sitting
+            // in gaps the width of the words that aren't there.
+            //
+            // The cursor's own cell survives even inside hidden text — it is
+            // the only thing showing where typing would land, and losing it
+            // makes the mode impossible to navigate. Everything else hidden
+            // (including a selection over it) is simply not emitted, and only
+            // sets the flag below.
+            if hidden && style != SegmentStyle::Cursor {
+                pending_gap = true;
+                continue;
+            }
+
+            // Flush one separator for however much was skipped — one space or
+            // three sentences both read as "something was here", which is the
+            // useful signal, and keeps the row from running words together.
+            // Deferring to just before the next fragment is what makes leading
+            // and trailing hidden text cost nothing.
+            if pending_gap && emitted_any {
+                spans.push(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(HIDDEN_TEXT_GAP_PX * zoom))
+                        .into_any_element(),
+                );
+            }
+            pending_gap = false;
+
+            // A zero-width segment only ever occurs for the cursor
+            // sitting past the last character (end of line) — render
+            // it as a single space so the highlighted cell still has
+            // visible width.
+            let text: String = if start == end {
+                " ".to_string()
+            } else {
+                chars[run_start + start..run_start + end].iter().collect()
+            };
+            spans.push(render_segment(
+                text,
+                run,
+                style,
+                zoom,
+                pal,
+                cursor_style,
+                is_misspelled.then_some(misspelled_color),
+                hidden,
+            ));
+            emitted_any = true;
+        }
+    }
 
     let mut line_div = div().flex().flex_row().children(spans);
     // Apply paragraph-level alignment if available (Phase 4.3)
@@ -2052,8 +2264,19 @@ fn render_line(
                 .w_full()
                 .border_color(rgb(pal.text))
                 .px(px(8.0))
-                .py(px(8.0))
-                .child(line_div);
+                .py(px(8.0));
+
+            box_div = match fold_toggle {
+                // Inside the border, so a Pocket's marker reads as part of the
+                // box rather than floating outside it.
+                Some(toggle) => box_div
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(toggle)
+                    .child(div().flex_1().min_w_0().child(line_div)),
+                None => box_div.child(line_div),
+            };
 
             // If previous line also has a box, merge them by removing top border
             if prev_has_box {
@@ -2065,7 +2288,16 @@ fn render_line(
             return box_div.into_any_element();
         }
     }
-    line_div.into_any_element()
+    match fold_toggle {
+        Some(toggle) => div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .child(toggle)
+            .child(div().flex_1().min_w_0().child(line_div))
+            .into_any_element(),
+        None => line_div.into_any_element(),
+    }
 }
 
 fn render_segment(
@@ -2076,6 +2308,7 @@ fn render_segment(
     pal: Palette,
     cursor_style: CursorStyle,
     misspelled: Option<u32>,
+    hidden: bool,
 ) -> AnyElement {
     /*
      * Applies the run's formatting first, then layers the cursor/selection
@@ -2135,6 +2368,12 @@ fn render_segment(
      * The common cases stay single-element: no squiggle, or a squiggle with
      * no competing formatting underline.
      */
+    // Applied after the run style and the cursor/selection overlay, so it wins
+    // the glyph color — but deliberately *not* over their backgrounds: the
+    // caret and the selection stay visible while reading, which is what makes
+    // the mode navigable rather than a blank page.
+    let el = if hidden { el.text_color(transparent_black()) } else { el };
+
     let formatting_underline = run.is_some_and(|r| r.underline || r.double_underline);
     match misspelled {
         Some(color) if formatting_underline => el
@@ -2340,14 +2579,78 @@ fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32) -> usize {
 ///   row starts at — needed anywhere pixel math is keyed off a wrap-row
 ///   index (cursor position, scroll-to-cursor) so it accounts for spacer
 ///   rows inserted earlier in the document.
+/// Which wrap rows paint nothing, so they can be dropped from the display list
+/// entirely rather than left as blank lines.
+///
+/// Two independent reasons a row disappears:
+///
+/// * **Fold** hides whatever sits under a collapsed heading. `folded_paras` is
+///   the per-paragraph map `AppState::folded_paragraphs` computed, which is
+///   level-aware — collapsing a Pocket takes its Hats, Blocks and Tags with it,
+///   not just its prose.
+/// * **Invisibility** hides individual runs, and a row whose every run is
+///   hidden has nothing left to paint.
+///
+/// Fold is checked first because it is coarser: a folded body row is gone
+/// regardless of what it contains, including highlights.
+pub(crate) fn hidden_wrap_rows(
+    rows: &[(usize, usize, usize)],
+    paragraphs: &[Paragraph],
+    invisibility: bool,
+    cite_size_half_points: u16,
+    folded_paras: &[bool],
+) -> Vec<bool> {
+    if !invisibility && folded_paras.iter().all(|f| !f) {
+        return vec![false; rows.len()];
+    }
+    rows.iter()
+        .map(|&(li, row_start, row_end)| {
+            let Some(para) = paragraphs.get(li) else { return true };
+            if folded_paras.get(li).copied().unwrap_or(false) {
+                return true;
+            }
+            if !invisibility {
+                return false;
+            }
+            if para.heading != 0 {
+                return false; // a card-style line stays whole
+            }
+            !paragraph_run_char_spans(para).into_iter().any(|(s, e, run_idx)| {
+                // Only runs actually on this row decide it.
+                if s.max(row_start) >= e.min(row_end) {
+                    return false;
+                }
+                let run = para.runs.get(run_idx);
+                !run_is_hidden(
+                    true,
+                    para.heading,
+                    run.is_some_and(|r| r.highlight),
+                    run.is_some_and(|r| r.bold),
+                    run.map(|r| r.size).unwrap_or(0),
+                    cite_size_half_points,
+                )
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn expand_rows_for_display(
     rows: &[(usize, usize, usize)],
     paragraphs: &[Paragraph],
     zoom: f32,
+    hidden: &[bool],
 ) -> (Vec<Option<usize>>, Vec<usize>) {
     let mut display_to_wrap = Vec::with_capacity(rows.len());
     let mut wrap_to_display = Vec::with_capacity(rows.len());
     for (wrap_idx, (li, _, _)) in rows.iter().enumerate() {
+        // A fully hidden row gets no display slot, which is what closes up the
+        // vertical gap. It still records a `wrap_to_display` entry pointing at
+        // wherever the next visible row lands, so cursor scrolling on a hidden
+        // row resolves to the nearest thing actually on screen.
+        if hidden.get(wrap_idx).copied().unwrap_or(false) {
+            wrap_to_display.push(display_to_wrap.len());
+            continue;
+        }
         wrap_to_display.push(display_to_wrap.len());
         display_to_wrap.push(Some(wrap_idx));
         let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom);
@@ -2917,7 +3220,7 @@ mod tests {
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
-        page_scroll_offset, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
+        hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache,
     };
     use std::cell::RefCell;
@@ -3815,6 +4118,8 @@ mod tests {
 
     fn test_row_cache(tab_id: usize, content_version: u64, viewport_width: f32, zoom: f32) -> RowCache {
         RowCache {
+            invisibility: false,
+            fold_version: 0,
             tab_id,
             content_version,
             viewport_width_bits: viewport_width.to_bits(),
@@ -3827,6 +4132,172 @@ mod tests {
             display_to_wrap: Rc::new(Vec::new()),
             wrap_to_display: Rc::new(Vec::new()),
         }
+    }
+
+    // ── invisibility mode ────────────────────────────────────────────────────
+
+    /// (invisibility, heading, highlighted, bold, size, cite_size)
+    #[test]
+    fn test_invisibility_keeps_highlights_and_every_card_style() {
+        const CITE: u16 = 26; // settings.conf cite_size=13pt
+
+        // Off: nothing is ever hidden.
+        assert!(!run_is_hidden(false, 0, false, false, 0, CITE));
+
+        // Plain body text hides.
+        assert!(run_is_hidden(true, 0, false, false, 0, CITE));
+        // Highlighted text stays.
+        assert!(!run_is_hidden(true, 0, true, false, 0, CITE));
+
+        // Pocket/Hat/Block/Tag are heading levels 1..4 — all stay, whole line.
+        for heading in 1..=4 {
+            assert!(!run_is_hidden(true, heading, false, false, 0, CITE), "heading {heading} hidden");
+        }
+
+        // Cite: bold at the configured cite size.
+        assert!(!run_is_hidden(true, 0, false, true, CITE, CITE));
+        // Emphasis is bold at body size (0 = inherit) and is *not* a cite.
+        assert!(run_is_hidden(true, 0, false, true, 0, CITE));
+        // Bold at some other explicit size is not a cite either.
+        assert!(run_is_hidden(true, 0, false, true, 52, CITE));
+        // Cite size without bold is not a cite.
+        assert!(run_is_hidden(true, 0, false, false, CITE, CITE));
+    }
+
+    fn run_plain(text: &str) -> Run {
+        Run { text: text.into(), ..Run::default() }
+    }
+
+    fn para_plain(text: &str) -> Paragraph {
+        Paragraph {
+            runs: vec![run_plain(text)],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    fn hl_run(text: &str) -> Run {
+        Run { text: text.into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() }
+    }
+
+    fn no_folds(paragraphs: &[Paragraph]) -> Vec<bool> {
+        vec![false; paragraphs.len()]
+    }
+
+    /// What "collapse every heading" produces: each body paragraph hidden.
+    fn all_body_folded(paragraphs: &[Paragraph]) -> Vec<bool> {
+        paragraphs.iter().map(|p| p.heading == 0).collect()
+    }
+
+    fn card_para(text: &str, heading: u8) -> Paragraph {
+        Paragraph {
+            runs: vec![run_plain(text)],
+            heading,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    /// Fold leaves every card-style line and hides every body paragraph — the
+    /// document's outline, Word's collapse-under-headings.
+    #[test]
+    fn test_fold_hides_body_and_keeps_every_heading_level() {
+        let paragraphs = vec![
+            card_para("pocket", 1),
+            para_plain("body under pocket"),
+            card_para("hat", 2),
+            para_plain("body under hat"),
+            card_para("block", 3),
+            card_para("tag", 4),
+            para_plain("body under tag"),
+        ];
+        let rows: Vec<(usize, usize, usize)> =
+            (0..paragraphs.len()).map(|i| (i, 0usize, 1usize)).collect();
+
+        let hidden = hidden_wrap_rows(&rows, &paragraphs, false, 26, &all_body_folded(&paragraphs));
+        assert_eq!(hidden, vec![false, true, false, true, false, false, true]);
+
+        // Off, nothing folds.
+        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)), vec![false; 7]);
+    }
+
+    /// Fold is the coarser rule: a folded body row goes even if it holds
+    /// highlighted text that invisibility mode would have kept.
+    #[test]
+    fn test_fold_hides_body_rows_that_invisibility_would_keep() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl_run("highlighted body")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let rows = vec![(0usize, 0usize, 16usize)];
+
+        // Invisibility alone keeps it (it is highlighted)...
+        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)), vec![false]);
+        // ...but folding hides it regardless.
+        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &all_body_folded(&paragraphs)), vec![true]);
+    }
+
+    #[test]
+    fn test_hidden_wrap_rows_marks_only_fully_hidden_rows() {
+        let paragraphs = vec![
+            // 0: body text with a highlight in it — stays.
+            Paragraph {
+                runs: vec![run_plain("plain "), hl_run("read this")],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            // 1: body text with nothing marked — goes.
+            para_plain("unread body text"),
+            // 2: a Tag line — stays whole.
+            Paragraph {
+                runs: vec![run_plain("a tag")],
+                heading: 4,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let rows = vec![(0usize, 0usize, 15usize), (1, 0, 16), (2, 0, 5)];
+
+        let hidden = hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs));
+        assert_eq!(hidden, vec![false, true, false]);
+
+        // Off, nothing hides.
+        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)), vec![false; 3]);
+    }
+
+    /// Only the runs actually on a row decide it: a highlight later in a
+    /// wrapped paragraph must not keep an earlier all-plain row visible.
+    #[test]
+    fn test_hidden_wrap_rows_judges_each_wrapped_row_separately() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![run_plain("aaaaa"), hl_run("bbbbb")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        // Row 0 covers only the plain run, row 1 only the highlighted one.
+        let rows = vec![(0usize, 0usize, 5usize), (0, 5, 10)];
+        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)), vec![true, false]);
+    }
+
+    #[test]
+    fn test_hidden_rows_get_no_display_slot() {
+        let paragraphs = vec![para_plain("a"), para_plain("b"), para_plain("c")];
+        let rows = vec![(0usize, 0usize, 1usize), (1, 0, 1), (2, 0, 1)];
+
+        let (display_to_wrap, wrap_to_display) =
+            expand_rows_for_display(&rows, &paragraphs, 1.0, &[false, true, false]);
+
+        // The middle row is gone from the paint list entirely — that is the
+        // vertical gap closing.
+        assert_eq!(display_to_wrap, vec![Some(0), Some(2)]);
+        // ...and the hidden row points at where the next visible one landed,
+        // so scroll-to-cursor still resolves.
+        assert_eq!(wrap_to_display, vec![0, 1, 1]);
     }
 
     // ── read mode paging ─────────────────────────────────────────────────────
@@ -3913,7 +4384,7 @@ mod tests {
     #[test]
     fn test_row_cache_is_valid_when_everything_matches() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, false));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, false, false, 0));
     }
 
     #[test]
@@ -3922,13 +4393,13 @@ mod tests {
         // content_version/width/zoom — tab_id must be checked, or a tab
         // switch could serve another tab's stale wrapped rows.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, false));
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, false, false, 0));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_content_version_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, false));
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, false, false, 0));
     }
 
     /// The divider-drag freeze fix: a width change normally invalidates, but
@@ -3937,8 +4408,8 @@ mod tests {
     #[test]
     fn test_row_cache_survives_a_width_change_while_the_divider_is_dragging() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, false));
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, true));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, false, false, 0));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, true, false, 0));
     }
 
     /// Dragging must not make the cache accept a *different document* or a
@@ -3946,9 +4417,9 @@ mod tests {
     #[test]
     fn test_dragging_still_invalidates_on_content_or_tab_change() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, true), "wrong tab accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, true), "stale content accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, true), "stale zoom accepted");
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, true, false, 0), "wrong tab accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, true, false, 0), "stale content accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, true, false, 0), "stale zoom accepted");
     }
 
     #[test]
@@ -3956,13 +4427,13 @@ mod tests {
         // A window resize must invalidate the cache — the old wrap width no
         // longer matches where lines should actually break.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, false));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, false, false, 0));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_zoom_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, false));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, false, false, 0));
     }
 
     // ── slot_count_for_paragraph / expand_rows_for_display ────────────────────
@@ -4040,7 +4511,7 @@ mod tests {
     fn test_expand_rows_for_display_plain_rows_are_untouched() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![plain_paragraph(), plain_paragraph()];
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()]);
         assert_eq!(display_to_wrap, vec![Some(0), Some(1)]);
         assert_eq!(wrap_to_display, vec![0, 1]);
     }
@@ -4050,7 +4521,7 @@ mod tests {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![pocket_paragraph(), plain_paragraph()];
         let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()]);
 
         // Row 0 (Pocket) occupies `slots` display rows: itself, then blanks.
         let mut expected = vec![Some(0)];

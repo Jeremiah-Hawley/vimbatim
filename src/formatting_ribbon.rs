@@ -94,6 +94,9 @@ struct RibbonBtn {
     /// to icon width. `label` is still carried — it is what the existing click
     /// handler logs, and it is the accessible name.
     icon: Option<RibbonIcon>,
+    /// Renders as pressed-in. For buttons that toggle a mode rather than
+    /// perform an action, so the ribbon shows what is currently on.
+    engaged: bool,
 }
 
 impl RibbonBtn {
@@ -103,6 +106,7 @@ impl RibbonBtn {
             action,
             tone: RibbonTone::Primary,
             icon: None,
+            engaged: false,
         }
     }
 
@@ -112,7 +116,14 @@ impl RibbonBtn {
             action,
             tone: RibbonTone::Secondary,
             icon: None,
+            engaged: false,
         }
+    }
+
+    /// Marks this button as showing an active mode.
+    fn engaged(mut self, engaged: bool) -> Self {
+        self.engaged = engaged;
+        self
     }
 
     /// A compact icon button.
@@ -122,6 +133,7 @@ impl RibbonBtn {
             action,
             tone: RibbonTone::Secondary,
             icon: Some(icon),
+            engaged: false,
         }
     }
 }
@@ -342,6 +354,7 @@ impl FormattingRibbon {
         action: FormatAction,
         tone: RibbonTone,
         icon: Option<RibbonIcon>,
+        engaged: bool,
         p: Palette,
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
@@ -399,6 +412,14 @@ impl FormattingRibbon {
         // width than the two-button row above them, which is what keeps the
         // DOCUMENT group from getting wider.
         let is_icon = icon.is_some();
+        // An engaged toggle takes the accent fill, overriding its tone's
+        // normal colors — a mode that changes what the editor shows has to be
+        // readable as on at a glance.
+        let (bg, text, border) = if engaged {
+            (p.accent, 0xffffff, p.accent_strong)
+        } else {
+            (bg, text, border)
+        };
         let button = div()
             .id(ElementId::named_usize("ribbon-btn", action_id))
             .flex()
@@ -1519,6 +1540,7 @@ impl FormattingRibbon {
                                         btn.action,
                                         btn.tone,
                                         btn.icon,
+                                        btn.engaged,
                                         p,
                                         color_mode,
                                         state.clone(),
@@ -1615,6 +1637,8 @@ impl Render for FormattingRibbon {
             let state_read = state.read(cx);
             (palette(state_read.theme, state_read.theme_mode), state_read.theme_color_mode)
         };
+        let invisibility_mode = self.state.read(cx).invisibility_mode;
+        let any_folded = self.state.read(cx).any_folded();
         let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
         let all_collapsed = ribbon_groups
             .iter()
@@ -1649,7 +1673,7 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Highlight", FormatAction::Highlight),
                         RibbonBtn::secondary("Shrink", FormatAction::Shrink),
                         RibbonBtn::secondary("Clear", FormatAction::Clear),
-                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle),
+                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle).engaged(any_folded),
                     ],
                 ],
                 *self.collapsed.get("cards").unwrap_or(&false),
@@ -1729,7 +1753,8 @@ impl Render for FormattingRibbon {
                 &[
                     vec![
                         RibbonBtn::secondary("Nav", FormatAction::Nav),
-                        RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode),
+                        RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode)
+                            .engaged(invisibility_mode),
                     ],
                     vec![
                         RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),

@@ -708,10 +708,15 @@ impl Render for FileExplorer {
                     .px(px(space::MD))
                     .border_b_1()
                     .border_color(rgb(p.border))
+                    // The title column is what gives way when the sidebar is
+                    // narrow: `min_w_0` lets it shrink below its text's natural
+                    // width and `truncate` clips the folder name, so a long
+                    // directory can never push the buttons off the edge.
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .min_w_0()
                             .gap(px(space::XXS))
                             .child(
                                 div()
@@ -726,6 +731,7 @@ impl Render for FileExplorer {
                             .child(
                                 div()
                                     .text_xs()
+                                    .truncate()
                                     .text_color(rgb(p.text_faint))
                                     .child(match sidebar_mode {
                                         SidebarMode::Files => dir_name,
@@ -737,6 +743,10 @@ impl Render for FileExplorer {
                         div()
                             .flex()
                             .flex_row()
+                            // Never shrinks — the controls stay reachable at
+                            // any sidebar width, including the 180px minimum
+                            // `clamp_sidebar_width` allows.
+                            .flex_none()
                             .gap(px(space::XS))
                             // Files/Nav toggle — switches this whole panel between the
                             // file tree and the heading outline. The ribbon's own Nav

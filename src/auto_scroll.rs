@@ -169,7 +169,21 @@ impl AutoScroller {
             .map(|t| t.paragraphs.clone()).unwrap_or_default();
         let lines = document_lines(&content);
         let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, font_size_px);
-        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom);
+        // Same filtered display table the editor paints from, or a drag-select
+        // would resolve rows the user cannot see.
+        let (invisibility, cite_size, folds) = {
+            let st = self.state.read(cx);
+            (
+                st.invisibility_mode,
+                st.cite_size_half_points,
+                st.tabs.get(st.active_tab).map(|t| t.folded_headings.clone()).unwrap_or_default(),
+            )
+        };
+        let folded_paras = crate::state::AppState::folded_paragraphs(&paragraphs, &folds);
+        let hidden = crate::text_editor::hidden_wrap_rows(
+            &rows, &paragraphs, invisibility, cite_size, &folded_paras,
+        );
+        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
         let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);

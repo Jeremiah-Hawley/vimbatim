@@ -300,6 +300,25 @@ pub struct Tab {
     /// only the shared `AppState` — so it leaves a note for `TextEditor` to
     /// act on next time it redraws instead.
     pub pending_scroll_to_cursor: bool,
+    /// Indices of the heading paragraphs the user has collapsed.
+    ///
+    /// Kept on the tab rather than on `Paragraph` so the document model stays
+    /// exactly what gets written to the .docx — folding is a view state and
+    /// must never reach the file.
+    ///
+    /// ponytail: keyed by paragraph *index*, and cleared wholesale whenever the
+    /// paragraph count changes (`sync_fold_state`). Typing inside a paragraph
+    /// keeps folds; splitting or merging one drops them all rather than
+    /// silently folding the wrong sections. The alternative — a stable id per
+    /// paragraph — means a new field on `Paragraph` and touching all 79 of its
+    /// struct literals, which is not worth it until someone actually edits
+    /// heavily while folded.
+    pub folded_headings: std::collections::HashSet<usize>,
+    /// Paragraph count `folded_headings` was built against — see above.
+    pub folded_para_count: usize,
+    /// Bumped on every fold change so the editor's row cache invalidates.
+    /// Folding is not a content edit, so `content_version` must not move.
+    pub fold_version: u64,
 }
 
 /// A dirty tab reduced to exactly what a recovery snapshot needs, with no
@@ -328,7 +347,12 @@ pub fn default_paragraphs() -> Vec<Paragraph> {
 /// The file explorer sidebar's starting width in pixels — not persisted
 /// across launches (deliberate: dragging the sidebar wider/narrower is a
 /// per-session convenience, not a saved preference).
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 240.0;
+///
+/// Sized so the header's whole control cluster — the Files/Nav pair plus the
+/// refresh and new-file buttons, about 144px together — fits alongside a
+/// readable folder name. At the previous 240 the last two were pushed off the
+/// edge on launch.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 
 /// Clamps a proposed sidebar width (from dragging its resize handle,
 /// `main_window.rs`) to a usable range: never so narrow file names become
@@ -403,6 +427,9 @@ impl Tab {
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
             pending_scroll_to_cursor: false,
+            folded_headings: std::collections::HashSet::new(),
+            folded_para_count: 0,
+            fold_version: 0,
             has_unsupported_blocks: false,
             unsupported_banner_dismissed: false,
         }
@@ -450,6 +477,9 @@ impl Tab {
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
             pending_scroll_to_cursor: false,
+            folded_headings: std::collections::HashSet::new(),
+            folded_para_count: 0,
+            fold_version: 0,
             has_unsupported_blocks: false,
             unsupported_banner_dismissed: false,
         }
@@ -784,7 +814,6 @@ pub struct AppState {
     /// closure (which must be `'static`, so it can't borrow) for the price of
     /// a refcount bump instead of deep-cloning every word on every frame.
     pub user_dictionary: Rc<HashSet<String>>,
-    pub fold_all: bool,
     pub invisibility_mode: bool,
     pub split_view: bool,
     /// The tab shown in the secondary pane, as a stable `Tab.id` — never an
@@ -1405,7 +1434,6 @@ impl AppState {
                 "red",
             ),
             user_dictionary: Rc::new(load_user_dictionary(&user_dictionary_path())),
-            fold_all: false,
             invisibility_mode: false,
             split_view: false,
             secondary_tab_id: None,
@@ -2989,15 +3017,104 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Color(Some(hex_str)));
     }
 
-    pub fn toggle_fold(&mut self) {
-        /*
-         * Toggles folding of all headings. When folded, only heading lines
-         * are shown; body text is hidden.
-         */
-        if let Some(_tab) = self.tabs.get(self.active_tab) {
-            self.fold_all = !self.fold_all;
+    /// Which paragraphs are hidden by the collapsed headings in `folded`.
+    ///
+    /// Level-aware, matching Word: collapsing a heading of level `L` hides
+    /// everything after it until the next heading of level `L` or higher —
+    /// body text *and* the lower-level headings nested under it. Collapsing a
+    /// Pocket therefore takes its Hats, Blocks and Tags with it, not just its
+    /// prose. Lower number = higher in the hierarchy (Pocket 1 .. Tag 4).
+    ///
+    /// One pass, no allocation beyond the result.
+    pub fn folded_paragraphs(
+        paragraphs: &[Paragraph],
+        folded: &std::collections::HashSet<usize>,
+    ) -> Vec<bool> {
+        let mut hidden = vec![false; paragraphs.len()];
+        if folded.is_empty() {
+            return hidden;
+        }
+        // `Some(level)` while inside a collapsed section: hide until a heading
+        // at that level or higher closes it.
+        let mut hide_until: Option<u8> = None;
+
+        for (i, para) in paragraphs.iter().enumerate() {
+            let heading = para.heading;
+            if let Some(level) = hide_until {
+                // Body text never closes a section, only a heading does.
+                if heading != 0 && heading <= level {
+                    hide_until = None;
+                } else {
+                    hidden[i] = true;
+                    continue;
+                }
+            }
+            // A visible collapsed heading opens a new section. Checked after
+            // the close above so one heading can end a section and start
+            // another in the same step.
+            if heading != 0 && folded.contains(&i) {
+                hide_until = Some(heading);
+            }
+        }
+        hidden
+    }
+
+    /// Drops fold state that can no longer be trusted — see
+    /// `Tab.folded_headings`. Called before anything reads or writes it.
+    fn sync_fold_state(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        if tab.folded_para_count != tab.paragraphs.len() {
+            tab.folded_headings.clear();
+            tab.folded_para_count = tab.paragraphs.len();
+            tab.fold_version = tab.fold_version.wrapping_add(1);
         }
     }
+
+    /// Collapses or expands the heading paragraph at `idx`. A no-op on body
+    /// text — there is nothing under it to fold.
+    pub fn toggle_paragraph_fold(&mut self, idx: usize) {
+        self.sync_fold_state();
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        if tab.paragraphs.get(idx).map(|p| p.heading).unwrap_or(0) == 0 {
+            return;
+        }
+        if !tab.folded_headings.remove(&idx) {
+            tab.folded_headings.insert(idx);
+        }
+        tab.fold_version = tab.fold_version.wrapping_add(1);
+    }
+
+    /// True when anything is currently collapsed — drives the Fold button's
+    /// engaged state and decides which way it toggles.
+    pub fn any_folded(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|t| t.folded_para_count == t.paragraphs.len() && !t.folded_headings.is_empty())
+    }
+
+    /// The Fold button: collapse every heading, or expand everything if
+    /// anything is already collapsed.
+    ///
+    /// Collapse-all-then-expand-what-you-need is the intended flow, so the
+    /// button leads with collapsing and only expands once there is something
+    /// to expand.
+    pub fn toggle_fold(&mut self) {
+        self.sync_fold_state();
+        let expand = self.any_folded();
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        tab.folded_headings.clear();
+        if !expand {
+            for (i, para) in tab.paragraphs.iter().enumerate() {
+                if para.heading != 0 {
+                    tab.folded_headings.insert(i);
+                }
+            }
+        }
+        tab.folded_para_count = tab.paragraphs.len();
+        tab.fold_version = tab.fold_version.wrapping_add(1);
+    }
+
+
 
     pub fn toggle_paragraph_integrity(&mut self) {
         /*
@@ -7253,6 +7370,9 @@ mod tests {
                 vim_jump_back: Vec::new(),
                 vim_jump_forward: Vec::new(),
                 pending_scroll_to_cursor: false,
+            folded_headings: std::collections::HashSet::new(),
+            folded_para_count: 0,
+            fold_version: 0,
                 has_unsupported_blocks: false,
                 unsupported_banner_dismissed: false,
             }],
@@ -7307,7 +7427,6 @@ mod tests {
             spellcheck_enabled: false,
             spellcheck_underline_color: "red".to_string(),
             user_dictionary: Rc::new(HashSet::new()),
-            fold_all: false,
             invisibility_mode: false,
             split_view: false,
             secondary_tab_id: None,
@@ -7399,6 +7518,124 @@ mod tests {
         // The other pane is untouched.
         assert_eq!(state.pane_content(Pane::Primary), "primary work");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Level-aware folding ────────────────────────────────────────────────
+
+    fn outline() -> Vec<Paragraph> {
+        let card = |text: &str, heading: u8| Paragraph {
+            runs: vec![Run { text: text.into(), ..Run::default() }],
+            heading,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        vec![
+            card("pocket A", 1),   // 0
+            para_plain("body A"),  // 1
+            card("hat A", 2),      // 2
+            para_plain("body B"),  // 3
+            card("tag A", 4),      // 4
+            para_plain("body C"),  // 5
+            card("pocket B", 1),   // 6
+            para_plain("body D"),  // 7
+        ]
+    }
+
+    /// Collapsing a Pocket takes everything under it — including the Hats and
+    /// Tags nested beneath — until the next heading at its level or higher.
+    #[test]
+    fn folding_a_heading_hides_lower_levels_beneath_it() {
+        let paragraphs = outline();
+        let folded = std::collections::HashSet::from([0usize]);
+
+        let hidden = AppState::folded_paragraphs(&paragraphs, &folded);
+
+        assert_eq!(
+            hidden,
+            vec![false, true, true, true, true, true, false, false],
+            "a collapsed Pocket must swallow its Hats and Tags, and stop at the next Pocket"
+        );
+    }
+
+    /// Collapsing a lower-level heading takes only its own section.
+    #[test]
+    fn folding_a_nested_heading_leaves_its_parents_alone() {
+        let paragraphs = outline();
+        let folded = std::collections::HashSet::from([2usize]); // the Hat
+
+        let hidden = AppState::folded_paragraphs(&paragraphs, &folded);
+
+        // Hat's section runs to the next heading of level <= 2, i.e. Pocket B.
+        assert_eq!(hidden, vec![false, false, false, true, true, true, false, false]);
+    }
+
+    #[test]
+    fn folding_nothing_hides_nothing() {
+        let paragraphs = outline();
+        let hidden = AppState::folded_paragraphs(&paragraphs, &std::collections::HashSet::new());
+        assert_eq!(hidden, vec![false; 8]);
+    }
+
+    /// A heading that closes one collapsed section can open another in the
+    /// same step — the two Pockets here are both collapsed.
+    #[test]
+    fn a_heading_can_end_one_section_and_start_the_next() {
+        let paragraphs = outline();
+        let folded = std::collections::HashSet::from([0usize, 6usize]);
+
+        let hidden = AppState::folded_paragraphs(&paragraphs, &folded);
+
+        assert_eq!(hidden, vec![false, true, true, true, true, true, false, true]);
+    }
+
+    #[test]
+    fn toggle_fold_collapses_every_heading_then_expands_all() {
+        let mut state = make_state_with_paragraphs(outline(), 0);
+
+        state.toggle_fold();
+        assert!(state.any_folded());
+        let hidden = AppState::folded_paragraphs(
+            &state.tabs[0].paragraphs,
+            &state.tabs[0].folded_headings,
+        );
+        // Only the two Pockets survive: each swallows everything beneath it.
+        assert_eq!(hidden, vec![false, true, true, true, true, true, false, true]);
+
+        state.toggle_fold();
+        assert!(!state.any_folded(), "second press should expand everything");
+    }
+
+    #[test]
+    fn toggling_one_heading_leaves_the_others_alone() {
+        let mut state = make_state_with_paragraphs(outline(), 0);
+        state.toggle_fold(); // collapse all
+
+        state.toggle_paragraph_fold(0); // expand just Pocket A
+
+        assert!(!state.tabs[0].folded_headings.contains(&0));
+        assert!(state.tabs[0].folded_headings.contains(&6));
+    }
+
+    #[test]
+    fn body_paragraphs_cannot_be_folded() {
+        let mut state = make_state_with_paragraphs(outline(), 0);
+        state.toggle_paragraph_fold(1); // a body line
+        assert!(state.tabs[0].folded_headings.is_empty());
+    }
+
+    /// Fold state is keyed by paragraph index, so a structural edit drops it
+    /// rather than folding the wrong sections — see `Tab.folded_headings`.
+    #[test]
+    fn fold_state_is_dropped_when_the_paragraph_count_changes() {
+        let mut state = make_state_with_paragraphs(outline(), 0);
+        state.toggle_fold();
+        assert!(state.any_folded());
+
+        // Split a paragraph in two.
+        state.tabs[0].cursor = 0;
+        state.insert_str("\n");
+
+        assert!(!state.any_folded(), "stale folds survived a structural edit");
     }
 
     // ── Read mode ──────────────────────────────────────────────────────────
