@@ -4,7 +4,7 @@ use gpui::*;
 use crate::docx_parser::Alignment;
 use crate::document_ops::FormatOp;
 use crate::state::AppState;
-use crate::theme::{palette, radius, space, Palette, ThemeColorMode};
+use crate::theme::{palette, radius, space, Palette, ThemeColorMode, ThemeMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -44,6 +44,7 @@ pub enum FormatAction {
     OpenWiki,
     OpenTabroom,
     Wikifi,
+    Analytic,
     AlignLeft,
     AlignCenter,
     AlignRight,
@@ -55,6 +56,8 @@ pub enum FormatAction {
     OpenBlock,
     CloseBlock,
     NormalSize,
+    Timer,
+    DeleteTags,
 }
 
 impl FormatAction {
@@ -85,6 +88,38 @@ impl FormatAction {
     }
 }
 
+/// The highlight colors the HL Color dropdown offers, as
+/// `(Word highlight name written into the document, label, swatch hex)`.
+///
+/// The names are Word's own, which is what `Run.highlight_color` stores and
+/// what `text_editor::highlight_color_hex` resolves — so a document written
+/// here still opens correctly in Word, and settings.conf's `highlight_color`
+/// can name any of them.
+/// The text colors the Font Color dropdown offers, and the same list the
+/// Analytic color setting picks from — one palette, so a color chosen for an
+/// analytic is always reachable from the dropdown too.
+///
+/// Stored as bare 6-digit hex, which is `Run.color`'s own form. Deeper tones
+/// than the highlight palette: these *are* the type, so they have to stay
+/// readable at body size rather than sitting behind black text.
+pub(crate) const TEXT_COLORS: [(&str, u32); 6] = [
+    ("000000", 0x000000),
+    ("0000ff", 0x0000FF),
+    ("c00000", 0xC00000),
+    ("007000", 0x007000),
+    ("7030a0", 0x7030A0),
+    ("b36b00", 0xB36B00),
+];
+
+pub(crate) const HIGHLIGHT_COLORS: [(&str, &str, u32); 6] = [
+    ("yellow", "Yellow", 0xFFD700),
+    ("green", "Green", 0x00FF00),
+    ("cyan", "Cyan", 0x00FFFF),
+    ("magenta", "Magenta", 0xFF00FF),
+    ("blue", "Blue", 0x0000FF),
+    ("red", "Red", 0xFF0000),
+];
+
 #[derive(Clone)]
 struct RibbonBtn {
     label: &'static str,
@@ -97,6 +132,9 @@ struct RibbonBtn {
     /// Renders as pressed-in. For buttons that toggle a mode rather than
     /// perform an action, so the ribbon shows what is currently on.
     engaged: bool,
+    /// Paints the button in this color instead of its tone's. Used by HL
+    /// Color to show which highlight is currently selected.
+    tint: Option<u32>,
 }
 
 impl RibbonBtn {
@@ -107,6 +145,7 @@ impl RibbonBtn {
             tone: RibbonTone::Primary,
             icon: None,
             engaged: false,
+            tint: None,
         }
     }
 
@@ -117,12 +156,19 @@ impl RibbonBtn {
             tone: RibbonTone::Secondary,
             icon: None,
             engaged: false,
+            tint: None,
         }
     }
 
     /// Marks this button as showing an active mode.
     fn engaged(mut self, engaged: bool) -> Self {
         self.engaged = engaged;
+        self
+    }
+
+    /// Paints this button in `hex` rather than its tone's usual colors.
+    fn tint(mut self, hex: u32) -> Self {
+        self.tint = Some(hex);
         self
     }
 
@@ -134,6 +180,7 @@ impl RibbonBtn {
             tone: RibbonTone::Secondary,
             icon: Some(icon),
             engaged: false,
+            tint: None,
         }
     }
 }
@@ -355,6 +402,7 @@ impl FormattingRibbon {
         tone: RibbonTone,
         icon: Option<RibbonIcon>,
         engaged: bool,
+        tint: Option<u32>,
         p: Palette,
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
@@ -417,6 +465,10 @@ impl FormattingRibbon {
         // readable as on at a glance.
         let (bg, text, border) = if engaged {
             (p.accent, 0xffffff, p.accent_strong)
+        } else if let Some(tint) = tint {
+            // The label rides on the tint, so it needs contrast against *that*
+            // rather than against the ribbon's chrome.
+            (tint, crate::color_picker::contrast_text(tint), tint)
         } else {
             (bg, text, border)
         };
@@ -556,6 +608,16 @@ impl FormattingRibbon {
                         FormatAction::OpenTabroom => {
                             cx.open_url("https://www.tabroom.com/index/index.mhtml");
                         }
+                        FormatAction::Timer => {
+                            st.update(cx, |state, _cx| {
+                                state.timer.visible = !state.timer.visible;
+                            });
+                            cx.notify();
+                        }
+                        FormatAction::DeleteTags => {
+                            st.update(cx, |state, _cx| state.delete_tags());
+                            cx.notify();
+                        }
                         FormatAction::Nav => {
                             // Toggles the same AppState.sidebar_mode the
                             // file explorer's own Files/Nav header buttons
@@ -613,6 +675,15 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| state.apply_card_style(kind));
                             cx.notify();
                         }
+                        // Analytic: Tag's weight and size in the configured
+                        // analytic color, without the heading marker — see
+                        // AppState::apply_analytic_style.
+                        FormatAction::Analytic => {
+                            st.update(cx, |state, _cx| {
+                                state.apply_analytic_style();
+                            });
+                            cx.notify();
+                        }
                         // Cite: apply the shared AppState::apply_cite_style,
                         // also used by the `f8` keybind (main_window.rs) so
                         // the ribbon button and hotkey behave identically.
@@ -644,6 +715,16 @@ impl FormattingRibbon {
                         _ => {
                             if let Some(op) = act.to_format_op() {
                                 st.update(cx, |state, _cx| {
+                                    // The generic Highlight button follows
+                                    // settings.conf's `highlight_color`; the
+                                    // explicit HighlightYellow/Green buttons
+                                    // keep naming their own color.
+                                    let op = match (act, op) {
+                                        (FormatAction::Highlight, FormatOp::Highlight(_)) => {
+                                            FormatOp::Highlight(Some(state.highlight_color.clone()))
+                                        }
+                                        (_, op) => op,
+                                    };
                                     state.apply_formatting_to_selection(op);
                                 });
                                 cx.notify();
@@ -657,11 +738,20 @@ impl FormattingRibbon {
                 None => d.child(label),
             });
 
-        // The menu is a child of its own button, and `anchored()` with no
-        // `.position()` resolves to the element's own laid-out origin (gpui's
-        // `AnchoredPositionMode::Window` falls back to `bounds.origin`). That's
-        // what makes the panel open under the button rather than under
-        // wherever inside the button the user happened to click.
+        // The menu is a child of its own button's wrapper, and `anchored()`
+        // with no `.position()` resolves to the element's own laid-out origin
+        // (gpui's `AnchoredPositionMode::Window` falls back to
+        // `bounds.origin`). That's what makes the panel open under the button
+        // rather than under wherever inside the button the user happened to
+        // click.
+        //
+        // That origin is the anchored element's *own* slot in the wrapper —
+        // i.e. already below the button, since the button is the first child.
+        // The offset below is therefore only the gap, not a gap plus a button
+        // height: adding the latter put every menu one full button too low.
+        // It went unnoticed while Doc Menu / Card Menu had another row beneath
+        // them; once the ribbon dropped from four rows to three they became
+        // the last row and the menus opened into empty space below it.
         div()
             .relative()
             .child(button)
@@ -671,8 +761,7 @@ impl FormattingRibbon {
                     deferred(
                         anchored()
                             .snap_to_window()
-                            // Button height (24px) + a 2px gap.
-                            .offset(point(px(0.0), px(26.0)))
+                            .offset(point(px(0.0), px(2.0)))
                             .child(panel),
                     )
                     .with_priority(100),
@@ -847,102 +936,110 @@ impl FormattingRibbon {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let theme_mode = self.state.read(cx).theme_mode;
         let rows: Vec<AnyElement> = match action {
             FormatAction::DocMenu => Self::text_menu_rows(
                 "Doc Menu",
+                // `None` = not implemented yet, and rendered red. Give an
+                // entry its `AppState` method as it lands.
                 &[
-                    "Fix Fake Tags",
-                    "Convert analytics to tags",
-                    "Fix Formatting Gaps",
-                    "Revert to default styles",
-                    "Remove emphasis",
-                    "Remove non highlighted underlining",
-                    "Remove blank lines",
-                    "Remove pilcrows",
-                    "Select similar formatting",
+                    ("Delete analytics", Some(AppState::delete_analytics)),
+                    (
+                        "Convert analytics to tags",
+                        Some(AppState::convert_analytics_to_tags),
+                    ),
+                    ("Remove emphasis", None),
+                    ("Remove non highlighted underlining", None),
+                    ("Remove blank lines", None),
+                    ("Remove pilcrows", None),
+                    (
+                        "Select similar formatting",
+                        Some(AppState::select_similar_formatting),
+                    ),
                 ],
                 p,
+                theme_mode,
                 cx,
             ),
             FormatAction::SwitchTabMenu => self.switch_tab_rows(p, cx),
             FormatAction::CardMenu => Self::text_menu_rows(
                 "Card Menu",
                 &[
-                    "Condense, no pilcrows",
-                    "Condense, pilcrows",
-                    "Uncondensed",
-                    "Standardize highlighting",
-                    "Standardize highlighting with exception",
-                    "Auto emphasis first",
-                    "Duplicate cite",
+                    ("Condense, no pilcrows", Some(AppState::condense_selection)),
+                    ("Condense, pilcrows", Some(AppState::condense_with_pilcrows)),
+                    ("Uncondensed", None),
+                    ("Standardize highlighting", Some(AppState::standardize_highlighting)),
+                    (
+                        "Standardize highlighting with exception",
+                        Some(AppState::standardize_highlighting_with_exception),
+                    ),
                 ],
                 p,
+                theme_mode,
                 cx,
             ),
             FormatAction::FontColor => {
-                let mut rows: Vec<AnyElement> = [
-                    crate::color_picker::ColorChoice::Black,
-                    crate::color_picker::ColorChoice::Red,
-                    crate::color_picker::ColorChoice::Blue,
-                ]
-                .into_iter()
-                .map(|choice| {
-                    div()
-                        .id(ElementId::named_usize("font-color-choice", choice.hex_value() as usize))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |this, _ev, _window, cx| {
-                                cx.stop_propagation();
-                                this.state.update(cx, |state, _cx| state.apply_font_color(choice));
+                let mut swatches: Vec<AnyElement> = TEXT_COLORS
+                    .into_iter()
+                    .map(|(name, hex)| {
+                        Self::color_swatch(
+                            ElementId::named_usize("font-color-choice", hex as usize),
+                            hex,
+                            p,
+                            cx,
+                            move |this, cx| {
+                                this.state.update(cx, |state, _cx| {
+                                    state.apply_formatting_to_selection(FormatOp::Color(Some(
+                                        name.to_string(),
+                                    )));
+                                });
                                 this.open_menu = None;
                                 cx.notify();
-                            }),
+                            },
+                            None,
                         )
-                        .child(crate::color_picker::color_button(
-                            choice.hex_value(),
-                            choice.label(),
-                        ))
-                        .into_any_element()
-                })
-                .collect();
-                rows.extend(self.custom_color_rows(FormatAction::FontColor, p, cx));
-                rows.push(self.render_custom_color_row(FormatAction::FontColor, p, cx));
-                rows
+                    })
+                    .collect();
+                swatches.extend(self.custom_color_swatches(FormatAction::FontColor, p, cx));
+                vec![
+                    Self::color_grid(swatches),
+                    self.render_custom_color_row(FormatAction::FontColor, p, cx),
+                ]
             }
             FormatAction::HighlightColorSelect => {
-                // First element is the Word highlight name written into the
-                // document; second is what the user reads.
-                let mut rows: Vec<AnyElement> = [
-                    ("blue", "Blue", 0x0000FFu32),
-                    ("green", "Green", 0x00FF00u32),
-                    ("yellow", "Yellow", 0xFFD700u32),
-                ]
-                .into_iter()
-                .map(|(name, label, hex)| {
-                    div()
-                        .id(ElementId::named_usize("highlight-color-choice", hex as usize))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |this, _ev, _window, cx| {
-                                cx.stop_propagation();
+                let mut swatches: Vec<AnyElement> = HIGHLIGHT_COLORS
+                    .into_iter()
+                    .map(|(name, _label, hex)| {
+                        Self::color_swatch(
+                            ElementId::named_usize("highlight-color-choice", hex as usize),
+                            hex,
+                            p,
+                            cx,
+                            move |this, cx| {
                                 this.state.update(cx, |state, _cx| {
+                                    // Picking here is what makes a color "the
+                                    // current highlight" — it drives the
+                                    // Highlight button and keybind, Standardize
+                                    // Highlighting, and this button's own tint,
+                                    // not just the selection under the cursor.
+                                    state.set_highlight_color(name);
                                     state.apply_formatting_to_selection(FormatOp::Highlight(Some(
                                         name.to_string(),
                                     )));
                                 });
                                 this.open_menu = None;
                                 cx.notify();
-                            }),
+                            },
+                            None,
                         )
-                        .child(crate::color_picker::color_button(hex, label))
-                        .into_any_element()
-                })
-                .collect();
-                rows.extend(self.custom_color_rows(FormatAction::HighlightColorSelect, p, cx));
-                rows.push(self.render_custom_color_row(FormatAction::HighlightColorSelect, p, cx));
-                rows
+                    })
+                    .collect();
+                swatches
+                    .extend(self.custom_color_swatches(FormatAction::HighlightColorSelect, p, cx));
+                vec![
+                    Self::color_grid(swatches),
+                    self.render_custom_color_row(FormatAction::HighlightColorSelect, p, cx),
+                ]
             }
             FormatAction::FontFamily => {
                 let mut names = cx.text_system().all_font_names();
@@ -1174,23 +1271,40 @@ impl FormattingRibbon {
         cx.notify();
     }
 
+    /// Rows for the Doc Menu / Card Menu dropdowns.
+    ///
+    /// Each item carries the `AppState` method it runs, or `None` when the
+    /// command doesn't exist yet — those render red, so the menus stop
+    /// advertising things that silently do nothing. One field expresses both
+    /// the behaviour and the colour: giving an entry an action is what makes
+    /// it go black.
     fn text_menu_rows(
         menu_label: &'static str,
-        items: &[&'static str],
+        items: &[(&'static str, Option<fn(&mut AppState)>)],
         p: Palette,
+        theme_mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        // A warning red that stays legible on both palettes — the dark tone is
+        // unreadable on a light background, the same per-mode pairing the
+        // settings modal's keybind-conflict message and the editor's
+        // unsupported-document banner already use.
+        let not_implemented = match theme_mode {
+            ThemeMode::Dark => 0xf48771,
+            ThemeMode::Light => 0xb02a15,
+        };
         items
             .iter()
             .enumerate()
-            .map(|(idx, item)| {
+            .map(|(idx, (item, action))| {
                 let item = *item;
+                let action = *action;
                 div()
                     .id(ElementId::named_usize("ribbon-menu-item", idx))
                     .px(px(space::SM))
                     .py(px(space::XXS))
                     .rounded(px(radius::SM))
-                    .text_color(rgb(p.text))
+                    .text_color(rgb(if action.is_some() { p.text } else { not_implemented }))
                     .text_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(p.chrome_hover)))
@@ -1198,7 +1312,13 @@ impl FormattingRibbon {
                         gpui::MouseButton::Left,
                         cx.listener(move |this, _ev, _window, cx| {
                             cx.stop_propagation();
-                            println!("{menu_label}: {item}");
+                            match action {
+                                Some(run) => this.state.update(cx, |state, cx| {
+                                    run(state);
+                                    cx.notify();
+                                }),
+                                None => println!("{menu_label}: {item}"),
+                            }
                             this.open_menu = None;
                             cx.notify();
                         }),
@@ -1208,9 +1328,6 @@ impl FormattingRibbon {
             })
             .collect()
     }
-
-    /// Which saved-color list a menu writes to. `None` for the menus that have
-    /// no colors at all (Doc/Card/Font Family).
     fn custom_color_target(action: FormatAction) -> Option<crate::state::CustomColorTarget> {
         match action {
             FormatAction::FontColor => Some(crate::state::CustomColorTarget::Font),
@@ -1223,7 +1340,97 @@ impl FormattingRibbon {
     /// there's no name for an arbitrary RGB value, and the hex is what the user
     /// typed in the first place. Each row carries a delete button on its right
     /// that drops the color from the list and from settings.conf.
-    fn custom_color_rows(
+    /// One swatch in a color grid. Unlabelled — the color is the label.
+    ///
+    /// `on_delete` is `Some` only for user-added custom colors: it renders a
+    /// small × in the corner, invisible until the swatch is hovered so a full
+    /// grid isn't a field of delete buttons. The × is a sibling overlay rather
+    /// than a nested child, so clicking it cannot also apply the color.
+    fn color_swatch(
+        id: ElementId,
+        hex: u32,
+        p: Palette,
+        cx: &mut Context<Self>,
+        on_pick: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        on_delete: Option<Box<dyn Fn(&mut Self, &mut Context<Self>)>>,
+    ) -> AnyElement {
+        let group = SharedString::from(format!("swatch-{hex:06X}"));
+        let mut swatch = div()
+            .id(id)
+            .group(group.clone())
+            .relative()
+            .w(px(22.0))
+            .h(px(22.0))
+            .flex_none()
+            .rounded(px(radius::SM))
+            .bg(rgb(hex))
+            .border_1()
+            .border_color(rgb(p.border))
+            .cursor_pointer()
+            .hover(move |s| s.border_color(rgb(p.text)))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    on_pick(this, cx);
+                }),
+            );
+
+        if let Some(on_delete) = on_delete {
+            swatch = swatch.child(
+                div()
+                    .id(SharedString::from(format!("swatch-del-{hex:06X}")))
+                    .absolute()
+                    .top(px(-4.0))
+                    .right(px(-4.0))
+                    .w(px(12.0))
+                    .h(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(p.chrome_elevated))
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .text_size(px(8.0))
+                    .text_color(transparent_black())
+                    .group_hover(group, move |s| s.text_color(rgb(p.text_muted)))
+                    .hover(move |s| s.text_color(rgb(p.text)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            on_delete(this, cx);
+                        }),
+                    )
+                    // ponytail: `×`, not a trash can — no font on this system
+                    // covers U+1F5D1, and it matches every other delete in the
+                    // app. Swap once an emoji font ships with the build.
+                    .child("×"),
+            );
+        }
+        swatch.into_any_element()
+    }
+
+    /// Wraps swatches into a grid, as one panel row.
+    ///
+    /// Replaces the old column of full-width labelled bars: with six built-in
+    /// colors plus however many custom ones, that list was taller than the
+    /// ribbon it dropped out of, and the names added nothing the swatch itself
+    /// doesn't already say.
+    fn color_grid(swatches: Vec<AnyElement>) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .w(px(160.0))
+            .gap(px(space::XS))
+            .children(swatches)
+            .into_any_element()
+    }
+
+    /// The user's saved custom colors, as grid swatches with a hover-delete.
+    fn custom_color_swatches(
         &self,
         target: FormatAction,
         p: Palette,
@@ -1236,68 +1443,26 @@ impl FormattingRibbon {
         colors
             .into_iter()
             .map(|hex| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(space::XXS))
-                    // The swatch and the delete button are siblings, not
-                    // nested — so clicking delete can't also apply the color,
-                    // no `stop_propagation` gymnastics needed.
-                    .child(
-                        div()
-                            .id(ElementId::named_usize("custom-color-row", hex as usize))
-                            .flex_1()
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |this, _ev, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.apply_custom_color(target, hex, cx);
-                                    this.open_menu = None;
-                                    this.editing_custom = None;
-                                    cx.notify();
-                                }),
-                            )
-                            .child(crate::color_picker::color_button(
-                                hex,
-                                format!("#{hex:06X}"),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::named_usize("custom-color-delete", hex as usize))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(20.0))
-                            .h(px(20.0))
-                            .rounded(px(radius::SM))
-                            .text_color(rgb(p.text_muted))
-                            .text_sm()
-                            .cursor_pointer()
-                            .hover(move |s| {
-                                s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
-                            })
-                            // Deleting leaves the menu open — you're usually
-                            // tidying several swatches at once, not picking one.
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |this, _ev, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.state.update(cx, |state, _cx| {
-                                        state.remove_custom_color(storage, hex);
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                            // ponytail: `×`, not a trash can — no font on this
-                            // system covers U+1F5D1, and it's the same glyph
-                            // every other delete/close in this app uses. Swap
-                            // to "🗑" once an emoji font ships with the build.
-                            .child("×"),
-                    )
-                    .into_any_element()
+                Self::color_swatch(
+                    ElementId::named_usize("custom-color-swatch", hex as usize),
+                    hex,
+                    p,
+                    cx,
+                    move |this, cx| {
+                        this.apply_custom_color(target, hex, cx);
+                        this.open_menu = None;
+                        this.editing_custom = None;
+                        cx.notify();
+                    },
+                    Some(Box::new(move |this: &mut Self, cx: &mut Context<Self>| {
+                        // Deleting leaves the menu open — you're usually
+                        // tidying several swatches at once, not picking one.
+                        this.state.update(cx, |state, _cx| {
+                            state.remove_custom_color(storage, hex);
+                        });
+                        cx.notify();
+                    })),
+                )
             })
             .collect()
     }
@@ -1365,12 +1530,19 @@ impl FormattingRibbon {
         self.state.update(cx, |state, _cx| {
             match target {
                 FormatAction::FontColor => {
-                    state.apply_font_color(crate::color_picker::ColorChoice::Custom(hex));
-                }
-                FormatAction::HighlightColorSelect => {
-                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(format!(
+                    // Same path the built-in swatches take — `Run.color` is a
+                    // bare 6-digit hex either way.
+                    state.apply_formatting_to_selection(FormatOp::Color(Some(format!(
                         "{hex:06x}"
                     ))));
+                }
+                FormatAction::HighlightColorSelect => {
+                    // `highlight_color_hex` parses a bare 6-digit hex, so a
+                    // custom color can be the current highlight just like a
+                    // named one.
+                    let hex_name = format!("{hex:06x}");
+                    state.set_highlight_color(&hex_name);
+                    state.apply_formatting_to_selection(FormatOp::Highlight(Some(hex_name)));
                 }
                 _ => {}
             }
@@ -1541,6 +1713,7 @@ impl FormattingRibbon {
                                         btn.tone,
                                         btn.icon,
                                         btn.engaged,
+                                        btn.tint,
                                         p,
                                         color_mode,
                                         state.clone(),
@@ -1639,6 +1812,13 @@ impl Render for FormattingRibbon {
         };
         let invisibility_mode = self.state.read(cx).invisibility_mode;
         let any_folded = self.state.read(cx).any_folded();
+        let timer_visible = self.state.read(cx).timer.visible;
+        // The button wears the current highlight color, nudged toward
+        // visibility against this theme's chrome — see `visible_on_chrome`.
+        let highlight_tint = crate::theme::visible_on_chrome(
+            crate::text_editor::highlight_color_hex(&self.state.read(cx).highlight_color),
+            self.state.read(cx).theme_mode,
+        );
         let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
         let all_collapsed = ribbon_groups
             .iter()
@@ -1667,13 +1847,13 @@ impl Render for FormattingRibbon {
                         RibbonBtn::primary("Block", FormatAction::Block),
                         RibbonBtn::primary("Tag", FormatAction::Tag),
                         RibbonBtn::primary("Cite", FormatAction::Cite),
-                        RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
+                        RibbonBtn::primary("Analytic", FormatAction::Analytic),
                     ],
                     vec![
+                        RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
                         RibbonBtn::secondary("Highlight", FormatAction::Highlight),
                         RibbonBtn::secondary("Shrink", FormatAction::Shrink),
                         RibbonBtn::secondary("Clear", FormatAction::Clear),
-                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle).engaged(any_folded),
                     ],
                 ],
                 *self.collapsed.get("cards").unwrap_or(&false),
@@ -1703,7 +1883,8 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Font Color", FormatAction::FontColor),
                     ],
                     vec![
-                        RibbonBtn::secondary("HL Color", FormatAction::HighlightColorSelect),
+                        RibbonBtn::secondary("HL Color", FormatAction::HighlightColorSelect)
+                            .tint(highlight_tint),
                         RibbonBtn::secondary("Case", FormatAction::ChangeCase),
                     ],
                 ],
@@ -1759,6 +1940,7 @@ impl Render for FormattingRibbon {
                     vec![
                         RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
                         RibbonBtn::secondary("Split", FormatAction::WindowSplit),
+                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle).engaged(any_folded),
                     ],
                 ],
                 *self.collapsed.get("view").unwrap_or(&false),
@@ -1771,8 +1953,15 @@ impl Render for FormattingRibbon {
                 "caselist",
                 "CASELIST",
                 &[
-                    vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)],
-                    vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)],
+                    vec![
+                        RibbonBtn::primary("Wikifi", FormatAction::Wikifi),
+                        RibbonBtn::secondary("Timer", FormatAction::Timer)
+                            .engaged(timer_visible),
+                    ],
+                    vec![
+                        RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki),
+                        RibbonBtn::secondary("Del Tags", FormatAction::DeleteTags),
+                    ],
                     vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)],
                 ],
                 *self.collapsed.get("caselist").unwrap_or(&false),

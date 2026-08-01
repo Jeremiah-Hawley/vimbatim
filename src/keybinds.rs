@@ -79,8 +79,19 @@ impl KeyCombo {
         parts.join("-")
     }
 
+    /// An action with no key assigned. `KeyCombo::parse` returns `None` for an
+    /// empty settings.conf value, so this is what an action's `default_combo`
+    /// returns when it ships unbound — the user assigns one in the settings
+    /// modal, and `rebuild_keymap` skips it until they do.
+    pub fn is_unbound(&self) -> bool {
+        self.key.is_empty()
+    }
+
     /// Human-readable label for the settings UI, platform-aware.
     pub fn display_string(&self) -> String {
+        if self.is_unbound() {
+            return "Unbound".to_string();
+        }
         let primary = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
         let mut parts = Vec::new();
         if self.ctrl { parts.push(primary.to_string()); }
@@ -183,6 +194,7 @@ pub enum KeybindAction {
     Undo,
     Redo,
     SelectAll,
+    SelectSimilarFormatting,
     Bold,
     Underline,
     Shrink,
@@ -194,6 +206,7 @@ pub enum KeybindAction {
     Block,
     Tag,
     Cite,
+    Analytic,
     Emphasis,
     Highlight,
     DeleteTags,
@@ -214,8 +227,9 @@ impl KeybindAction {
         &[
             ToggleSettings, ToggleSidebar, NewTab, CloseTab, Save, SaveAs, Find, FindReplace,
             Copy, Cut, Paste, PasteWithoutFormatting, Undo, Redo, SelectAll,
+            SelectSimilarFormatting,
             Bold, Underline, Shrink, ClearFormatting,
-            PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Emphasis,
+            PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Analytic, Emphasis,
             Highlight,
             DeleteTags, StartTimer, OpenStats, CiteFromLink, Wikifi,
             ZoomIn, ZoomOut, ZoomReset,
@@ -241,6 +255,7 @@ impl KeybindAction {
             Undo => "Undo",
             Redo => "Redo",
             SelectAll => "Select All",
+            SelectSimilarFormatting => "Select Similar Formatting",
             Bold => "Bold",
             Underline => "Underline",
             Shrink => "Shrink",
@@ -252,11 +267,16 @@ impl KeybindAction {
             Block => "Block",
             Tag => "Tag",
             Cite => "Cite",
+            Analytic => "Analytic",
             Emphasis => "Emphasis",
             Highlight => "Highlight",
             DeleteTags => "Delete Tags",
-            StartTimer => "Start Timer",
-            OpenStats => "Open Stats",
+            StartTimer => "Timer",
+            // Labelled for the thing it opens — the ribbon button says "Word
+            // Count", and a keybind list that calls it something else is a
+            // keybind nobody finds. The conf key stays `open_stats` so existing
+            // settings.conf files keep working.
+            OpenStats => "Word Count",
             CiteFromLink => "Cite From Link",
             Wikifi => "Wikifi",
             ZoomIn => "Zoom In",
@@ -273,9 +293,10 @@ impl KeybindAction {
         match self {
             ToggleSettings | ToggleSidebar | NewTab | CloseTab | Save | SaveAs | Find | FindReplace
                 | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab => C::General,
-            Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll => C::Editing,
+            Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
+                | SelectSimilarFormatting => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
-            PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Emphasis => C::CardStyles,
+            PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Analytic | Emphasis => C::CardStyles,
             Highlight => C::Highlighting,
             DeleteTags | StartTimer | OpenStats | CiteFromLink | Wikifi => C::CaselistTools,
         }
@@ -300,6 +321,7 @@ impl KeybindAction {
             Undo => "undo",
             Redo => "redo",
             SelectAll => "select_all",
+            SelectSimilarFormatting => "select_similar_formatting",
             Bold => "bold",
             Underline => "underline",
             Shrink => "shrink",
@@ -311,6 +333,7 @@ impl KeybindAction {
             Block => "block",
             Tag => "tag",
             Cite => "cite",
+            Analytic => "analytic",
             Emphasis => "emphasis",
             Highlight => "highlight",
             DeleteTags => "delete_tags",
@@ -350,6 +373,9 @@ impl KeybindAction {
             Undo => KeyCombo::new(true, false, false, "z"),
             Redo => KeyCombo::new(true, false, false, "y"),
             SelectAll => KeyCombo::new(true, false, false, "a"),
+            // Ships unbound, like Analytic: it is a rarely-reached Doc Menu
+            // command, and every obvious Ctrl combination is already taken.
+            SelectSimilarFormatting => KeyCombo::new(false, false, false, ""),
             Bold => KeyCombo::new(true, false, false, "b"),
             Underline => KeyCombo::new(true, false, false, "u"),
             Shrink => KeyCombo::new(false, false, true, "f3"),
@@ -361,6 +387,9 @@ impl KeybindAction {
             Block => KeyCombo::new(false, false, false, "f6"),
             Tag => KeyCombo::new(false, false, false, "f7"),
             Cite => KeyCombo::new(false, false, false, "f8"),
+            // Ships unbound — there is no spare function key that isn't
+            // already a card style, so the user picks one.
+            Analytic => KeyCombo::new(false, false, false, ""),
             Emphasis => KeyCombo::new(false, false, false, "f10"),
             Highlight => KeyCombo::new(false, false, false, "f11"),
             DeleteTags => KeyCombo::new(false, false, true, "f7"),
@@ -450,7 +479,14 @@ impl Keybinds {
     /// Returns whichever *other* action already owns `combo`, if any —
     /// used to block duplicate assignments and tell the user what's
     /// currently using the combination they just pressed.
+    ///
+    /// An unbound combo owns nothing, so it never conflicts: several actions
+    /// ship with no key at all (Analytic, Select Similar Formatting) and
+    /// "unbound collides with unbound" is not a clash a user can act on.
     pub fn find_conflict(&self, combo: &KeyCombo, exclude: KeybindAction) -> Option<KeybindAction> {
+        if combo.is_unbound() {
+            return None;
+        }
         KeybindAction::all()
             .iter()
             .find(|a| **a != exclude && self.get(**a) == *combo)
@@ -551,9 +587,10 @@ actions!(
         ToggleSettingsAction, ToggleSidebarAction, NewTabAction, CloseTabAction, SaveAction,
         SaveAsAction, FindAction, FindReplaceAction,
         CopyAction, CutAction, PasteAction, PasteWithoutFormattingAction, UndoAction, RedoAction, SelectAllAction,
+        SelectSimilarFormattingAction,
         BoldAction, UnderlineAction, ShrinkAction, ClearFormattingAction,
         PasteSmartAction, CondenseAction, PocketAction, HatAction, BlockAction, TagAction,
-        CiteAction, EmphasisAction,
+        CiteAction, AnalyticAction, EmphasisAction,
         HighlightAction,
         DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
         ZoomInAction, ZoomOutAction, ZoomResetAction,
@@ -575,49 +612,60 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
 
     cx.clear_key_bindings();
 
-    let ks = |action: KeybindAction| keybinds.get(action).to_gpui_keystroke();
+    // Each entry is an `Option` so an unbound action (`KeyCombo::is_unbound`)
+    // can be dropped rather than registered under an empty keystroke, which
+    // would either never fire or shadow a real binding.
+    let bind = |action: KeybindAction| -> Option<String> {
+        let combo = keybinds.get(action);
+        (!combo.is_unbound()).then(|| combo.to_gpui_keystroke())
+    };
 
     cx.bind_keys([
-        KeyBinding::new(&ks(ToggleSettings), ToggleSettingsAction, None),
-        KeyBinding::new(&ks(ToggleSidebar), ToggleSidebarAction, None),
-        KeyBinding::new(&ks(NewTab), NewTabAction, None),
-        KeyBinding::new(&ks(CloseTab), CloseTabAction, None),
-        KeyBinding::new(&ks(Save), SaveAction, None),
-        KeyBinding::new(&ks(SaveAs), SaveAsAction, None),
-        KeyBinding::new(&ks(Find), FindAction, None),
-        KeyBinding::new(&ks(FindReplace), FindReplaceAction, None),
-        KeyBinding::new(&ks(Copy), CopyAction, None),
-        KeyBinding::new(&ks(Cut), CutAction, None),
-        KeyBinding::new(&ks(Paste), PasteAction, None),
-        KeyBinding::new(&ks(PasteWithoutFormatting), PasteWithoutFormattingAction, None),
-        KeyBinding::new(&ks(Undo), UndoAction, None),
-        KeyBinding::new(&ks(Redo), RedoAction, None),
-        KeyBinding::new(&ks(SelectAll), SelectAllAction, None),
-        KeyBinding::new(&ks(Bold), BoldAction, None),
-        KeyBinding::new(&ks(Underline), UnderlineAction, None),
-        KeyBinding::new(&ks(Shrink), ShrinkAction, None),
-        KeyBinding::new(&ks(ClearFormatting), ClearFormattingAction, None),
-        KeyBinding::new(&ks(PasteSmart), PasteSmartAction, None),
-        KeyBinding::new(&ks(Condense), CondenseAction, None),
-        KeyBinding::new(&ks(Pocket), PocketAction, None),
-        KeyBinding::new(&ks(Hat), HatAction, None),
-        KeyBinding::new(&ks(Block), BlockAction, None),
-        KeyBinding::new(&ks(Tag), TagAction, None),
-        KeyBinding::new(&ks(Cite), CiteAction, None),
-        KeyBinding::new(&ks(Emphasis), EmphasisAction, None),
-        KeyBinding::new(&ks(Highlight), HighlightAction, None),
-        KeyBinding::new(&ks(DeleteTags), DeleteTagsAction, None),
-        KeyBinding::new(&ks(StartTimer), StartTimerAction, None),
-        KeyBinding::new(&ks(OpenStats), OpenStatsAction, None),
-        KeyBinding::new(&ks(CiteFromLink), CiteFromLinkAction, None),
-        KeyBinding::new(&ks(Wikifi), WikifiAction, None),
-        KeyBinding::new(&ks(ZoomIn), ZoomInAction, None),
-        KeyBinding::new(&ks(ZoomOut), ZoomOutAction, None),
-        KeyBinding::new(&ks(ZoomReset), ZoomResetAction, None),
-        KeyBinding::new(&ks(NextTab), NextTabAction, None),
-        KeyBinding::new(&ks(PrevTab), PrevTabAction, None),
-        KeyBinding::new("f9", UnderlineAction, None),
-    ]);
+        bind(ToggleSettings).map(|k| KeyBinding::new(&k, ToggleSettingsAction, None)),
+        bind(ToggleSidebar).map(|k| KeyBinding::new(&k, ToggleSidebarAction, None)),
+        bind(NewTab).map(|k| KeyBinding::new(&k, NewTabAction, None)),
+        bind(CloseTab).map(|k| KeyBinding::new(&k, CloseTabAction, None)),
+        bind(Save).map(|k| KeyBinding::new(&k, SaveAction, None)),
+        bind(SaveAs).map(|k| KeyBinding::new(&k, SaveAsAction, None)),
+        bind(Find).map(|k| KeyBinding::new(&k, FindAction, None)),
+        bind(FindReplace).map(|k| KeyBinding::new(&k, FindReplaceAction, None)),
+        bind(Copy).map(|k| KeyBinding::new(&k, CopyAction, None)),
+        bind(Cut).map(|k| KeyBinding::new(&k, CutAction, None)),
+        bind(Paste).map(|k| KeyBinding::new(&k, PasteAction, None)),
+        bind(PasteWithoutFormatting).map(|k| KeyBinding::new(&k, PasteWithoutFormattingAction, None)),
+        bind(Undo).map(|k| KeyBinding::new(&k, UndoAction, None)),
+        bind(Redo).map(|k| KeyBinding::new(&k, RedoAction, None)),
+        bind(SelectAll).map(|k| KeyBinding::new(&k, SelectAllAction, None)),
+        bind(SelectSimilarFormatting)
+            .map(|k| KeyBinding::new(&k, SelectSimilarFormattingAction, None)),
+        bind(Bold).map(|k| KeyBinding::new(&k, BoldAction, None)),
+        bind(Underline).map(|k| KeyBinding::new(&k, UnderlineAction, None)),
+        bind(Shrink).map(|k| KeyBinding::new(&k, ShrinkAction, None)),
+        bind(ClearFormatting).map(|k| KeyBinding::new(&k, ClearFormattingAction, None)),
+        bind(PasteSmart).map(|k| KeyBinding::new(&k, PasteSmartAction, None)),
+        bind(Condense).map(|k| KeyBinding::new(&k, CondenseAction, None)),
+        bind(Pocket).map(|k| KeyBinding::new(&k, PocketAction, None)),
+        bind(Hat).map(|k| KeyBinding::new(&k, HatAction, None)),
+        bind(Block).map(|k| KeyBinding::new(&k, BlockAction, None)),
+        bind(Tag).map(|k| KeyBinding::new(&k, TagAction, None)),
+        bind(Cite).map(|k| KeyBinding::new(&k, CiteAction, None)),
+        bind(Analytic).map(|k| KeyBinding::new(&k, AnalyticAction, None)),
+        bind(Emphasis).map(|k| KeyBinding::new(&k, EmphasisAction, None)),
+        bind(Highlight).map(|k| KeyBinding::new(&k, HighlightAction, None)),
+        bind(DeleteTags).map(|k| KeyBinding::new(&k, DeleteTagsAction, None)),
+        bind(StartTimer).map(|k| KeyBinding::new(&k, StartTimerAction, None)),
+        bind(OpenStats).map(|k| KeyBinding::new(&k, OpenStatsAction, None)),
+        bind(CiteFromLink).map(|k| KeyBinding::new(&k, CiteFromLinkAction, None)),
+        bind(Wikifi).map(|k| KeyBinding::new(&k, WikifiAction, None)),
+        bind(ZoomIn).map(|k| KeyBinding::new(&k, ZoomInAction, None)),
+        bind(ZoomOut).map(|k| KeyBinding::new(&k, ZoomOutAction, None)),
+        bind(ZoomReset).map(|k| KeyBinding::new(&k, ZoomResetAction, None)),
+        bind(NextTab).map(|k| KeyBinding::new(&k, NextTabAction, None)),
+        bind(PrevTab).map(|k| KeyBinding::new(&k, PrevTabAction, None)),
+        Some(KeyBinding::new("f9", UnderlineAction, None)),
+    ]
+    .into_iter()
+    .flatten());
 }
 
 #[cfg(test)]

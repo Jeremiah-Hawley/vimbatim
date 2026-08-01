@@ -14,9 +14,10 @@ use crate::find_bar::FindBarView;
 use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
     BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
-    CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction, FindAction,
+    AnalyticAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction,
+    FindAction,
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction,
+    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
@@ -26,6 +27,7 @@ use crate::state::{clamp_sidebar_width, clamp_split_ratio, AppState, CardStyleKi
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 use crate::theme::palette;
+use crate::timer::Timer;
 use crate::word_count::WordCount;
 
 /// Carried by the split-view divider's drag, and picked up by this window's
@@ -75,6 +77,7 @@ pub struct MainWindow {
     close_confirm: Entity<CloseConfirm>,
     recovery_prompt: Entity<RecoveryPrompt>,
     word_count: Entity<WordCount>,
+    timer: Entity<Timer>,
 }
 
 impl MainWindow {
@@ -105,6 +108,7 @@ impl MainWindow {
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
         let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
         let word_count        = cx.new(|_cx| WordCount::new(state.clone()));
+        let timer             = cx.new(|cx|  Timer::new(state.clone(), cx));
 
         // ── Crash-recovery snapshots ────────────────────────────────────
         // One task for the whole app, not one per tab: it wakes on a fixed
@@ -244,6 +248,7 @@ impl MainWindow {
             close_confirm,
             recovery_prompt,
             word_count,
+            timer,
         }
     }
 
@@ -421,6 +426,11 @@ impl MainWindow {
         });
 
         let s = state.clone();
+        cx.on_action(move |_: &SelectSimilarFormattingAction, cx| {
+            s.update(cx, |st, cx| { st.select_similar_formatting(); cx.notify(); });
+        });
+
+        let s = state.clone();
         cx.on_action(move |_: &BoldAction, cx| {
             s.update(cx, |st, cx| {
                 st.apply_formatting_to_selection(FormatOp::Bold(true));
@@ -522,6 +532,14 @@ impl MainWindow {
         });
 
         let s = state.clone();
+        cx.on_action(move |_: &AnalyticAction, cx| {
+            s.update(cx, |st, cx| {
+                st.apply_analytic_style();
+                cx.notify();
+            });
+        });
+
+        let s = state.clone();
         cx.on_action(move |_: &EmphasisAction, cx| {
             s.update(cx, |st, cx| {
                 st.apply_formatting_to_selection(FormatOp::Bold(true));
@@ -532,17 +550,28 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &HighlightAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_selection(FormatOp::Highlight(Some("yellow".to_string())));
+                // settings.conf's `highlight_color`, not a hardcoded yellow —
+                // the setting existed but nothing had ever read it.
+                let color = st.highlight_color.clone();
+                st.apply_formatting_to_selection(FormatOp::Highlight(Some(color)));
                 cx.notify();
             });
         });
 
-        cx.on_action(move |_: &DeleteTagsAction, _cx| {
-            println!("[Delete Tags] not yet implemented");
+        let s = state.clone();
+        cx.on_action(move |_: &DeleteTagsAction, cx| {
+            s.update(cx, |st, cx| { st.delete_tags(); cx.notify(); });
         });
 
-        cx.on_action(move |_: &StartTimerAction, _cx| {
-            println!("[Start Timer] not yet implemented");
+        // Opens the timer popup rather than starting the clock directly: Start
+        // lives on the panel, and starting an invisible timer is not something
+        // anyone can act on.
+        let s = state.clone();
+        cx.on_action(move |_: &StartTimerAction, cx| {
+            s.update(cx, |st, cx| {
+                st.timer.visible = !st.timer.visible;
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -593,6 +622,7 @@ impl Render for MainWindow {
         let pending_close    = self.state.read(cx).pending_close;
         let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
         let word_count_visible = self.state.read(cx).word_count_visible;
+        let timer_visible    = self.state.read(cx).timer.visible;
         let split_view       = self.state.read(cx).split_view;
         let split_ratio      = self.state.read(cx).split_ratio;
         let sidebar_width    = self.state.read(cx).sidebar_width;
@@ -686,7 +716,29 @@ impl Render for MainWindow {
             // ── App toolbar (Vimbatim label, sidebar toggle, placeholders) ──
             .child(self.app_toolbar.clone())
             // ── Formatting ribbon ──────────────────────────────────────────
-            .child(self.formatting_ribbon.clone())
+            // Wrapped in its own stacking context so the timer popup can be
+            // positioned against the *ribbon* ("in the middle of the ribbon")
+            // rather than against the window, with no height constants to keep
+            // in sync. `deferred` so it paints over the editor below it — the
+            // same trick the ribbon's own dropdown menus use, and the reason it
+            // can't simply be a later sibling like the modals are.
+            .child(
+                div()
+                    .relative()
+                    .child(self.formatting_ribbon.clone())
+                    .when(timer_visible, |d| {
+                        d.child(deferred(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(self.timer.clone()),
+                        ).with_priority(150))
+                    }),
+            )
             // ── Main content row ───────────────────────────────────────────
             .child(
                 div()

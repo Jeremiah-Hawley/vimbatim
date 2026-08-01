@@ -54,6 +54,7 @@ const SPELLCHECK_COLORS: [(&str, u32); 5] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsSection {
     Appearance,
+    TextSettings,
     Keybindings,
     ToggleFeatures,
 }
@@ -61,9 +62,10 @@ pub enum SettingsSection {
 impl SettingsSection {
     /// Sidebar order, top to bottom. `ToggleFeatures` is deliberately last —
     /// the toggles belong at the bottom of the settings list.
-    fn all() -> [SettingsSection; 3] {
+    fn all() -> [SettingsSection; 4] {
         [
             SettingsSection::Appearance,
+            SettingsSection::TextSettings,
             SettingsSection::Keybindings,
             SettingsSection::ToggleFeatures,
         ]
@@ -72,6 +74,7 @@ impl SettingsSection {
     fn label(&self) -> &'static str {
         match self {
             SettingsSection::Appearance => "Appearance",
+            SettingsSection::TextSettings => "Text Settings",
             SettingsSection::Keybindings => "Keybindings",
             SettingsSection::ToggleFeatures => "Toggle Features",
         }
@@ -261,6 +264,18 @@ impl SettingsModal {
     /// A stepper rather than a text field: GPUI has no text input, and a
     /// hand-rolled numeric one would be more code than the setting is worth
     /// (typing an exact value is still possible — settings.conf is plain text).
+    /// Nudges the shrink size by `delta` points, clamped and persisted. Same
+    /// stepper reasoning as `adjust_spreading_wpm` — no text input exists, and
+    /// settings.conf stays hand-editable for an exact value.
+    fn adjust_shrink_size(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let current = (s.small_size_half_points / 2) as i32;
+            s.set_shrink_size_points((current + delta).max(0) as u16);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let next = crate::state::clamp_spreading_wpm(
@@ -753,7 +768,7 @@ impl SettingsModal {
                             .items_center()
                             .gap(px(6.0))
                             .flex_none()
-                            .child(Self::wpm_step("spreading-wpm-down", "−", p).on_mouse_down(
+                            .child(Self::stepper_btn("spreading-wpm-down", "−", p).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _ev, _window, cx| this.adjust_spreading_wpm(-10, cx)),
                             ))
@@ -767,7 +782,7 @@ impl SettingsModal {
                                     .text_color(rgb(p.text))
                                     .child(format!("{spreading_wpm}")),
                             )
-                            .child(Self::wpm_step("spreading-wpm-up", "+", p).on_mouse_down(
+                            .child(Self::stepper_btn("spreading-wpm-up", "+", p).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _ev, _window, cx| this.adjust_spreading_wpm(10, cx)),
                             )),
@@ -775,8 +790,8 @@ impl SettingsModal {
             )
     }
 
-    /// One −/+ button of the spreading-rate stepper.
-    fn wpm_step(id: &'static str, label: &'static str, p: crate::theme::Palette) -> Stateful<Div> {
+    /// One −/+ button of a numeric stepper.
+    fn stepper_btn(id: &'static str, label: &'static str, p: crate::theme::Palette) -> Stateful<Div> {
         div()
             .id(id)
             .w(px(24.0))
@@ -793,6 +808,285 @@ impl SettingsModal {
             .border_color(rgb(p.border))
             .hover(move |s| s.bg(rgb(p.chrome_hover)))
             .child(label)
+    }
+
+    /// A labelled checkbox. Used for the Emphasis trio, which are independent
+    /// rather than a pick-one — a squad's "emphasis" is whatever combination
+    /// they standardised on.
+    fn checkbox(
+        id: &'static str,
+        label: &'static str,
+        checked: bool,
+        p: crate::theme::Palette,
+        on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, on_click)
+            .child(
+                div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.0))
+                    .border_1()
+                    .text_size(px(11.0))
+                    .when(checked, |d| {
+                        d.bg(rgb(p.accent))
+                            .border_color(rgb(p.accent_strong))
+                            .text_color(rgb(0xffffff))
+                            .child("✓")
+                    })
+                    .when(!checked, |d| {
+                        d.bg(rgb(p.chrome_active)).border_color(rgb(p.border))
+                    }),
+            )
+            .child(div().text_sm().text_color(rgb(p.text)).child(label))
+    }
+
+    /// The Text Settings pane: default highlight color, what Emphasis applies,
+    /// and how the paste command treats newlines.
+    fn render_text_settings(
+        &self,
+        emphasis: (bool, bool, bool),
+        shrink_points: u16,
+        exception: String,
+        custom_highlights: Vec<u32>,
+        analytic_color: String,
+        paste_condense: bool,
+        paste_condense_pilcrow: bool,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (bold, underline, boxed) = emphasis;
+        let heading = |text: &'static str| {
+            div()
+                .text_sm()
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(p.text))
+                .child(text)
+        };
+        let note = |text: &'static str| {
+            div().text_xs().text_color(rgb(p.text_muted)).max_w(px(420.0)).child(text)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            // ── Shrink size ───────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(heading("Shrink size"))
+                    .child(note("The point size Shrink drops text to. Underlined text is left alone."))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(Self::stepper_btn("shrink-size-down", "−", p).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| this.adjust_shrink_size(-1, cx)),
+                            ))
+                            .child(
+                                div()
+                                    .w(px(48.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgb(p.text))
+                                    .child(format!("{shrink_points} pt")),
+                            )
+                            .child(Self::stepper_btn("shrink-size-up", "+", p).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| this.adjust_shrink_size(1, cx)),
+                            )),
+                    ),
+            )
+            // ── Analytic color ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(heading("Analytic color"))
+                    .child(note("The text color the Analytic button applies. Same palette as the Font Color dropdown."))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .children(crate::formatting_ribbon::TEXT_COLORS.iter().map(|&(name, hex)| {
+                                let selected = analytic_color == name;
+                                div()
+                                    .id(SharedString::from(format!("analytic-color-{name}")))
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(hex))
+                                    .cursor_pointer()
+                                    .border_2()
+                                    .border_color(rgb(if selected { p.text } else { hex }))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                                        this.state.update(cx, |s, cx| {
+                                            s.set_analytic_color(name);
+                                            cx.notify();
+                                        });
+                                        cx.notify();
+                                    }))
+                            })),
+                    ),
+            )
+            // ── Standardize exception ─────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(heading("Standardize highlight exception"))
+                    .child(note(
+                        "\"Standardize highlighting with exception\" leaves this color alone. \
+                         Click the selected swatch again to clear it.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .w(px(220.0))
+                            .gap(px(6.0))
+                            .children(
+                                crate::formatting_ribbon::HIGHLIGHT_COLORS
+                                    .iter()
+                                    .map(|&(name, _label, hex)| (name.to_string(), hex))
+                                    .chain(
+                                        custom_highlights
+                                            .iter()
+                                            .map(|&hex| (format!("{hex:06x}"), hex)),
+                                    )
+                                    .map(|(name, hex)| {
+                                        let selected = exception == name;
+                                        let pick = name.clone();
+                                        div()
+                                            .id(SharedString::from(format!("std-exception-{name}")))
+                                            .w(px(22.0))
+                                            .h(px(22.0))
+                                            .rounded(px(4.0))
+                                            .bg(rgb(hex))
+                                            .cursor_pointer()
+                                            .border_2()
+                                            .border_color(rgb(if selected { p.text } else { hex }))
+                                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                                                // Re-clicking the current one
+                                                // clears it — there is no
+                                                // separate "none" swatch to
+                                                // find.
+                                                let next = if selected { String::new() } else { pick.clone() };
+                                                this.state.update(cx, |s, cx| {
+                                                    s.set_standardize_exception(&next);
+                                                    cx.notify();
+                                                });
+                                                cx.notify();
+                                            }))
+                                    }),
+                            ),
+                    ),
+            )
+            // ── Emphasis ──────────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(heading("Emphasis"))
+                    .child(note("Which formatting the Emphasis command applies. Any combination."))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(16.0))
+                            .child(Self::checkbox("emphasis-bold", "Bold", bold, p,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_emphasis(!bold, underline, boxed);
+                                        cx.notify();
+                                    });
+                                })))
+                            .child(Self::checkbox("emphasis-underline", "Underline", underline, p,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_emphasis(bold, !underline, boxed);
+                                        cx.notify();
+                                    });
+                                })))
+                            .child(Self::checkbox("emphasis-box", "Box", boxed, p,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_emphasis(bold, underline, !boxed);
+                                        cx.notify();
+                                    });
+                                }))),
+                    ),
+            )
+            // ── Paste ─────────────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(heading("Paste"))
+                    .child(note("The ribbon's Para Integrity and Pilcrows buttons drive these same two settings."))
+                    .child(Self::checkbox("paste-condense", "Condense by default", paste_condense, p,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.set_paste_condense(!paste_condense);
+                                cx.notify();
+                            });
+                        })))
+                    // Only meaningful while condensing, so it appears only then
+                    // rather than sitting inert.
+                    .when(paste_condense, |d| {
+                        d.child(
+                            div().pl(px(22.0)).child(Self::checkbox(
+                                "paste-condense-pilcrow",
+                                "Mark collapsed newlines with ¶",
+                                paste_condense_pilcrow,
+                                p,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_paste_condense_pilcrow(!paste_condense_pilcrow);
+                                        cx.notify();
+                                    });
+                                }),
+                            )),
+                        )
+                    }),
+            )
     }
 
     /// The Appearance pane: theme picker, then the Theme Color / Mode pair.
@@ -1013,6 +1307,25 @@ impl Render for SettingsModal {
         let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
         let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
         let spreading_wpm = self.state.read(cx).spreading_wpm;
+        let shrink_points = self.state.read(cx).small_size_half_points / 2;
+        let exception = self.state.read(cx).standardize_highlight_exception.clone();
+        let analytic_color = self.state.read(cx).analytic_color.clone();
+        // The same colors the HL Color dropdown offers — built-ins plus
+        // whatever the user has saved — so the exception can name any highlight
+        // actually reachable in the document.
+        let custom_highlights: Vec<u32> = self
+            .state
+            .read(cx)
+            .custom_colors(crate::state::CustomColorTarget::Highlight)
+            .to_vec();
+        let (emphasis, paste_condense, paste_condense_pilcrow) = {
+            let st = self.state.read(cx);
+            (
+                (st.emphasis_bold, st.emphasis_underline, st.emphasis_box),
+                st.paste_condense,
+                st.paste_condense_pilcrow,
+            )
+        };
         let current_theme = self.state.read(cx).theme;
         let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
@@ -1166,6 +1479,19 @@ impl Render for SettingsModal {
                                             current_theme_mode,
                                             current_theme_color_mode,
                                             theme_preview,
+                                            p,
+                                            cx,
+                                        ))
+                                    })
+                                    .when(!theme_preview && section == SettingsSection::TextSettings, |d| {
+                                        d.child(self.render_text_settings(
+                                            emphasis,
+                                            shrink_points,
+                                            exception.clone(),
+                                            custom_highlights.clone(),
+                                            analytic_color.clone(),
+                                            paste_condense,
+                                            paste_condense_pilcrow,
                                             p,
                                             cx,
                                         ))

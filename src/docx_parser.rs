@@ -23,6 +23,70 @@ const UNSUPPORTED_INLINE_TAGS: &[&[u8]] = &[
     b"w:instrText",
 ];
 
+/// A named debate style a run carries, independent of the visual formatting
+/// that style happens to apply.
+///
+/// Pocket/Hat/Block/Tag were previously identified only by
+/// `Paragraph.heading`, and Cite and Analytic by nothing at all — they were
+/// recognised by pattern-matching bold + a configured font size + a color,
+/// which mistakes any hand-formatted text that happens to match. A marker
+/// makes the intent explicit and survives a round-trip through the .docx as a
+/// `<w:rStyle>` reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardStyle {
+    Pocket,
+    Hat,
+    Block,
+    Tag,
+    Cite,
+    Analytic,
+}
+
+impl CardStyle {
+    /// The `<w:rStyle w:val>` id written into the document.
+    ///
+    /// Namespaced so it cannot collide with a style a real Word document
+    /// defines. Word ignores a reference to a style id it doesn't know, so
+    /// these are harmless in any other editor — and this parser reads the id
+    /// back directly rather than resolving it through `styles.xml`, so the
+    /// marker survives even though nothing defines it there.
+    pub fn style_id(&self) -> &'static str {
+        match self {
+            CardStyle::Pocket => "VimbatimPocket",
+            CardStyle::Hat => "VimbatimHat",
+            CardStyle::Block => "VimbatimBlock",
+            CardStyle::Tag => "VimbatimTag",
+            CardStyle::Cite => "VimbatimCite",
+            CardStyle::Analytic => "VimbatimAnalytic",
+        }
+    }
+
+    pub fn from_style_id(id: &str) -> Option<CardStyle> {
+        match id {
+            "VimbatimPocket" => Some(CardStyle::Pocket),
+            "VimbatimHat" => Some(CardStyle::Hat),
+            "VimbatimBlock" => Some(CardStyle::Block),
+            "VimbatimTag" => Some(CardStyle::Tag),
+            "VimbatimCite" => Some(CardStyle::Cite),
+            "VimbatimAnalytic" => Some(CardStyle::Analytic),
+            _ => None,
+        }
+    }
+
+    /// The card style a Word heading level corresponds to, for documents
+    /// written elsewhere that carry `<w:pStyle w:val="Heading N"/>` but none
+    /// of this app's own markers.
+    pub fn from_heading(level: u8) -> Option<CardStyle> {
+        match level {
+            1 => Some(CardStyle::Pocket),
+            2 => Some(CardStyle::Hat),
+            3 => Some(CardStyle::Block),
+            4 => Some(CardStyle::Tag),
+            _ => None,
+        }
+    }
+}
+
 /// A single formatting run within a paragraph — the smallest unit of text with
 /// consistent styling. Word documents split paragraphs into runs whenever
 /// formatting changes (e.g., switching from plain to bold text).
@@ -52,6 +116,8 @@ pub struct Run {
     /// True when `xml:space="preserve"` is set on `<w:t>` — required to keep
     /// leading/trailing whitespace that XML parsers would otherwise strip.
     pub whitespace_preserve: bool,
+    /// The debate style this run was given, if any. See `CardStyle`.
+    pub style: Option<CardStyle>,
 }
 
 /// One paragraph of the document, composed of zero or more runs.
@@ -505,6 +571,10 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                     // tag" no-op.
                     b"w:rStyle" if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
+                            // This app's own marker is read straight off the
+                            // id — it is deliberately absent from styles.xml,
+                            // so resolving it there would find nothing.
+                            apply_run_style_marker(e, run);
                             apply_run_character_style(e, run, styles);
                         }
                     }
@@ -540,6 +610,10 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                     }
                     b"w:rStyle" if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
+                            // This app's own marker is read straight off the
+                            // id — it is deliberately absent from styles.xml,
+                            // so resolving it there would find nothing.
+                            apply_run_style_marker(e, run);
                             apply_run_character_style(e, run, styles);
                         }
                     }
@@ -588,6 +662,21 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                             // re-emitted verbatim and ignores `runs`
                             // entirely) but keeps every later edit as cheap
                             // as it already is for a new document.
+                            // A document written elsewhere carries Word's
+                            // heading styles but none of this app's markers.
+                            // Deriving the marker from the heading level here
+                            // is what lets every command that identifies card
+                            // styles read one field instead of re-guessing
+                            // from bold + font size — the accuracy win the
+                            // marker exists for. Runs that already carry a
+                            // marker (a document this app saved) keep it.
+                            if let Some(style) = CardStyle::from_heading(para.heading) {
+                                for run in &mut para.runs {
+                                    if run.style.is_none() && !run.text.trim().is_empty() {
+                                        run.style = Some(style);
+                                    }
+                                }
+                            }
                             crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
                             paragraphs.push(para);
                         }
@@ -692,6 +781,26 @@ fn on_off_attr_is_true(e: &BytesStart) -> bool {
     })
 }
 
+/// Records this app's own `<w:rStyle>` marker on the run, if that is what the
+/// reference is.
+///
+/// Deliberately separate from `apply_run_character_style`: the Vimbatim ids are
+/// not defined in `styles.xml` (the document's own style table is preserved
+/// verbatim on save, so there is nowhere to add them), which means style
+/// resolution finds nothing for them. Reading the id directly is what makes the
+/// marker survive a save/reload, while staying invisible to Word.
+fn apply_run_style_marker(e: &BytesStart, run: &mut Run) {
+    for attr in e.attributes().flatten() {
+        if attr.key.as_ref() == b"w:val" {
+            if let Ok(val) = std::str::from_utf8(attr.value.as_ref()) {
+                if let Some(style) = CardStyle::from_style_id(val) {
+                    run.style = Some(style);
+                }
+            }
+        }
+    }
+}
+
 /// Resolves a `<w:rStyle w:val="...">` — a *character* style referenced
 /// directly on a run's `<w:rPr>`, distinct from a paragraph's `<w:pStyle>`.
 /// Debate-community docx files commonly underline/bold the emphasized
@@ -734,6 +843,11 @@ pub(crate) const WORD_HIGHLIGHT_NAMES: [&str; 16] = [
 /// highlight-vs-shading branch below can be tested directly.
 fn run_props_xml(run: &Run) -> String {
     let mut out = String::new();
+    // `<w:rStyle>` must lead `<w:rPr>` per the OOXML schema, so it is written
+    // before any direct formatting.
+    if let Some(style) = run.style {
+        out.push_str(&format!("<w:rStyle w:val=\"{}\"/>", style.style_id()));
+    }
     if run.bold { out.push_str("<w:b/>"); }
     if run.italic { out.push_str("<w:i/>"); }
     if run.strikethrough { out.push_str("<w:strike/>"); }
@@ -912,7 +1026,11 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
             out.push_str("<w:r>");
             let has_props = run.bold || run.italic || run.underline || run.double_underline
                 || run.strikethrough || run.highlight || run.size > 0 || run.font.is_some()
-                || run.color.is_some();
+                || run.color.is_some()
+                // A style marker alone is enough to need a `<w:rPr>` — an
+                // Analytic that happens to carry no direct formatting still
+                // has to say what it is.
+                || run.style.is_some();
             if has_props {
                 out.push_str("<w:rPr>");
                 out.push_str(&run_props_xml(run));
@@ -1460,6 +1578,73 @@ mod tests {
     }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pBdr"));
+    }
+
+    /// The marker's whole point: it survives a save/reload, so a Cite stays a
+    /// Cite instead of being re-guessed from bold + font size.
+    #[test]
+    fn test_style_marker_round_trips_through_parse_and_rebuild() {
+        for style in [
+            CardStyle::Pocket,
+            CardStyle::Hat,
+            CardStyle::Block,
+            CardStyle::Tag,
+            CardStyle::Cite,
+            CardStyle::Analytic,
+        ] {
+            let paragraphs = vec![Paragraph {
+                runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            }];
+            let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+            let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+            assert_eq!(
+                reparsed[0].runs[0].style,
+                Some(style),
+                "{style:?} did not survive the round trip"
+            );
+        }
+    }
+
+    /// The id is written as a `<w:rStyle>` reference, which Word ignores when
+    /// the style isn't defined — so a marked document opens cleanly elsewhere.
+    #[test]
+    fn test_style_marker_is_written_as_an_rstyle_reference() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "a cite".into(), style: Some(CardStyle::Cite), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+        assert!(xml.contains(r#"<w:rStyle w:val="VimbatimCite"/>"#), "got: {xml}");
+    }
+
+    /// A document written in Word carries heading styles but no markers —
+    /// deriving them at parse time is the accuracy win.
+    #[test]
+    fn test_word_heading_styles_become_markers() {
+        let xml = "<w:document><w:body><w:p>\
+                   <w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
+                   <w:r><w:t>a pocket</w:t></w:r>\
+                   </w:p></w:body></w:document>";
+        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        assert_eq!(paragraphs[0].heading, 1);
+        assert_eq!(paragraphs[0].runs[0].style, Some(CardStyle::Pocket));
+    }
+
+    /// Runs that look identical but carry different markers are different
+    /// things — merging them would erase one.
+    #[test]
+    fn test_runs_with_different_markers_do_not_merge() {
+        let mut runs = vec![
+            Run { text: "a".into(), style: Some(CardStyle::Cite), ..Run::default() },
+            Run { text: "b".into(), style: Some(CardStyle::Analytic), ..Run::default() },
+        ];
+        crate::document_ops::merge_adjacent_same_format_runs(&mut runs);
+        assert_eq!(runs.len(), 2);
     }
 
     #[test]

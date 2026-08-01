@@ -654,6 +654,42 @@ pub mod color {
     pub const SELECTION: u32 = 0x2b4e69;
 }
 
+/// Perceived luminance, 0.0 (black) to 1.0 (white), ITU-R BT.709 weighting.
+fn luminance(hex: u32) -> f32 {
+    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+    let b = (hex & 0xFF) as f32 / 255.0;
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// Blends `hex` toward `target` by `amount` (0.0 = unchanged, 1.0 = target).
+fn blend(hex: u32, target: u32, amount: f32) -> u32 {
+    let mix = |shift: u32| {
+        let from = ((hex >> shift) & 0xFF) as f32;
+        let to = ((target >> shift) & 0xFF) as f32;
+        (from + (to - from) * amount).round().clamp(0.0, 255.0) as u32
+    };
+    (mix(16) << 16) | (mix(8) << 8) | mix(0)
+}
+
+/// A variant of `hex` that stays visible against the given mode's chrome.
+///
+/// A highlight color is chosen for how it looks behind black text on white
+/// paper, which is not the same thing as being readable as a swatch on app
+/// chrome: yellow all but disappears on a light panel, and a saturated blue
+/// disappears on a dark one. Only colors that would actually vanish are
+/// touched, and the blend keeps the hue recognisable — the point is still to
+/// show *which* color is selected.
+pub fn visible_on_chrome(hex: u32, mode: ThemeMode) -> u32 {
+    const TOO_DARK: f32 = 0.35;
+    const TOO_LIGHT: f32 = 0.6;
+    match mode {
+        ThemeMode::Dark if luminance(hex) < TOO_DARK => blend(hex, 0xFFFFFF, 0.45),
+        ThemeMode::Light if luminance(hex) > TOO_LIGHT => blend(hex, 0x000000, 0.35),
+        _ => hex,
+    }
+}
+
 pub mod space {
     pub const XXS: f32 = 2.0;
     pub const XS: f32 = 4.0;
@@ -665,6 +701,71 @@ pub mod radius {
     pub const XS: f32 = 2.0;
     pub const SM: f32 = 3.0;
     pub const MD: f32 = 4.0;
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    /// Yellow is the default highlight and the worst case on a light panel —
+    /// it must come back darker there, and be left alone on dark chrome.
+    #[test]
+    fn yellow_is_darkened_only_for_light_mode() {
+        const YELLOW: u32 = 0xFFD700;
+        assert_eq!(visible_on_chrome(YELLOW, ThemeMode::Dark), YELLOW);
+
+        let light = visible_on_chrome(YELLOW, ThemeMode::Light);
+        assert_ne!(light, YELLOW);
+        assert!(luminance(light) < luminance(YELLOW), "should have darkened");
+    }
+
+    /// A saturated blue is the mirror case: invisible on dark chrome, fine on
+    /// light.
+    #[test]
+    fn blue_is_lightened_only_for_dark_mode() {
+        const BLUE: u32 = 0x0000FF;
+        assert_eq!(visible_on_chrome(BLUE, ThemeMode::Light), BLUE);
+
+        let dark = visible_on_chrome(BLUE, ThemeMode::Dark);
+        assert_ne!(dark, BLUE);
+        assert!(luminance(dark) > luminance(BLUE), "should have lightened");
+    }
+
+    /// A colour comfortably between the thresholds is passed through
+    /// untouched in both modes.
+    #[test]
+    fn mid_tones_are_left_alone() {
+        const MID_GREY: u32 = 0x808080;
+        assert_eq!(visible_on_chrome(MID_GREY, ThemeMode::Dark), MID_GREY);
+        assert_eq!(visible_on_chrome(MID_GREY, ThemeMode::Light), MID_GREY);
+    }
+
+    /// Adjusting must keep the colour recognisable — the button's whole job is
+    /// to say *which* highlight is selected, so the dominant channels have to
+    /// stay dominant. Magenta is the awkward case: it carries no green, so its
+    /// luminance (0.28) reads as dark even though it looks vivid.
+    #[test]
+    fn adjusting_preserves_hue() {
+        let channels = |hex: u32| (hex >> 16 & 0xFF, hex >> 8 & 0xFF, hex & 0xFF);
+        for (name, color) in [("magenta", 0xFF00FFu32), ("blue", 0x0000FF), ("yellow", 0xFFD700)] {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                let (r0, g0, b0) = channels(color);
+                let (r1, g1, b1) = channels(visible_on_chrome(color, mode));
+                assert_eq!(
+                    (r0 > g0, g0 > b0, r0 > b0),
+                    (r1 > g1, g1 > b1, r1 > b1),
+                    "{name} lost its hue ordering in {mode:?} mode"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blend_hits_both_ends_and_the_middle() {
+        assert_eq!(blend(0x000000, 0xFFFFFF, 0.0), 0x000000);
+        assert_eq!(blend(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
+        assert_eq!(blend(0x000000, 0xFFFFFF, 0.5), 0x808080);
+    }
 }
 
 #[cfg(test)]

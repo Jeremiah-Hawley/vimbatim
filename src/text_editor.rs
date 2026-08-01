@@ -681,6 +681,25 @@ impl TextEditor {
             });
         }
 
+        // Likewise for a "Select similar formatting" highlight — its ranges are
+        // raw byte offsets that can't follow an edit, so they must not outlive
+        // the keystroke. Only *unbound* keys get here at all: GPUI dispatches
+        // matched key bindings first and its action handlers stop propagation
+        // (`App::on_action`'s bubble phase), so Bold/Highlight/etc. still act on
+        // the whole match set, which is the entire point of the feature.
+        if self
+            .state
+            .read(cx)
+            .tabs
+            .get(self.tab_index(cx).unwrap_or(usize::MAX))
+            .is_some_and(|t| !t.similar_ranges.is_empty())
+        {
+            self.state.update(cx, |s, cx| {
+                s.clear_similar_selection();
+                cx.notify();
+            });
+        }
+
         let ks = &event.keystroke;
 
         // Reading mode: Left/Right page the viewport instead of moving the
@@ -1197,11 +1216,23 @@ impl Render for TextEditor {
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         // Normalise (anchor, focus) into (min, max) once so per-line lookups
         // below don't each have to re-derive the ordering.
-        let selection = state
+        // Flattened with "Select similar formatting"'s own matched ranges
+        // (`Tab.similar_ranges`) — the two draw identically, so the whole
+        // paint path below takes one list rather than knowing about both.
+        // In practice only one is ever non-empty: selecting-similar clears
+        // the caret selection, and the next keystroke or click clears the
+        // similar ranges.
+        let selections: Vec<(usize, usize)> = state
             .tabs
             .get(idx.unwrap_or(usize::MAX))
-            .and_then(|t| t.selection)
-            .map(|(a, f)| (a.min(f), a.max(f)));
+            .into_iter()
+            .flat_map(|t| {
+                t.selection
+                    .map(|(a, f)| (a.min(f), a.max(f)))
+                    .into_iter()
+                    .chain(t.similar_ranges.iter().copied())
+            })
+            .collect();
         // Mode indicator text. Deviates from spec 5.1's literal "nothing
         // shown for Normal" — showing `-- NORMAL --` removes the ambiguity
         // between "vim is on and in Normal mode" and "vim mode is off
@@ -1445,6 +1476,7 @@ impl Render for TextEditor {
                 let click_count = ev.click_count;
                 this.state.update(cx, |state, cx| {
                     state.editor_context_menu = None;
+                    state.clear_similar_selection();
                     // `set_cursor_from_line_col` does the line/col -> byte-offset
                     // conversion (there's no standalone public helper for it) and
                     // leaves the result in `tab.cursor`, so double/triple-click
@@ -1614,6 +1646,7 @@ impl Render for TextEditor {
             .child(
                 uniform_list("text-editor-rows", display_to_wrap.len(), {
                     let lines = lines.clone();
+                    let selections = selections.clone();
                     let line_chars = line_chars.clone();
                     let line_byte_starts = line_byte_starts.clone();
                     let rows = rows.clone();
@@ -1663,9 +1696,10 @@ impl Render for TextEditor {
                         // Clip the logical line's selection char-range (if any) down
                         // to this row's own [row_start, row_end) sub-range, then
                         // rebase it to be relative to the row instead of the line.
-                        let row_selection = selection
-                            .and_then(|(s, e)| selection_span_for_line(&lines[li], line_byte_starts[li], s, e))
-                            .and_then(|(sel_start, sel_end)| {
+                        let row_selections: Vec<(usize, usize)> = selections
+                            .iter()
+                            .filter_map(|&(s, e)| selection_span_for_line(&lines[li], line_byte_starts[li], s, e))
+                            .filter_map(|(sel_start, sel_end)| {
                                 let clipped_start = sel_start.max(row_start);
                                 let clipped_end = sel_end.min(row_end);
                                 // Same eager-vs-lazy pitfall as row_cursor_col above: use
@@ -1674,7 +1708,8 @@ impl Render for TextEditor {
                                 // underflow `clipped_end - row_start` if evaluated eagerly.
                                 (clipped_start < clipped_end)
                                     .then(|| (clipped_start - row_start, clipped_end - row_start))
-                            });
+                            })
+                            .collect();
 
                         // Rich-text formatting (Phase 1): clip this logical
                         // line's paragraph run boundaries down to this row's
@@ -1771,7 +1806,7 @@ impl Render for TextEditor {
                         let content_el = render_line(
                             &row_text,
                             row_cursor_col,
-                            row_selection,
+                            &row_selections,
                             &row_run_spans,
                             paragraphs.get(li),
                             prev_has_box,
@@ -2061,7 +2096,11 @@ fn render_context_menu(
 fn render_line(
     line: &str,
     cursor_col: Option<usize>,
-    selection: Option<(usize, usize)>,
+    // Row-relative char-column ranges to paint as selected. More than one
+    // because "Select similar formatting" highlights every matching run in
+    // the document at once; an ordinary caret selection is just the
+    // single-element case.
+    selections: &[(usize, usize)],
     run_spans: &[(usize, usize, usize)],
     para: Option<&Paragraph>,
     prev_has_box: bool,
@@ -2122,7 +2161,7 @@ fn render_line(
     // The fast paths below emit one element for the whole row, which cannot
     // express "some runs drawn, some not" — fall through to the per-run path
     // whenever anything might be hidden.
-    if !hides_anything && cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
+    if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
         if run_spans.is_empty() {
             return line.to_string().into_any_element();
         }
@@ -2163,10 +2202,14 @@ fn render_line(
         let run = para.and_then(|p| p.runs.get(run_idx));
         let sub_len = run_end - run_start;
         let sub_cursor = cursor_col.filter(|&c| c >= run_start && c <= run_end).map(|c| c - run_start);
-        let sub_selection = selection.and_then(|(s, e)| {
-            let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
-            (clipped_start < clipped_end).then(|| (clipped_start - run_start, clipped_end - run_start))
-        });
+        let sub_selections: Vec<(usize, usize)> = selections
+            .iter()
+            .filter_map(|&(s, e)| {
+                let (clipped_start, clipped_end) = (s.max(run_start), e.min(run_end));
+                (clipped_start < clipped_end)
+                    .then(|| (clipped_start - run_start, clipped_end - run_start))
+            })
+            .collect();
         // Same clip-and-rebase as `sub_selection`, for each squiggle
         // range that overlaps this run.
         let sub_misspelled: Vec<(usize, usize)> = misspelled
@@ -2190,7 +2233,7 @@ fn render_line(
         );
 
         for (start, end, style, is_misspelled) in
-            line_segments(sub_len, sub_cursor, sub_selection, &sub_misspelled)
+            line_segments(sub_len, sub_cursor, &sub_selections, &sub_misspelled)
         {
             // Hidden text is dropped from the layout rather than painted
             // transparently, so visible fragments close up instead of sitting
@@ -2448,7 +2491,7 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     el
 }
 
-fn highlight_color_hex(name: &str) -> u32 {
+pub(crate) fn highlight_color_hex(name: &str) -> u32 {
     /*
      * Maps Word's highlight color names to their GPUI hex value (spec
      * 6.2's 15-entry table, plus a fallback for anything unrecognized).
@@ -3136,7 +3179,7 @@ enum SegmentStyle {
 fn line_segments(
     len: usize,
     cursor_col: Option<usize>,
-    selection: Option<(usize, usize)>,
+    selections: &[(usize, usize)],
     misspelled: &[(usize, usize)],
 ) -> Vec<(usize, usize, SegmentStyle, bool)> {
     /*
@@ -3156,7 +3199,7 @@ fn line_segments(
      * contribute breakpoints like the others but come back as the trailing
      * `bool` on each segment — "paint a squiggle under this run too".
      */
-    if cursor_col.is_none() && selection.is_none() && misspelled.is_empty() {
+    if cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
         return vec![(0, len, SegmentStyle::Plain, false)];
     }
 
@@ -3166,7 +3209,7 @@ fn line_segments(
         breaks.push(c);
         if c < len { breaks.push(c + 1); }
     }
-    if let Some((s, e)) = selection {
+    for &(s, e) in selections {
         breaks.push(s.min(len));
         breaks.push(e.min(len));
     }
@@ -3181,9 +3224,9 @@ fn line_segments(
     for w in breaks.windows(2) {
         let (start, end) = (w[0], w[1]);
         let is_cursor = cursor_col.map(|c| c.min(len) == start && end == start + 1).unwrap_or(false);
-        let in_selection = selection
-            .map(|(s, e)| start >= s.min(len) && end <= e.min(len))
-            .unwrap_or(false);
+        let in_selection = selections
+            .iter()
+            .any(|&(s, e)| start >= s.min(len) && end <= e.min(len));
         let style = if is_cursor {
             SegmentStyle::Cursor
         } else if in_selection {
@@ -3471,13 +3514,13 @@ mod tests {
 
     #[test]
     fn test_line_segments_no_cursor_no_selection() {
-        assert_eq!(line_segments(5, None, None, &[]), vec![(0, 5, SegmentStyle::Plain, false)]);
+        assert_eq!(line_segments(5, None, &[], &[]), vec![(0, 5, SegmentStyle::Plain, false)]);
     }
 
     #[test]
     fn test_line_segments_cursor_mid_line() {
         assert_eq!(
-            line_segments(5, Some(2), None, &[]),
+            line_segments(5, Some(2), &[], &[]),
             vec![
                 (0, 2, SegmentStyle::Plain, false),
                 (2, 3, SegmentStyle::Cursor, false),
@@ -3489,7 +3532,7 @@ mod tests {
     #[test]
     fn test_line_segments_cursor_at_line_start() {
         assert_eq!(
-            line_segments(5, Some(0), None, &[]),
+            line_segments(5, Some(0), &[], &[]),
             vec![(0, 1, SegmentStyle::Cursor, false), (1, 5, SegmentStyle::Plain, false)]
         );
     }
@@ -3497,7 +3540,7 @@ mod tests {
     #[test]
     fn test_line_segments_cursor_past_end_of_line() {
         assert_eq!(
-            line_segments(5, Some(5), None, &[]),
+            line_segments(5, Some(5), &[], &[]),
             vec![(0, 5, SegmentStyle::Plain, false), (5, 5, SegmentStyle::Cursor, false)]
         );
     }
@@ -3505,7 +3548,7 @@ mod tests {
     #[test]
     fn test_line_segments_selection_only() {
         assert_eq!(
-            line_segments(6, None, Some((1, 4)), &[]),
+            line_segments(6, None, &[(1, 4)], &[]),
             vec![
                 (0, 1, SegmentStyle::Plain, false),
                 (1, 4, SegmentStyle::Selection, false),
@@ -3517,7 +3560,7 @@ mod tests {
     #[test]
     fn test_line_segments_selection_covers_full_line() {
         assert_eq!(
-            line_segments(6, None, Some((0, 6)), &[]),
+            line_segments(6, None, &[(0, 6)], &[]),
             vec![(0, 6, SegmentStyle::Selection, false)]
         );
     }
@@ -3525,7 +3568,7 @@ mod tests {
     #[test]
     fn test_line_segments_cursor_inside_selection_wins_its_own_cell() {
         assert_eq!(
-            line_segments(6, Some(2), Some((2, 5)), &[]),
+            line_segments(6, Some(2), &[(2, 5)], &[]),
             vec![
                 (0, 2, SegmentStyle::Plain, false),
                 (2, 3, SegmentStyle::Cursor, false),
@@ -3538,7 +3581,7 @@ mod tests {
     #[test]
     fn test_line_segments_empty_line_with_cursor() {
         assert_eq!(
-            line_segments(0, Some(0), None, &[]),
+            line_segments(0, Some(0), &[], &[]),
             vec![(0, 0, SegmentStyle::Cursor, false)]
         );
     }
@@ -3546,7 +3589,7 @@ mod tests {
     #[test]
     fn test_line_segments_misspelled_range_splits_and_flags() {
         assert_eq!(
-            line_segments(9, None, None, &[(4, 9)]),
+            line_segments(9, None, &[], &[(4, 9)]),
             vec![(0, 4, SegmentStyle::Plain, false), (4, 9, SegmentStyle::Plain, true)]
         );
     }
@@ -3556,7 +3599,7 @@ mod tests {
         // A selected, cursor-bearing, misspelled word must keep all three:
         // the squiggle is an overlay, not a competing SegmentStyle.
         assert_eq!(
-            line_segments(6, Some(1), Some((0, 4)), &[(0, 4)]),
+            line_segments(6, Some(1), &[(0, 4)], &[(0, 4)]),
             vec![
                 (0, 1, SegmentStyle::Selection, true),
                 (1, 2, SegmentStyle::Cursor, true),

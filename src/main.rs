@@ -20,6 +20,7 @@ mod close_confirm;
 mod main_window;
 mod spellcheck;
 mod theme;
+mod timer;
 mod word_count;
 
 use gpui::prelude::*;

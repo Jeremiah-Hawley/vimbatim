@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::case_converter;
-use crate::color_picker;
-use crate::docx_parser::{Alignment, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
-use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, reset_card_style_in_range, resolve_position, runs_in_range, sync_delete_range, sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp};
+use crate::docx_parser::{Alignment, CardStyle, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
+use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, ranges_matching_format, reset_card_style_in_range, resolve_position, runs_in_range, sync_delete_range, sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp};
 use crate::recovery::RecoveryEntry;
 use crate::wikifi_export;
 
@@ -319,6 +318,20 @@ pub struct Tab {
     /// Bumped on every fold change so the editor's row cache invalidates.
     /// Folding is not a content edit, so `content_version` must not move.
     pub fold_version: u64,
+    /// Byte ranges last matched by "Select similar formatting" (Doc Menu),
+    /// drawn exactly like `selection` and used in its place by
+    /// `apply_formatting_to_selection`.
+    ///
+    /// Deliberately *not* folded into `selection`: that field is a single
+    /// (anchor, focus) pair driven by the caret, and ~80 call sites assume
+    /// it. This is a separate, read-mostly overlay that only formatting
+    /// commands consult, and any keystroke or click clears it (see
+    /// `clear_similar_selection`) so it can never go stale against edits.
+    ///
+    /// ponytail: formatting ops only — copy/cut/delete still act on
+    /// `selection`. Widen when someone actually wants to cut every tag at
+    /// once.
+    pub similar_ranges: Vec<(usize, usize)>,
 }
 
 /// A dirty tab reduced to exactly what a recovery snapshot needs, with no
@@ -430,6 +443,7 @@ impl Tab {
             folded_headings: std::collections::HashSet::new(),
             folded_para_count: 0,
             fold_version: 0,
+            similar_ranges: Vec::new(),
             has_unsupported_blocks: false,
             unsupported_banner_dismissed: false,
         }
@@ -480,6 +494,7 @@ impl Tab {
             folded_headings: std::collections::HashSet::new(),
             folded_para_count: 0,
             fold_version: 0,
+            similar_ranges: Vec::new(),
             has_unsupported_blocks: false,
             unsupported_banner_dismissed: false,
         }
@@ -658,6 +673,10 @@ pub struct AppState {
     pub find_bar: Option<FindBar>,
     /// Whether the word-count panel (`src/word_count.rs`) is showing.
     pub word_count_visible: bool,
+    /// The speech timer popup and its clock (`src/timer.rs`). Lives here
+    /// rather than in the view so the `start_timer` keybind and the ribbon's
+    /// Timer button reach the same state.
+    pub timer: crate::timer::TimerState,
     /// settings.conf `[FORMATTING] spreading_wpm` — the reading rate the word
     /// count panel divides by for its time estimate. "Spreading" is debate's
     /// term for reading at speed, so this is deliberately not a prose-reading
@@ -791,6 +810,36 @@ pub struct AppState {
     vim_pending_change_before_insert: Option<(char, Vec<RecordedVimKey>)>,
     pub paragraph_integrity: bool,
     pub pilcrows: bool,
+    /// settings.conf `highlight_color` — the color the Highlight button and
+    /// keybind apply. A Word highlight-color name (any of the six the ribbon's
+    /// HL Color dropdown offers), or a bare 6-digit hex; resolved by
+    /// `text_editor::highlight_color_hex`, same as everywhere else.
+    ///
+    /// Edited by hand in settings.conf, not in the settings modal — the
+    /// dropdown is where colors get picked.
+    pub highlight_color: String,
+    /// settings.conf `analytic_color` — the text color the Analytic style
+    /// applies, as a 6-digit hex (`Run.color`'s own form, no leading `#`).
+    pub analytic_color: String,
+    /// settings.conf `standardize_highlight_exception` — a highlight color
+    /// that "Standardize highlighting with exception" leaves alone. Empty
+    /// means no exception, and that command behaves like the plain one.
+    pub standardize_highlight_exception: String,
+    /// Which run formatting the Emphasis command applies. Independent, not
+    /// mutually exclusive — Word's own "emphasis" is whatever combination a
+    /// squad has standardised on.
+    ///
+    /// Stored and surfaced only; nothing reads these yet. The Emphasis button
+    /// still applies plain bold until it is wired up separately.
+    pub emphasis_bold: bool,
+    pub emphasis_underline: bool,
+    pub emphasis_box: bool,
+    /// Whether the paste command (f2 / the ribbon's Paste button) condenses
+    /// the pasted text, collapsing its newlines instead of keeping them.
+    pub paste_condense: bool,
+    /// When condensing, mark each collapsed newline with a pilcrow instead of
+    /// a plain space. Only meaningful while `paste_condense` is on.
+    pub paste_condense_pilcrow: bool,
     /// The settings.conf this state reads from and writes back to.
     ///
     /// Held as a field rather than calling `settings_conf_path()` at each
@@ -910,6 +959,17 @@ impl CardStyleKind {
     /// The `Paragraph.heading` value each card style marks its line with —
     /// also the markdown level `wikifi_export.rs` maps it to (1=H1 .. 4=H4)
     /// and the nesting depth the Nav menu indents it at.
+    /// The run marker this card style stamps onto its line — what identifies
+    /// it afterwards, rather than re-deriving it from bold + font size.
+    fn card_style(&self) -> CardStyle {
+        match self {
+            CardStyleKind::Pocket => CardStyle::Pocket,
+            CardStyleKind::Hat => CardStyle::Hat,
+            CardStyleKind::Block => CardStyle::Block,
+            CardStyleKind::Tag => CardStyle::Tag,
+        }
+    }
+
     fn heading_level(&self) -> u8 {
         match self {
             CardStyleKind::Pocket => 1,
@@ -1096,6 +1156,13 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
 /// speech is ~150 wpm and prose reading ~250; competitive debate "spreading"
 /// sits far above both, and 300 is a common mid-range figure to start from.
 pub const DEFAULT_SPREADING_WPM: u32 = 300;
+
+/// Clamps the shrink size (points) to something a document can actually use.
+/// Wide enough for any real "small text" convention, narrow enough that the
+/// stepper can't walk it somewhere unreadable.
+pub fn clamp_shrink_size_points(points: u16) -> u16 {
+    points.clamp(4, 48)
+}
 
 /// Clamps a words-per-minute value to something that can't produce a nonsense
 /// estimate. Zero would divide by zero; the upper bound is well past any human
@@ -1375,7 +1442,8 @@ impl AppState {
         let block_size_half_points = load_font_size_half_points(settings_path, "block_size", 32);
         let tag_size_half_points = load_font_size_half_points(settings_path, "tag_size", 26);
         let cite_size_half_points = load_font_size_half_points(settings_path, "cite_size", 26);
-        let small_size_half_points = load_font_size_half_points(settings_path, "small_size", 12);
+        let small_size_half_points =
+            clamp_shrink_size_points(load_font_size_half_points(settings_path, "small_size", 12) / 2) * 2;
         let custom_font_colors =
             load_custom_colors(settings_path, CustomColorTarget::Font.settings_key());
         let custom_highlight_colors =
@@ -1392,6 +1460,7 @@ impl AppState {
             editor_context_menu: None,
             find_bar: None,
             word_count_visible: false,
+            timer: crate::timer::TimerState::default(),
             spreading_wpm: load_spreading_wpm(settings_path),
             custom_font_colors,
             custom_highlight_colors,
@@ -1426,6 +1495,15 @@ impl AppState {
             vim_pending_change_before_insert: None,
             paragraph_integrity: false,
             pilcrows: false,
+            highlight_color: load_string_setting(settings_path, "highlight_color", "yellow"),
+            analytic_color: load_string_setting(settings_path, "analytic_color", "0000ff"),
+            standardize_highlight_exception:
+                load_string_setting(settings_path, "standardize_highlight_exception", ""),
+            emphasis_bold: load_bool_setting(settings_path, "emphasis_bold", true),
+            emphasis_underline: load_bool_setting(settings_path, "emphasis_underline", false),
+            emphasis_box: load_bool_setting(settings_path, "emphasis_box", false),
+            paste_condense: load_bool_setting(settings_path, "paste_condense", false),
+            paste_condense_pilcrow: load_bool_setting(settings_path, "paste_condense_pilcrow", false),
             settings_path: settings_path.to_path_buf(),
             spellcheck_enabled: load_bool_setting(settings_path, "spellcheck", true),
             spellcheck_underline_color: load_string_setting(
@@ -1527,6 +1605,96 @@ impl AppState {
         }
         stats.spoken_words = stats.tag_words + stats.highlighted_words;
         stats
+    }
+
+    /// Words in the active tab's selection that get read aloud — highlighted
+    /// runs plus every run marked Tag or Cite. Feeds the timer's WPM readout.
+    ///
+    /// `None` (rather than 0) when there is no selection at all, so the caller
+    /// can tell "nothing selected" from "selected text that nobody reads".
+    ///
+    /// Driven off run style markers, unlike `document_stats`, which predates
+    /// them and still recognises a Tag by `Paragraph.heading`. Markers are what
+    /// every command written since uses, and they survive reformatting; a
+    /// document imported from another editor with no markers at all will
+    /// under-count here.
+    pub fn spoken_words_in_selection(&self) -> Option<usize> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let (a, f) = tab.selection?;
+        let (start, end) = (a.min(f), a.max(f));
+        if start >= end {
+            return None;
+        }
+        Some(
+            runs_in_range(&tab.paragraphs, start, end)
+                .iter()
+                .filter(|r| {
+                    r.highlight
+                        || matches!(r.style, Some(CardStyle::Tag) | Some(CardStyle::Cite))
+                })
+                .map(|r| count_words(&r.text))
+                .sum(),
+        )
+    }
+
+    /// Caselist Tools → Delete tags (`delete_tags` keybind): strips Tag
+    /// formatting from every tagged paragraph, leaving the words behind as
+    /// ordinary body text.
+    ///
+    /// The *formatting* is deleted, not the line — unlike `delete_analytics`,
+    /// which removes the paragraph outright. Reuses `FormatOp::ClearAll`, the
+    /// same op the Clear button applies, so a de-tagged line is byte-identical
+    /// to one the user cleared by hand.
+    pub fn delete_tags(&mut self) {
+        let is_tag = Self::tag_paragraph_test();
+        let any = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.paragraphs.iter().any(&is_tag))
+            .unwrap_or(false);
+        // No undo entry for a no-op — Ctrl+Z should undo what the user did.
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        let default_size = self.normal_text_size_half_points;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for para in &mut tab.paragraphs {
+                if !is_tag(para) {
+                    continue;
+                }
+                for run in &mut para.runs {
+                    apply_format_op(run, &FormatOp::ClearAll { default_size });
+                }
+                // What made the line a Tag structurally: the heading marker is
+                // what the Nav outline, the fold hierarchy and `document_stats`
+                // all read. Alignment is left alone — `apply_card_style` never
+                // centres a Tag, so any centring here was the user's own.
+                para.heading = 0;
+                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+            }
+            tab.is_modified = true;
+        }
+    }
+
+    /// Recognises a Tag paragraph, on the same terms as
+    /// `analytic_paragraph_test`: the run style marker is authoritative when
+    /// present, and the heading level is the fallback for documents written
+    /// before markers existed or by Word itself.
+    fn tag_paragraph_test() -> impl Fn(&Paragraph) -> bool {
+        let tag_heading = CardStyleKind::Tag.heading_level();
+        move |para: &Paragraph| {
+            let substantive = || para.runs.iter().filter(|r| !r.text.trim().is_empty());
+            // A blank line is never a tag, however its runs are styled.
+            if substantive().next().is_none() {
+                return false;
+            }
+            if substantive().any(|r| r.style.is_some()) {
+                return substantive().all(|r| r.style == Some(CardStyle::Tag));
+            }
+            para.heading == tag_heading
+        }
     }
 
     // ── Find / Replace bar (spec 4.6) ───────────────────────────────────────
@@ -2583,28 +2751,46 @@ impl AppState {
          * and also arms `pending_format` for subsequent typing, so formatting
          * applies both retroactively and prospectively.
          */
-        let selection = self.tabs.get(self.active_tab).and_then(|t| t.selection);
-        match selection {
-            Some((a, f)) => {
-                let (start, end) = (a.min(f), a.max(f));
+        // "Select similar formatting" (Doc Menu) leaves its matches in
+        // `similar_ranges` and blanks `selection`; when present they stand in
+        // for the caret selection, so one button click restyles every matching
+        // run in the document at once. Both empty = the no-selection path.
+        let ranges: Option<Vec<(usize, usize)>> = self.tabs.get(self.active_tab).and_then(|t| {
+            if !t.similar_ranges.is_empty() {
+                Some(t.similar_ranges.clone())
+            } else {
+                t.selection.map(|(a, f)| vec![(a.min(f), a.max(f))])
+            }
+        });
+        match ranges {
+            Some(ranges) => {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                    let effective_op = if is_uniformly_active(&tab.paragraphs, start, end, &op) {
+                    // Toggle off only when *every* range is already in that
+                    // state, so one already-bold match can't block bolding all
+                    // the others. Identical to the old single-range rule when
+                    // there is only one range.
+                    let effective_op = if ranges
+                        .iter()
+                        .all(|&(s, e)| is_uniformly_active(&tab.paragraphs, s, e, &op))
+                    {
                         toggled_off(&op)
                     } else {
                         op.clone()
                     };
-                    apply_formatting(&mut tab.paragraphs, start, end, effective_op.clone());
-                    // Mirrors apply_formatting_to_line's own ClearAll special
-                    // case (see its comment above `reset_card_style_in_range`):
-                    // apply_formatting above only ever mutates run-level
-                    // fields, never a Pocket/Hat/Block paragraph's own
-                    // `heading`/`alignment` — left alone, Clear Formatting
-                    // through an active selection silently kept a card-styled
-                    // paragraph boxed/centered while only stripping bold/size.
-                    if let FormatOp::ClearAll { .. } = effective_op {
-                        reset_card_style_in_range(&mut tab.paragraphs, start, end);
-                        tab.pending_format = None;
+                    for &(start, end) in &ranges {
+                        apply_formatting(&mut tab.paragraphs, start, end, effective_op.clone());
+                        // Mirrors apply_formatting_to_line's own ClearAll special
+                        // case (see its comment above `reset_card_style_in_range`):
+                        // apply_formatting above only ever mutates run-level
+                        // fields, never a Pocket/Hat/Block paragraph's own
+                        // `heading`/`alignment` — left alone, Clear Formatting
+                        // through an active selection silently kept a card-styled
+                        // paragraph boxed/centered while only stripping bold/size.
+                        if let FormatOp::ClearAll { .. } = effective_op {
+                            reset_card_style_in_range(&mut tab.paragraphs, start, end);
+                            tab.pending_format = None;
+                        }
                     }
                     tab.is_modified = true;
                 }
@@ -2665,38 +2851,116 @@ impl AppState {
         }
     }
 
+    /// Inserts clipboard text at the cursor, replacing any selection —
+    /// `insert_str` with the paste command's own condensing rules applied
+    /// first. Called from the ribbon's Paste button and its keybind.
+    ///
+    /// Condensing is now driven by the `paste_condense` setting rather than by
+    /// reading `paragraph_integrity`/`pilcrows` directly. Those two ribbon
+    /// toggles still control it, but through the setting (see
+    /// `toggle_paragraph_integrity`/`toggle_pilcrows`), so the settings modal
+    /// and the ribbon can't disagree about what a paste will do.
     pub fn paste_text(&mut self, text: &str) {
-        /*
-         * Inserts clipboard text at cursor or replaces selection.
-         * Mirrors insert_str but is called from ribbon button handler.
-         * Respects paragraph_integrity and pilcrows toggles.
-         */
         if text.is_empty() {
             return;
         }
-        let processed = if self.paragraph_integrity {
-            text.replace('\n', " ")
-        } else if self.pilcrows {
-            text.replace('\n', "¶")
+        let processed = if self.paste_condense {
+            let replacement = if self.paste_condense_pilcrow { "¶" } else { " " };
+            text.replace('\n', replacement)
         } else {
             text.to_string()
         };
         self.insert_str(&processed);
     }
 
+    /// Card Menu → Standardize highlighting: repaints every highlighted run in
+    /// the document to the current highlight color.
+    pub fn standardize_highlighting(&mut self) {
+        self.standardize_highlights(None);
+    }
+
+    /// Card Menu → Standardize highlighting with exception: the same, but
+    /// leaves runs already in `standardize_highlight_exception` untouched.
+    ///
+    /// The use case is a document where one color carries meaning — an
+    /// analytic marked in green, say — that shouldn't be flattened along with
+    /// the ordinary highlighting. With no exception configured this is exactly
+    /// the plain command.
+    pub fn standardize_highlighting_with_exception(&mut self) {
+        let exception = self.standardize_highlight_exception.clone();
+        let exception = (!exception.is_empty()).then_some(exception);
+        self.standardize_highlights(exception.as_deref());
+    }
+
+    /// Repaints every highlighted run to the current highlight color, skipping
+    /// any already in `except`.
+    ///
+    /// Whole-file on purpose — the point is that a card assembled from several
+    /// sources ends up consistent, so it acts regardless of selection. Runs
+    /// that are not highlighted are untouched; this only changes *which*
+    /// highlight, never adds or removes one.
+    fn standardize_highlights(&mut self, except: Option<&str>) {
+        let color = self.highlight_color.clone();
+        let repaints = |run: &Run| {
+            run.highlight
+                && run.highlight_color != color
+                && except.is_none_or(|e| run.highlight_color != e)
+        };
+
+        let nothing_to_do = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| !t.paragraphs.iter().flat_map(|para| &para.runs).any(repaints))
+            .unwrap_or(true);
+        // Pushing an undo entry for a no-op would make Ctrl+Z appear broken.
+        if nothing_to_do {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for para in &mut tab.paragraphs {
+                for run in &mut para.runs {
+                    if repaints(run) {
+                        run.highlight_color = color.clone();
+                    }
+                }
+                // Neighbours that differed only by highlight color are now
+                // identical, so fuse them rather than leaving the document
+                // fragmented on a distinction that no longer exists.
+                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+            }
+            tab.is_modified = true;
+        }
+    }
+
+    /// Card Menu → "Condense, no pilcrows", and the ribbon's own Condense
+    /// button: collapses the selection's newlines into spaces.
     pub fn condense_selection(&mut self) {
-        /*
-         * Removes newlines from selected text and replaces with spaces,
-         * preserving each character's own formatting (bold/highlight/size/
-         * etc.) rather than flattening the condensed text down to a single
-         * unformatted run — `runs_in_range` (already used by copy/paste's
-         * rich-clipboard path) captures the original per-character runs
-         * before the delete below discards them, and
-         * `sync_insert_str_with_runs` (the same rich-paste primitive) puts
-         * them back instead of `sync_insert_str`'s plain, inherit-whatever's-
-         * at-the-insertion-point behavior. Only works on active selection;
-         * no-op if no selection.
-         */
+        self.condense_selection_with(" ");
+    }
+
+    /// Card Menu → "Condense, pilcrows": the same, but each collapsed newline
+    /// leaves a `¶` behind so the original paragraph breaks stay visible.
+    ///
+    /// The same marker `paste_text` uses when condensing a paste, and no
+    /// surrounding space — the pilcrow marks the exact point the break was.
+    pub fn condense_with_pilcrows(&mut self) {
+        self.condense_selection_with("¶");
+    }
+
+    /// Replaces every newline in the selection with `replacement`, preserving
+    /// each character's own formatting (bold/highlight/size/etc.) rather than
+    /// flattening the condensed text down to a single unformatted run —
+    /// `runs_in_range` (already used by copy/paste's rich-clipboard path)
+    /// captures the original per-character runs before the delete below
+    /// discards them, and `sync_insert_str_with_runs` (the same rich-paste
+    /// primitive) puts them back instead of `sync_insert_str`'s plain,
+    /// inherit-whatever's-at-the-insertion-point behavior.
+    ///
+    /// Only works on an active selection; no-op without one, and no-op when
+    /// the selection holds no newlines to collapse.
+    fn condense_selection_with(&mut self, replacement: &str) {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let Some((a, f)) = tab.selection else { return };
 
@@ -2706,20 +2970,20 @@ impl AppState {
         }
 
         let selected_text = tab.content[start..end].to_string();
-        let condensed = selected_text.replace('\n', " ");
+        let condensed = selected_text.replace('\n', replacement);
 
         if condensed == selected_text {
             return;
         }
 
         // `runs_in_range` emits a dedicated unformatted `"\n"` run for every
-        // paragraph boundary the selection crosses (same contract
-        // copy/paste relies on) — replacing `\n` with `' '` inside each run's
-        // own text turns those into plain spaces too, matching `condensed`,
-        // without touching any real run's formatting.
+        // paragraph boundary the selection crosses (same contract copy/paste
+        // relies on) — replacing `\n` inside each run's own text turns those
+        // into the replacement too, matching `condensed`, without touching any
+        // real run's formatting.
         let condensed_runs: Vec<Run> = runs_in_range(&tab.paragraphs, start, end)
             .into_iter()
-            .map(|mut r| { r.text = r.text.replace('\n', " "); r })
+            .map(|mut r| { r.text = r.text.replace('\n', replacement); r })
             .collect();
 
         self.push_undo_snapshot();
@@ -3009,14 +3273,6 @@ impl AppState {
         }
     }
 
-    pub fn apply_font_color(&mut self, color: color_picker::ColorChoice) {
-        /*
-         * Applies font color to selected text.
-         */
-        let hex_str = format!("{:06x}", color.hex_value());
-        self.apply_formatting_to_selection(FormatOp::Color(Some(hex_str)));
-    }
-
     /// Which paragraphs are hidden by the collapsed headings in `folded`.
     ///
     /// Level-aware, matching Word: collapsing a heading of level `L` hides
@@ -3116,20 +3372,91 @@ impl AppState {
 
 
 
+    /// Paragraph integrity: keep a paste's paragraph breaks intact.
+    ///
+    /// Turning it on switches condense-on-paste off — the two are opposites,
+    /// and leaving both on meant the ribbon claimed to be preserving
+    /// paragraphs while the paste collapsed them anyway.
     pub fn toggle_paragraph_integrity(&mut self) {
-        /*
-         * Toggles paragraph integrity mode. When on, newlines are
-         * excluded from pastes.
-         */
         self.paragraph_integrity = !self.paragraph_integrity;
+        if self.paragraph_integrity {
+            self.set_paste_condense(false);
+        }
     }
 
+    /// Pilcrows: mark collapsed newlines with `¶`.
+    ///
+    /// Drives the `paste_condense_pilcrow` setting so the ribbon toggle and
+    /// the settings modal are the same switch rather than two that disagree.
     pub fn toggle_pilcrows(&mut self) {
-        /*
-         * Toggles pilcrow display mode. When on, newlines are
-         * shown as pilcrow characters (¶).
-         */
         self.pilcrows = !self.pilcrows;
+        self.set_paste_condense_pilcrow(self.pilcrows);
+    }
+
+    /// Setters for the text settings that persist to settings.conf, so a
+    /// change made from the ribbon survives a restart exactly like one made in
+    /// the settings modal.
+    pub fn set_paste_condense(&mut self, on: bool) {
+        self.paste_condense = on;
+        self.save_setting("paste_condense", if on { "true" } else { "false" });
+    }
+
+    pub fn set_paste_condense_pilcrow(&mut self, on: bool) {
+        self.paste_condense_pilcrow = on;
+        self.save_setting("paste_condense_pilcrow", if on { "true" } else { "false" });
+    }
+
+    /// The size Shrink drops text to, in points. Stored as half-points
+    /// (`Run.size`'s unit) but written to settings.conf as points, which is
+    /// what `small_size` has always held and what the user reads.
+    pub fn set_shrink_size_points(&mut self, points: u16) {
+        let points = clamp_shrink_size_points(points);
+        self.small_size_half_points = points * 2;
+        self.save_setting("small_size", &points.to_string());
+    }
+
+    /// Sets the current highlight color and persists it.
+    ///
+    /// Called when a color is chosen from the ribbon's HL Color dropdown —
+    /// picking one there is what "the current highlight color" means, and it
+    /// is what the Highlight button, the Highlight keybind, Standardize
+    /// Highlighting, and the HL Color button's own tint all read.
+    ///
+    /// `name` is a Word highlight-color name or a bare 6-digit hex, matching
+    /// what `Run.highlight_color` stores.
+    pub fn set_highlight_color(&mut self, name: &str) {
+        self.highlight_color = name.to_string();
+        self.save_setting("highlight_color", name);
+    }
+
+    pub fn set_analytic_color(&mut self, hex: &str) {
+        self.analytic_color = hex.to_string();
+        self.save_setting("analytic_color", hex);
+    }
+
+    /// The highlight color "Standardize highlighting with exception" spares.
+    /// An empty string clears it.
+    pub fn set_standardize_exception(&mut self, name: &str) {
+        self.standardize_highlight_exception = name.to_string();
+        self.save_setting("standardize_highlight_exception", name);
+    }
+
+    pub fn set_emphasis(&mut self, bold: bool, underline: bool, boxed: bool) {
+        self.emphasis_bold = bold;
+        self.emphasis_underline = underline;
+        self.emphasis_box = boxed;
+        self.save_setting("emphasis_bold", if bold { "true" } else { "false" });
+        self.save_setting("emphasis_underline", if underline { "true" } else { "false" });
+        self.save_setting("emphasis_box", if boxed { "true" } else { "false" });
+    }
+
+    /// Writes one key to this state's settings.conf. Best-effort, matching
+    /// every other settings write in this file — an unwritable directory must
+    /// not break the in-memory change.
+    fn save_setting(&self, key: &str, value: &str) {
+        if let Err(e) = crate::theme::save_setting_line(&self.settings_path, key, value) {
+            eprintln!("[settings] couldn't save {key}: {e}");
+        }
     }
 
     pub fn toggle_invisibility_mode(&mut self) {
@@ -3239,6 +3566,7 @@ impl AppState {
 
         self.apply_formatting_to_line(FormatOp::Bold(true));
         self.apply_formatting_to_line(FormatOp::FontSize(size));
+        self.apply_formatting_to_line(FormatOp::Style(Some(kind.card_style())));
         match kind {
             CardStyleKind::Pocket => self.apply_formatting_to_line(FormatOp::Box(true)),
             CardStyleKind::Hat => self.apply_formatting_to_line(FormatOp::DoubleUnderline(true)),
@@ -3282,10 +3610,154 @@ impl AppState {
     /// but shares the same reasoning for living here: the ribbon's Cite
     /// button and the `f8` keybind (`main_window.rs`) both call this so
     /// they can't drift apart.
+    /// The Analytic style: Tag's weight and size, in the configured analytic
+    /// color, but deliberately *not* a heading.
+    ///
+    /// Analytics are the debater's own argument rather than a structural
+    /// marker, so they must stay out of the Nav outline, the fold hierarchy,
+    /// and the Wikifi export's heading levels — all three of which key off
+    /// `Paragraph.heading`. Applying this to a line that *was* a card style
+    /// clears that marker rather than leaving a heading that no longer looks
+    /// like one.
+    pub fn apply_analytic_style(&mut self) {
+        let size = self.tag_size_half_points;
+        let color = self.analytic_color.clone();
+        self.apply_formatting_to_line(FormatOp::Bold(true));
+        self.apply_formatting_to_line(FormatOp::FontSize(size));
+        self.apply_formatting_to_line(FormatOp::Color(Some(color)));
+        self.apply_formatting_to_line(FormatOp::Style(Some(CardStyle::Analytic)));
+
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let line_idx = tab.content[..tab.cursor].matches('\n').count();
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                if let Some(para) = tab.paragraphs.get_mut(line_idx) {
+                    para.heading = 0;
+                }
+            }
+        }
+    }
+
+    /// A predicate matching paragraphs formatted as analytics.
+    ///
+    /// Shared by every command that acts on analytics, so they cannot disagree
+    /// about what one is. Analytics carry no marker of their own — exactly like
+    /// cites — so they are recognised by what `apply_analytic_style` leaves
+    /// behind: a non-heading paragraph whose runs are bold at the Tag size in
+    /// the configured analytic color. A paragraph hand-formatted to match will
+    /// be treated as one.
+    ///
+    /// Returns a closure so the borrow of `self` ends before callers mutate
+    /// `tabs`.
+    fn analytic_paragraph_test(&self) -> impl Fn(&Paragraph) -> bool {
+        let size = self.tag_size_half_points;
+        let color = self.analytic_color.clone();
+        move |para: &Paragraph| {
+            // A blank line is never an analytic, however its runs are styled.
+            let has_text = !para.runs.iter().all(|r| r.text.trim().is_empty());
+            if !has_text {
+                return false;
+            }
+            let substantive = || para.runs.iter().filter(|r| !r.text.trim().is_empty());
+
+            // The marker is authoritative: it says what the run *is*, so a
+            // reformatted analytic is still one and a coincidentally-matching
+            // line is not.
+            if substantive().any(|r| r.style.is_some()) {
+                return substantive().all(|r| r.style == Some(CardStyle::Analytic));
+            }
+
+            // Documents written before markers existed, or by another editor,
+            // carry no marker at all — fall back to the formatting signature
+            // `apply_analytic_style` produces.
+            para.heading == 0
+                && substantive().all(|r| {
+                    r.bold && r.size == size && r.color.as_deref() == Some(color.as_str())
+                })
+        }
+    }
+
+    /// Doc Menu → Delete analytics: removes every analytic paragraph from the
+    /// document, line and all.
+    ///
+    /// Whole lines rather than just their text: an analytic *is* its line, and
+    /// blanking them would leave a run of empty paragraphs where the argument
+    /// used to be. `content` is rebuilt from the surviving paragraphs to keep
+    /// the 1:1 line/paragraph invariant the rest of the editor depends on.
+    pub fn delete_analytics(&mut self) {
+        let is_analytic = self.analytic_paragraph_test();
+        let any = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.paragraphs.iter().any(&is_analytic))
+            .unwrap_or(false);
+        // No undo entry for a no-op — Ctrl+Z should undo what the user did.
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.paragraphs.retain(|para| !is_analytic(para));
+            // Every rich-text-aware function assumes at least one paragraph and
+            // one run always exist (`default_paragraphs`).
+            if tab.paragraphs.is_empty() {
+                tab.paragraphs = default_paragraphs();
+            }
+            tab.content = paragraphs_to_plain_text(&tab.paragraphs);
+            // The cursor and any selection pointed into text that is gone.
+            tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor.min(tab.content.len()));
+            tab.selection = None;
+            tab.is_modified = true;
+        }
+    }
+
+    /// Doc Menu → Convert analytics to tags: promotes every Analytic-formatted
+    /// paragraph in the document to a Tag.
+    ///
+    /// An analytic is recognised by what `apply_analytic_style` leaves behind —
+    /// a non-heading paragraph whose runs are bold at the Tag size in the
+    /// configured analytic color. That is the only signal available: analytics
+    /// carry no marker of their own, exactly like cites. A paragraph the user
+    /// hand-formatted to match will convert too.
+    ///
+    /// Converting drops the analytic color (a Tag is plain-colored) and sets
+    /// the heading marker, which is what puts the line into the Nav outline and
+    /// the fold hierarchy.
+    pub fn convert_analytics_to_tags(&mut self) {
+        let is_analytic = self.analytic_paragraph_test();
+
+        let any = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.paragraphs.iter().any(&is_analytic))
+            .unwrap_or(false);
+        // No undo entry for a no-op — Ctrl+Z should undo what the user did.
+        if !any {
+            return;
+        }
+
+        self.push_undo_snapshot();
+        let tag_heading = CardStyleKind::Tag.heading_level();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            for para in &mut tab.paragraphs {
+                if !is_analytic(para) {
+                    continue;
+                }
+                for run in &mut para.runs {
+                    run.color = None;
+                }
+                para.heading = tag_heading;
+                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+            }
+            tab.is_modified = true;
+        }
+    }
+
     pub fn apply_cite_style(&mut self) {
         self.apply_formatting_to_selection(FormatOp::Bold(true));
         let size = self.cite_size_half_points;
         self.apply_formatting_to_selection(FormatOp::FontSize(size));
+        self.apply_formatting_to_selection(FormatOp::Style(Some(CardStyle::Cite)));
     }
 
     pub fn undo(&mut self) {
@@ -3912,6 +4384,50 @@ impl AppState {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.selection = Some((0, tab.content.len()));
             tab.cursor = tab.content.len();
+        }
+    }
+
+    /// Doc Menu → "Select similar formatting": highlights every run in the
+    /// document whose formatting matches the run under the caret (or, with an
+    /// active selection, the run its start sits in). Word's own command of the
+    /// same name.
+    ///
+    /// The result lands in `Tab.similar_ranges` rather than `selection`, and
+    /// `selection` is blanked so the two can't both be drawn. See
+    /// `similar_ranges`' own doc comment for why they are separate fields, and
+    /// what does and doesn't act on it.
+    pub fn select_similar_formatting(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        // The selection's *start*, not the caret, when there is one — dragging
+        // right-to-left leaves the caret at the low end and the anchor at the
+        // high one, and the user means "the formatting I selected" either way.
+        //
+        // `+ 1` because `resolve_position` maps an offset sitting exactly on a
+        // run boundary to the end of the *earlier* run (what typing there
+        // inherits). That's right for a bare caret, but wrong for a selection:
+        // its first selected byte belongs to the run on the *right*, so a
+        // selection starting at a boundary would otherwise match the formatting
+        // of text it doesn't cover. Byte arithmetic only — `resolve_position`
+        // never slices, so landing mid-UTF-8 is harmless.
+        let probe = match tab.selection {
+            Some((a, f)) => a.min(f) + 1,
+            None => tab.cursor,
+        };
+        let (para_idx, run_idx, _) = resolve_position(&tab.paragraphs, probe);
+        let Some(target) = tab.paragraphs.get(para_idx).and_then(|p| p.runs.get(run_idx)) else {
+            return;
+        };
+        tab.similar_ranges = ranges_matching_format(&tab.paragraphs, &target.clone());
+        tab.selection = None;
+    }
+
+    /// Drops any "select similar formatting" highlight. Called from the
+    /// editor's key-down and mouse-down handlers, the same two choke points
+    /// that dismiss the right-click menu: the ranges are byte offsets with no
+    /// way to follow an edit, so they must not outlive the next input event.
+    pub fn clear_similar_selection(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.similar_ranges.clear();
         }
     }
 
@@ -7373,6 +7889,7 @@ mod tests {
             folded_headings: std::collections::HashSet::new(),
             folded_para_count: 0,
             fold_version: 0,
+                similar_ranges: Vec::new(),
                 has_unsupported_blocks: false,
                 unsupported_banner_dismissed: false,
             }],
@@ -7385,6 +7902,7 @@ mod tests {
             editor_context_menu: None,
             find_bar: None,
             word_count_visible: false,
+            timer: crate::timer::TimerState::default(),
             spreading_wpm: DEFAULT_SPREADING_WPM,
             custom_font_colors: Vec::new(),
             custom_highlight_colors: Vec::new(),
@@ -7419,6 +7937,14 @@ mod tests {
             vim_pending_change_before_insert: None,
             paragraph_integrity: false,
             pilcrows: false,
+            highlight_color: "yellow".to_string(),
+            analytic_color: "0000ff".to_string(),
+            standardize_highlight_exception: String::new(),
+            emphasis_bold: true,
+            emphasis_underline: false,
+            emphasis_box: false,
+            paste_condense: false,
+            paste_condense_pilcrow: false,
             // A temp file, never the real ~/.vimbatim/settings.conf — see
             // the field's doc comment.
             settings_path: std::env::temp_dir().join("vimbatim_test_settings.conf"),
@@ -7636,6 +8162,665 @@ mod tests {
         state.insert_str("\n");
 
         assert!(!state.any_folded(), "stale folds survived a structural edit");
+    }
+
+    // ── Text settings ──────────────────────────────────────────────────────
+    // ── Standardize highlighting ───────────────────────────────────────────
+    // ── Analytic style ─────────────────────────────────────────────────────
+    fn analytic_para(text: &str, size: u16, color: &str) -> Paragraph {
+        Paragraph {
+            runs: vec![Run {
+                text: text.into(),
+                bold: true,
+                size,
+                color: Some(color.into()),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    #[test]
+    fn delete_analytics_removes_whole_lines() {
+        let paragraphs = vec![
+            para_plain("keep this"),
+            analytic_para("an analytic", 26, "0000ff"),
+            para_plain("and this"),
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.delete_analytics();
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 2, "the line should be gone, not blanked");
+        // `content` is rebuilt from the survivors — the 1:1 line/paragraph
+        // invariant the rest of the editor depends on.
+        assert_eq!(state.tabs[0].content, "keep this\nand this");
+    }
+
+    #[test]
+    fn delete_analytics_leaves_other_formatting_alone() {
+        let paragraphs = vec![analytic_para("wrong color", 26, "c00000")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.delete_analytics();
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 1);
+    }
+
+    /// A document that is nothing but analytics must still end up with one
+    /// paragraph — every rich-text function assumes at least one exists.
+    #[test]
+    fn deleting_every_paragraph_leaves_a_blank_one() {
+        let paragraphs = vec![
+            analytic_para("one", 26, "0000ff"),
+            analytic_para("two", 26, "0000ff"),
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.delete_analytics();
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 1);
+        assert!(state.tabs[0].content.is_empty());
+        assert!(!state.tabs[0].paragraphs[0].runs.is_empty(), "a paragraph always has a run");
+    }
+
+    /// The cursor pointed into text that no longer exists.
+    #[test]
+    fn delete_analytics_clamps_the_cursor() {
+        let paragraphs = vec![para_plain("ab"), analytic_para("long analytic", 26, "0000ff")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+        state.tabs[0].cursor = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, state.tabs[0].content.len()));
+
+        state.delete_analytics();
+
+        assert!(state.tabs[0].cursor <= state.tabs[0].content.len());
+        assert_eq!(state.tabs[0].selection, None, "a selection into deleted text must clear");
+    }
+
+    #[test]
+    fn delete_analytics_is_a_no_op_when_there_are_none() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("just text")], 0);
+        state.set_analytic_color("0000ff");
+        let version_before = state.tabs[0].content_version;
+
+        state.delete_analytics();
+
+        assert_eq!(state.tabs[0].content_version, version_before);
+        assert!(!state.tabs[0].is_modified);
+    }
+
+    /// The marker is authoritative: a reformatted analytic is still one, even
+    /// though its bold/size/color no longer match the signature.
+    #[test]
+    fn a_marked_analytic_is_recognised_regardless_of_its_formatting() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run {
+                text: "reformatted".into(),
+                bold: false,
+                size: 99,
+                color: Some("00ff00".into()),
+                style: Some(CardStyle::Analytic),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.set_analytic_color("0000ff");
+
+        state.convert_analytics_to_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 4);
+    }
+
+    /// ...and the converse: text that coincidentally matches the old
+    /// signature but is marked as something else is left alone. This is the
+    /// misidentification the marker exists to prevent.
+    #[test]
+    fn a_marked_cite_is_not_mistaken_for_an_analytic() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run {
+                text: "a cite".into(),
+                bold: true,
+                size: 26,
+                color: Some("0000ff".into()),
+                style: Some(CardStyle::Cite),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.convert_analytics_to_tags();
+        state.delete_analytics();
+
+        assert_eq!(state.tabs[0].paragraphs.len(), 1, "a marked Cite was deleted as an analytic");
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0);
+    }
+
+    #[test]
+    fn applying_a_card_style_stamps_its_marker() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("a line")], 0);
+        state.apply_card_style(CardStyleKind::Block);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, Some(CardStyle::Block));
+    }
+
+    #[test]
+    fn applying_cite_and_analytic_stamps_their_markers() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("some text")], 0);
+        state.tabs[0].selection = Some((0, 9));
+        state.apply_cite_style();
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, Some(CardStyle::Cite));
+
+        let mut state = make_state_with_paragraphs(vec![para_plain("some text")], 0);
+        state.apply_analytic_style();
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, Some(CardStyle::Analytic));
+    }
+
+    /// Clearing formatting clears what the run *was*, not just how it looked —
+    /// otherwise a cleared line still answers to "is this an analytic?".
+    #[test]
+    fn clearing_formatting_clears_the_marker() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("a line")], 0);
+        state.apply_analytic_style();
+        state.tabs[0].selection = Some((0, 6));
+
+        state.clear_formatting();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, None);
+    }
+
+    #[test]
+    fn convert_analytics_promotes_them_to_tags() {
+        let paragraphs = vec![
+            analytic_para("an analytic", 26, "0000ff"),
+            para_plain("ordinary body text"),
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.convert_analytics_to_tags();
+
+        let converted = &state.tabs[0].paragraphs[0];
+        assert_eq!(converted.heading, 4, "should now be a Tag");
+        assert_eq!(converted.runs[0].color, None, "a Tag is plain-colored");
+        assert!(converted.runs[0].bold);
+        assert_eq!(state.tabs[0].paragraphs[1].heading, 0, "body text untouched");
+    }
+
+    /// Only paragraphs matching the analytic signature convert — bold text at
+    /// the same size in a *different* color is someone else's formatting.
+    #[test]
+    fn convert_analytics_ignores_other_colored_text() {
+        let paragraphs = vec![analytic_para("not an analytic", 26, "c00000")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.convert_analytics_to_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].color.as_deref(), Some("c00000"));
+    }
+
+    #[test]
+    fn convert_analytics_is_a_no_op_when_there_are_none() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("just text")], 0);
+        state.set_analytic_color("0000ff");
+        let version_before = state.tabs[0].content_version;
+
+        state.convert_analytics_to_tags();
+
+        assert_eq!(state.tabs[0].content_version, version_before);
+        assert!(!state.tabs[0].is_modified);
+    }
+
+    /// Round-trip: what `apply_analytic_style` produces is exactly what the
+    /// converter recognises, so the two cannot drift apart.
+    #[test]
+    fn a_freshly_applied_analytic_converts() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("some analysis")], 0);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("0000ff");
+
+        state.apply_analytic_style();
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0, "analytic must not be a heading");
+
+        state.convert_analytics_to_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 4);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].color, None);
+    }
+
+    /// A blank line is never an analytic — converting one would put an empty
+    /// Tag in the Nav outline.
+    #[test]
+    fn convert_analytics_skips_blank_lines() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("")], 0);
+        state.set_analytic_color("0000ff");
+
+        state.convert_analytics_to_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0);
+    }
+
+
+    #[test]
+    fn analytic_applies_tag_weight_and_size_in_the_configured_color() {
+        let mut state = make_state("an analytic", 0, None);
+        state.tag_size_half_points = 26;
+        state.set_analytic_color("c00000");
+
+        state.apply_analytic_style();
+
+        let run = &state.tabs[0].paragraphs[0].runs[0];
+        assert!(run.bold);
+        assert_eq!(run.size, 26, "should match the configured Tag size");
+        assert_eq!(run.color.as_deref(), Some("c00000"));
+    }
+
+    /// The whole point of Analytic over Tag: it is the debater's own argument,
+    /// not a structural marker, so it must stay out of the Nav outline, the
+    /// fold hierarchy, and Wikifi's heading levels — all of which read
+    /// `Paragraph.heading`.
+    #[test]
+    fn analytic_is_not_a_heading() {
+        let mut state = make_state("an analytic", 0, None);
+        state.apply_analytic_style();
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0);
+    }
+
+    /// Converting a Tag line to an Analytic has to clear the heading it
+    /// already carried, or the line stays in the outline while no longer
+    /// looking like a card style.
+    #[test]
+    fn analytic_clears_an_existing_card_style_heading() {
+        let mut state = make_state("was a tag", 0, None);
+        state.apply_card_style(CardStyleKind::Tag);
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 4);
+
+        state.apply_analytic_style();
+
+        assert_eq!(state.tabs[0].paragraphs[0].heading, 0);
+    }
+
+    #[test]
+    fn setting_the_highlight_color_is_what_later_operations_read() {
+        let mut state = make_state("", 0, None);
+        assert_eq!(state.highlight_color, "yellow");
+
+        state.set_highlight_color("cyan");
+        assert_eq!(state.highlight_color, "cyan");
+
+        // A custom color is stored as a bare hex, which
+        // `text_editor::highlight_color_hex` also parses.
+        state.set_highlight_color("86f2ef");
+        assert_eq!(state.highlight_color, "86f2ef");
+    }
+
+    /// Picking a color and then standardizing must use the picked one — the
+    /// two features share `highlight_color` rather than each having their own
+    /// idea of "current".
+    #[test]
+    fn standardize_follows_the_most_recently_picked_color() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("marked", "green")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+
+        state.set_highlight_color("cyan");
+        state.standardize_highlighting();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].highlight_color, "cyan");
+    }
+
+
+    fn hl(text: &str, color: &str) -> Run {
+        Run { text: text.into(), highlight: true, highlight_color: color.into(), ..Run::default() }
+    }
+
+    #[test]
+    fn standardize_repaints_every_highlight_to_the_current_color() {
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![hl("green bit", "green"), run_plain(" plain "), hl("cyan bit", "cyan")],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![hl("magenta bit", "magenta")],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.highlight_color = "yellow".to_string();
+
+        state.standardize_highlighting();
+
+        for para in &state.tabs[0].paragraphs {
+            for run in &para.runs {
+                if run.highlight {
+                    assert_eq!(run.highlight_color, "yellow");
+                }
+            }
+        }
+    }
+
+    /// Only the color changes — nothing gains or loses a highlight, and no
+    /// text moves.
+    #[test]
+    fn standardize_leaves_unhighlighted_text_alone() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![run_plain("before "), hl("marked", "green"), run_plain(" after")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let content_before = state.tabs[0].content.clone();
+        state.highlight_color = "yellow".to_string();
+
+        state.standardize_highlighting();
+
+        assert_eq!(state.tabs[0].content, content_before, "text must not move");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(!runs[0].highlight, "plain text gained a highlight");
+        assert!(!runs.last().unwrap().highlight);
+    }
+
+    /// Runs that differed only by highlight color are identical afterwards, so
+    /// they fuse rather than leaving the document split on a distinction that
+    /// no longer exists.
+    #[test]
+    fn standardize_merges_runs_that_now_match() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("one ", "green"), hl("two", "cyan")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.highlight_color = "yellow".to_string();
+
+        state.standardize_highlighting();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs.len(), 1);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "one two");
+    }
+
+    #[test]
+    fn standardize_with_exception_spares_the_chosen_color() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![
+                hl("ordinary", "green"),
+                run_plain(" "),
+                hl("meaningful", "cyan"),
+                run_plain(" "),
+                hl("also ordinary", "magenta"),
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.set_highlight_color("yellow");
+        state.set_standardize_exception("cyan");
+
+        state.standardize_highlighting_with_exception();
+
+        let colors: Vec<&str> = state.tabs[0].paragraphs[0]
+            .runs
+            .iter()
+            .filter(|r| r.highlight)
+            .map(|r| r.highlight_color.as_str())
+            .collect();
+        assert_eq!(colors, vec!["yellow", "cyan", "yellow"]);
+    }
+
+    /// With nothing configured, the exception command is the plain one.
+    #[test]
+    fn standardize_with_no_exception_repaints_everything() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("a", "green"), hl("b", "cyan")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.set_highlight_color("yellow");
+        assert!(state.standardize_highlight_exception.is_empty());
+
+        state.standardize_highlighting_with_exception();
+
+        // Both repainted, and now identical, so they fused.
+        assert_eq!(state.tabs[0].paragraphs[0].runs.len(), 1);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].highlight_color, "yellow");
+    }
+
+    /// A document where only the excepted color differs has nothing to do —
+    /// no undo entry, so Ctrl+Z still undoes whatever the user actually did.
+    #[test]
+    fn standardize_with_exception_is_a_no_op_when_only_the_exception_differs() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("kept", "cyan"), hl(" done", "yellow")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.set_highlight_color("yellow");
+        state.set_standardize_exception("cyan");
+        let version_before = state.tabs[0].content_version;
+
+        state.standardize_highlighting_with_exception();
+
+        assert_eq!(state.tabs[0].content_version, version_before);
+        assert!(!state.tabs[0].is_modified);
+    }
+
+    #[test]
+    fn standardize_is_undoable() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("marked", "green")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.highlight_color = "yellow".to_string();
+        let version_before = state.tabs[0].content_version;
+
+        state.standardize_highlighting();
+
+        assert!(state.tabs[0].is_modified);
+        assert!(state.tabs[0].content_version > version_before, "row cache would go stale");
+    }
+
+    /// A document already in the right color must not push an undo entry —
+    /// Ctrl+Z afterwards should undo whatever the user actually did last.
+    #[test]
+    fn standardize_is_a_no_op_when_already_uniform() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![hl("marked", "yellow")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.highlight_color = "yellow".to_string();
+        let version_before = state.tabs[0].content_version;
+
+        state.standardize_highlighting();
+
+        assert_eq!(state.tabs[0].content_version, version_before);
+        assert!(!state.tabs[0].is_modified);
+    }
+
+    #[test]
+    fn shrink_size_setter_stores_half_points_and_clamps() {
+        let mut state = make_state("", 0, None);
+
+        state.set_shrink_size_points(8);
+        assert_eq!(state.small_size_half_points, 16, "stored in half-points");
+
+        // Clamped at both ends rather than walking somewhere unusable.
+        state.set_shrink_size_points(0);
+        assert_eq!(state.small_size_half_points, 8); // 4pt floor
+        state.set_shrink_size_points(999);
+        assert_eq!(state.small_size_half_points, 96); // 48pt ceiling
+    }
+
+    /// Shrink applies whatever the setting currently says, not a fixed size.
+    #[test]
+    fn shrink_uses_the_configured_size() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "shrink me".into(), size: 44, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, 9));
+        state.set_shrink_size_points(7);
+
+        state.shrink_text();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].size, 14, "7pt = 14 half-points");
+    }
+
+    #[test]
+    fn text_settings_load_from_settings_conf() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_textset_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.conf");
+        std::fs::write(
+            &path,
+            "[FORMATTING]\nhighlight_color=cyan\n\n[TEXT]\nemphasis_bold=false\n\
+             emphasis_underline=true\nemphasis_box=true\npaste_condense=true\n\
+             paste_condense_pilcrow=true\n",
+        )
+        .unwrap();
+
+        assert_eq!(load_string_setting(&path, "highlight_color", "yellow"), "cyan");
+        assert!(!load_bool_setting(&path, "emphasis_bold", true));
+        assert!(load_bool_setting(&path, "emphasis_underline", false));
+        assert!(load_bool_setting(&path, "emphasis_box", false));
+        assert!(load_bool_setting(&path, "paste_condense", false));
+        assert!(load_bool_setting(&path, "paste_condense_pilcrow", false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+
+    #[test]
+    fn paste_keeps_newlines_when_condense_is_off() {
+        let mut state = make_state("", 0, None);
+        state.paste_condense = false;
+        state.paste_text("one\ntwo");
+        assert_eq!(state.tabs[0].content, "one\ntwo");
+    }
+
+    #[test]
+    fn paste_condenses_newlines_to_spaces() {
+        let mut state = make_state("", 0, None);
+        state.paste_condense = true;
+        state.paste_text("one\ntwo");
+        assert_eq!(state.tabs[0].content, "one two");
+    }
+
+    #[test]
+    fn paste_condense_marks_newlines_with_a_pilcrow_when_asked() {
+        let mut state = make_state("", 0, None);
+        state.paste_condense = true;
+        state.paste_condense_pilcrow = true;
+        state.paste_text("one\ntwo");
+        assert_eq!(state.tabs[0].content, "one¶two");
+    }
+
+    /// The pilcrow sub-setting is meaningless on its own — condensing off means
+    /// the newline is kept, not replaced with a mark.
+    #[test]
+    fn the_pilcrow_setting_does_nothing_while_condense_is_off() {
+        let mut state = make_state("", 0, None);
+        state.paste_condense = false;
+        state.paste_condense_pilcrow = true;
+        state.paste_text("one\ntwo");
+        assert_eq!(state.tabs[0].content, "one\ntwo");
+    }
+
+    /// Paragraph integrity and condense-on-paste are opposites: turning the
+    /// first on has to switch the second off, or the ribbon claims to preserve
+    /// paragraphs while the paste collapses them.
+    #[test]
+    fn paragraph_integrity_turns_condense_off() {
+        let mut state = make_state("", 0, None);
+        state.paste_condense = true;
+
+        state.toggle_paragraph_integrity();
+
+        assert!(state.paragraph_integrity);
+        assert!(!state.paste_condense);
+    }
+
+    #[test]
+    fn turning_paragraph_integrity_back_off_leaves_condense_alone() {
+        let mut state = make_state("", 0, None);
+        state.toggle_paragraph_integrity(); // on -> condense forced off
+        state.set_paste_condense(true); // user turns it back on deliberately
+
+        state.toggle_paragraph_integrity(); // off again
+
+        assert!(!state.paragraph_integrity);
+        assert!(state.paste_condense, "toggling integrity off should not undo a deliberate choice");
+    }
+
+    /// The Pilcrows ribbon button and the settings checkbox are the same
+    /// switch, not two that can disagree.
+    #[test]
+    fn the_pilcrow_button_drives_the_pilcrow_setting() {
+        let mut state = make_state("", 0, None);
+        assert!(!state.paste_condense_pilcrow);
+
+        state.toggle_pilcrows();
+        assert!(state.pilcrows);
+        assert!(state.paste_condense_pilcrow);
+
+        state.toggle_pilcrows();
+        assert!(!state.paste_condense_pilcrow);
+    }
+
+    #[test]
+    fn emphasis_options_are_independent() {
+        let mut state = make_state("", 0, None);
+        state.set_emphasis(true, true, false);
+        assert!(state.emphasis_bold && state.emphasis_underline && !state.emphasis_box);
+
+        state.set_emphasis(false, true, true);
+        assert!(!state.emphasis_bold && state.emphasis_underline && state.emphasis_box);
     }
 
     // ── Read mode ──────────────────────────────────────────────────────────
@@ -13039,6 +14224,273 @@ mod tests {
         state.tabs[0].selection = Some((0, end));
         state.condense_selection();
         assert_eq!(state.tabs[0].content, "one two");
+    }
+
+    #[test]
+    fn test_condense_with_pilcrows_marks_each_break() {
+        let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+
+        state.condense_with_pilcrows();
+
+        assert_eq!(state.tabs[0].content, "one¶two¶three");
+        assert_eq!(state.tabs[0].paragraphs.len(), 1, "should be one paragraph now");
+    }
+
+    /// The pilcrow variant must keep per-character formatting exactly as the
+    /// plain one does — they share a core, and this pins that they stay shared.
+    #[test]
+    fn test_condense_with_pilcrows_preserves_run_formatting() {
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![run_plain("plain")],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+        ];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+
+        state.condense_with_pilcrows();
+
+        assert_eq!(state.tabs[0].content, "bold¶plain");
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(runs.iter().find(|r| r.text.contains("bold")).unwrap().bold);
+        assert!(!runs.iter().find(|r| r.text.contains("plain")).unwrap().bold);
+    }
+
+    // ── Delete tags / spoken-word counting ────────────────────────────────
+
+    fn tag_para(text: &str) -> Paragraph {
+        Paragraph {
+            runs: vec![Run {
+                text: text.into(),
+                bold: true,
+                size: 26,
+                style: Some(CardStyle::Tag),
+                ..Run::default()
+            }],
+            heading: CardStyleKind::Tag.heading_level(),
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    /// The words survive; only the formatting goes.
+    #[test]
+    fn delete_tags_strips_formatting_but_keeps_the_line() {
+        let mut state = make_state_with_paragraphs(
+            vec![para_plain("body"), tag_para("A tag"), para_plain("more body")],
+            0,
+        );
+
+        state.delete_tags();
+
+        assert_eq!(state.tabs[0].content, "body\nA tag\nmore body");
+        let tag = &state.tabs[0].paragraphs[1];
+        assert_eq!(tag.heading, 0, "the heading marker is what made it a tag");
+        assert_eq!(tag.runs[0].text, "A tag");
+        assert!(!tag.runs[0].bold);
+        assert_eq!(tag.runs[0].style, None);
+        assert_eq!(tag.runs[0].size, state.normal_text_size_half_points);
+    }
+
+    /// The marker is authoritative, exactly as it is for analytics: a
+    /// reformatted tag is still a tag.
+    #[test]
+    fn delete_tags_finds_a_marked_tag_whose_formatting_was_changed() {
+        let mut para = tag_para("odd tag");
+        para.runs[0].bold = false;
+        para.runs[0].size = 99;
+        para.heading = 0;
+        let mut state = make_state_with_paragraphs(vec![para], 0);
+
+        state.delete_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, None);
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].size, state.normal_text_size_half_points);
+    }
+
+    /// ...and a marked *cite* that happens to sit at a heading level is not a
+    /// tag. This is the misidentification the marker exists to prevent.
+    #[test]
+    fn delete_tags_leaves_a_marked_cite_alone() {
+        let mut para = tag_para("a cite");
+        para.runs[0].style = Some(CardStyle::Cite);
+        let mut state = make_state_with_paragraphs(vec![para], 0);
+
+        state.delete_tags();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].style, Some(CardStyle::Cite));
+        assert!(!state.tabs[0].is_modified, "nothing matched, so nothing changed");
+    }
+
+    #[test]
+    fn delete_tags_is_a_no_op_when_there_are_none() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("just text")], 0);
+        let version_before = state.tabs[0].content_version;
+
+        state.delete_tags();
+
+        assert_eq!(state.tabs[0].content_version, version_before);
+        assert!(!state.tabs[0].is_modified);
+    }
+
+    /// The timer's WPM readout counts what actually gets read aloud —
+    /// highlighted runs plus tags and cites — and nothing else.
+    #[test]
+    fn spoken_words_in_selection_counts_only_read_aloud_text() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![
+                run_plain("skip these four words "),
+                Run { text: "two highlighted ".into(), highlight: true, ..Run::default() },
+                Run { text: "one tag ".into(), style: Some(CardStyle::Tag), ..Run::default() },
+                Run { text: "a cite".into(), style: Some(CardStyle::Cite), ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((0, state.tabs[0].content.len()));
+
+        assert_eq!(state.spoken_words_in_selection(), Some(6));
+    }
+
+    /// `None`, not `Some(0)` — the timer shows a "select text" hint for the
+    /// first and a different message for the second.
+    #[test]
+    fn spoken_words_in_selection_distinguishes_no_selection_from_no_spoken_text() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("plain words only")], 0);
+        assert_eq!(state.spoken_words_in_selection(), None);
+
+        state.tabs[0].selection = Some((0, 16));
+        assert_eq!(state.spoken_words_in_selection(), Some(0));
+    }
+
+    // ── Select similar formatting ─────────────────────────────────────────
+
+    fn tagged(text: &str) -> Run {
+        Run { text: text.into(), style: Some(CardStyle::Tag), ..Run::default() }
+    }
+
+    /// Two paragraphs, each "TAG" + " body". Cursor inside the first tag.
+    fn tagged_doc(cursor: usize) -> AppState {
+        let para = || Paragraph {
+            runs: vec![tagged("TAG"), run_plain(" body")],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        make_state_with_paragraphs(vec![para(), para()], cursor)
+    }
+
+    #[test]
+    fn test_select_similar_formatting_matches_every_run_like_the_cursors() {
+        // "TAG body\nTAG body" — tags at 0..3 and 9..12.
+        let mut state = tagged_doc(1);
+
+        state.select_similar_formatting();
+
+        assert_eq!(state.tabs[0].similar_ranges, vec![(0, 3), (9, 12)]);
+        // Blanked so the caret selection and the matches can't both be drawn.
+        assert_eq!(state.tabs[0].selection, None);
+    }
+
+    /// With a selection, the run at its *start* is the template — and the
+    /// result replaces the selection rather than adding to it.
+    #[test]
+    fn test_select_similar_formatting_uses_the_selections_first_run() {
+        let mut state = tagged_doc(0);
+        // Spans the plain " body" into the second paragraph's tag; the start
+        // sits in the plain run, so plain text is what gets matched.
+        state.tabs[0].selection = Some((3, 11));
+
+        state.select_similar_formatting();
+
+        assert_eq!(state.tabs[0].similar_ranges, vec![(3, 8), (12, 17)]);
+    }
+
+    /// The payoff: one formatting command restyles every match at once.
+    #[test]
+    fn test_formatting_applies_to_every_similar_range() {
+        let mut state = tagged_doc(1);
+        state.select_similar_formatting();
+
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+
+        let tags: Vec<&Run> = state.tabs[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| p.runs.iter())
+            .filter(|r| r.text == "TAG")
+            .collect();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.iter().all(|r| r.bold), "both tags should be bold");
+        // Everything else untouched.
+        assert!(state.tabs[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| p.runs.iter())
+            .filter(|r| r.text == " body")
+            .all(|r| !r.bold));
+    }
+
+    /// A second click of the same button toggles off, exactly as it does for a
+    /// single selection — but only because *every* match was already bold.
+    #[test]
+    fn test_formatting_toggles_off_only_when_every_similar_range_matches() {
+        let mut state = tagged_doc(1);
+        state.select_similar_formatting();
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+
+        // One match un-bolded by hand: the next apply must bold *it*, not
+        // un-bold the other one.
+        state.tabs[0].paragraphs[1].runs[0].bold = false;
+        state.apply_formatting_to_selection(FormatOp::Bold(true));
+
+        assert!(state.tabs[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| p.runs.iter())
+            .filter(|r| r.text == "TAG")
+            .all(|r| r.bold));
+    }
+
+    #[test]
+    fn test_clear_similar_selection_drops_the_matches() {
+        let mut state = tagged_doc(1);
+        state.select_similar_formatting();
+        assert!(!state.tabs[0].similar_ranges.is_empty());
+
+        state.clear_similar_selection();
+
+        assert!(state.tabs[0].similar_ranges.is_empty());
+    }
+
+    /// Both variants need a selection, and neither should touch a selection
+    /// with no newlines in it — no undo entry for a no-op.
+    #[test]
+    fn test_condense_is_a_no_op_without_newlines() {
+        let mut state = make_state_with_paragraphs(vec![para_plain("single line")], 0);
+        state.tabs[0].selection = Some((0, 11));
+        let version_before = state.tabs[0].content_version;
+
+        state.condense_with_pilcrows();
+        state.condense_selection();
+
+        assert_eq!(state.tabs[0].content, "single line");
+        assert_eq!(state.tabs[0].content_version, version_before);
     }
 
     #[test]

@@ -333,7 +333,10 @@ pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
             && runs[i].font == runs[i + 1].font
             && runs[i].color == runs[i + 1].color
             && runs[i].box_format == runs[i + 1].box_format
-            && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve;
+            && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve
+            // Two runs that look identical but carry different markers are
+            // different things — fusing them would erase one.
+            && runs[i].style == runs[i + 1].style;
         if same_format {
             let next_text = runs[i + 1].text.clone();
             runs[i].text.push_str(&next_text);
@@ -383,6 +386,8 @@ pub enum FormatOp {
     /// Docx hex color (`"RRGGBB"`), or `None` to remove the override.
     Color(Option<String>),
     Box(bool),
+    /// The debate style marker (`Run.style`), or `None` to clear it.
+    Style(Option<crate::docx_parser::CardStyle>),
     /// Clears every character-formatting field (bold/italic/underline/
     /// highlight/font/color) back to the unformatted default, and size to
     /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
@@ -466,6 +471,50 @@ pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<
                 out.push(Run { text: "\n".to_string(), ..Run::default() });
             }
             cumulative += 1;
+        }
+    }
+    out
+}
+
+/// Everything a `Run` carries *except* its text — the thing "same formatting"
+/// compares. Built by blanking the text on a clone rather than by listing the
+/// fields, so a new `Run` field is automatically part of the comparison
+/// instead of being silently ignored until someone notices.
+///
+/// `whitespace_preserve` is blanked too: it's an XML serialisation detail
+/// derived from the text itself (`xml:space="preserve"`), not formatting the
+/// user ever chose, and leaving it in would split otherwise-identical runs
+/// apart purely over leading/trailing spaces.
+fn format_key(run: &Run) -> Run {
+    Run { text: String::new(), whitespace_preserve: false, ..run.clone() }
+}
+
+/// Byte ranges, in document order, of every run whose formatting matches
+/// `target`'s — the document-wide search behind "Select similar formatting".
+///
+/// Ranges that touch are merged, so a paragraph split into three adjacent
+/// same-format runs (which happens constantly after editing) comes back as
+/// one range rather than three. Paragraph-separating `'\n'` bytes are never
+/// included: they belong to no run, so a match either side of one stays two
+/// ranges and the newline itself is left unselected.
+pub fn ranges_matching_format(paragraphs: &[Paragraph], target: &Run) -> Vec<(usize, usize)> {
+    let key = format_key(target);
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut cumulative = 0usize;
+    let last_para_idx = paragraphs.len().saturating_sub(1);
+    for (para_idx, para) in paragraphs.iter().enumerate() {
+        for run in &para.runs {
+            let (run_start, run_end) = (cumulative, cumulative + run.text.len());
+            if run_start < run_end && format_key(run) == key {
+                match out.last_mut() {
+                    Some(prev) if prev.1 == run_start => prev.1 = run_end,
+                    _ => out.push((run_start, run_end)),
+                }
+            }
+            cumulative = run_end;
+        }
+        if para_idx != last_para_idx {
+            cumulative += 1; // the separating '\n'
         }
     }
     out
@@ -601,6 +650,7 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::FontFamily(font) => run.font = font.clone(),
         FormatOp::Color(color) => run.color = color.clone(),
         FormatOp::Box(b) => run.box_format = *b,
+        FormatOp::Style(style) => run.style = *style,
         FormatOp::ClearAll { default_size } => {
             run.bold = false;
             run.italic = false;
@@ -612,6 +662,10 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
             run.size = *default_size;
             run.font = None;
             run.color = None;
+            // Clearing formatting clears what the run *was*, not just how it
+            // looked — otherwise a cleared line still answers to "is this a
+            // Cite?" while looking like body text.
+            run.style = None;
             run.box_format = false;
         }
     }
@@ -620,7 +674,7 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::docx_parser::Run;
+    use crate::docx_parser::{CardStyle, Run};
 
     fn run(text: &str) -> Run {
         Run { text: text.to_string(), ..Run::default() }
@@ -1240,6 +1294,53 @@ mod tests {
         assert_eq!(paragraphs[0].runs[0].text, "hello");
         assert_eq!(paragraphs[0].runs[1], runs[0]);
         assert_eq!(paragraphs[0].runs[2].text, " world");
+    }
+
+    /// The document-wide search behind "Select similar formatting": every
+    /// bold run matches and nothing else does, across paragraph boundaries.
+    #[test]
+    fn test_ranges_matching_format_finds_every_matching_run() {
+        let bold = |t: &str| Run { text: t.into(), bold: true, ..Run::default() };
+        let paragraphs = vec![
+            // "tag" (0..3) | " plain" (3..9)      -> paragraph is 0..9, '\n' at 9
+            para(vec![bold("tag"), run(" plain")]),
+            // "body " (10..15) | "tag2" (15..19)
+            para(vec![run("body "), bold("tag2")]),
+        ];
+
+        let ranges = ranges_matching_format(&paragraphs, &bold("anything"));
+
+        // Text is irrelevant to the match — only formatting is compared.
+        assert_eq!(ranges, vec![(0, 3), (15, 19)]);
+    }
+
+    /// Adjacent same-format runs (which editing produces constantly) come back
+    /// as one range, but a paragraph break in between keeps them separate —
+    /// the separating '\n' belongs to no run and must stay unselected.
+    #[test]
+    fn test_ranges_matching_format_merges_neighbours_but_not_across_paragraphs() {
+        let paragraphs = vec![
+            para(vec![run("ab"), run("cd")]),
+            para(vec![run("ef")]),
+        ];
+
+        assert_eq!(
+            ranges_matching_format(&paragraphs, &run("")),
+            vec![(0, 4), (5, 7)],
+        );
+    }
+
+    /// Formatting is compared on every `Run` field except the text itself, so
+    /// a run differing in any one of them is not "similar".
+    #[test]
+    fn test_ranges_matching_format_excludes_a_run_differing_in_one_field() {
+        let paragraphs = vec![para(vec![
+            run("plain"),
+            Run { text: "big".into(), size: 48, ..Run::default() },
+            Run { text: "cited".into(), style: Some(CardStyle::Cite), ..Run::default() },
+        ])];
+
+        assert_eq!(ranges_matching_format(&paragraphs, &run("")), vec![(0, 5)]);
     }
 
     #[test]

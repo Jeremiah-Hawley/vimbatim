@@ -3,33 +3,6 @@ use gpui::*;
 
 use crate::theme::{radius, space, Palette};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ColorChoice {
-    Black,
-    Red,
-    Blue,
-    Custom(u32), // RGB as hex
-}
-
-impl ColorChoice {
-    pub fn hex_value(&self) -> u32 {
-        match self {
-            ColorChoice::Black => 0x000000,
-            ColorChoice::Red => 0xFF0000,
-            ColorChoice::Blue => 0x0000FF,
-            ColorChoice::Custom(hex) => *hex,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            ColorChoice::Black => "Black",
-            ColorChoice::Red => "Red",
-            ColorChoice::Blue => "Blue",
-            ColorChoice::Custom(_) => "Custom",
-        }
-    }
-}
 
 /// `Hsla` -> packed `0xRRGGBB`. gpui already owns the conversion math
 /// (`From<Hsla> for Rgba`); this only packs the channels.
@@ -140,21 +113,6 @@ pub fn contrast_text(hex: u32) -> u32 {
     }
 }
 
-/// One swatch row: a block of `hex` with `label` written on it in a readable
-/// color. The label is passed in rather than derived, because the same hex
-/// means different things in different menus — `0x0000FF` is "Blue" in the HL
-/// Color menu and "#0000FF" as a saved custom color.
-pub fn color_button(hex: u32, label: impl Into<SharedString>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .p(px(4.0))
-        .rounded(px(2.0))
-        .bg(rgb(hex))
-        .text_color(rgb(contrast_text(hex)))
-        .child(label.into())
-}
 
 /// The picker's visuals. Concretely typed to `FormattingRibbon` because that's
 /// the only view that owns one; generalize only if a second one appears.

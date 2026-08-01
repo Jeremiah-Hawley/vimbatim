@@ -1,4 +1,4 @@
-use crate::docx_parser::{Alignment, Run};
+use crate::docx_parser::{Alignment, CardStyle, Run};
 
 /// One copied paragraph's *paragraph-level* formatting: `(heading, alignment)`.
 ///
@@ -64,11 +64,14 @@ fn decode_alignment(v: u8) -> Option<Alignment> {
 
 fn encode_fields(r: &Run) -> String {
     format!(
-        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
         r.bold, r.italic, r.underline, r.double_underline, r.strikethrough,
         r.highlight, r.highlight_color, r.size,
         r.font.as_deref().unwrap_or(""), r.color.as_deref().unwrap_or(""),
-        r.box_format
+        r.box_format,
+        // Carried so a copied Cite or Analytic is still one after pasting —
+        // the marker is what every command identifying them reads.
+        r.style.map(|s| s.style_id()).unwrap_or(""),
     )
 }
 
@@ -102,8 +105,8 @@ pub fn decode(metadata: &str, plain_text: &str) -> Option<(Vec<Run>, Vec<Paragra
     let mut offset = 0usize;
     for record in run_section.split('\x1e') {
         let fields: Vec<&str> = record.split('\x1f').collect();
-        if fields.len() != 12 { return None; }
-        let len: usize = fields[11].parse().ok()?;
+        if fields.len() != 13 { return None; }
+        let len: usize = fields[12].parse().ok()?;
         if offset + len > plain_text.len() || !plain_text.is_char_boundary(offset)
             || !plain_text.is_char_boundary(offset + len)
         {
@@ -123,6 +126,7 @@ pub fn decode(metadata: &str, plain_text: &str) -> Option<(Vec<Run>, Vec<Paragra
             color: (!fields[9].is_empty()).then(|| fields[9].to_string()),
             box_format: fields[10].parse().ok()?,
             whitespace_preserve: false,
+            style: CardStyle::from_style_id(fields[11]),
         });
         offset += len;
     }
