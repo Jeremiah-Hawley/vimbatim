@@ -10,7 +10,8 @@ use crate::docx_parser::{Paragraph, Run};
 use crate::document_ops::paragraph_run_char_spans;
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{
-    matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, SpellTarget, VimMode,
+    matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, Pane, SpellTarget,
+    VimMode,
 };
 use crate::theme::{palette, Palette, ThemeMode};
 
@@ -75,7 +76,7 @@ const SCROLL_MARGIN_LINES: f32 = 6.0;
 /// request. "DejaVu Sans Mono" ships with separate Book/Bold/Oblique/Bold
 /// Oblique faces under one family name on essentially all Linux/WSL
 /// systems, giving `find_best_match` real candidates to choose between.
-const FONT_FAMILY: &str = "DejaVu Sans Mono";
+pub(crate) const FONT_FAMILY: &str = "DejaVu Sans Mono";
 
 /// Caches the word-wrapped row table (and the intermediate data it's built
 /// from — split lines, per-line chars, line byte offsets, and the cloned
@@ -113,13 +114,52 @@ struct RowCache {
     wrap_to_display: Rc<Vec<usize>>,
 }
 
+/// The scroll arithmetic behind reading mode's Left/Right paging, split out
+/// from `TextEditor::page_scroll` so it is testable without a laid-out view.
+///
+/// `current` and the result are GPUI scroll offsets: `<= 0`, growing more
+/// negative further down the document. `max_y` is the positive maximum scroll
+/// distance. Returns `None` when the page would not move — already at that end.
+fn page_scroll_offset(
+    current: f32,
+    viewport_h: f32,
+    row_height: f32,
+    max_y: f32,
+    forward: bool,
+) -> Option<f32> {
+    // Whole rows only: a raw pixel jump lands mid-row and slices the line
+    // straddling the fold, scrolling half of it past unread. At least one row
+    // so a viewport shorter than a single line still advances.
+    let rows_per_page = (viewport_h / row_height).floor().max(1.0);
+    let delta = rows_per_page * row_height;
+    let target = if forward { current - delta } else { current + delta };
+    let clamped = target.clamp(-max_y.max(0.0), 0.0);
+    ((clamped - current).abs() >= 0.5).then_some(clamped)
+}
+
 /// Pure cache-validity check, pulled out of `render()` so it's unit-testable
 /// without a GPUI context — the one part of the row cache that isn't just
-/// GPUI interaction glue.
-fn row_cache_is_valid(cache: &RowCache, tab_id: usize, content_version: u64, viewport_width: f32, zoom: f32) -> bool {
+/// GPUI interaction glue. `ignore_width` optionally accepts a cache built at a
+/// different width.
+///
+/// `ignore_width` is set only while the split divider is being dragged
+/// (`AppState.split_dragging`). A width change normally *must* invalidate —
+/// the wrap points depend on it — but rebuilding costs a full-document re-wrap
+/// per pane per mouse-move, which locks the app up on a large file. Reusing
+/// the stale tables leaves the text wrapped at the pre-drag width for the
+/// duration of the drag; releasing clears the flag and the next render wraps
+/// correctly, once.
+fn row_cache_is_valid_for(
+    cache: &RowCache,
+    tab_id: usize,
+    content_version: u64,
+    viewport_width: f32,
+    zoom: f32,
+    ignore_width: bool,
+) -> bool {
     cache.tab_id == tab_id
         && cache.content_version == content_version
-        && cache.viewport_width_bits == viewport_width.to_bits()
+        && (ignore_width || cache.viewport_width_bits == viewport_width.to_bits())
         && cache.zoom_bits == zoom.to_bits()
 }
 
@@ -202,6 +242,11 @@ pub struct TextEditor {
     /// hit clones a pointer, not the ranges. Cleared wholesale past
     /// `SPELL_CACHE_MAX_LINES` — see `spell_ranges_cached`.
     spell_cache: Rc<RefCell<SpellCache>>,
+    /// Which pane this editor paints. Two `TextEditor` entities exist while
+    /// the split is open (`notes/split_view_plan.md`); every tab read below
+    /// goes through `tab_index` rather than `AppState.active_tab`, so each one
+    /// shows its own document.
+    pane: Pane,
 }
 
 /// The spellcheck memo plus the one thing besides line text that its results
@@ -264,6 +309,22 @@ fn spell_ranges_cached(
 
 impl TextEditor {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        Self::for_pane(state, Pane::Primary, cx)
+    }
+
+    /// Resolves this editor's tab. `None` means the pane has nothing to show —
+    /// the secondary pane while the split is closed.
+    ///
+    /// Every tab read in this file goes through here. After the split-view
+    /// refactor there are deliberately *no* remaining `active_tab` reads in
+    /// this file: a missed one would silently paint the other pane's document
+    /// with no error, so "zero matches" is the greppable invariant that
+    /// replaces checking by eye.
+    fn tab_index(&self, cx: &App) -> Option<usize> {
+        self.state.read(cx).pane_tab_index(self.pane)
+    }
+
+    pub fn for_pane(state: Entity<AppState>, pane: Pane, cx: &mut Context<Self>) -> Self {
         /*
          * Creates the text editor and registers a focus handle. Focus is claimed
          * lazily the first time the user clicks inside the editor.
@@ -287,6 +348,7 @@ impl TextEditor {
             tab_scroll_offsets: std::collections::HashMap::new(),
             last_seen_active_tab: None,
             spell_cache: Rc::new(RefCell::new(SpellCache::default())),
+            pane,
         }
     }
 
@@ -363,7 +425,7 @@ impl TextEditor {
     /// happen on the very first frame.
     fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32)> {
         let state = self.state.read(cx);
-        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let _ = state;
 
@@ -404,17 +466,19 @@ impl TextEditor {
         cx: &Context<Self>,
         viewport_width: f32,
     ) -> (Rc<Vec<(usize, usize, usize)>>, Rc<Vec<Option<usize>>>, Rc<Vec<usize>>) {
+        let idx = self.tab_index(cx);
         let state = self.state.read(cx);
-        let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
-        let content_version = state.tabs.get(state.active_tab).map(|t| t.content_version).unwrap_or(0);
+        let dragging = state.split_dragging;
+        let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
+        let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
         let zoom = state.zoom;
         if let Some(cache) = self.row_cache.as_ref() {
-            if row_cache_is_valid(cache, tab_id, content_version, viewport_width, zoom) {
+            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, dragging) {
                 return (cache.rows.clone(), cache.display_to_wrap.clone(), cache.wrap_to_display.clone());
             }
         }
-        let content = state.active_content().to_string();
-        let paragraphs = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let content = state.pane_content(self.pane).to_string();
+        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let lines = document_lines(&content);
         let rows = Rc::new(visual_rows_for_viewport(
@@ -432,6 +496,41 @@ impl TextEditor {
     /// an already-visible line with no scroll at all reads as "nothing
     /// happened" even though the cursor did move, which defeats the point
     /// of clicking a heading to jump to it.
+    /// Reading mode's Left/Right paging: moves the viewport by exactly one
+    /// screenful of whole rows.
+    ///
+    /// Advancing by `floor(viewport / row_height)` rows rather than by the raw
+    /// viewport height is what makes the two guarantees hold together. A raw
+    /// pixel jump lands mid-row, so the line straddling the fold would be
+    /// sliced — half of it scrolled past unread. Rounding down to whole rows
+    /// means the next page starts exactly at the first row that wasn't fully
+    /// visible: nothing is skipped, and nothing fully-read is shown twice. A
+    /// row that was only *partially* visible at the bottom reappears whole at
+    /// the top, which is the safe direction to err.
+    ///
+    /// Returns false when there is nothing to scroll (not laid out yet, or
+    /// already at the end in that direction), so the caller can let the key
+    /// fall through to its normal meaning.
+    fn page_scroll(&self, forward: bool, cx: &Context<Self>) -> bool {
+        let zoom = self.state.read(cx).zoom;
+        let row_height = LINE_HEIGHT_PX * zoom;
+        if row_height <= 0.0 {
+            return false;
+        }
+        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+        if viewport_h <= 0.0 {
+            return false;
+        }
+        let offset = self.scroll_handle.offset();
+        let max_y = self.scroll_handle.max_offset().y.as_f32();
+        let current = offset.y.as_f32();
+        let Some(next) = page_scroll_offset(current, viewport_h, row_height, max_y, forward) else {
+            return false; // already at that end
+        };
+        self.scroll_handle.set_offset(point(offset.x, px(next)));
+        true
+    }
+
     fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
         let Some((cursor_top, viewport_h, max_y, offset_x, zoom)) = self.cursor_scroll_geometry(cx) else { return };
         let target_visible_top = cursor_top - (viewport_h - LINE_HEIGHT_PX * zoom) / 2.0;
@@ -458,12 +557,13 @@ impl TextEditor {
          * `extend_selection_to_line_col` (Shift+Up/Down), mirroring every
          * other motion's plain/extending pair.
          */
+        let idx = self.tab_index(cx);
         let state = self.state.read(cx);
-        let content = state.active_content().to_string();
-        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let content = state.pane_content(self.pane).to_string();
+        let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
-        let paragraphs = state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let _ = state;
 
         let lines = document_lines(&content);
@@ -518,6 +618,27 @@ impl TextEditor {
         }
 
         let ks = &event.keystroke;
+
+        // Reading mode: Left/Right page the viewport instead of moving the
+        // caret. Only for unmodified presses, so Shift-select and any
+        // Ctrl/Cmd combination keep their normal meaning; and only when the
+        // scroll actually moved, so at the end of the document the key still
+        // falls through to ordinary cursor movement.
+        let plain_arrow = !ks.modifiers.shift && !ks.modifiers.control && !ks.modifiers.platform;
+        if self.state.read(cx).read_mode && plain_arrow {
+            let forward = match ks.key.as_str() {
+                "right" => Some(true),
+                "left" => Some(false),
+                _ => None,
+            };
+            if let Some(forward) = forward {
+                if self.page_scroll(forward, cx) {
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), cx);
     }
 
@@ -652,8 +773,9 @@ impl TextEditor {
         // doc comment) — everything else it returns true for is fully
         // handled here and shouldn't reach the plain-editor logic below.
         let (vim_enabled, vim_mode) = {
+            let idx = self.tab_index(cx);
             let state = self.state.read(cx);
-            let mode = state.tabs.get(state.active_tab).map(|t| t.vim_mode).unwrap_or_default();
+            let mode = idx.and_then(|i| state.tabs.get(i)).map(|t| t.vim_mode).unwrap_or_default();
             (state.vim_enabled, mode)
         };
         if vim_enabled {
@@ -710,11 +832,12 @@ impl TextEditor {
                     && shift && matches!(key, "h" | "m" | "l")
                 {
                     let zoom = self.state.read(cx).zoom;
-                    let content = self.state.read(cx).active_content().to_string();
+                    let content = self.state.read(cx).pane_content(self.pane).to_string();
+                    let pane_idx = self.tab_index(cx);
                     let (paragraphs, normal_size_px) = {
                         let st = self.state.read(cx);
                         (
-                            st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default(),
+                            pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default(),
                             st.normal_text_size_half_points as f32 / 2.0,
                         )
                     };
@@ -913,8 +1036,11 @@ impl Render for TextEditor {
         // so Enter/keys silently stop reaching `handle_key_down` until the
         // user clicks into the editor again. Honor and clear the request
         // here, once per frame, mirroring `pending_scroll_to_cursor` below.
-        if self.state.read(cx).pending_focus_editor {
-            self.state.update(cx, |state, _cx| state.pending_focus_editor = false);
+        // Only when *this* pane is the one being asked for — with two editors
+        // mounted, an unqualified flag lets whichever renders first steal the
+        // keyboard from the pane the user actually acted on.
+        if self.state.read(cx).pending_focus_editor == Some(self.pane) {
+            self.state.update(cx, |state, _cx| state.pending_focus_editor = None);
             self.focus_handle.clone().focus(window, cx);
         }
 
@@ -924,8 +1050,9 @@ impl Render for TextEditor {
         // before laying out this frame — always centering (not the regular
         // edge-triggered scroll_to_cursor) so clicking an already-visible
         // heading still visibly does something.
+        let pane_idx = self.tab_index(cx);
         let should_scroll = self.state.update(cx, |state, _cx| {
-            let active = state.active_tab;
+            let active = pane_idx.unwrap_or(usize::MAX);
             if let Some(tab) = state.tabs.get_mut(active) {
                 if tab.pending_scroll_to_cursor {
                     tab.pending_scroll_to_cursor = false;
@@ -948,7 +1075,7 @@ impl Render for TextEditor {
         // offset under its old id, then restore the incoming tab's saved
         // offset — or `Point::default()` (scrolled to top) if this is the
         // first time that tab has ever been active.
-        let active_tab_id = self.state.read(cx).tabs.get(self.state.read(cx).active_tab).map(|t| t.id);
+        let active_tab_id = self.tab_index(cx).and_then(|i| self.state.read(cx).tabs.get(i)).map(|t| t.id);
         if self.last_seen_active_tab != active_tab_id {
             if let Some(prev_id) = self.last_seen_active_tab {
                 self.tab_scroll_offsets.insert(prev_id, self.scroll_handle.offset());
@@ -958,6 +1085,7 @@ impl Render for TextEditor {
             self.last_seen_active_tab = active_tab_id;
         }
 
+        let idx = pane_idx;
         let state = self.state.read(cx);
         let zoom = state.zoom;
         // The editor pane is themed like the rest of the chrome — every color
@@ -968,38 +1096,39 @@ impl Render for TextEditor {
         let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-        let tab_id = state.tabs.get(state.active_tab).map(|t| t.id).unwrap_or(usize::MAX);
-        let content_version = state.tabs.get(state.active_tab).map(|t| t.content_version).unwrap_or(0);
+        let dragging = state.split_dragging;
+        let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
+        let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
         let cache_valid = self
             .row_cache
             .as_ref()
-            .is_some_and(|c| row_cache_is_valid(c, tab_id, content_version, viewport_width, zoom));
+            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, dragging));
         // Only pay for the full content/paragraphs clone on a cache miss.
         // `document_lines`/word-wrap need `cx` free of `state`'s borrow (see
         // `let _ = state;` below), so the actual wrap happens further down —
         // this just captures the owned data a miss needs before that borrow ends.
         let fresh_content_and_paragraphs = (!cache_valid).then(|| {
             (
-                state.active_content().to_string(),
-                state.tabs.get(state.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default(),
+                state.pane_content(self.pane).to_string(),
+                state.tabs.get(idx.unwrap_or(usize::MAX)).map(|t| t.paragraphs.clone()).unwrap_or_default(),
             )
         });
         let is_new_tab = state
             .tabs
-            .get(state.active_tab)
-            .map(|t| t.file_path.is_none() && t.content.is_empty())
+            .get(idx.unwrap_or(usize::MAX))
+            .map(|t| t.is_blank_new_tab())
             .unwrap_or(true);
         let show_unsupported_banner = state
             .tabs
-            .get(state.active_tab)
+            .get(idx.unwrap_or(usize::MAX))
             .map(|t| t.has_unsupported_blocks && !t.unsupported_banner_dismissed)
             .unwrap_or(false);
-        let (cursor_line, cursor_col) = state.cursor_line_col();
+        let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         // Normalise (anchor, focus) into (min, max) once so per-line lookups
         // below don't each have to re-derive the ordering.
         let selection = state
             .tabs
-            .get(state.active_tab)
+            .get(idx.unwrap_or(usize::MAX))
             .and_then(|t| t.selection)
             .map(|(a, f)| (a.min(f), a.max(f)));
         // Mode indicator text. Deviates from spec 5.1's literal "nothing
@@ -1008,7 +1137,7 @@ impl Render for TextEditor {
         // entirely", both of which otherwise render an identical blank
         // indicator strip.
         let mode_indicator_text: Option<&'static str> = if state.vim_enabled {
-            state.tabs.get(state.active_tab).map(|t| match t.vim_mode {
+            idx.and_then(|i| state.tabs.get(i)).map(|t| match t.vim_mode {
                 VimMode::Normal => "-- NORMAL --",
                 VimMode::Insert => "-- INSERT --",
                 VimMode::Visual => "-- VISUAL --",
@@ -1048,7 +1177,7 @@ impl Render for TextEditor {
         // error line.
         let pending_command_text: Option<String> = state
             .tabs
-            .get(state.active_tab)
+            .get(idx.unwrap_or(usize::MAX))
             .map(|t| {
                 let mut buf = if t.vim_mode == VimMode::Command {
                     format!(":{}", t.vim_command_line)
@@ -1194,8 +1323,13 @@ impl Render for TextEditor {
                                 .px(px(8.0))
                                 .child("×")
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    // Resolved at click time, not captured from
+                                    // render: this listener outlives the frame
+                                    // and the pane's tab can change meanwhile.
+                                    let pane = this.pane;
                                     this.state.update(cx, |s, cx| {
-                                        if let Some(tab) = s.tabs.get_mut(s.active_tab) {
+                                        let i = s.pane_tab_index(pane);
+                                        if let Some(tab) = i.and_then(|i| s.tabs.get_mut(i)) {
                                             tab.unsupported_banner_dismissed = true;
                                         }
                                         cx.notify();
@@ -1216,6 +1350,11 @@ impl Render for TextEditor {
             // cursor to the clicked position (spec 4.1 click-to-position).
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
+                // Claim the pane before anything reads a tab: `focus_pane`
+                // repoints `active_tab`, and every state call below (cursor
+                // placement, selection) resolves through it.
+                let pane = this.pane;
+                this.state.update(cx, |s, cx| { s.focus_pane(pane); cx.notify(); });
                 this.focus_handle.clone().focus(window, cx);
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
@@ -1223,7 +1362,7 @@ impl Render for TextEditor {
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
                 let paragraphs = {
                     let st = this.state.read(cx);
-                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
@@ -1236,7 +1375,7 @@ impl Render for TextEditor {
                     // reuse that single call instead of re-deriving the byte
                     // position themselves.
                     state.set_cursor_from_line_col(line, col);
-                    let byte_pos = state.tabs.get(state.active_tab).map(|t| t.cursor).unwrap_or(0);
+                    let byte_pos = pane_idx.and_then(|i| state.tabs.get(i)).map(|t| t.cursor).unwrap_or(0);
                     match click_count {
                         2 => state.select_word_at(byte_pos),
                         3 => state.select_line_at(byte_pos),
@@ -1258,10 +1397,12 @@ impl Render for TextEditor {
             // that ever bites.
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                 cx.stop_propagation();
+                let pane = this.pane;
+                this.state.update(cx, |s, cx| { s.focus_pane(pane); cx.notify(); });
                 this.focus_handle.clone().focus(window, cx);
                 let has_selection = {
                     let st = this.state.read(cx);
-                    st.tabs.get(st.active_tab).is_some_and(|t| t.selection.is_some())
+                    pane_idx.and_then(|i| st.tabs.get(i)).is_some_and(|t| t.selection.is_some())
                 };
                 // Resolve the click to a (line, col) whether or not there's a
                 // selection — without a selection it also moves the caret,
@@ -1272,7 +1413,7 @@ impl Render for TextEditor {
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
                 let paragraphs = {
                     let st = this.state.read(cx);
-                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
@@ -1288,7 +1429,7 @@ impl Render for TextEditor {
                     if !st.spellcheck_enabled {
                         None
                     } else {
-                        let content = st.tabs.get(st.active_tab).map(|t| t.content.clone()).unwrap_or_default();
+                        let content = pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.content.clone()).unwrap_or_default();
                         let lines = document_lines(&content);
                         lines.get(line).and_then(|text| {
                             crate::spellcheck::misspelled_ranges(text, &st.user_dictionary)
@@ -1331,7 +1472,7 @@ impl Render for TextEditor {
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
                 let paragraphs = {
                     let st = this.state.read(cx);
-                    st.tabs.get(st.active_tab).map(|t| t.paragraphs.clone()).unwrap_or_default()
+                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
@@ -1628,7 +1769,7 @@ impl Render for TextEditor {
                     .state
                     .read(cx)
                     .tabs
-                    .get(self.state.read(cx).active_tab)
+                    .get(self.tab_index(cx).unwrap_or(usize::MAX))
                     .is_some_and(|t| t.selection.is_some());
                 el.child(render_context_menu(menu, p, has_selection, &self.state))
             })
@@ -2776,7 +2917,7 @@ mod tests {
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
-        row_cache_is_valid, RowCache, slot_count_for_paragraph, expand_rows_for_display,
+        page_scroll_offset, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache,
     };
     use std::cell::RefCell;
@@ -3688,6 +3829,44 @@ mod tests {
         }
     }
 
+    // ── read mode paging ─────────────────────────────────────────────────────
+
+    /// The two guarantees together: a page advances by whole rows only, so
+    /// nothing is skipped, and by a *full* screenful of them, so nothing
+    /// fully-read repeats.
+    #[test]
+    fn test_page_scroll_advances_by_whole_rows() {
+        // 100px viewport, 24px rows -> 4 whole rows fit (96px), not 100.
+        assert_eq!(page_scroll_offset(0.0, 100.0, 24.0, 1000.0, true), Some(-96.0));
+        // ...and back up by the same amount.
+        assert_eq!(page_scroll_offset(-96.0, 100.0, 24.0, 1000.0, false), Some(0.0));
+    }
+
+    #[test]
+    fn test_page_scroll_stops_at_the_document_ends() {
+        // Already at the top: nothing above to page to.
+        assert_eq!(page_scroll_offset(0.0, 100.0, 24.0, 1000.0, false), None);
+        // Already at the bottom.
+        assert_eq!(page_scroll_offset(-1000.0, 100.0, 24.0, 1000.0, true), None);
+        // A partial page remaining still moves, clamped to the end rather
+        // than overshooting into blank space.
+        assert_eq!(page_scroll_offset(-950.0, 100.0, 24.0, 1000.0, true), Some(-1000.0));
+    }
+
+    /// A viewport shorter than one row must still advance, or the keys lock up.
+    #[test]
+    fn test_page_scroll_advances_at_least_one_row() {
+        assert_eq!(page_scroll_offset(0.0, 10.0, 24.0, 1000.0, true), Some(-24.0));
+    }
+
+    /// Rows scale with zoom, so a page must too — otherwise zoomed-in text
+    /// would page by more lines than are on screen and skip content.
+    #[test]
+    fn test_page_scroll_follows_zoom() {
+        let zoomed_row = 24.0 * 2.0;
+        assert_eq!(page_scroll_offset(0.0, 100.0, zoomed_row, 1000.0, true), Some(-96.0));
+    }
+
     // ── spell cache ──────────────────────────────────────────────────────────
 
     #[test]
@@ -3734,7 +3913,7 @@ mod tests {
     #[test]
     fn test_row_cache_is_valid_when_everything_matches() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(row_cache_is_valid(&cache, 1, 5, 800.0, 1.0));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, false));
     }
 
     #[test]
@@ -3743,13 +3922,33 @@ mod tests {
         // content_version/width/zoom — tab_id must be checked, or a tab
         // switch could serve another tab's stale wrapped rows.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid(&cache, 2, 5, 800.0, 1.0));
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, false));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_content_version_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid(&cache, 1, 6, 800.0, 1.0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, false));
+    }
+
+    /// The divider-drag freeze fix: a width change normally invalidates, but
+    /// while dragging the stale tables are reused rather than paying a
+    /// full-document re-wrap per pane per mouse-move.
+    #[test]
+    fn test_row_cache_survives_a_width_change_while_the_divider_is_dragging() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, false));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, true));
+    }
+
+    /// Dragging must not make the cache accept a *different document* or a
+    /// stale edit — only a different width.
+    #[test]
+    fn test_dragging_still_invalidates_on_content_or_tab_change() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, true), "wrong tab accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, true), "stale content accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, true), "stale zoom accepted");
     }
 
     #[test]
@@ -3757,13 +3956,13 @@ mod tests {
         // A window resize must invalidate the cache — the old wrap width no
         // longer matches where lines should actually break.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid(&cache, 1, 5, 801.0, 1.0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, false));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_zoom_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid(&cache, 1, 5, 800.0, 1.25));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, false));
     }
 
     // ── slot_count_for_paragraph / expand_rows_for_display ────────────────────

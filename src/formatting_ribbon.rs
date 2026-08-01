@@ -46,6 +46,7 @@ pub enum FormatAction {
     Wikifi,
     AlignLeft,
     AlignCenter,
+    AlignRight,
     Body,
     PocketCite,
     HighlightYellow,
@@ -89,6 +90,10 @@ struct RibbonBtn {
     label: &'static str,
     action: FormatAction,
     tone: RibbonTone,
+    /// When set, the button paints this icon instead of `label` and shrinks
+    /// to icon width. `label` is still carried — it is what the existing click
+    /// handler logs, and it is the accessible name.
+    icon: Option<RibbonIcon>,
 }
 
 impl RibbonBtn {
@@ -97,6 +102,7 @@ impl RibbonBtn {
             label,
             action,
             tone: RibbonTone::Primary,
+            icon: None,
         }
     }
 
@@ -105,8 +111,46 @@ impl RibbonBtn {
             label,
             action,
             tone: RibbonTone::Secondary,
+            icon: None,
         }
     }
+
+    /// A compact icon button.
+    fn icon(label: &'static str, action: FormatAction, icon: RibbonIcon) -> Self {
+        Self {
+            label,
+            action,
+            tone: RibbonTone::Secondary,
+            icon: Some(icon),
+        }
+    }
+}
+
+/// The marks a ribbon button can paint instead of a text label.
+///
+/// Drawn from divs rather than glyphs — there is no icon font or SVG asset in
+/// this project, and the Unicode characters that come closest (alignment
+/// marks, `•`, `1.`) render inconsistently across platform UI fonts. This app
+/// has already been bitten once by assuming a font name resolves
+/// (`text_editor.rs`'s `FONT_FAMILY` fix), so shapes that are guaranteed to
+/// paint are worth the handful of extra lines.
+#[derive(Clone, Copy)]
+enum RibbonIcon {
+    /// Four stacked bars justified to the alignment, as in Word.
+    Align(Alignment),
+    /// Three rows, each a dot and a bar.
+    BulletList,
+    /// Three rows, each a small numeral and a bar.
+    NumberedList,
+    /// A single letterform carrying the formatting it applies — `B` in bold,
+    /// `I` italic, `U` underlined, `S` struck through. Unlike the marks above
+    /// these are real text: they are plain ASCII letters styled by the very
+    /// property the button toggles, so there is no font-coverage risk and the
+    /// icon can't drift out of sync with what the button does.
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
 }
 
 #[derive(Clone, Copy)]
@@ -140,8 +184,21 @@ pub struct FormattingRibbon {
     /// `custom_hex_buffer`'s arrangement.
     font_size_buffer: Option<String>,
     font_size_focus: FocusHandle,
+    /// What the user has typed into the Switch Tab menu's search box. Empty
+    /// means "show every open tab". Cleared whenever that menu opens.
+    tab_search_buffer: String,
+    tab_search_focus: FocusHandle,
     /// `pub(crate)` so `color_picker::render_picker`'s listeners can reach it.
     pub(crate) picker: crate::color_picker::CustomColorPicker,
+    /// `AppState.read_mode` as of the last render, so the transition into it
+    /// can be acted on once. Same check-and-update-per-frame idiom as
+    /// `TextEditor.last_seen_active_tab`.
+    last_seen_read_mode: bool,
+    /// The per-group collapse state read mode replaced, restored on the way
+    /// out. Collapsing is a one-shot action on entering rather than an
+    /// override held for the duration, so a group can still be expanded while
+    /// reading — but the user's own layout shouldn't be lost to have done so.
+    collapsed_before_read_mode: Option<std::collections::HashMap<&'static str, bool>>,
 }
 
 impl FormattingRibbon {
@@ -163,7 +220,11 @@ impl FormattingRibbon {
             custom_color_focus: cx.focus_handle(),
             font_size_buffer: None,
             font_size_focus: cx.focus_handle(),
+            tab_search_buffer: String::new(),
+            tab_search_focus: cx.focus_handle(),
             picker: crate::color_picker::CustomColorPicker::new(),
+            last_seen_read_mode: false,
+            collapsed_before_read_mode: None,
         }
     }
 
@@ -174,11 +235,113 @@ impl FormattingRibbon {
         cx.notify();
     }
 
+    /// Paints a `RibbonIcon` at roughly 14x16px — the size Word uses for the
+    /// same marks at this button height.
+    fn render_icon(icon: RibbonIcon, color: u32) -> AnyElement {
+        match icon {
+            RibbonIcon::Align(alignment) => {
+                let justify = |d: Div| match alignment {
+                    Alignment::Center => d.items_center(),
+                    Alignment::Right => d.items_end(),
+                    // Justify has no button of its own; it falls in with Left
+                    // rather than silently painting as something else.
+                    _ => d.items_start(),
+                };
+                justify(div().flex().flex_col())
+                    .w(px(14.0))
+                    .gap(px(2.0))
+                    .children([14.0_f32, 9.0, 14.0, 9.0].into_iter().enumerate().map(|(i, w)| {
+                        div()
+                            .id(ElementId::named_usize("align-icon-bar", i))
+                            .h(px(2.0))
+                            .w(px(w))
+                            .bg(rgb(color))
+                    }))
+                    .into_any_element()
+            }
+            RibbonIcon::Bold
+            | RibbonIcon::Italic
+            | RibbonIcon::Underline
+            | RibbonIcon::Strikethrough => {
+                let letter = match icon {
+                    RibbonIcon::Bold => "B",
+                    RibbonIcon::Italic => "I",
+                    RibbonIcon::Underline => "U",
+                    _ => "S",
+                };
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(color))
+                    // Without an explicit real family name the bold and
+                    // italic requests below are silently dropped: GPUI
+                    // resolves the default UI font to a single face, and
+                    // `find_best_match` short-circuits past weight/style
+                    // selection whenever only one face is loaded. Same bug,
+                    // same fix as `text_editor.rs`'s FONT_FAMILY — reusing
+                    // that constant keeps the choice in one place. Applied to
+                    // all four letters so the row doesn't mix typefaces.
+                    .font_family(crate::text_editor::FONT_FAMILY)
+                    .when(matches!(icon, RibbonIcon::Bold), |d| d.font_weight(FontWeight::BOLD))
+                    .when(matches!(icon, RibbonIcon::Italic), |d| d.italic())
+                    .when(matches!(icon, RibbonIcon::Underline), |d| d.underline())
+                    // GPUI does paint this (`text_system/line.rs` calls
+                    // `window.paint_strikethrough`) — see the note in
+                    // `text_editor.rs::apply_run_style`, which still claims
+                    // otherwise for document text.
+                    .when(matches!(icon, RibbonIcon::Strikethrough), |d| d.line_through())
+                    .child(letter)
+                    .into_any_element()
+            }
+            RibbonIcon::BulletList | RibbonIcon::NumberedList => {
+                let numbered = matches!(icon, RibbonIcon::NumberedList);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .children((0..3).map(|row| {
+                        let marker = if numbered {
+                            // `line_height` pins the numeral to the row height
+                            // so three of them still fit inside the button —
+                            // without it each row grows to the font's natural
+                            // line box and the icon overflows.
+                            div()
+                                .w(px(4.0))
+                                .flex()
+                                .justify_center()
+                                .text_size(px(6.0))
+                                .line_height(px(4.0))
+                                .text_color(rgb(color))
+                                .child(format!("{}", row + 1))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .w(px(4.0))
+                                .flex()
+                                .justify_center()
+                                .child(div().w(px(3.0)).h(px(3.0)).rounded_full().bg(rgb(color)))
+                                .into_any_element()
+                        };
+                        div()
+                            .id(ElementId::named_usize("list-icon-row", row))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(2.0))
+                            .h(px(4.0))
+                            .child(marker)
+                            .child(div().w(px(9.0)).h(px(2.0)).bg(rgb(color)))
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
     fn make_button(
         &self,
         label: &'static str,
         action: FormatAction,
         tone: RibbonTone,
+        icon: Option<RibbonIcon>,
         p: Palette,
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
@@ -231,14 +394,19 @@ impl FormattingRibbon {
                 ),
             };
 
+        // An icon button is sized to its mark, not to the label minimum every
+        // text button uses — three of them side by side then occupy no more
+        // width than the two-button row above them, which is what keeps the
+        // DOCUMENT group from getting wider.
+        let is_icon = icon.is_some();
         let button = div()
             .id(ElementId::named_usize("ribbon-btn", action_id))
             .flex()
             .items_center()
             .justify_center()
-            .min_w(px(min_width))
+            .when(!is_icon, |d| d.min_w(px(min_width)).px(px(space::SM)))
+            .when(is_icon, |d| d.w(px(38.0)))
             .h(px(24.0))
-            .px(px(space::SM))
             .rounded(px(radius::MD))
             .bg(rgb(bg))
             .text_color(rgb(text))
@@ -336,6 +504,7 @@ impl FormattingRibbon {
                         }
                         FormatAction::DocMenu
                         | FormatAction::CardMenu
+                        | FormatAction::SwitchTabMenu
                         | FormatAction::FontFamily
                         | FormatAction::FontColor
                         | FormatAction::HighlightColorSelect => {
@@ -348,6 +517,8 @@ impl FormattingRibbon {
                             } else {
                                 this.open_menu = Some(act);
                                 this.editing_custom = None;
+                                // Every open starts from the full tab list.
+                                this.tab_search_buffer.clear();
                             }
                             cx.notify();
                         }
@@ -387,17 +558,13 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::SwitchTabMenu => {
-                            st.update(cx, |state, _cx| {
-                                let tabs = state.get_tab_titles();
-                                println!("Switch Tab Menu: {:?}", tabs);
-                                // UI for selecting tab would go here
-                            });
-                            cx.notify();
-                        }
                         FormatAction::WindowSplit => {
                             st.update(cx, |state, _cx| {
-                                state.toggle_split_view();
+                                if state.split_view {
+                                    state.close_split();
+                                } else {
+                                    state.open_split();
+                                }
                             });
                             cx.notify();
                         }
@@ -432,12 +599,15 @@ impl FormattingRibbon {
                             st.update(cx, |state, _cx| state.apply_cite_style());
                             cx.notify();
                         }
-                        // Align Left / Align Center: set the current line's
+                        // Align Left / Center / Right: set the current line's
                         // alignment. Not a toggle — see AppState::apply_line_alignment.
-                        FormatAction::AlignLeft | FormatAction::AlignCenter => {
+                        FormatAction::AlignLeft
+                        | FormatAction::AlignCenter
+                        | FormatAction::AlignRight => {
                             let alignment = match act {
                                 FormatAction::AlignLeft => Alignment::Left,
                                 FormatAction::AlignCenter => Alignment::Center,
+                                FormatAction::AlignRight => Alignment::Right,
                                 _ => unreachable!(),
                             };
                             st.update(cx, |state, _cx| state.apply_line_alignment(alignment));
@@ -461,7 +631,10 @@ impl FormattingRibbon {
                     }
                 })
             })
-            .child(label);
+            .map(|d| match icon {
+                Some(icon) => d.child(Self::render_icon(icon, text)),
+                None => d.child(label),
+            });
 
         // The menu is a child of its own button, and `anchored()` with no
         // `.position()` resolves to the element's own laid-out origin (gpui's
@@ -670,6 +843,7 @@ impl FormattingRibbon {
                 p,
                 cx,
             ),
+            FormatAction::SwitchTabMenu => self.switch_tab_rows(p, cx),
             FormatAction::CardMenu => Self::text_menu_rows(
                 "Card Menu",
                 &[
@@ -816,6 +990,167 @@ impl FormattingRibbon {
             .shadow_lg()
             .children(rows)
             .into_any_element()
+    }
+
+    /// The Switch Tab dropdown: a search box over the open tabs' titles, then
+    /// a scrollable list of whatever still matches. Clicking a row activates
+    /// that tab.
+    ///
+    /// Rows carry the tab's stable `id`, not its position in the filtered
+    /// list — filtering reorders nothing but does remove entries, so a
+    /// positional index would activate the wrong document as soon as the
+    /// search box had anything in it.
+    fn switch_tab_rows(&self, p: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let query = self.tab_search_buffer.to_lowercase();
+        let (tabs, active_tab) = {
+            let state = self.state.read(cx);
+            let tabs: Vec<(usize, usize, String)> = state
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(idx, t)| (idx, t.id, t.title.clone()))
+                .filter(|(_, _, title)| query.is_empty() || title.to_lowercase().contains(&query))
+                .collect();
+            (tabs, state.active_tab)
+        };
+
+        let typed = self.tab_search_buffer.clone();
+        let search_box = div()
+            .id("switch-tab-search")
+            .track_focus(&self.tab_search_focus)
+            .on_key_down(cx.listener(Self::handle_tab_search_key))
+            .w_full()
+            .h(px(24.0))
+            .px(px(space::SM))
+            .mb(px(space::XXS))
+            .flex()
+            .items_center()
+            .rounded(px(radius::SM))
+            .bg(rgb(p.editor_bg))
+            .border_1()
+            .border_color(rgb(p.accent))
+            .text_sm()
+            .text_color(rgb(if typed.is_empty() { p.text_faint } else { p.text }))
+            .child(if typed.is_empty() { "Search tabs…".to_string() } else { typed })
+            .into_any_element();
+
+        let mut rows = vec![search_box];
+
+        if tabs.is_empty() {
+            rows.push(
+                div()
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .text_sm()
+                    .text_color(rgb(p.text_faint))
+                    .child("No matching tabs")
+                    .into_any_element(),
+            );
+            return rows;
+        }
+
+        // Scroll rather than grow: a debater can have dozens of files open,
+        // and an unbounded dropdown would run off the bottom of the window.
+        let list = div()
+            .id("switch-tab-list")
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .children(tabs.into_iter().map(|(idx, id, title)| {
+                let is_active = idx == active_tab;
+                div()
+                    .id(ElementId::named_usize("switch-tab-row", id))
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(is_active, |d| {
+                        d.bg(rgb(p.accent_wash)).text_color(rgb(p.text)).font_weight(FontWeight::BOLD)
+                    })
+                    .when(!is_active, |d| {
+                        d.text_color(rgb(p.text)).hover(move |s| s.bg(rgb(p.chrome_hover)))
+                    })
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.state.update(cx, |state, cx| {
+                                // Re-resolve by id: the list was built on a
+                                // previous frame and a tab could have closed
+                                // since, which would shift every later index.
+                                if let Some(pos) = state.tabs.iter().position(|t| t.id == id) {
+                                    state.set_active_tab(pos);
+                                }
+                                cx.notify();
+                            });
+                            this.open_menu = None;
+                            this.tab_search_buffer.clear();
+                            cx.notify();
+                        }),
+                    )
+                    .child(title)
+            }))
+            .into_any_element();
+
+        rows.push(list);
+        rows
+    }
+
+    /// Keystrokes for the Switch Tab search box. Escape closes the menu,
+    /// Enter jumps to the single remaining match (the common case after
+    /// typing a few letters).
+    fn handle_tab_search_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open_menu != Some(FormatAction::SwitchTabMenu) {
+            return;
+        }
+        let ks = &event.keystroke;
+        match ks.key.as_str() {
+            "escape" => {
+                self.open_menu = None;
+                self.tab_search_buffer.clear();
+            }
+            "backspace" => {
+                self.tab_search_buffer.pop();
+            }
+            "enter" => {
+                let query = self.tab_search_buffer.to_lowercase();
+                let hit = {
+                    let state = self.state.read(cx);
+                    state
+                        .tabs
+                        .iter()
+                        .position(|t| query.is_empty() || t.title.to_lowercase().contains(&query))
+                };
+                if let Some(pos) = hit {
+                    self.state.update(cx, |state, cx| {
+                        state.set_active_tab(pos);
+                        cx.notify();
+                    });
+                }
+                self.open_menu = None;
+                self.tab_search_buffer.clear();
+            }
+            key => {
+                // Same resolver the find bar and vim's `f` use — it handles
+                // shifted punctuation correctly on this GPUI backend.
+                let Some(ch) = crate::state::vim_find_target_char(
+                    key,
+                    ks.modifiers.shift,
+                    ks.key_char.as_deref(),
+                ) else {
+                    return;
+                };
+                self.tab_search_buffer.push(ch);
+            }
+        }
+        cx.notify();
     }
 
     fn text_menu_rows(
@@ -1183,6 +1518,7 @@ impl FormattingRibbon {
                                         btn.label,
                                         btn.action,
                                         btn.tone,
+                                        btn.icon,
                                         p,
                                         color_mode,
                                         state.clone(),
@@ -1243,10 +1579,36 @@ impl FormattingRibbon {
 }
 
 impl Render for FormattingRibbon {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Valid only for the duration of one mouse-down dispatch (see the
         // field's doc comment) — this is the clear half of that contract.
         self.dismissed = None;
+
+        // Entering read mode collapses every group, so the document gets the
+        // window; leaving puts the previous layout back. Acted on once per
+        // transition rather than held as an override, so a group can still be
+        // expanded by hand while reading.
+        let read_mode = self.state.read(cx).read_mode;
+        if read_mode != self.last_seen_read_mode {
+            self.last_seen_read_mode = read_mode;
+            if read_mode {
+                self.collapsed_before_read_mode = Some(self.collapsed.clone());
+                for name in ["cards", "text", "document", "view", "caselist"] {
+                    self.collapsed.insert(name, true);
+                }
+            } else if let Some(previous) = self.collapsed_before_read_mode.take() {
+                self.collapsed = previous;
+            }
+        }
+
+        // The Switch Tab menu is search-first, so its box takes focus for as
+        // long as the menu is open — otherwise the first keystroke after
+        // opening it would go to the document instead.
+        if self.open_menu == Some(FormatAction::SwitchTabMenu)
+            && !self.tab_search_focus.is_focused(window)
+        {
+            self.tab_search_focus.clone().focus(window, cx);
+        }
 
         let state = self.state.clone();
         let (p, color_mode) = {
@@ -1300,19 +1662,24 @@ impl Render for FormattingRibbon {
                 "text",
                 "TEXT",
                 &[
+                    // The four character-formatting icons plus the size
+                    // spinner lead the group: they are the controls reached
+                    // most often, and four 38px icons alongside the spinner
+                    // still fit the width the three-label rows below already
+                    // need.
                     vec![
-                        RibbonBtn::secondary("Bold", FormatAction::Bold),
-                        RibbonBtn::secondary("Italics", FormatAction::Italics),
-                        RibbonBtn::secondary("Underline", FormatAction::Underline),
+                        RibbonBtn::icon("Bold", FormatAction::Bold, RibbonIcon::Bold),
+                        RibbonBtn::icon("Italics", FormatAction::Italics, RibbonIcon::Italic),
+                        RibbonBtn::icon("Underline", FormatAction::Underline, RibbonIcon::Underline),
+                        RibbonBtn::icon("Strike", FormatAction::Strikethrough, RibbonIcon::Strikethrough),
+                        RibbonBtn::secondary("Font Size", FormatAction::FontSize),
                     ],
                     vec![
-                        RibbonBtn::secondary("Font Size", FormatAction::FontSize),
                         RibbonBtn::secondary("Font Family", FormatAction::FontFamily),
                         RibbonBtn::secondary("Font Color", FormatAction::FontColor),
                     ],
                     vec![
                         RibbonBtn::secondary("HL Color", FormatAction::HighlightColorSelect),
-                        RibbonBtn::secondary("Strike", FormatAction::Strikethrough),
                         RibbonBtn::secondary("Case", FormatAction::ChangeCase),
                     ],
                 ],
@@ -1326,9 +1693,17 @@ impl Render for FormattingRibbon {
                 "document",
                 "DOCUMENT",
                 &[
+                    // All five icon buttons share one row: at 38px each they
+                    // fit in the width the Doc Menu / Card Menu row already
+                    // needs, and folding the old fourth row in here drops
+                    // DOCUMENT — the only four-row group — to three, which is
+                    // what sets the ribbon's height.
                     vec![
-                        RibbonBtn::secondary("Bullets", FormatAction::BulletList),
-                        RibbonBtn::secondary("Numbered", FormatAction::NumberedList),
+                        RibbonBtn::icon("Bullets", FormatAction::BulletList, RibbonIcon::BulletList),
+                        RibbonBtn::icon("Numbered", FormatAction::NumberedList, RibbonIcon::NumberedList),
+                        RibbonBtn::icon("Align Left", FormatAction::AlignLeft, RibbonIcon::Align(Alignment::Left)),
+                        RibbonBtn::icon("Align Center", FormatAction::AlignCenter, RibbonIcon::Align(Alignment::Center)),
+                        RibbonBtn::icon("Align Right", FormatAction::AlignRight, RibbonIcon::Align(Alignment::Right)),
                     ],
                     vec![
                         RibbonBtn::secondary(
@@ -1340,10 +1715,6 @@ impl Render for FormattingRibbon {
                     vec![
                         RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu),
                         RibbonBtn::secondary("Card Menu", FormatAction::CardMenu),
-                    ],
-                    vec![
-                        RibbonBtn::secondary("Align Left", FormatAction::AlignLeft),
-                        RibbonBtn::secondary("Align Center", FormatAction::AlignCenter),
                     ],
                 ],
                 *self.collapsed.get("document").unwrap_or(&false),

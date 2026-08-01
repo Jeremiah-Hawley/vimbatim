@@ -135,8 +135,13 @@ impl Render for TabBar {
         let is_maximized = window.is_maximized();
         let state = self.state.read(cx);
         let p = palette(state.theme, state.theme_mode);
+        let accent_alt = p.accent_alt;
         let tabs = state.tabs.clone();
         let active_idx = state.active_tab;
+        // The secondary pane's tab is marked so it's clear which half of a
+        // split a document lives in — it is not `active_tab` unless that pane
+        // also has focus.
+        let secondary_idx = state.pane_tab_index(crate::state::Pane::Secondary);
         let _ = state;
         let renaming_tab_id = self.renaming_tab_id;
         let rename_buffer = self.rename_buffer.clone();
@@ -247,6 +252,12 @@ impl Render for TabBar {
                             .active(move |s| s.bg(rgb(chrome_active)))
                     })
                     .when(is_active, move |d| d.border_t_1().border_color(rgb(accent)))
+                    // Tab shown in the split's second pane: a bottom rule in
+                    // the alternate accent, so it reads as "open elsewhere"
+                    // rather than competing with the active tab's top rule.
+                    .when(Some(idx) == secondary_idx, move |d| {
+                        d.border_b_2().border_color(rgb(accent_alt))
+                    })
                     // Highlight this tab's left edge when a dragged tab hovers over it.
                     .drag_over::<TabDragPayload>(move |style, _, _, _| {
                         style.border_l_2().border_color(rgb(accent))

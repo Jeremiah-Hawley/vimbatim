@@ -337,7 +337,36 @@ pub fn clamp_sidebar_width(width: f32) -> f32 {
     width.clamp(180.0, 480.0)
 }
 
+/// One of the editor's two side-by-side panes (`notes/split_view_plan.md`).
+///
+/// `Primary` is the only pane when the split is closed, so it is also the
+/// default — every pre-split code path keeps behaving as it always did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Pane {
+    #[default]
+    Primary,
+    Secondary,
+}
+
+/// The primary pane's share of the editor width. Clamped so neither pane can
+/// be dragged away to nothing — same reasoning (and same shape) as
+/// `clamp_sidebar_width`.
+pub fn clamp_split_ratio(ratio: f32) -> f32 {
+    ratio.clamp(0.2, 0.8)
+}
+
 impl Tab {
+    /// A never-saved, never-typed-in tab — the blank "New Tab" the app opens
+    /// with, or one the user made and hasn't used yet.
+    ///
+    /// Opening a file reuses such a tab rather than leaving it stranded beside
+    /// the document (`open_file`), and the editor paints its placeholder text
+    /// on one. `is_modified` alone isn't enough: a tab can be modified back to
+    /// empty by undo, and that still shouldn't be silently replaced.
+    pub fn is_blank_new_tab(&self) -> bool {
+        self.file_path.is_none() && self.content.is_empty() && !self.is_modified
+    }
+
     pub fn new_empty(id: usize) -> Self {
         /*
          * Creates a blank "New Tab" with no associated file. This is the default
@@ -582,7 +611,7 @@ pub struct AppState {
     /// silently stop reaching it until the user clicks into the editor
     /// again. `TextEditor::render` checks and clears this once per frame,
     /// mirroring `Tab::pending_scroll_to_cursor`'s same check-and-clear idiom.
-    pub pending_focus_editor: bool,
+    pub pending_focus_editor: Option<Pane>,
     pub next_tab_id: usize,
     pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
@@ -758,6 +787,47 @@ pub struct AppState {
     pub fold_all: bool,
     pub invisibility_mode: bool,
     pub split_view: bool,
+    /// The tab shown in the secondary pane, as a stable `Tab.id` — never an
+    /// index.
+    ///
+    /// `close_tab` shifts every later index, and this codebase has been bitten
+    /// by that twice already (the Switch Tab menu and the recovery snapshot
+    /// loop both key by id for the same reason). A stale index here would
+    /// silently point the second pane at the wrong document.
+    pub secondary_tab_id: Option<usize>,
+    /// Which pane the user is editing in. `active_tab` always names this
+    /// pane's tab — see `focus_pane`.
+    pub focused_pane: Pane,
+    /// The primary pane's tab, as a stable id, remembered while focus is in
+    /// the *secondary* pane.
+    ///
+    /// Without it the primary pane has nowhere to point once `active_tab` has
+    /// moved to the secondary's document: both panes would resolve to the same
+    /// tab and render the same text, and focusing back would have nothing to
+    /// restore. `None` before focus has ever left Primary, where `active_tab`
+    /// is still the answer.
+    pub primary_tab_id: Option<usize>,
+    /// The primary pane's share of the editor width, `clamp_split_ratio`'d.
+    /// Deliberately not persisted, matching `sidebar_width`.
+    pub split_ratio: f32,
+    /// Reading mode: the split pane and sidebar are hidden, and Left/Right
+    /// page through the document a screenful at a time
+    /// (`TextEditor::page_scroll`).
+    pub read_mode: bool,
+    /// Whether the sidebar was showing before read mode hid it, so leaving
+    /// read mode puts it back rather than stranding the user without a file
+    /// tree.
+    sidebar_before_read_mode: bool,
+    /// True only while the divider is actually being dragged.
+    ///
+    /// The editor's row cache is keyed on viewport width, so a drag
+    /// invalidates it on every mouse-move — and a miss is a full re-wrap of the
+    /// *whole document* (measured at ~0.9ms per 500 paragraphs in release,
+    /// several times that in debug), paid twice because both panes re-render.
+    /// At mouse-move rates that is a freeze on any real card file. While this
+    /// is set, `TextEditor` keeps painting its existing row tables and re-wraps
+    /// once on release instead.
+    pub split_dragging: bool,
 }
 
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
@@ -1285,7 +1355,7 @@ impl AppState {
         AppState {
             tabs: vec![Tab::new_empty(0)],
             active_tab: 0,
-            pending_focus_editor: false,
+            pending_focus_editor: None,
             next_tab_id: 1,
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -1338,6 +1408,13 @@ impl AppState {
             fold_all: false,
             invisibility_mode: false,
             split_view: false,
+            secondary_tab_id: None,
+            focused_pane: Pane::Primary,
+            primary_tab_id: None,
+            split_ratio: 0.5,
+            split_dragging: false,
+            read_mode: false,
+            sidebar_before_read_mode: true,
         }
     }
 
@@ -1442,7 +1519,7 @@ impl AppState {
 
     pub fn close_find_bar(&mut self) {
         self.find_bar = None;
-        self.pending_focus_editor = true;
+        self.pending_focus_editor = Some(self.focused_pane);
     }
 
     /// Recomputes the "N of M" readout. Cheap enough to run on every
@@ -1565,11 +1642,138 @@ impl AppState {
          * Appends a blank tab and makes it the active tab. Used when the user
          * clicks the "+" button in the tab bar or presses the new-tab keybind.
          */
-        let tab = Tab::new_empty(self.next_tab_id);
+        self.push_empty_tab();
+        self.show_in_focused_pane(self.tabs.len() - 1);
+    }
+
+    /// Shows the tab at `idx` in whichever pane currently has focus.
+    ///
+    /// Needed because a pane's document is tracked by *id*, not by
+    /// `active_tab`: opening a file while the secondary pane was focused
+    /// otherwise moved `active_tab` while both panes kept pointing at their
+    /// stored ids, and the new document appeared in neither half.
+    ///
+    /// This is also the affordance for getting an existing file into the
+    /// second pane — focus it, then open from the sidebar.
+    fn show_in_focused_pane(&mut self, idx: usize) {
+        self.active_tab = idx;
+        let id = self.tabs.get(idx).map(|t| t.id);
+        match self.focused_pane {
+            Pane::Primary => self.primary_tab_id = id,
+            Pane::Secondary => self.secondary_tab_id = id,
+        }
+        self.pending_focus_editor = Some(self.focused_pane);
+    }
+
+    /// Appends a blank tab and returns its stable id, without touching focus
+    /// or `active_tab`. Shared by `new_tab` and `open_split`, which then do
+    /// their own focusing — the two differ only in which pane ends up on it.
+    fn push_empty_tab(&mut self) -> usize {
+        let id = self.next_tab_id;
+        self.tabs.push(Tab::new_empty(id));
         self.next_tab_id += 1;
-        self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
-        self.pending_focus_editor = true;
+        id
+    }
+
+    // ── Split view (notes/split_view_plan.md) ───────────────────────────────
+
+    /// Enters or leaves reading mode.
+    ///
+    /// Entering collapses the split (the tab stays open — only the pane goes
+    /// away, same as `close_split`) and hides the sidebar, so the document has
+    /// the whole window. Leaving restores the sidebar to whatever it was.
+    pub fn toggle_read_mode(&mut self) {
+        self.read_mode = !self.read_mode;
+        if self.read_mode {
+            self.sidebar_before_read_mode = self.sidebar_visible;
+            self.close_split();
+            self.sidebar_visible = false;
+        } else {
+            self.sidebar_visible = self.sidebar_before_read_mode;
+        }
+    }
+
+    /// Resolves a pane to a live index into `tabs`.
+    ///
+    /// The single place the secondary pane's stored `Tab.id` is turned into an
+    /// index. `None` for `Secondary` when the split is closed, or when its tab
+    /// has since been closed.
+    pub fn pane_tab_index(&self, pane: Pane) -> Option<usize> {
+        match pane {
+            // While the secondary pane holds focus, `active_tab` names *its*
+            // document, so the primary pane resolves through its remembered id
+            // instead — otherwise both panes paint the same text.
+            Pane::Primary => {
+                if self.focused_pane == Pane::Primary || self.primary_tab_id.is_none() {
+                    (self.active_tab < self.tabs.len()).then_some(self.active_tab)
+                } else {
+                    let id = self.primary_tab_id?;
+                    self.tabs.iter().position(|t| t.id == id)
+                }
+            }
+            Pane::Secondary => {
+                if !self.split_view {
+                    return None;
+                }
+                let id = self.secondary_tab_id?;
+                self.tabs.iter().position(|t| t.id == id)
+            }
+        }
+    }
+
+    /// Moves editing focus to `pane`, pointing `active_tab` at that pane's tab.
+    ///
+    /// This is the whole mechanism that keeps split view from touching the 200+
+    /// `self.active_tab` reads elsewhere in this file: "the active tab" and
+    /// "the focused pane's tab" are the same thing, so every existing method
+    /// acts on the right document without knowing panes exist.
+    pub fn focus_pane(&mut self, pane: Pane) {
+        match pane {
+            Pane::Secondary => {
+                let Some(idx) = self.pane_tab_index(Pane::Secondary) else { return };
+                // Remember what the primary pane was on before `active_tab`
+                // moves off it, so focusing back lands on the same document.
+                if self.focused_pane == Pane::Primary {
+                    self.primary_tab_id = self.tabs.get(self.active_tab).map(|t| t.id);
+                }
+                self.active_tab = idx;
+            }
+            Pane::Primary => {
+                if let Some(idx) = self.pane_tab_index(Pane::Primary) {
+                    self.active_tab = idx;
+                }
+            }
+        }
+        self.focused_pane = pane;
+        self.pending_focus_editor = Some(pane);
+    }
+
+    /// Opens the split with a fresh blank tab in the new pane.
+    ///
+    /// Idempotent: with the split already open this only focuses the secondary
+    /// pane, rather than stacking up blank tabs on repeated clicks.
+    pub fn open_split(&mut self) {
+        if self.split_view {
+            self.focus_pane(Pane::Secondary);
+            return;
+        }
+        let id = self.push_empty_tab();
+        self.secondary_tab_id = Some(id);
+        self.split_view = true;
+        self.focus_pane(Pane::Secondary);
+    }
+
+    /// Closes the split. The secondary tab stays *open* — only the pane goes
+    /// away, so nothing the user typed into it is lost or hidden from the tab
+    /// bar.
+    pub fn close_split(&mut self) {
+        if !self.split_view {
+            return;
+        }
+        self.split_view = false;
+        self.secondary_tab_id = None;
+        self.focused_pane = Pane::Primary;
+        self.pending_focus_editor = Some(Pane::Primary);
     }
 
     pub fn open_file(&mut self, path: PathBuf) {
@@ -1595,8 +1799,15 @@ impl AppState {
             return;
         }
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
-            self.active_tab = idx;
-            self.pending_focus_editor = true;
+            // Already open in the *other* pane: focus that pane rather than
+            // pulling the same document into this one (split-view decision 1).
+            if self.split_view && self.pane_tab_index(Pane::Secondary) == Some(idx) {
+                self.focus_pane(Pane::Secondary);
+            } else if self.split_view && self.pane_tab_index(Pane::Primary) == Some(idx) {
+                self.focus_pane(Pane::Primary);
+            } else {
+                self.show_in_focused_pane(idx);
+            }
             return;
         }
         let mut tab = Tab::from_path(self.next_tab_id, path.clone());
@@ -1607,9 +1818,27 @@ impl AppState {
             tab.docx_origin = Some(Arc::new(origin));
         }
         self.next_tab_id += 1;
-        self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
-        self.pending_focus_editor = true;
+
+        // An untouched "New Tab" is a placeholder, not work — opening a file
+        // takes its slot instead of leaving a blank tab stranded beside the
+        // document. Replacing *in place* keeps every other tab's index stable,
+        // so the other pane's tab and any in-flight indices stay valid; the
+        // replacement carries a fresh id, and `show_in_focused_pane` re-reads
+        // it so this pane points at the new document rather than the discarded
+        // placeholder.
+        let reuse = self
+            .pane_tab_index(self.focused_pane)
+            .filter(|&i| self.tabs.get(i).is_some_and(|t| t.is_blank_new_tab()));
+        match reuse {
+            Some(idx) => {
+                self.tabs[idx] = tab;
+                self.show_in_focused_pane(idx);
+            }
+            None => {
+                self.tabs.push(tab);
+                self.show_in_focused_pane(self.tabs.len() - 1);
+            }
+        }
     }
 
     pub fn save_active_tab(&mut self) -> Result<(), String> {
@@ -1716,10 +1945,20 @@ impl AppState {
             return;
         }
         // A deliberately closed tab has no unsaved work worth recovering.
-        if let Some(tab) = self.tabs.get(idx) {
-            crate::recovery::delete_snapshot(tab.id);
+        let closed_id = self.tabs.get(idx).map(|t| t.id);
+        if let Some(id) = closed_id {
+            crate::recovery::delete_snapshot(id);
         }
         self.tabs.remove(idx);
+
+        // Two panes need two tabs. Collapse the split when the closed tab was
+        // the secondary pane's own, or when only one tab is left for both to
+        // share — either way the pane has nothing legal left to show.
+        if self.split_view
+            && (closed_id == self.secondary_tab_id || self.tabs.len() < 2)
+        {
+            self.close_split();
+        }
         // If a tab to the left of the active one was removed, shift active_tab left.
         if idx < self.active_tab {
             self.active_tab -= 1;
@@ -1733,7 +1972,7 @@ impl AppState {
         // `set_active_tab`/`open_file`, so request the same reclaim.
         // Harmless when the active tab didn't actually change: GPUI's
         // `focus()` is a no-op if the handle is already focused.
-        self.pending_focus_editor = true;
+        self.pending_focus_editor = Some(self.focused_pane);
     }
 
     /// Entry point for the tab-bar's `×` button. Closes the tab immediately
@@ -1918,8 +2157,7 @@ impl AppState {
 
         self.next_tab_id += 1;
         self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
-        self.pending_focus_editor = true;
+        self.show_in_focused_pane(self.tabs.len() - 1);
 
         crate::recovery::delete_entry(&entry);
     }
@@ -1955,11 +2193,33 @@ impl AppState {
          * Requests that the text editor reclaim keyboard focus too (see
          * `pending_focus_editor`'s doc comment) — a tab-bar click never
          * touches GPUI focus on its own.
+         *
+         * A document is never shown in both panes at once
+         * (`notes/split_view_plan.md`), and this is where that is enforced:
+         * asking for the tab the secondary pane already holds focuses that
+         * pane instead of pulling the document into the primary one. Doing it
+         * here means the tab bar needs no special-casing at all.
          */
-        if idx < self.tabs.len() {
-            self.active_tab = idx;
-            self.pending_focus_editor = true;
+        if idx >= self.tabs.len() {
+            return;
         }
+        if self.split_view {
+            let other = match self.focused_pane {
+                Pane::Primary => Pane::Secondary,
+                Pane::Secondary => Pane::Primary,
+            };
+            // Already showing in the other pane: focus it rather than
+            // duplicating the document (split-view decision 1).
+            if self.pane_tab_index(other) == Some(idx) {
+                self.focus_pane(other);
+                return;
+            }
+        }
+        // Otherwise the tab opens in whichever pane is live. Clicking a tab is
+        // how a document gets into the split at all, so this must *not* force
+        // the primary pane — doing so made the second pane unable to show
+        // anything but the blank tab the Split button created.
+        self.show_in_focused_pane(idx);
     }
 
     pub fn next_tab(&mut self) {
@@ -2761,23 +3021,6 @@ impl AppState {
          * tags, and citations are shown.
          */
         self.invisibility_mode = !self.invisibility_mode;
-    }
-
-    pub fn get_tab_titles(&self) -> Vec<(usize, String)> {
-        /*
-         * Returns list of (index, title) for all open tabs.
-         */
-        self.tabs.iter().enumerate()
-            .map(|(idx, tab)| (idx, tab.title.clone()))
-            .collect()
-    }
-
-    pub fn toggle_split_view(&mut self) {
-        /*
-         * Toggles split view mode. When on, editor is split into
-         * two windows side-by-side.
-         */
-        self.split_view = !self.split_view;
     }
 
     pub fn wikify_current_tab(&mut self) -> std::io::Result<()> {
@@ -3642,6 +3885,27 @@ impl AppState {
          * div at the right character position.
          */
         let Some(tab) = self.tabs.get(self.active_tab) else { return (0, 0) };
+        let start = line_start(&tab.content, tab.cursor);
+        let col = tab.content[start..tab.cursor].chars().count();
+        let line_idx = tab.content[..start].matches('\n').count();
+        (line_idx, col)
+    }
+
+    /// `active_content` for a specific pane. The secondary pane is showing a
+    /// different document than `active_tab` names, so it cannot go through the
+    /// `active_*` helpers — those all mean "the focused pane's tab".
+    pub fn pane_content(&self, pane: Pane) -> &str {
+        self.pane_tab_index(pane)
+            .and_then(|i| self.tabs.get(i))
+            .map(|t| t.content.as_str())
+            .unwrap_or("")
+    }
+
+    /// `cursor_line_col` for a specific pane — see `pane_content`.
+    pub fn pane_cursor_line_col(&self, pane: Pane) -> (usize, usize) {
+        let Some(tab) = self.pane_tab_index(pane).and_then(|i| self.tabs.get(i)) else {
+            return (0, 0);
+        };
         let start = line_start(&tab.content, tab.cursor);
         let col = tab.content[start..tab.cursor].chars().count();
         let line_idx = tab.content[..start].matches('\n').count();
@@ -6993,7 +7257,7 @@ mod tests {
                 unsupported_banner_dismissed: false,
             }],
             active_tab: 0,
-            pending_focus_editor: false,
+            pending_focus_editor: None,
             next_tab_id: 1,
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -7046,6 +7310,13 @@ mod tests {
             fold_all: false,
             invisibility_mode: false,
             split_view: false,
+            secondary_tab_id: None,
+            focused_pane: Pane::Primary,
+            primary_tab_id: None,
+            split_ratio: 0.5,
+            split_dragging: false,
+            read_mode: false,
+            sidebar_before_read_mode: true,
         };
         state
     }
@@ -7061,6 +7332,346 @@ mod tests {
         state.handle_vim_key(key, shift, key_char);
     }
 
+    // ── Opening a file reuses a blank "New Tab" ────────────────────────────
+
+    fn temp_docx(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("vimbatim_reuse_{}_{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("card.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn opening_a_file_replaces_an_untouched_new_tab() {
+        let (dir, path) = temp_docx("replace");
+        let mut state = make_state("", 0, None);
+        state.tabs[0] = Tab::new_empty(0); // a pristine "New Tab"
+        assert_eq!(state.tabs.len(), 1);
+
+        state.open_file(path.clone());
+
+        assert_eq!(state.tabs.len(), 1, "a blank tab was left stranded");
+        assert_eq!(state.tabs[0].file_path.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_file_keeps_a_tab_that_has_been_typed_in() {
+        let (dir, path) = temp_docx("keep-typed");
+        let mut state = make_state("", 0, None);
+        state.tabs[0] = Tab::new_empty(0);
+        state.insert_str("draft"); // now it holds work
+
+        state.open_file(path.clone());
+
+        assert_eq!(state.tabs.len(), 2, "unsaved work was overwritten");
+        assert_eq!(state.tabs[0].content, "draft");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undoing back to empty leaves a tab that *looks* blank but has history
+    /// and a dirty flag. Replacing it would silently discard that.
+    #[test]
+    fn a_tab_emptied_by_undo_is_not_treated_as_a_blank_new_tab() {
+        let mut state = make_state("", 0, None);
+        state.tabs[0] = Tab::new_empty(0);
+        state.insert_str("typed");
+        state.undo();
+
+        assert!(state.tabs[0].content.is_empty());
+        assert!(!state.tabs[0].is_blank_new_tab(), "undo-emptied tab looked pristine");
+    }
+
+    #[test]
+    fn opening_a_file_in_the_split_replaces_only_that_panes_blank_tab() {
+        let (dir, path) = temp_docx("split");
+        let mut state = make_state("primary work", 0, None);
+        state.open_split(); // secondary gets a blank tab, and focus
+        let tabs_before = state.tabs.len();
+
+        state.open_file(path.clone());
+
+        assert_eq!(state.tabs.len(), tabs_before, "split's blank tab was not reused");
+        let secondary = state.pane_tab_index(Pane::Secondary).unwrap();
+        assert_eq!(state.tabs[secondary].file_path.as_deref(), Some(path.as_path()));
+        // The other pane is untouched.
+        assert_eq!(state.pane_content(Pane::Primary), "primary work");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Read mode ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_mode_hides_the_sidebar_and_collapses_the_split() {
+        let mut state = make_state("doc", 0, None);
+        state.sidebar_visible = true;
+        state.open_split();
+        let tabs_before = state.tabs.len();
+
+        state.toggle_read_mode();
+
+        assert!(state.read_mode);
+        assert!(!state.sidebar_visible);
+        assert!(!state.split_view);
+        // The split's tab is only un-shown, never closed.
+        assert_eq!(state.tabs.len(), tabs_before, "read mode closed a tab");
+    }
+
+    #[test]
+    fn leaving_read_mode_restores_the_sidebar_it_hid() {
+        let mut state = make_state("doc", 0, None);
+        state.sidebar_visible = true;
+
+        state.toggle_read_mode();
+        state.toggle_read_mode();
+
+        assert!(!state.read_mode);
+        assert!(state.sidebar_visible);
+    }
+
+    /// A sidebar the user had already hidden must stay hidden on exit —
+    /// restoring it would be read mode turning something on that wasn't.
+    #[test]
+    fn leaving_read_mode_does_not_reveal_a_sidebar_that_was_already_hidden() {
+        let mut state = make_state("doc", 0, None);
+        state.sidebar_visible = false;
+
+        state.toggle_read_mode();
+        state.toggle_read_mode();
+
+        assert!(!state.sidebar_visible);
+    }
+
+    // ── Split view (notes/split_view_plan.md) ──────────────────────────────
+
+    /// The index-vs-id trap this feature is most exposed to: closing a tab
+    /// positioned *before* the secondary pane's shifts every later index, and
+    /// an index-based `secondary_tab_id` would silently retarget the pane.
+    #[test]
+    fn secondary_pane_survives_a_tab_closing_before_it() {
+        let mut state = make_state("", 0, None);
+        state.new_tab();
+        state.new_tab();
+        state.open_split(); // 4 tabs; secondary is the newest
+        let secondary_id = state.secondary_tab_id.unwrap();
+
+        state.close_tab(0);
+
+        assert!(state.split_view, "split should survive an unrelated close");
+        assert_eq!(state.secondary_tab_id, Some(secondary_id));
+        let idx = state.pane_tab_index(Pane::Secondary).unwrap();
+        assert_eq!(state.tabs[idx].id, secondary_id, "pane followed the wrong tab");
+    }
+
+    /// Decision 1: one document is never in two panes. Asking for the tab the
+    /// secondary pane holds focuses that pane instead.
+    #[test]
+    fn activating_the_secondary_panes_tab_focuses_that_pane() {
+        let mut state = make_state("", 0, None);
+        state.open_split();
+        let secondary_idx = state.pane_tab_index(Pane::Secondary).unwrap();
+        state.focus_pane(Pane::Primary);
+
+        state.set_active_tab(secondary_idx);
+
+        assert_eq!(state.focused_pane, Pane::Secondary);
+        assert_eq!(state.active_tab, secondary_idx);
+    }
+
+    /// Clicking a tab shows it in whichever pane is live — this is the only
+    /// way to get an existing document into the split.
+    #[test]
+    fn activating_a_tab_opens_it_in_the_focused_pane() {
+        let mut state = make_state("tab zero", 0, None);
+        state.new_tab(); // idx 1 — the one we'll click; in neither pane
+        state.new_tab(); // idx 2 — what the primary pane ends up showing
+        state.open_split(); // idx 3 — secondary, and now focused
+        assert_eq!(state.focused_pane, Pane::Secondary);
+        let primary_before = state.pane_tab_index(Pane::Primary);
+
+        state.set_active_tab(1);
+
+        assert_eq!(state.focused_pane, Pane::Secondary, "click yanked focus to the other pane");
+        assert_eq!(state.pane_tab_index(Pane::Secondary), Some(1));
+        // ...and the primary pane kept whatever it was already showing.
+        assert_eq!(state.pane_tab_index(Pane::Primary), primary_before);
+    }
+
+    /// The other half of decision 1: clicking the tab the *other* pane is
+    /// already showing focuses that pane instead of duplicating it.
+    #[test]
+    fn activating_the_other_panes_tab_focuses_that_pane_from_either_side() {
+        let mut state = make_state("", 0, None);
+        state.open_split();
+        let primary_idx = state.pane_tab_index(Pane::Primary).unwrap();
+
+        // Focused pane is Secondary; click the primary's tab.
+        state.set_active_tab(primary_idx);
+        assert_eq!(state.focused_pane, Pane::Primary);
+
+        // And back the other way.
+        let secondary_idx = state.pane_tab_index(Pane::Secondary).unwrap();
+        state.set_active_tab(secondary_idx);
+        assert_eq!(state.focused_pane, Pane::Secondary);
+    }
+
+    #[test]
+    fn closing_the_secondary_panes_tab_collapses_the_split() {
+        let mut state = make_state("", 0, None);
+        state.new_tab();
+        state.open_split();
+        let idx = state.pane_tab_index(Pane::Secondary).unwrap();
+
+        state.close_tab(idx);
+
+        assert!(!state.split_view);
+        assert_eq!(state.secondary_tab_id, None);
+        assert_eq!(state.focused_pane, Pane::Primary);
+    }
+
+    /// Two panes need two tabs; dropping to one has to collapse the split
+    /// even when the tab closed was not the secondary pane's own.
+    #[test]
+    fn closing_down_to_one_tab_collapses_the_split() {
+        let mut state = make_state("", 0, None);
+        state.open_split(); // 2 tabs
+        state.close_tab(0);
+
+        assert!(!state.split_view);
+        assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn open_split_is_idempotent() {
+        let mut state = make_state("", 0, None);
+        state.open_split();
+        let tabs_after_first = state.tabs.len();
+        let id = state.secondary_tab_id;
+
+        state.open_split();
+
+        assert_eq!(state.tabs.len(), tabs_after_first, "second open stacked a blank tab");
+        assert_eq!(state.secondary_tab_id, id);
+    }
+
+    #[test]
+    fn focus_pane_repoints_active_tab() {
+        let mut state = make_state("", 0, None);
+        state.open_split();
+        let secondary_idx = state.pane_tab_index(Pane::Secondary).unwrap();
+
+        state.focus_pane(Pane::Primary);
+        assert_ne!(state.active_tab, secondary_idx);
+
+        state.focus_pane(Pane::Secondary);
+        assert_eq!(state.active_tab, secondary_idx);
+    }
+
+    /// With the split closed the secondary pane has nothing to show, and its
+    /// editor must render blank rather than mirroring the primary.
+    #[test]
+    fn secondary_pane_has_no_tab_while_the_split_is_closed() {
+        let state = make_state("hello", 0, None);
+        assert_eq!(state.pane_tab_index(Pane::Secondary), None);
+        assert_eq!(state.pane_content(Pane::Secondary), "");
+        assert_eq!(state.pane_content(Pane::Primary), "hello");
+    }
+
+    /// The bug this exists to prevent: with focus in the secondary pane,
+    /// `active_tab` names the *secondary's* document, so a primary pane that
+    /// resolved through `active_tab` would paint the same text in both halves.
+    #[test]
+    fn the_two_panes_never_resolve_to_the_same_tab() {
+        let mut state = make_state("primary text", 0, None);
+        state.open_split();
+        state.insert_str("secondary text");
+
+        // Focus is in the secondary pane right after open_split.
+        assert_eq!(state.focused_pane, Pane::Secondary);
+        let primary = state.pane_tab_index(Pane::Primary).unwrap();
+        let secondary = state.pane_tab_index(Pane::Secondary).unwrap();
+        assert_ne!(primary, secondary, "both panes resolved to one tab");
+        assert_eq!(state.pane_content(Pane::Primary), "primary text");
+        assert_eq!(state.pane_content(Pane::Secondary), "secondary text");
+
+        // ...and the same holds with focus back in the primary pane.
+        state.focus_pane(Pane::Primary);
+        assert_ne!(
+            state.pane_tab_index(Pane::Primary),
+            state.pane_tab_index(Pane::Secondary)
+        );
+        assert_eq!(state.pane_content(Pane::Primary), "primary text");
+        assert_eq!(state.pane_content(Pane::Secondary), "secondary text");
+    }
+
+    /// Opening a file with the secondary pane focused must put it in *that*
+    /// pane. Before `show_in_focused_pane` it moved `active_tab` while both
+    /// panes kept their stored ids, so the document appeared in neither.
+    #[test]
+    fn opening_a_tab_with_the_secondary_pane_focused_lands_there() {
+        let mut state = make_state("primary", 0, None);
+        state.open_split();
+        assert_eq!(state.focused_pane, Pane::Secondary);
+
+        state.new_tab();
+
+        let secondary = state.pane_tab_index(Pane::Secondary).unwrap();
+        assert_eq!(secondary, state.active_tab, "new tab did not land in the focused pane");
+        assert_ne!(state.pane_tab_index(Pane::Primary), Some(secondary));
+        assert_eq!(state.pane_content(Pane::Primary), "primary");
+    }
+
+    /// The reported bug: double-clicking a file in the sidebar with the split
+    /// pane focused opened a new tab that appeared in *neither* pane. The
+    /// new-tab path in `open_file` still assigned `active_tab` directly and
+    /// never updated the focused pane's stored id.
+    #[test]
+    fn opening_a_file_with_the_secondary_pane_focused_shows_it_there() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_split_open_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("card.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
+        let mut state = make_state("primary", 0, None);
+        state.open_split();
+        assert_eq!(state.focused_pane, Pane::Secondary);
+        let primary_before = state.pane_tab_index(Pane::Primary);
+
+        state.open_file(path.clone());
+
+        let secondary = state.pane_tab_index(Pane::Secondary).expect("split collapsed");
+        assert_eq!(
+            state.tabs[secondary].file_path.as_deref(),
+            Some(path.as_path()),
+            "opened file did not land in the focused pane"
+        );
+        assert_eq!(state.pane_tab_index(Pane::Primary), primary_before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Recovery reopens a document the same way, and had the same defect.
+    #[test]
+    fn resumed_recovery_lands_in_the_focused_pane() {
+        let (mut state, _dir) = make_state_with_recovery("split-resume");
+        state.open_split();
+        assert_eq!(state.focused_pane, Pane::Secondary);
+
+        state.resume_recovery();
+
+        let secondary = state.pane_tab_index(Pane::Secondary).expect("split collapsed");
+        assert_eq!(state.active_tab, secondary, "recovered tab bypassed the focused pane");
+    }
+
+    #[test]
+    fn split_ratio_is_clamped_away_from_collapsing_a_pane() {
+        assert_eq!(clamp_split_ratio(0.0), 0.2);
+        assert_eq!(clamp_split_ratio(0.5), 0.5);
+        assert_eq!(clamp_split_ratio(1.0), 0.8);
+    }
+
     // ── pending_focus_editor (tab switch / open / close / new-tab) ──────────
 
     #[test]
@@ -7073,21 +7684,21 @@ mod tests {
         // checks-and-clears to reclaim focus once per frame.
         let mut state = make_state("hello", 0, None);
         state.tabs.push(Tab::new_empty(1));
-        state.pending_focus_editor = false;
+        state.pending_focus_editor = None;
 
         state.set_active_tab(1);
 
-        assert!(state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
     }
 
     #[test]
     fn set_active_tab_out_of_range_does_not_request_focus() {
         let mut state = make_state("hello", 0, None);
-        state.pending_focus_editor = false;
+        state.pending_focus_editor = None;
 
         state.set_active_tab(99);
 
-        assert!(!state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, None);
     }
 
     // ── rename_tab (double-click tab rename) ────────────────────────────
@@ -7116,11 +7727,11 @@ mod tests {
     #[test]
     fn new_tab_requests_editor_focus() {
         let mut state = make_state("hello", 0, None);
-        state.pending_focus_editor = false;
+        state.pending_focus_editor = None;
 
         state.new_tab();
 
-        assert!(state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
     }
 
     /// The guard is in `open_file` rather than at the toolbar's picker, so it
@@ -7192,11 +7803,11 @@ mod tests {
         create_new_docx(&default_paragraphs(), &path).unwrap();
 
         let mut state = make_state("hello", 0, None);
-        state.pending_focus_editor = false;
+        state.pending_focus_editor = None;
 
         state.open_file(path);
 
-        assert!(state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
     }
 
     #[test]
@@ -7211,22 +7822,22 @@ mod tests {
 
         let mut state = make_state("hello", 0, None);
         state.open_file(path.clone());
-        state.pending_focus_editor = false; // clear what the first open set
+        state.pending_focus_editor = None; // clear what the first open set
 
         state.open_file(path); // already open -> switches to existing tab
 
-        assert!(state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
     }
 
     #[test]
     fn close_tab_requests_editor_focus() {
         let mut state = make_state("hello", 0, None);
         state.tabs.push(Tab::new_empty(1));
-        state.pending_focus_editor = false;
+        state.pending_focus_editor = None;
 
         state.close_tab(0);
 
-        assert!(state.pending_focus_editor);
+        assert_eq!(state.pending_focus_editor, Some(Pane::Primary));
     }
 
     // ── next_tab / prev_tab (Task 9: Ctrl+Tab / Ctrl+Shift+Tab cycling) ─────

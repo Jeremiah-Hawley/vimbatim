@@ -22,11 +22,27 @@ use crate::keybinds::{
 };
 use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
-use crate::state::{clamp_sidebar_width, AppState, CardStyleKind};
+use crate::state::{clamp_sidebar_width, clamp_split_ratio, AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 use crate::theme::palette;
 use crate::word_count::WordCount;
+
+/// Carried by the split-view divider's drag, and picked up by this window's
+/// `on_drag_move` handler.
+///
+/// A distinct type rather than a flag on the sidebar's payload: GPUI
+/// discriminates `on_drag_move` listeners *by payload type*, which is the whole
+/// reason `SidebarResizePayload` is its own struct. Two drags, two types, no
+/// interference.
+#[derive(Clone)]
+pub struct SplitResizePayload;
+
+impl Render for SplitResizePayload {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 /// The root view of the application window.
 ///
@@ -52,6 +68,7 @@ pub struct MainWindow {
     app_toolbar: Entity<AppToolbar>,
     formatting_ribbon: Entity<FormattingRibbon>,
     text_editor: Entity<TextEditor>,
+    text_editor_secondary: Entity<TextEditor>,
     file_explorer: Entity<FileExplorer>,
     find_bar: Entity<FindBarView>,
     settings_modal: Entity<SettingsModal>,
@@ -77,6 +94,11 @@ impl MainWindow {
         let app_toolbar       = cx.new(|_cx| AppToolbar::new(state.clone()));
         let formatting_ribbon = cx.new(|cx| FormattingRibbon::new(state.clone(), cx));
         let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));
+        // Constructed always, mounted only while the split is open. Each pane
+        // needs its own scroll handle, row cache, spell cache and focus handle
+        // — sharing one editor would make the panes fight over all four.
+        let text_editor_secondary =
+            cx.new(|cx| TextEditor::for_pane(state.clone(), crate::state::Pane::Secondary, cx));
         let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
         let find_bar          = cx.new(|cx|  FindBarView::new(state.clone(), cx));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
@@ -215,6 +237,7 @@ impl MainWindow {
             app_toolbar,
             formatting_ribbon,
             text_editor,
+            text_editor_secondary,
             file_explorer,
             find_bar,
             settings_modal,
@@ -570,6 +593,9 @@ impl Render for MainWindow {
         let pending_close    = self.state.read(cx).pending_close;
         let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
         let word_count_visible = self.state.read(cx).word_count_visible;
+        let split_view       = self.state.read(cx).split_view;
+        let split_ratio      = self.state.read(cx).split_ratio;
+        let sidebar_width    = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).find_bar.is_some();
         let theme = self.state.read(cx).theme;
         let theme_mode = self.state.read(cx).theme_mode;
@@ -577,11 +603,33 @@ impl Render for MainWindow {
 
         let ctx_menu_state = self.state.clone();
         let resize_state = self.state.clone();
+        let split_state = self.state.clone();
+        let drag_end_state = self.state.clone();
+        // The divider drag reports a window-absolute X; converting it to a
+        // ratio needs the window's own width, sampled here rather than inside
+        // the handler (which has no view to measure from).
+        let window_width = _window.viewport_size().width.as_f32();
+        let _ = sidebar_width;
         div()
             // Closes the file explorer's right-click menu (found_bugs.md)
             // on any left-click elsewhere in the app — its own rows call
             // `cx.stop_propagation()` so a click inside the menu never
             // reaches here.
+            // Ends a divider drag. `on_mouse_up` fires on release wherever the
+            // cursor happens to be, and this root spans the window, so the flag
+            // can't be stranded on — which would otherwise leave the document
+            // wrapped at a stale width indefinitely.
+            .on_mouse_up(MouseButton::Left, {
+                let s = drag_end_state.clone();
+                move |_ev, _window, cx| {
+                    s.update(cx, |st, cx| {
+                        if st.split_dragging {
+                            st.split_dragging = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
                 ctx_menu_state.update(cx, |s, cx| {
@@ -599,6 +647,27 @@ impl Render for MainWindow {
             // when the cursor moves faster than the handle's own bounds.
             // Mirrors Zed's own `Workspace::on_drag_move` dock-resize
             // pattern (`workspace.rs`), the reference this was built from.
+            // Split-view divider. Registered on this same window-spanning
+            // root, and for the same reason as the sidebar's: a 4px handle
+            // cannot track a cursor moving faster than its own width.
+            .on_drag_move(move |e: &DragMoveEvent<SplitResizePayload>, _window, cx| {
+                let x = e.event.position.x.as_f32();
+                split_state.update(cx, |s, cx| {
+                    // Measured against the editor area, which starts after the
+                    // sidebar when one is showing.
+                    let left = if s.sidebar_visible { s.sidebar_width } else { 0.0 };
+                    let width = (window_width - left).max(1.0);
+                    let next = clamp_split_ratio((x - left) / width);
+                    if s.split_ratio == next && s.split_dragging {
+                        return; // no movement worth a repaint
+                    }
+                    s.split_ratio = next;
+                    // Suspends the editors' full-document re-wrap for the
+                    // duration of the drag — see `AppState.split_dragging`.
+                    s.split_dragging = true;
+                    cx.notify();
+                });
+            })
             .on_drag_move(move |e: &DragMoveEvent<SidebarResizePayload>, _window, cx| {
                 let new_width = clamp_sidebar_width(e.event.position.x.as_f32());
                 resize_state.update(cx, |s, cx| {
@@ -637,10 +706,46 @@ impl Render for MainWindow {
                         div()
                             .relative()
                             .flex()
+                            .flex_row()
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .child(self.text_editor.clone())
+                            // Primary pane. `flex_grow` carries the ratio so
+                            // the two panes always fill the row exactly, with
+                            // no leftover gap to reconcile.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_grow(if split_view { split_ratio } else { 1.0 })
+                                    .flex_basis(px(0.0))
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .child(self.text_editor.clone()),
+                            )
+                            .when(split_view, |d| {
+                                d.child(
+                                    div()
+                                        .id("split-divider")
+                                        .w(px(4.0))
+                                        .h_full()
+                                        .flex_none()
+                                        .bg(rgb(p.border))
+                                        .cursor_col_resize()
+                                        .occlude()
+                                        .on_drag(SplitResizePayload, |payload: &SplitResizePayload, _offset, _window, cx| {
+                                            cx.new(|_| payload.clone())
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_grow(1.0 - split_ratio)
+                                        .flex_basis(px(0.0))
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .child(self.text_editor_secondary.clone()),
+                                )
+                            })
                             .when(find_bar_visible, |d| {
                                 d.child(
                                     div()
