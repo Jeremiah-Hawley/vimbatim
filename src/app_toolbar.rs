@@ -160,6 +160,51 @@ impl Render for AppToolbar {
                     }))
                     .child("Open Folder"),
             )
+            // ── Open file ─────────────────────────────────────────────────────
+            // Same native picker as Open Folder, flipped to files, feeding
+            // `AppState::open_file` — which already parses the .docx, opens a
+            // new tab, focuses the editor, and switches to the existing tab
+            // instead if the file is already open.
+            .child(
+                div()
+                    .id("toolbar-open-file")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded(px(radius::MD))
+                    .text_xs()
+                    .text_color(rgb(p.text_muted))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(p.border_subtle))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: false,
+                            prompt: None,
+                        });
+                        let state = this.state.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                                return;
+                            };
+                            let Some(file) = paths.pop() else {
+                                return;
+                            };
+                            state.update(cx, |s, cx| {
+                                s.open_file(file);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }))
+                    .child("Open File"),
+            )
             .child(div().flex_1())
             // ── Future command hooks ─────────────────────────────────────────
             .child(Self::future_command("toolbar-find", "Find", p))
