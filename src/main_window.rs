@@ -269,11 +269,40 @@ impl MainWindow {
             });
         });
 
-        cx.on_action(move |_: &SaveAsAction, _cx| {
-            // Stub — no Save As flow exists yet (bindable/remappable
-            // regardless, matching this codebase's existing Doc Menu/Card
-            // Menu convention).
-            println!("[Save As] not yet implemented");
+        let s = state.clone();
+        cx.on_action(move |_: &SaveAsAction, cx| {
+            // Native save dialog (gpui's `prompt_for_new_path`), seeded with
+            // the tab's own folder and filename when it has one so "Save As"
+            // on an opened document starts beside the original rather than at
+            // some unrelated default.
+            let (dir, suggested) = {
+                let st = s.read(cx);
+                let tab = st.tabs.get(st.active_tab);
+                let dir = tab
+                    .and_then(|t| t.file_path.as_ref())
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| st.working_directory.clone());
+                let suggested = tab
+                    .map(|t| t.title.clone())
+                    .filter(|t| t.ends_with(".docx"))
+                    .unwrap_or_else(|| "Untitled.docx".to_string());
+                (dir, suggested)
+            };
+
+            let path_rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+            let state = s.clone();
+            cx.spawn(async move |cx| {
+                let Ok(Ok(Some(path))) = path_rx.await else {
+                    return; // cancelled, or the platform couldn't open a picker
+                };
+                let _ = state.update(cx, |st, cx| {
+                    if let Err(e) = st.save_active_tab_as(path) {
+                        eprintln!("[save as] {}", e);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
         });
 
         cx.on_action(move |_: &FindAction, _cx| {

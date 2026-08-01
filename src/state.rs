@@ -1282,7 +1282,20 @@ impl AppState {
          * When `parse_docx` fails (e.g., the file is corrupt or a 0-byte placeholder),
          * the tab still opens with empty content and `docx_origin = None`
          * (`paragraphs` stays at its default single empty paragraph/run).
+         *
+         * Anything that isn't a .docx is refused outright. The guard lives here
+         * rather than at the toolbar's file picker because that isn't the only
+         * way an arbitrary path gets in: vim's `:e <path>` reaches this same
+         * method, and GPUI's `PathPromptOptions` has no extension filter to set
+         * on the native dialog. The sidebar's own tree is already .docx-only
+         * (`scan_directory`), so this changes nothing for it.
          */
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("docx")) {
+            // stderr, matching how every other non-fatal file error in this
+            // file reports itself — there's no in-app notification surface.
+            eprintln!("[open] not a .docx, refusing to open: {}", path.display());
+            return;
+        }
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
             self.active_tab = idx;
             self.pending_focus_editor = true;
@@ -1309,6 +1322,36 @@ impl AppState {
          * without needing to juggle `active_tab`).
          */
         self.save_tab(self.active_tab)
+    }
+
+    /// Writes the active tab to `path`, then re-points the tab at it — the
+    /// "Save As" toolbar button and its Ctrl+Shift+S keybind.
+    ///
+    /// Re-points rather than just writing a copy, matching what every editor's
+    /// Save As does: subsequent plain saves go to the new file, and the tab's
+    /// title updates to the new name.
+    ///
+    /// `is_modified` is forced true before delegating because `save_tab`
+    /// short-circuits on a clean tab — correct for plain Save (nothing
+    /// changed, nothing to write) but wrong here, where the destination is a
+    /// file that doesn't exist yet.
+    pub fn save_active_tab_as(&mut self, path: PathBuf) -> Result<(), String> {
+        // Same funnel-level forcing the recovery Save As already does: a
+        // picker (or a user typing a name) can hand back a bare or
+        // wrong-extension path, and saving a docx there produces a file
+        // `open_file` will refuse to reopen.
+        let path = with_docx_extension(&path);
+
+        let idx = self.active_tab;
+        let tab = self.tabs.get_mut(idx).ok_or("No active tab")?;
+        tab.file_path = Some(path.clone());
+        tab.title = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
+        tab.is_modified = true;
+        self.save_tab(idx)
     }
 
     fn save_tab(&mut self, idx: usize) -> Result<(), String> {
@@ -6703,6 +6746,64 @@ mod tests {
         state.new_tab();
 
         assert!(state.pending_focus_editor);
+    }
+
+    /// The guard is in `open_file` rather than at the toolbar's picker, so it
+    /// has to hold for every entry point — vim's `:e <path>` included.
+    #[test]
+    fn open_file_refuses_anything_that_is_not_a_docx() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_ext_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let txt = dir.join("notes.txt");
+        std::fs::write(&txt, "plain text").unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        let tabs_before = state.tabs.len();
+        state.open_file(txt);
+        assert_eq!(state.tabs.len(), tabs_before, "a .txt must not open a tab");
+
+        // Case-insensitive: Windows hands back .DOCX from the native picker.
+        let upper = dir.join("doc.DOCX");
+        create_new_docx(&default_paragraphs(), &upper).unwrap();
+        state.open_file(upper);
+        assert_eq!(state.tabs.len(), tabs_before + 1, ".DOCX must still open");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_as_writes_the_file_and_repoints_the_tab() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_saveas_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("renamed.docx");
+
+        let mut state = make_state("hello world", 0, None);
+        state.save_active_tab_as(dest.clone()).unwrap();
+
+        assert!(dest.exists(), "Save As must write the file");
+        // Re-pointed, not merely copied — a later plain Ctrl+S goes here too.
+        assert_eq!(state.tabs[0].file_path.as_deref(), Some(dest.as_path()));
+        assert_eq!(state.tabs[0].title, "renamed.docx");
+        assert!(!state.tabs[0].is_modified, "a successful save clears the dirty flag");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A picker (or a user typing a name) can hand back a path with no
+    /// extension — saving there would produce a file `open_file` then refuses
+    /// to reopen.
+    #[test]
+    fn save_as_appends_docx_when_the_chosen_name_lacks_it() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_saveas_ext_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.save_active_tab_as(dir.join("no_extension")).unwrap();
+
+        assert_eq!(state.tabs[0].title, "no_extension.docx");
+        assert!(dir.join("no_extension.docx").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

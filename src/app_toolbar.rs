@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::keybinds::SaveAsAction;
 use crate::state::AppState;
 use crate::theme::{palette, radius, space};
 
@@ -209,7 +210,31 @@ impl Render for AppToolbar {
             // ── Future command hooks ─────────────────────────────────────────
             .child(Self::future_command("toolbar-find", "Find", p))
             .child(Self::future_command("toolbar-word-count", "Word Count", p))
-            .child(Self::future_command("toolbar-export", "Export", p))
+            // ── Save As ───────────────────────────────────────────────────────
+            // Dispatches the existing `SaveAsAction` rather than opening the
+            // dialog here, so this button and its Ctrl+Shift+S keybind run the
+            // identical handler (registered globally in `main_window.rs`).
+            .child(
+                div()
+                    .id("toolbar-save-as")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .rounded(px(radius::MD))
+                    .text_xs()
+                    .text_color(rgb(p.text_muted))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(p.border_subtle))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_click(|_ev, window, cx| {
+                        window.dispatch_action(Box::new(SaveAsAction), cx);
+                    })
+                    .child("Save As"),
+            )
             .child(Self::future_command("toolbar-history", "History", p))
             // ── Secondary app controls ───────────────────────────────────────
             .child(
