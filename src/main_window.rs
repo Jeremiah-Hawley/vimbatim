@@ -10,6 +10,7 @@ use crate::close_confirm::CloseConfirm;
 use crate::docx_parser::{DocxOrigin, Paragraph};
 use crate::document_ops::FormatOp;
 use crate::file_explorer::{FileExplorer, SidebarResizePayload};
+use crate::find_bar::FindBarView;
 use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
     BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
@@ -25,6 +26,7 @@ use crate::state::{clamp_sidebar_width, AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 use crate::theme::palette;
+use crate::word_count::WordCount;
 
 /// The root view of the application window.
 ///
@@ -51,9 +53,11 @@ pub struct MainWindow {
     formatting_ribbon: Entity<FormattingRibbon>,
     text_editor: Entity<TextEditor>,
     file_explorer: Entity<FileExplorer>,
+    find_bar: Entity<FindBarView>,
     settings_modal: Entity<SettingsModal>,
     close_confirm: Entity<CloseConfirm>,
     recovery_prompt: Entity<RecoveryPrompt>,
+    word_count: Entity<WordCount>,
 }
 
 impl MainWindow {
@@ -74,9 +78,11 @@ impl MainWindow {
         let formatting_ribbon = cx.new(|cx| FormattingRibbon::new(state.clone(), cx));
         let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));
         let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
+        let find_bar          = cx.new(|cx|  FindBarView::new(state.clone(), cx));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
         let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
+        let word_count        = cx.new(|_cx| WordCount::new(state.clone()));
 
         // ── Crash-recovery snapshots ────────────────────────────────────
         // One task for the whole app, not one per tab: it wakes on a fixed
@@ -210,9 +216,11 @@ impl MainWindow {
             formatting_ribbon,
             text_editor,
             file_explorer,
+            find_bar,
             settings_modal,
             close_confirm,
             recovery_prompt,
+            word_count,
         }
     }
 
@@ -305,12 +313,23 @@ impl MainWindow {
             .detach();
         });
 
-        cx.on_action(move |_: &FindAction, _cx| {
-            println!("[Find] not yet implemented");
+        // Ctrl+F and Ctrl+H open the same panel — it always carries both a
+        // Find and a Replace field, so there is nothing for the two bindings
+        // to differ on beyond which field starts focused.
+        let s = state.clone();
+        cx.on_action(move |_: &FindAction, cx| {
+            s.update(cx, |st, cx| { st.open_find_bar(); cx.notify(); });
         });
 
-        cx.on_action(move |_: &FindReplaceAction, _cx| {
-            println!("[Find & Replace] not yet implemented");
+        let s = state.clone();
+        cx.on_action(move |_: &FindReplaceAction, cx| {
+            s.update(cx, |st, cx| {
+                st.open_find_bar();
+                if let Some(bar) = st.find_bar.as_mut() {
+                    bar.focus = crate::state::FindField::Replace;
+                }
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -503,8 +522,12 @@ impl MainWindow {
             println!("[Start Timer] not yet implemented");
         });
 
-        cx.on_action(move |_: &OpenStatsAction, _cx| {
-            println!("[Open Stats] not yet implemented");
+        let s = state.clone();
+        cx.on_action(move |_: &OpenStatsAction, cx| {
+            s.update(cx, |st, cx| {
+                st.word_count_visible = !st.word_count_visible;
+                cx.notify();
+            });
         });
 
         cx.on_action(move |_: &CiteFromLinkAction, _cx| {
@@ -546,6 +569,8 @@ impl Render for MainWindow {
         let settings_visible = self.state.read(cx).settings_visible;
         let pending_close    = self.state.read(cx).pending_close;
         let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
+        let word_count_visible = self.state.read(cx).word_count_visible;
+        let find_bar_visible = self.state.read(cx).find_bar.is_some();
         let theme = self.state.read(cx).theme;
         let theme_mode = self.state.read(cx).theme_mode;
         let p = palette(theme, theme_mode);
@@ -603,7 +628,29 @@ impl Render for MainWindow {
                     // the parent's height and will overflow.
                     .min_h_0()
                     .when(sidebar_visible, |d| d.child(self.file_explorer.clone()))
-                    .child(self.text_editor.clone())
+                    // The editor and the find bar share a stacking context so
+                    // the bar can float over the top-left of the editor area
+                    // (spec 4.6) without taking layout space from it — an
+                    // inline sibling would reflow the document every time the
+                    // bar opened, re-wrapping every line.
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(self.text_editor.clone())
+                            .when(find_bar_visible, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(8.0))
+                                        .right(px(8.0))
+                                        .child(self.find_bar.clone()),
+                                )
+                            }),
+                    )
             )
             // ── Settings modal overlay ─────────────────────────────────────
             // Added last so it paints on top of all other children
@@ -618,5 +665,7 @@ impl Render for MainWindow {
             // behind. Painted last so it sits above both other modals — it
             // must be answered before anything else is usable.
             .when(has_recovery, |d| d.child(self.recovery_prompt.clone()))
+            // ── Word count panel ────────────────────────────────────────────
+            .when(word_count_visible, |d| d.child(self.word_count.clone()))
     }
 }

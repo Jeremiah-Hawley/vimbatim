@@ -13,12 +13,14 @@ mod auto_scroll;
 mod case_converter;
 mod color_picker;
 mod file_explorer;
+mod find_bar;
 mod wikifi_export;
 mod settings_modal;
 mod close_confirm;
 mod main_window;
 mod spellcheck;
 mod theme;
+mod word_count;
 
 use gpui::prelude::*;
 use gpui::*;

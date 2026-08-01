@@ -530,6 +530,35 @@ pub struct SpellTarget {
     pub suggestions: Vec<String>,
 }
 
+/// Which of the find bar's two text fields keystrokes go to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindField {
+    Query,
+    Replace,
+}
+
+/// State for the find/replace bar (`src/find_bar.rs`), `None` when closed.
+///
+/// Deliberately app-wide rather than per-tab: the bar is a single floating
+/// panel under the ribbon, and carrying the query across a tab switch is what
+/// every editor does.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FindBar {
+    pub query: String,
+    pub replacement: String,
+    pub focus: FindField,
+    /// Match count and which one the cursor is on (1-based), recomputed after
+    /// every query change or jump — drives the "3 of 12" readout.
+    pub match_count: usize,
+    pub current_match: usize,
+}
+
+impl Default for FindField {
+    fn default() -> Self {
+        FindField::Query
+    }
+}
+
 /// A close action (tab-close `×` or the app-close `×`) awaiting the user's
 /// answer to "save changes before closing?", set by `request_close_tab`/
 /// `request_close_app` whenever the target has unsaved changes. `None` means
@@ -566,6 +595,15 @@ pub struct AppState {
     /// Open state of the text editor's right-click menu, `None` when closed.
     /// See `EditorContextMenu`.
     pub editor_context_menu: Option<EditorContextMenu>,
+    /// Open state of the find/replace bar, `None` when closed. See `FindBar`.
+    pub find_bar: Option<FindBar>,
+    /// Whether the word-count panel (`src/word_count.rs`) is showing.
+    pub word_count_visible: bool,
+    /// settings.conf `[FORMATTING] spreading_wpm` — the reading rate the word
+    /// count panel divides by for its time estimate. "Spreading" is debate's
+    /// term for reading at speed, so this is deliberately not a prose-reading
+    /// default.
+    pub spreading_wpm: u32,
     /// Colors the user added from the Font Color and HL Color dropdowns'
     /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
     /// `[FORMATTING]` section so they survive a restart, capped at
@@ -955,6 +993,93 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
 /// anything after the last dot: `set_extension` turns "neg.v2" into "neg.docx",
 /// silently eating part of the name. An existing `.docx` (in any case — Windows
 /// pickers hand back `.DOCX`) is left exactly as the user wrote it.
+/// Reading rate used when settings.conf has no `spreading_wpm`. Conversational
+/// speech is ~150 wpm and prose reading ~250; competitive debate "spreading"
+/// sits far above both, and 300 is a common mid-range figure to start from.
+pub const DEFAULT_SPREADING_WPM: u32 = 300;
+
+/// Clamps a words-per-minute value to something that can't produce a nonsense
+/// estimate. Zero would divide by zero; the upper bound is well past any human
+/// rate and only exists to keep the settings stepper from running away.
+pub fn clamp_spreading_wpm(wpm: u32) -> u32 {
+    wpm.clamp(50, 1000)
+}
+
+fn load_spreading_wpm(path: &std::path::Path) -> u32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == "spreading_wpm").then(|| value.trim().parse::<u32>().ok()).flatten()
+            })
+        })
+        .map(clamp_spreading_wpm)
+        .unwrap_or(DEFAULT_SPREADING_WPM)
+}
+
+/// What the word-count panel shows. `spoken` is the figure the time estimate
+/// divides — in a debate doc the parts actually read aloud are the tag lines
+/// plus the highlighted body text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentStats {
+    pub total_words: usize,
+    pub tag_words: usize,
+    pub highlighted_words: usize,
+    pub spoken_words: usize,
+}
+
+impl DocumentStats {
+    /// `spoken_words` at `wpm`, as `(minutes, seconds)`.
+    pub fn estimated_time(&self, wpm: u32) -> (u64, u64) {
+        let wpm = clamp_spreading_wpm(wpm) as f64;
+        let seconds = (self.spoken_words as f64 / wpm * 60.0).round() as u64;
+        (seconds / 60, seconds % 60)
+    }
+}
+
+/// Whitespace-delimited word count — the same rule Word's own counter uses,
+/// and the only one that matches what a user eyeballing a page expects.
+fn count_words(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// First byte offset at or after `from` where `needle` occurs, matched
+/// ASCII-case-insensitively. `None` if there is no match.
+///
+/// ASCII-only case folding on purpose. Full Unicode folding via
+/// `to_lowercase()` is not length-preserving (`İ` lowercases to two chars),
+/// which would break the byte offsets every caller here feeds straight into
+/// `content[..]` slicing and selection ranges. Comparing bytes with
+/// `eq_ignore_ascii_case` keeps offsets exact and covers the English prose
+/// this editor is for; non-ASCII letters simply match case-sensitively.
+pub(crate) fn find_from(content: &str, needle: &str, from: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > content.len() {
+        return None;
+    }
+    let last = content.len() - needle.len();
+    (from.min(content.len())..=last)
+        .filter(|i| content.is_char_boundary(*i) && content.is_char_boundary(i + needle.len()))
+        .find(|i| content[*i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// Last occurrence of `needle` that *starts* strictly before `before`. The
+/// backward counterpart of `find_from`, with the same ASCII-folding caveat.
+pub(crate) fn rfind_before(content: &str, needle: &str, before: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > content.len() || before == 0 {
+        return None;
+    }
+    // `before - 1`, not `saturating_sub(1)`: at `before == 0` no index can be
+    // strictly before it, and saturating would have collapsed that to the same
+    // bound as `before == 1` — making a backward search from the very start of
+    // the document match position 0 instead of wrapping to the end.
+    let last = (content.len() - needle.len()).min(before - 1);
+    (0..=last)
+        .rev()
+        .filter(|i| content.is_char_boundary(*i) && content.is_char_boundary(i + needle.len()))
+        .find(|i| content[*i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
 pub fn with_docx_extension(path: &Path) -> PathBuf {
     let already_docx = path
         .extension()
@@ -1166,6 +1291,9 @@ impl AppState {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
             editor_context_menu: None,
+            find_bar: None,
+            word_count_visible: false,
+            spreading_wpm: load_spreading_wpm(settings_path),
             custom_font_colors,
             custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
@@ -1260,6 +1388,176 @@ impl AppState {
         self.set_cursor_from_line_col(target.line, target.start_col);
         self.extend_selection_to_line_col(target.line, target.end_col);
         self.insert_str(replacement);
+    }
+
+    /// Word counts for the active tab, for the word-count panel.
+    ///
+    /// A Tag line's words and a highlighted run's words are counted
+    /// separately and summed, so text that is *both* (a highlighted word
+    /// inside a tag line) counts twice — deliberate: it is read once as part
+    /// of the tag, and the double-count is the conservative direction for a
+    /// speech-time estimate. Highlighted words are counted per run rather than
+    /// across run boundaries; adjacent same-format runs are already fused by
+    /// `merge_adjacent_same_format_runs`, so a highlighted phrase is one run
+    /// and counts correctly.
+    pub fn document_stats(&self) -> DocumentStats {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return DocumentStats::default() };
+
+        let mut stats = DocumentStats {
+            total_words: count_words(&tab.content),
+            ..DocumentStats::default()
+        };
+        for para in &tab.paragraphs {
+            // Tag is the card style at heading level 4
+            // (`CardStyleKind::heading_level`).
+            if para.heading == 4 {
+                let text: String = para.runs.iter().map(|r| r.text.as_str()).collect();
+                stats.tag_words += count_words(&text);
+            }
+            for run in &para.runs {
+                if run.highlight {
+                    stats.highlighted_words += count_words(&run.text);
+                }
+            }
+        }
+        stats.spoken_words = stats.tag_words + stats.highlighted_words;
+        stats
+    }
+
+    // ── Find / Replace bar (spec 4.6) ───────────────────────────────────────
+
+    /// Opens the find bar, or refocuses the query field if it's already open.
+    ///
+    /// Seeds the query from the current selection when there is one, matching
+    /// what every editor does with Ctrl+F over selected text.
+    pub fn open_find_bar(&mut self) {
+        let selected = self.copy_selection().filter(|s| !s.contains('\n'));
+        let bar = self.find_bar.get_or_insert_with(FindBar::default);
+        if let Some(text) = selected {
+            bar.query = text;
+        }
+        bar.focus = FindField::Query;
+        self.refresh_find_matches();
+    }
+
+    pub fn close_find_bar(&mut self) {
+        self.find_bar = None;
+        self.pending_focus_editor = true;
+    }
+
+    /// Recomputes the "N of M" readout. Cheap enough to run on every
+    /// keystroke: it is one pass over the document with a byte comparison per
+    /// candidate position.
+    pub fn refresh_find_matches(&mut self) {
+        let Some(bar) = self.find_bar.as_ref() else { return };
+        let query = bar.query.clone();
+        let (count, current) = match self.tabs.get(self.active_tab) {
+            Some(tab) if !query.is_empty() => {
+                let cursor = tab.cursor;
+                let mut count = 0;
+                let mut current = 0;
+                let mut at = 0;
+                while let Some(pos) = find_from(&tab.content, &query, at) {
+                    count += 1;
+                    // The match the cursor currently sits on or just past —
+                    // `find_next` leaves the caret at the match's end.
+                    if pos < cursor && cursor <= pos + query.len() {
+                        current = count;
+                    }
+                    at = pos + query.len().max(1);
+                }
+                (count, current)
+            }
+            _ => (0, 0),
+        };
+        if let Some(bar) = self.find_bar.as_mut() {
+            bar.match_count = count;
+            bar.current_match = current;
+        }
+    }
+
+    /// Jumps to and selects the next (or previous) match, wrapping around the
+    /// document like the vim `/` search this shares its wraparound semantics
+    /// with. Returns false when there's nothing to find.
+    pub fn find_next(&mut self, forward: bool) -> bool {
+        let Some(query) = self.find_bar.as_ref().map(|b| b.query.clone()) else { return false };
+        if query.is_empty() { return false; }
+        let Some(tab) = self.tabs.get(self.active_tab) else { return false };
+
+        // Search from the current selection's far edge so repeated Next walks
+        // forward instead of re-finding the match already highlighted.
+        let from = match tab.selection {
+            Some((a, f)) if forward => a.max(f),
+            Some((a, f)) => a.min(f),
+            None => tab.cursor,
+        };
+        let found = if forward {
+            find_from(&tab.content, &query, from).or_else(|| find_from(&tab.content, &query, 0))
+        } else {
+            rfind_before(&tab.content, &query, from)
+                .or_else(|| rfind_before(&tab.content, &query, tab.content.len()))
+        };
+
+        let Some(pos) = found else { return false };
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.selection = Some((pos, pos + query.len()));
+            tab.cursor = pos + query.len();
+            tab.pending_scroll_to_cursor = true;
+        }
+        self.refresh_find_matches();
+        true
+    }
+
+    /// Replaces the currently-selected match, then advances to the next one.
+    /// A no-op unless the selection actually *is* a match — otherwise Replace
+    /// pressed straight after opening the bar would overwrite arbitrary text.
+    pub fn replace_current(&mut self) {
+        let Some(bar) = self.find_bar.as_ref() else { return };
+        let (query, replacement) = (bar.query.clone(), bar.replacement.clone());
+        if query.is_empty() { return; }
+
+        let selection_is_match = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.selection.map(|(a, f)| (t, a.min(f), a.max(f))))
+            .is_some_and(|(tab, start, end)| {
+                end <= tab.content.len()
+                    && end - start == query.len()
+                    && tab.content[start..end].eq_ignore_ascii_case(&query)
+            });
+
+        if selection_is_match {
+            self.insert_str(&replacement);
+        }
+        self.find_next(true);
+        self.refresh_find_matches();
+    }
+
+    /// Replaces every match in the document, returning how many were changed.
+    ///
+    /// Walks forward from the start, resuming *past* each replacement so a
+    /// replacement containing the query (find "a", replace with "aa") can't
+    /// loop forever.
+    pub fn replace_all(&mut self) -> usize {
+        let Some(bar) = self.find_bar.as_ref() else { return 0 };
+        let (query, replacement) = (bar.query.clone(), bar.replacement.clone());
+        if query.is_empty() { return 0; }
+
+        let mut replaced = 0;
+        let mut at = 0;
+        loop {
+            let Some(tab) = self.tabs.get(self.active_tab) else { break };
+            let Some(pos) = find_from(&tab.content, &query, at) else { break };
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.selection = Some((pos, pos + query.len()));
+                tab.cursor = pos + query.len();
+            }
+            self.insert_str(&replacement);
+            replaced += 1;
+            at = pos + replacement.len();
+        }
+        self.refresh_find_matches();
+        replaced
     }
 
     pub fn new_tab(&mut self) {
@@ -6701,6 +6999,9 @@ mod tests {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
             editor_context_menu: None,
+            find_bar: None,
+            word_count_visible: false,
+            spreading_wpm: DEFAULT_SPREADING_WPM,
             custom_font_colors: Vec::new(),
             custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
@@ -7434,7 +7735,6 @@ mod tests {
     // ── Rich clipboard round-trip: copy_selection_runs -> encode_with_lengths
     // -> decode -> insert_str_with_runs, end-to-end, no GPUI involved ────────
 
-    #[test]
     /// End-to-end against the user's reported repro: the Pocket/Hat/Block/Tag
     /// document is copied whole, pasted below itself, saved as a real .docx,
     /// and re-parsed. Guards the whole clipboard -> paragraphs -> docx chain,
@@ -7560,6 +7860,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_multi_paragraph_copy_paste_round_trip_preserves_per_line_formatting() {
         // Regression test: runs_in_range never emitted a run for the
         // paragraph-separating '\n', so the summed run lengths came up one
@@ -12029,6 +12330,211 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vimbatim_ctx_menu_test_{}_{}", std::process::id(), test_name));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── Word count ────────────────────────────────────────────────────────
+
+    #[test]
+    fn document_stats_counts_total_tag_and_highlighted_words() {
+        let tag_para = Paragraph {
+            runs: vec![Run { text: "extinction comes first".into(), bold: true, ..Run::default() }],
+            heading: 4, // Tag — CardStyleKind::heading_level
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        let body = Paragraph {
+            runs: vec![
+                Run { text: "unread lead in ".into(), ..Run::default() },
+                Run { text: "three highlighted words".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() },
+                Run { text: " unread tail".into(), ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        let state = make_state_with_paragraphs(vec![tag_para, body], 0);
+        let stats = state.document_stats();
+
+        // 3 in the tag line + 8 in the body line.
+        assert_eq!(stats.total_words, 11);
+        assert_eq!(stats.tag_words, 3);
+        assert_eq!(stats.highlighted_words, 3);
+        assert_eq!(stats.spoken_words, 6);
+    }
+
+    #[test]
+    fn document_stats_ignores_heading_levels_that_are_not_tag() {
+        // Pocket/Hat/Block are headings 1..3 and are not read aloud.
+        let pocket = Paragraph {
+            runs: vec![Run { text: "not a tag".into(), ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        let state = make_state_with_paragraphs(vec![pocket], 0);
+        assert_eq!(state.document_stats().tag_words, 0);
+    }
+
+    #[test]
+    fn estimated_time_formats_as_minutes_and_seconds() {
+        let stats = DocumentStats { spoken_words: 300, ..DocumentStats::default() };
+        assert_eq!(stats.estimated_time(300), (1, 0));
+        assert_eq!(stats.estimated_time(600), (0, 30));
+
+        // 450 words at 300 wpm is 1.5 minutes.
+        let stats = DocumentStats { spoken_words: 450, ..DocumentStats::default() };
+        assert_eq!(stats.estimated_time(300), (1, 30));
+    }
+
+    /// A zero rate would divide by zero and produce an infinite estimate; the
+    /// clamp is what stops a hand-edited settings.conf from doing that.
+    #[test]
+    fn estimated_time_survives_a_nonsense_wpm() {
+        let stats = DocumentStats { spoken_words: 100, ..DocumentStats::default() };
+        let (m, s) = stats.estimated_time(0);
+        assert!(m < 10 && s < 60, "expected a finite estimate, got {m}:{s}");
+    }
+
+    #[test]
+    fn spreading_wpm_is_clamped_to_a_usable_range() {
+        assert_eq!(clamp_spreading_wpm(0), 50);
+        assert_eq!(clamp_spreading_wpm(300), 300);
+        assert_eq!(clamp_spreading_wpm(99_999), 1000);
+    }
+
+    // ── Find / Replace ────────────────────────────────────────────────────
+
+    #[test]
+    fn find_from_is_ascii_case_insensitive_and_respects_start() {
+        assert_eq!(find_from("Hello hello", "hello", 0), Some(0));
+        assert_eq!(find_from("Hello hello", "hello", 1), Some(6));
+        assert_eq!(find_from("Hello hello", "HELLO", 0), Some(0));
+        assert_eq!(find_from("Hello", "bye", 0), None);
+        // Empty needle must never match, or find_next would spin.
+        assert_eq!(find_from("Hello", "", 0), None);
+    }
+
+    #[test]
+    fn find_from_never_splits_a_multibyte_char() {
+        // "é" is two bytes: a naive byte scan would test an offset inside it.
+        let content = "café cafe";
+        assert_eq!(find_from(content, "cafe", 0), Some(6));
+        assert_eq!(find_from(content, "café", 0), Some(0));
+    }
+
+    #[test]
+    fn rfind_before_finds_the_last_match_that_starts_earlier() {
+        assert_eq!(rfind_before("a b a b a", "a", 9), Some(8));
+        assert_eq!(rfind_before("a b a b a", "a", 8), Some(4));
+        // "strictly before": offset 0 still qualifies when `before` is 1...
+        assert_eq!(rfind_before("a b a b a", "a", 1), Some(0));
+        // ...and nothing qualifies at 0, which is what makes find_next(false)
+        // wrap instead of re-finding the match it is already sitting on.
+        assert_eq!(rfind_before("a b a b a", "a", 0), None);
+    }
+
+    #[test]
+    fn find_next_selects_the_match_and_wraps_around() {
+        let mut state = make_state("one two one", 0, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+
+        assert!(state.find_next(true));
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+
+        assert!(state.find_next(true));
+        assert_eq!(state.tabs[0].selection, Some((8, 11)));
+
+        // Past the last match, wrap back to the first.
+        assert!(state.find_next(true));
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+    }
+
+    #[test]
+    fn find_next_backward_walks_in_reverse() {
+        let mut state = make_state("one two one", 11, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+
+        assert!(state.find_next(false));
+        assert_eq!(state.tabs[0].selection, Some((8, 11)));
+        assert!(state.find_next(false));
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+    }
+
+    /// Replace must only act on a selection that actually *is* a match —
+    /// otherwise pressing it right after opening the bar overwrites whatever
+    /// text happened to be selected.
+    #[test]
+    fn replace_current_ignores_a_selection_that_is_not_a_match() {
+        let mut state = make_state("one two", 0, None);
+        state.tabs[0].selection = Some((4, 7)); // "two"
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.find_bar.as_mut().unwrap().replacement = "X".to_string();
+
+        state.replace_current();
+        assert!(state.tabs[0].content.contains("two"), "unrelated selection was overwritten");
+    }
+
+    #[test]
+    fn replace_current_swaps_the_found_match_then_advances() {
+        let mut state = make_state("one two one", 0, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.find_bar.as_mut().unwrap().replacement = "X".to_string();
+
+        state.find_next(true);
+        state.replace_current();
+        assert_eq!(state.tabs[0].content, "X two one");
+        // ...and moved on to the remaining match.
+        assert_eq!(state.tabs[0].selection, Some((6, 9)));
+    }
+
+    #[test]
+    fn replace_all_replaces_every_match_case_insensitively() {
+        let mut state = make_state("One one ONE", 0, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.find_bar.as_mut().unwrap().replacement = "two".to_string();
+
+        assert_eq!(state.replace_all(), 3);
+        assert_eq!(state.tabs[0].content, "two two two");
+    }
+
+    /// A replacement containing the query would loop forever if the scan
+    /// resumed at the match position instead of past the inserted text.
+    #[test]
+    fn replace_all_terminates_when_the_replacement_contains_the_query() {
+        let mut state = make_state("a a a", 0, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "a".to_string();
+        state.find_bar.as_mut().unwrap().replacement = "aa".to_string();
+
+        assert_eq!(state.replace_all(), 3);
+        assert_eq!(state.tabs[0].content, "aa aa aa");
+    }
+
+    #[test]
+    fn open_find_bar_seeds_the_query_from_the_selection() {
+        let mut state = make_state("hello world", 0, None);
+        state.tabs[0].selection = Some((6, 11));
+        state.open_find_bar();
+        assert_eq!(state.find_bar.as_ref().unwrap().query, "world");
+    }
+
+    #[test]
+    fn refresh_find_matches_counts_every_occurrence() {
+        let mut state = make_state("one one one", 0, None);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.refresh_find_matches();
+        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 3);
+
+        state.find_next(true);
+        assert_eq!(state.find_bar.as_ref().unwrap().current_match, 1);
+        state.find_next(true);
+        assert_eq!(state.find_bar.as_ref().unwrap().current_match, 2);
     }
 
     // ── Spellcheck ────────────────────────────────────────────────────────

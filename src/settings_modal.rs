@@ -256,6 +256,27 @@ impl SettingsModal {
         cx.notify();
     }
 
+    /// Nudges the spreading rate by `delta` wpm, clamped and persisted.
+    ///
+    /// A stepper rather than a text field: GPUI has no text input, and a
+    /// hand-rolled numeric one would be more code than the setting is worth
+    /// (typing an exact value is still possible — settings.conf is plain text).
+    fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let next = crate::state::clamp_spreading_wpm(
+                (s.spreading_wpm as i32 + delta).max(0) as u32,
+            );
+            s.spreading_wpm = next;
+            let _ = crate::theme::save_setting_line(
+                &settings_path(),
+                "spreading_wpm",
+                &next.to_string(),
+            );
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme = theme;
@@ -617,6 +638,7 @@ impl SettingsModal {
         vim_enabled: bool,
         spellcheck_enabled: bool,
         spellcheck_color: String,
+        spreading_wpm: u32,
         p: crate::theme::Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -693,6 +715,84 @@ impl SettingsModal {
                         )
                     }),
             )
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            // ── Spreading rate ────────────────────────────────────────────
+            // Not a toggle, but it belongs with the other document-behaviour
+            // settings rather than under Appearance.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(16.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Spreading rate"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(p.text_muted))
+                                    .max_w(px(400.0))
+                                    .child("Words per minute used for the Word Count panel's speech-time estimate."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .flex_none()
+                            .child(Self::wpm_step("spreading-wpm-down", "−", p).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| this.adjust_spreading_wpm(-10, cx)),
+                            ))
+                            .child(
+                                div()
+                                    .w(px(56.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgb(p.text))
+                                    .child(format!("{spreading_wpm}")),
+                            )
+                            .child(Self::wpm_step("spreading-wpm-up", "+", p).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _ev, _window, cx| this.adjust_spreading_wpm(10, cx)),
+                            )),
+                    ),
+            )
+    }
+
+    /// One −/+ button of the spreading-rate stepper.
+    fn wpm_step(id: &'static str, label: &'static str, p: crate::theme::Palette) -> Stateful<Div> {
+        div()
+            .id(id)
+            .w(px(24.0))
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .text_sm()
+            .text_color(rgb(p.text))
+            .bg(rgb(p.chrome_active))
+            .border_1()
+            .border_color(rgb(p.border))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)))
+            .child(label)
     }
 
     /// The Appearance pane: theme picker, then the Theme Color / Mode pair.
@@ -912,6 +1012,7 @@ impl Render for SettingsModal {
         let vim_enabled = self.state.read(cx).vim_enabled;
         let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
         let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
+        let spreading_wpm = self.state.read(cx).spreading_wpm;
         let current_theme = self.state.read(cx).theme;
         let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
@@ -1079,6 +1180,7 @@ impl Render for SettingsModal {
                                             vim_enabled,
                                             spellcheck_enabled,
                                             spellcheck_color.clone(),
+                                            spreading_wpm,
                                             p,
                                             cx,
                                         ))
