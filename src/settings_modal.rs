@@ -44,6 +44,40 @@ const SPELLCHECK_COLORS: [(&str, u32); 5] = [
     ("magenta", 0xFF00FF),
 ];
 
+/// Which pane the settings sidebar is showing.
+///
+/// The sidebar switches panes rather than scrolling one long page to an
+/// anchor: GPUI has no scroll-to-element primitive, so a true jump would mean
+/// measuring every section's laid-out offset and driving the scroll handle by
+/// hand. Switching panes is what VS Code and macOS System Settings do anyway,
+/// and it keeps each pane short enough to not need scrolling at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsSection {
+    Appearance,
+    Keybindings,
+    ToggleFeatures,
+}
+
+impl SettingsSection {
+    /// Sidebar order, top to bottom. `ToggleFeatures` is deliberately last —
+    /// the toggles belong at the bottom of the settings list.
+    fn all() -> [SettingsSection; 3] {
+        [
+            SettingsSection::Appearance,
+            SettingsSection::Keybindings,
+            SettingsSection::ToggleFeatures,
+        ]
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Keybindings => "Keybindings",
+            SettingsSection::ToggleFeatures => "Toggle Features",
+        }
+    }
+}
+
 /// `{version} ({git_sha})`, e.g. `0.1.0-beta.1 (a1b2c3d)` — both baked in at
 /// compile time (`Cargo.toml`'s version, and `build.rs`'s
 /// `VIMBATIM_GIT_SHA`). Shown in the settings modal so a beta tester can
@@ -79,6 +113,8 @@ pub struct SettingsModal {
     /// Lightweight mode for cycling themes against the real app chrome
     /// without the dimmed backdrop or the full keybind settings list.
     theme_preview: bool,
+    /// Which sidebar pane is showing. See `SettingsSection`.
+    section: SettingsSection,
 }
 
 impl SettingsModal {
@@ -95,6 +131,7 @@ impl SettingsModal {
             conflict_message: None,
             collapsed: std::collections::HashMap::new(),
             theme_preview: false,
+            section: SettingsSection::Appearance,
         }
     }
 
@@ -239,13 +276,11 @@ impl SettingsModal {
 
     /// One selectable pill in the Theme Color / Mode rows. Both groups render
     /// identically and differ only in what their click writes, so the styling
-    /// (including the settings modal's own "not previewing the theme yet" dark
-    /// fallback colors) lives here once.
+    /// lives here once.
     fn mode_pill(
         id: ElementId,
         label: &'static str,
         is_current: bool,
-        theme_preview: bool,
         p: crate::theme::Palette,
         on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
@@ -258,17 +293,17 @@ impl SettingsModal {
             .text_xs()
             .border_1()
             .when(is_current, |d| {
-                d.bg(rgb(if theme_preview { p.accent_wash } else { 0x334155 }))
-                    .border_color(rgb(if theme_preview { p.accent_muted } else { 0x64748b }))
-                    .text_color(rgb(if theme_preview { p.text } else { 0xf8fafc }))
+                d.bg(rgb(p.accent_wash))
+                    .border_color(rgb(p.accent_muted))
+                    .text_color(rgb(p.text))
             })
             .when(!is_current, |d| {
-                d.bg(rgb(if theme_preview { p.chrome_active } else { 0x3c3c3c }))
-                    .border_color(rgb(if theme_preview { p.border_subtle } else { 0x555555 }))
-                    .text_color(rgb(if theme_preview { p.text_muted } else { 0xd4d4d4 }))
+                d.bg(rgb(p.chrome_active))
+                    .border_color(rgb(p.border_subtle))
+                    .text_color(rgb(p.text_muted))
             })
-            .hover(move |s| s.bg(rgb(if theme_preview { p.chrome_hover } else { 0x4a4a4a })))
-            .active(move |s| s.bg(rgb(if theme_preview { p.chrome_active } else { 0x252526 })))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)))
+            .active(move |s| s.bg(rgb(p.chrome_active)))
             .on_click(on_click)
             .child(label)
     }
@@ -322,20 +357,34 @@ impl SettingsModal {
     /// Renders one action's row: its label on the left, and on the right
     /// either its current combo + a "Change" button, or (while this
     /// specific action is being captured) a live prompt / conflict message.
-    fn render_action_row(&self, action: KeybindAction, combo: KeyCombo, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_action_row(
+        &self,
+        action: KeybindAction,
+        combo: KeyCombo,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let is_capturing = self.capturing == Some(action);
 
         let right_side: AnyElement = if is_capturing {
             match &self.conflict_message {
+                // A conflict warning keeps its own red identity rather than
+                // becoming palette chrome, but the dark red is illegible on a
+                // light background — same per-mode pairing the editor's
+                // unsupported-document banner uses (`text_editor.rs`).
                 Some(msg) => div()
                     .text_xs()
-                    .text_color(rgb(0xf48771))
+                    .text_color(rgb(match theme_mode {
+                        ThemeMode::Dark => 0xf48771,
+                        ThemeMode::Light => 0xb02a15,
+                    }))
                     .max_w(px(220.0))
                     .child(msg.clone())
                     .into_any_element(),
                 None => div()
                     .text_xs()
-                    .text_color(rgb(0x569cd6))
+                    .text_color(rgb(p.accent))
                     .child("Press a key… (Esc to cancel)")
                     .into_any_element(),
             }
@@ -348,10 +397,10 @@ impl SettingsModal {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xd4d4d4))
+                        .text_color(rgb(p.text))
                         .px(px(8.0))
                         .py(px(2.0))
-                        .bg(rgb(0x3c3c3c))
+                        .bg(rgb(p.chrome_active))
                         .rounded(px(4.0))
                         .child(combo.display_string()),
                 )
@@ -360,7 +409,7 @@ impl SettingsModal {
                         .id(ElementId::named_usize("keybind-change", action as usize))
                         .cursor_pointer()
                         .text_xs()
-                        .text_color(rgb(0x569cd6))
+                        .text_color(rgb(p.accent))
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
                             this.start_capture(action, window, cx);
                         }))
@@ -382,12 +431,12 @@ impl SettingsModal {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().text_sm().text_color(rgb(0xd4d4d4)).child(action.label()))
+                    .child(div().text_sm().text_color(rgb(p.text)).child(action.label()))
                     .when(action.is_stub(), |d| {
                         d.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x858585))
+                                .text_color(rgb(p.text_faint))
                                 .child("(not yet implemented)"),
                         )
                     }),
@@ -398,7 +447,14 @@ impl SettingsModal {
     /// Renders one collapsible category section (its header + every action
     /// row belonging to it), mirroring `formatting_ribbon.rs`'s own
     /// collapse-arrow convention.
-    fn render_category(&self, category: KeybindCategory, keybinds: &Keybinds, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_category(
+        &self,
+        category: KeybindCategory,
+        keybinds: &Keybinds,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let is_collapsed = *self.collapsed.get(&category).unwrap_or(&false);
         let actions: Vec<KeybindAction> = KeybindAction::all()
             .iter()
@@ -412,7 +468,7 @@ impl SettingsModal {
             .gap(px(2.0))
             .py(px(6.0))
             .border_b_1()
-            .border_color(rgb(0x3d3d3d))
+            .border_color(rgb(p.border_subtle))
             .child(
                 div()
                     .id(ElementId::named_usize("keybind-category", category as u8 as usize))
@@ -423,7 +479,7 @@ impl SettingsModal {
                     .py(px(2.0))
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xd4d4d4))
+                    .text_color(rgb(p.text))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
                         let collapsed = this.collapsed.get(&category).copied().unwrap_or(false);
                         this.collapsed.insert(category, !collapsed);
@@ -439,10 +495,391 @@ impl SettingsModal {
                         .flex_col()
                         .px(px(16.0))
                         .children(actions.into_iter().map(|action| {
-                            self.render_action_row(action, keybinds.get(action), cx)
+                            self.render_action_row(action, keybinds.get(action), p, theme_mode, cx)
                         })),
                 )
             })
+    }
+}
+
+impl SettingsModal {
+    /// The left-hand pane switcher. One row per `SettingsSection`, the active
+    /// one washed with the accent color.
+    fn render_sidebar(&self, p: crate::theme::Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .w(px(180.0))
+            .flex_none()
+            .p(px(10.0))
+            .border_r_1()
+            .border_color(rgb(p.border_subtle))
+            .bg(rgb(p.sidebar))
+            .children(SettingsSection::all().into_iter().map(|section| {
+                let is_current = section == self.section;
+                div()
+                    .id(ElementId::named_usize("settings-section", section as usize))
+                    .flex()
+                    .items_center()
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(is_current, |d| {
+                        d.bg(rgb(p.accent_wash))
+                            .text_color(rgb(p.text))
+                            .font_weight(FontWeight::BOLD)
+                    })
+                    .when(!is_current, |d| {
+                        d.text_color(rgb(p.text_muted))
+                            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    })
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                        this.section = section;
+                        this.cancel_capture(cx);
+                        cx.notify();
+                    }))
+                    .child(section.label())
+            }))
+    }
+
+    /// A labelled on/off row with a description — the shared shape of every
+    /// entry in the Toggle Features pane.
+    fn toggle_row(
+        id: &'static str,
+        label: &'static str,
+        description: &'static str,
+        enabled: bool,
+        p: crate::theme::Palette,
+        on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .justify_between()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(p.text))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(p.text_muted))
+                            .max_w(px(400.0))
+                            .child(description),
+                    ),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .flex_none()
+                    .cursor_pointer()
+                    .px(px(12.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .text_xs()
+                    .border_1()
+                    .when(enabled, |d| {
+                        d.bg(rgb(p.accent))
+                            .border_color(rgb(p.accent_strong))
+                            // The accent is a saturated mid-tone in both
+                            // modes, so a fixed light label stays legible on
+                            // it — unlike `p.text`, which inverts with the
+                            // mode and would vanish on the light palette.
+                            .text_color(rgb(0xffffff))
+                    })
+                    .when(!enabled, |d| {
+                        d.bg(rgb(p.chrome_active))
+                            .border_color(rgb(p.border))
+                            .text_color(rgb(p.text_muted))
+                    })
+                    .on_mouse_down(MouseButton::Left, on_click)
+                    .child(if enabled { "On" } else { "Off" }),
+            )
+    }
+
+    /// The Toggle Features pane: every on/off feature in one group, per the
+    /// bottom-of-settings grouping this sidebar's last entry names.
+    fn render_toggle_features(
+        &self,
+        vim_enabled: bool,
+        spellcheck_enabled: bool,
+        spellcheck_color: String,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(
+                Self::toggle_row(
+                    "vim-mode-toggle",
+                    "Vim Mode",
+                    "Enables modal editing (Normal/Insert/Visual modes and motions), similar to the Vim text editor.",
+                    vim_enabled,
+                    p,
+                    cx.listener(|this, _ev, _window, cx| this.toggle_vim(cx)),
+                ),
+            )
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(Self::toggle_row(
+                        "spellcheck-toggle",
+                        "Spellcheck",
+                        "Underlines misspelled words. Right-click one for suggestions, or to add it to your dictionary.",
+                        spellcheck_enabled,
+                        p,
+                        cx.listener(|this, _ev, _window, cx| this.toggle_spellcheck(cx)),
+                    ))
+                    // Underline color — only meaningful while spellcheck is on.
+                    .when(spellcheck_enabled, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(p.text_muted))
+                                        .child("Underline color"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(6.0))
+                                        .children(SPELLCHECK_COLORS.iter().map(|&(name, hex)| {
+                                            let selected = spellcheck_color == name;
+                                            div()
+                                                .id(SharedString::from(format!("spellcheck-color-{name}")))
+                                                .w(px(20.0))
+                                                .h(px(20.0))
+                                                .rounded(px(4.0))
+                                                .bg(rgb(hex))
+                                                .cursor_pointer()
+                                                .border_2()
+                                                // The selected swatch gets a ring
+                                                // in the page's own text color
+                                                // (so it reads on both light and
+                                                // dark); the rest get a border
+                                                // matching their own fill, which
+                                                // keeps every swatch the same
+                                                // size either way.
+                                                .border_color(rgb(if selected { p.text } else { hex }))
+                                                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                                                    this.set_spellcheck_color(name, cx);
+                                                }))
+                                        })),
+                                ),
+                        )
+                    }),
+            )
+    }
+
+    /// The Appearance pane: theme picker, then the Theme Color / Mode pair.
+    /// Also what Theme Preview shows on its own.
+    fn render_appearance(
+        &self,
+        current_theme: ThemeKind,
+        current_theme_mode: ThemeMode,
+        current_theme_color_mode: ThemeColorMode,
+        theme_preview: bool,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            // ── Theme selector ────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Theme"),
+                            )
+                            .when(!theme_preview, |d| {
+                                d.child(
+                                    div()
+                                        .id("theme-preview-toggle")
+                                        .cursor_pointer()
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .text_xs()
+                                        .bg(rgb(p.chrome_active))
+                                        .text_color(rgb(p.text))
+                                        .border_1()
+                                        .border_color(rgb(p.border))
+                                        .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                                        .active(move |s| s.bg(rgb(p.chrome_active)))
+                                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                                            this.enter_theme_preview(cx);
+                                        }))
+                                        .child("Preview"),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap(px(6.0))
+                            .children(ThemeKind::all().iter().map(|theme| {
+                                let theme = *theme;
+                                let is_current = theme == current_theme;
+                                let theme_palette = palette(theme, current_theme_mode);
+                                div()
+                                    .id(ElementId::named_usize("theme-choice", theme as usize))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
+                                    .pl(px(6.0))
+                                    .pr(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .text_xs()
+                                    .border_1()
+                                    .when(is_current, |d| {
+                                        d.bg(rgb(p.accent_wash))
+                                            .border_color(rgb(p.accent_muted))
+                                            .text_color(rgb(p.text))
+                                    })
+                                    .when(!is_current, |d| {
+                                        d.bg(rgb(p.chrome_active))
+                                            .border_color(rgb(p.border_subtle))
+                                            .text_color(rgb(p.text_muted))
+                                    })
+                                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                        this.set_theme(theme, cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap(px(2.0))
+                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.accent)))
+                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.accent_alt)))
+                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.highlight))),
+                                    )
+                                    .child(theme.label())
+                            })),
+                    ),
+            )
+            // ── Theme Color │ Mode ────────────────────────────────────────
+            // Two labelled groups side by side, split by a thin vertical rule.
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Theme Color"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(6.0))
+                                    .children(ThemeColorMode::all().iter().map(|mode| {
+                                        let mode = *mode;
+                                        Self::mode_pill(
+                                            ElementId::named_usize("theme-color-mode", mode as usize),
+                                            mode.label(),
+                                            mode == current_theme_color_mode,
+                                            p,
+                                            cx.listener(move |this, _ev, _window, cx| {
+                                                this.set_theme_color_mode(mode, cx);
+                                            }),
+                                        )
+                                    })),
+                            ),
+                    )
+                    // The separating rule. Height is fixed rather than
+                    // stretched so it spans the label+buttons pair without
+                    // pinning the row's height.
+                    .child(div().w(px(1.0)).h(px(44.0)).bg(rgb(p.border_subtle)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Mode"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(6.0))
+                                    .children(ThemeMode::all().iter().map(|mode| {
+                                        let mode = *mode;
+                                        Self::mode_pill(
+                                            ElementId::named_usize("theme-mode", mode as usize),
+                                            mode.label(),
+                                            mode == current_theme_mode,
+                                            p,
+                                            cx.listener(move |this, _ev, _window, cx| {
+                                                this.set_theme_mode(mode, cx);
+                                            }),
+                                        )
+                                    })),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -456,10 +893,16 @@ impl Render for SettingsModal {
          *   • Full-screen dimmed backdrop — clicking it closes the modal
          *   • Centred panel containing:
          *       – Title bar with "Settings" heading and a × close button
-         *       – Vim Mode on/off toggle row
-         *       – One collapsible section per KeybindCategory, each listing
-         *         its actions' current binding + a "Change" (capture) button
+         *       – A content row: the section sidebar on the left, the selected
+         *         section's pane on the right (see `SettingsSection`)
          *       – Reset to Defaults / Close button row
+         *
+         * Every color comes from the active theme's `Palette`. It used to be
+         * hardcoded VS-Code-dark hex with a `theme_preview ? palette : hex`
+         * split, which meant the modal stayed dark-on-dark in light mode —
+         * unreadable — unless you happened to be in Theme Preview. The flag
+         * now controls layout only (narrower panel, no backdrop dim, no
+         * sidebar or keybind list), never color.
          *
          * The panel tracks its own focus handle and listens for key-down
          * events so `start_capture` can claim focus and `handle_capture_key`
@@ -475,6 +918,7 @@ impl Render for SettingsModal {
         let keybinds = self.state.read(cx).keybinds.clone();
         let p = palette(current_theme, current_theme_mode);
         let theme_preview = self.theme_preview;
+        let section = self.section;
 
         div()
             .absolute()
@@ -498,9 +942,14 @@ impl Render for SettingsModal {
                     .id("settings-panel")
                     .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(Self::handle_capture_key))
-                    .w(px(if theme_preview { 380.0 } else { 520.0 }))
-                    .max_h(px(if theme_preview { 420.0 } else { 640.0 }))
-                    .bg(rgb(if theme_preview { p.chrome } else { 0x2d2d2d }))
+                    // Wide enough for the sidebar plus a keybind row's
+                    // label/combo/Change trio without the combo chip
+                    // wrapping.
+                    .w(px(if theme_preview { 380.0 } else { 860.0 }))
+                    .h(px(if theme_preview { 420.0 } else { 620.0 }))
+                    .bg(rgb(p.chrome))
+                    .border_1()
+                    .border_color(rgb(p.border))
                     .rounded(px(8.0))
                     .shadow_lg()
                     .flex()
@@ -514,17 +963,18 @@ impl Render for SettingsModal {
                     // in the panel (Change buttons, category headers, the
                     // vim toggle, Reset) closed the modal.
                     .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    // ── Title bar ──────────────────────────────────────────────
+                    // ── Title bar ────────────────────────────────────────────
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
                             .justify_between()
+                            .flex_none()
                             .px(px(20.0))
                             .py(px(14.0))
                             .border_b_1()
-                            .border_color(rgb(if theme_preview { p.border_subtle } else { 0x464647 }))
+                            .border_color(rgb(p.border_subtle))
                             .when(theme_preview, |d| {
                                 d.child(
                                     div()
@@ -564,7 +1014,7 @@ impl Render for SettingsModal {
                             .when(!theme_preview, |d| {
                                 d.child(
                                     div()
-                                        .text_color(rgb(0xd4d4d4))
+                                        .text_color(rgb(p.text))
                                         .font_weight(FontWeight::BOLD)
                                         .child("Settings"),
                                 )
@@ -578,8 +1028,9 @@ impl Render for SettingsModal {
                                         .h(px(28.0))
                                         .rounded(px(4.0))
                                         .cursor_pointer()
-                                        .text_color(rgb(0x858585))
-                                        .bg(rgb(0x3c3c3c))
+                                        .text_color(rgb(p.text_muted))
+                                        .bg(rgb(p.chrome_active))
+                                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                                         .on_click(cx.listener(|this, _ev, window, cx| {
                                             this.close(window, cx);
                                         }))
@@ -587,378 +1038,54 @@ impl Render for SettingsModal {
                                 )
                             }),
                     )
-                    // ── Scrollable body ──────────────────────────────────────────
+                    // ── Sidebar │ selected pane ──────────────────────────────
                     .child(
                         div()
-                            .id("settings-body-scroll")
                             .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            .p(px(20.0))
+                            .flex_row()
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            // ── Vim Mode toggle row ──────────────────────────────
-                            .when(!theme_preview, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_start()
-                                        .justify_between()
-                                        .pb(px(8.0))
-                                        .border_b_1()
-                                        .border_color(rgb(0x464647))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(4.0))
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_color(rgb(0xd4d4d4))
-                                                        .child("Vim Mode"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(p.text_muted))
-                                                        .max_w(px(320.0))
-                                                        .child("Enables modal editing (Normal/Insert/Visual modes and motions), similar to the Vim text editor."),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("vim-mode-toggle")
-                                                .cursor_pointer()
-                                                .px(px(10.0))
-                                                .py(px(4.0))
-                                                .rounded(px(4.0))
-                                                .text_xs()
-                                                .when(vim_enabled, |d| d.bg(rgb(0x007acc)).text_color(rgb(0xffffff)))
-                                                .when(!vim_enabled, |d| d.bg(rgb(0x3c3c3c)).text_color(rgb(0x999999)))
-                                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
-                                                    this.toggle_vim(cx);
-                                                }))
-                                                .child(if vim_enabled { "On" } else { "Off" }),
-                                        ),
-                                )
-                            })
-                            // ── Spellcheck row ────────────────────────────────
-                            // Toggle mirrors Vim Mode above; the color row is
-                            // a fixed swatch set rather than the ribbon's full
-                            // HSL picker — see the `ponytail:` note below.
-                            .when(!theme_preview, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(8.0))
-                                        .pb(px(8.0))
-                                        .border_b_1()
-                                        .border_color(rgb(0x464647))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_start()
-                                                .justify_between()
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap(px(4.0))
-                                                        .child(
-                                                            div()
-                                                                .text_sm()
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(rgb(0xd4d4d4))
-                                                                .child("Spellcheck"),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(rgb(p.text_muted))
-                                                                .max_w(px(320.0))
-                                                                .child("Underlines misspelled words. Right-click one for suggestions, or to add it to your dictionary."),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("spellcheck-toggle")
-                                                        .cursor_pointer()
-                                                        .px(px(10.0))
-                                                        .py(px(4.0))
-                                                        .rounded(px(4.0))
-                                                        .text_xs()
-                                                        .when(spellcheck_enabled, |d| d.bg(rgb(0x007acc)).text_color(rgb(0xffffff)))
-                                                        .when(!spellcheck_enabled, |d| d.bg(rgb(0x3c3c3c)).text_color(rgb(0x999999)))
-                                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
-                                                            this.toggle_spellcheck(cx);
-                                                        }))
-                                                        .child(if spellcheck_enabled { "On" } else { "Off" }),
-                                                ),
-                                        )
-                                        // Underline color — only meaningful
-                                        // while spellcheck is on.
-                                        .when(spellcheck_enabled, |d| {
-                                            d.child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(rgb(p.text_muted))
-                                                            .child("Underline color"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .gap(px(6.0))
-                                                            .children(SPELLCHECK_COLORS.iter().map(
-                                                                |&(name, hex)| {
-                                                                    let selected = spellcheck_color == name;
-                                                                    div()
-                                                                        .id(SharedString::from(format!("spellcheck-color-{name}")))
-                                                                        .w(px(20.0))
-                                                                        .h(px(20.0))
-                                                                        .rounded(px(4.0))
-                                                                        .bg(rgb(hex))
-                                                                        .cursor_pointer()
-                                                                        .border_2()
-                                                                        // The selected swatch gets a
-                                                                        // light ring; the rest get a
-                                                                        // border the same color as the
-                                                                        // swatch, so all five stay the
-                                                                        // same size either way.
-                                                                        .border_color(rgb(if selected { 0xffffff } else { hex }))
-                                                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                                                                            this.set_spellcheck_color(name, cx);
-                                                                        }))
-                                                                },
-                                                            )),
-                                                    ),
-                                            )
-                                        }),
-                                )
-                            })
-                            // ── Theme selector ────────────────────────────────
+                            .when(!theme_preview, |d| d.child(self.render_sidebar(p, cx)))
                             .child(
                                 div()
+                                    .id("settings-body-scroll")
                                     .flex()
                                     .flex_col()
                                     .gap(px(8.0))
-                                    .pb(px(10.0))
-                                    .border_b_1()
-                                    .border_color(rgb(if theme_preview { p.border_subtle } else { 0x464647 }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
-                                                    .child("Theme"),
-                                            )
-                                            .when(!theme_preview, |d| {
-                                                d.child(
-                                                    div()
-                                                        .id("theme-preview-toggle")
-                                                        .cursor_pointer()
-                                                        .px(px(10.0))
-                                                        .py(px(4.0))
-                                                        .rounded(px(4.0))
-                                                        .text_xs()
-                                                        .bg(rgb(0x3c3c3c))
-                                                        .text_color(rgb(0xd4d4d4))
-                                                        .border_1()
-                                                        .border_color(rgb(0x555555))
-                                                        .hover(|s| s.bg(rgb(0x4a4a4a)))
-                                                        .active(|s| s.bg(rgb(0x252526)))
-                                                        .on_click(cx.listener(|this, _ev, _window, cx| {
-                                                            this.enter_theme_preview(cx);
-                                                        }))
-                                                        .child("Preview"),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .flex_wrap()
-                                            .gap(px(6.0))
-                                            .children(ThemeKind::all().iter().map(|theme| {
-                                                let theme = *theme;
-                                                let is_current = theme == current_theme;
-                                                let theme_palette = palette(theme, current_theme_mode);
-                                                div()
-                                                    .id(ElementId::named_usize("theme-choice", theme as usize))
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap(px(6.0))
-                                                    .cursor_pointer()
-                                                    .pl(px(6.0))
-                                                    .pr(px(10.0))
-                                                    .py(px(4.0))
-                                                    .rounded(px(4.0))
-                                                    .text_xs()
-                                                    .border_1()
-                                                    .when(is_current, |d| {
-                                                        d.bg(rgb(if theme_preview { p.accent_wash } else { 0x007acc }))
-                                                            .border_color(rgb(if theme_preview { p.accent_muted } else { 0x569cd6 }))
-                                                            .text_color(rgb(if theme_preview { p.text } else { 0xffffff }))
-                                                    })
-                                                    .when(!is_current, |d| {
-                                                        d.bg(rgb(if theme_preview { p.chrome_active } else { 0x3c3c3c }))
-                                                            .border_color(rgb(if theme_preview { p.border_subtle } else { 0x555555 }))
-                                                            .text_color(rgb(if theme_preview { p.text_muted } else { 0xd4d4d4 }))
-                                                    })
-                                                    .hover(move |s| s.bg(rgb(if theme_preview { p.chrome_hover } else { 0x4a4a4a })))
-                                                    .active(move |s| s.bg(rgb(if theme_preview { p.chrome_active } else { 0x252526 })))
-                                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                                        this.set_theme(theme, cx);
-                                                    }))
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .gap(px(2.0))
-                                                            .child(
-                                                                div()
-                                                                    .w(px(8.0))
-                                                                    .h(px(8.0))
-                                                                    .rounded(px(2.0))
-                                                                    .bg(rgb(theme_palette.accent)),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .w(px(8.0))
-                                                                    .h(px(8.0))
-                                                                    .rounded(px(2.0))
-                                                                    .bg(rgb(theme_palette.accent_alt)),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .w(px(8.0))
-                                                                    .h(px(8.0))
-                                                                    .rounded(px(2.0))
-                                                                    .bg(rgb(theme_palette.highlight)),
-                                                            ),
-                                                    )
-                                                    .child(theme.label())
-                                            })),
-                                    ),
-                            )
-                            // ── Theme Color │ Mode ───────────────────────────────
-                            // Two labelled groups side by side, split by a thin
-                            // vertical rule. `pill` is the shared button styling
-                            // both groups use — identical apart from which
-                            // setting each one writes.
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .gap(px(12.0))
-                                    .pb(px(10.0))
-                                    .border_b_1()
-                                    .border_color(rgb(if theme_preview { p.border_subtle } else { 0x464647 }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.0))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
-                                                    .child("Theme Color"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .gap(px(6.0))
-                                                    .children(ThemeColorMode::all().iter().map(|mode| {
-                                                        let mode = *mode;
-                                                        Self::mode_pill(
-                                                            ElementId::named_usize("theme-color-mode", mode as usize),
-                                                            mode.label(),
-                                                            mode == current_theme_color_mode,
-                                                            theme_preview,
-                                                            p,
-                                                            cx.listener(move |this, _ev, _window, cx| {
-                                                                this.set_theme_color_mode(mode, cx);
-                                                            }),
-                                                        )
-                                                    })),
-                                            ),
-                                    )
-                                    // The separating rule. Height is fixed rather
-                                    // than stretched so it spans the label+buttons
-                                    // pair without pinning the row's height.
-                                    .child(
-                                        div()
-                                            .w(px(1.0))
-                                            .h(px(44.0))
-                                            .bg(rgb(if theme_preview { p.border_subtle } else { 0x464647 })),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(8.0))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_color(rgb(if theme_preview { p.text } else { 0xd4d4d4 }))
-                                                    .child("Mode"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .gap(px(6.0))
-                                                    .children(ThemeMode::all().iter().map(|mode| {
-                                                        let mode = *mode;
-                                                        Self::mode_pill(
-                                                            ElementId::named_usize("theme-mode", mode as usize),
-                                                            mode.label(),
-                                                            mode == current_theme_mode,
-                                                            theme_preview,
-                                                            p,
-                                                            cx.listener(move |this, _ev, _window, cx| {
-                                                                this.set_theme_mode(mode, cx);
-                                                            }),
-                                                        )
-                                                    })),
-                                            ),
-                                    ),
-                            )
-                            // ── Keybind categories ───────────────────────────────
-                            .when(!theme_preview, |d| {
-                                d.children(
-                                    KeybindCategory::all()
-                                        .iter()
-                                        .map(|category| self.render_category(*category, &keybinds, cx)),
-                                )
-                            }),
+                                    .p(px(20.0))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    // Theme Preview is Appearance-only, with
+                                    // no sidebar to choose anything else.
+                                    .when(theme_preview || section == SettingsSection::Appearance, |d| {
+                                        d.child(self.render_appearance(
+                                            current_theme,
+                                            current_theme_mode,
+                                            current_theme_color_mode,
+                                            theme_preview,
+                                            p,
+                                            cx,
+                                        ))
+                                    })
+                                    .when(!theme_preview && section == SettingsSection::Keybindings, |d| {
+                                        d.children(KeybindCategory::all().iter().map(|category| {
+                                            self.render_category(*category, &keybinds, p, current_theme_mode, cx)
+                                        }))
+                                    })
+                                    .when(!theme_preview && section == SettingsSection::ToggleFeatures, |d| {
+                                        d.child(self.render_toggle_features(
+                                            vim_enabled,
+                                            spellcheck_enabled,
+                                            spellcheck_color.clone(),
+                                            p,
+                                            cx,
+                                        ))
+                                    }),
+                            ),
                     )
-                    // ── Bottom button row ────────────────────────────────────────
+                    // ── Bottom button row ────────────────────────────────────
                     .when(!theme_preview, |d| {
                         d.child(
                             div()
@@ -966,17 +1093,18 @@ impl Render for SettingsModal {
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
+                                .flex_none()
                                 .px(px(20.0))
                                 .py(px(12.0))
                                 .border_t_1()
-                                .border_color(rgb(0x464647))
+                                .border_color(rgb(p.border_subtle))
                                 // closed_beta_plan.md §3: always-visible build
                                 // string so a tester reporting a bug can read
                                 // off exactly what build they're on.
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x808080))
+                                        .text_color(rgb(p.text_faint))
                                         .child(build_version_string()),
                                 )
                                 .child(
@@ -992,13 +1120,14 @@ impl Render for SettingsModal {
                                                 .justify_center()
                                                 .px(px(16.0))
                                                 .py(px(6.0))
-                                                .bg(rgb(0x3c3c3c))
+                                                .bg(rgb(p.chrome_active))
                                                 .rounded(px(4.0))
                                                 .cursor_pointer()
                                                 .text_sm()
-                                                .text_color(rgb(0xd4d4d4))
+                                                .text_color(rgb(p.text))
                                                 .border_1()
-                                                .border_color(rgb(0x555555))
+                                                .border_color(rgb(p.border))
+                                                .hover(move |s| s.bg(rgb(p.chrome_hover)))
                                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                                     this.reset_to_defaults(cx);
                                                 }))
@@ -1012,11 +1141,17 @@ impl Render for SettingsModal {
                                                 .justify_center()
                                                 .px(px(16.0))
                                                 .py(px(6.0))
-                                                .bg(rgb(0x007acc))
+                                                .bg(rgb(p.accent))
                                                 .rounded(px(4.0))
                                                 .cursor_pointer()
                                                 .text_sm()
+                                                // Fixed light label: the accent
+                                                // is a saturated mid-tone in
+                                                // both modes, while `p.text`
+                                                // inverts and would disappear
+                                                // on it in light mode.
                                                 .text_color(rgb(0xffffff))
+                                                .hover(move |s| s.bg(rgb(p.accent_strong)))
                                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                                     this.close(window, cx);
                                                 }))
