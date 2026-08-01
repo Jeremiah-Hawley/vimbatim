@@ -300,6 +300,26 @@ fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, 
 /// repeated edits would let paragraphs accumulate more and more same-format
 /// runs indefinitely.
 pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
+    /*
+     * Empty runs go first, before the merge — they render nothing but are not
+     * harmless. `sync_insert_str_with_runs` inserts one character at a time
+     * and splits paragraphs as it goes, which strands an empty remnant of each
+     * source run in the paragraph the split left behind. A multi-line paste of
+     * Pocket/Hat/Block/Tag lines therefore ended with a paragraph holding
+     * `[("test", 0), ("", 26), ("", 32), ("", 44), ("", 52)]` — four invisible
+     * runs whose sizes and `box_format` still fed paragraph-level rendering
+     * (a spurious border) and got written straight back out to the .docx.
+     *
+     * The all-empty case is a genuinely blank paragraph: keep exactly one run,
+     * both to hold the invariant that a paragraph always has at least one and
+     * to preserve the formatting typing there should inherit.
+     */
+    if runs.iter().all(|r| r.text.is_empty()) {
+        runs.truncate(1);
+    } else {
+        runs.retain(|r| !r.text.is_empty());
+    }
+
     let mut i = 0;
     while i + 1 < runs.len() {
         let same_format = runs[i].bold == runs[i + 1].bold

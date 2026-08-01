@@ -2708,6 +2708,37 @@ impl AppState {
         Some(crate::document_ops::runs_in_range(&tab.paragraphs, start, end))
     }
 
+    /// The `(heading, alignment)` of every paragraph the selection touches, in
+    /// document order — the paragraph-level half of a copy.
+    ///
+    /// Separate from `copy_selection_runs` because runs cannot express a card
+    /// style on their own: Pocket/Hat/Block/Tag are run-level bold/size/box
+    /// *plus* these two paragraph fields (`apply_card_style`). Copying only the
+    /// runs is what made a pasted card come back correctly sized but
+    /// structurally plain.
+    pub fn copy_selection_paragraph_attrs(&self) -> Option<Vec<crate::rich_clipboard::ParagraphAttrs>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let (a, f) = tab.selection?;
+        let (start, end) = (a.min(f), a.max(f));
+
+        // Walk paragraphs by their byte spans in `content`, +1 per separating
+        // '\n', and keep every one the selection overlaps. A zero-width
+        // selection is already ruled out by the callers, but an end-exclusive
+        // touch (selection stopping exactly at a paragraph's first byte) must
+        // not pull that paragraph in.
+        let mut attrs = Vec::new();
+        let mut para_start = 0usize;
+        for para in &tab.paragraphs {
+            let text_len: usize = para.runs.iter().map(|r| r.text.len()).sum();
+            let para_end = para_start + text_len;
+            if start <= para_end && end > para_start || (start == end && start == para_start) {
+                attrs.push((para.heading, para.alignment));
+            }
+            para_start = para_end + 1; // the '\n' between paragraphs
+        }
+        Some(attrs)
+    }
+
     pub fn cut_selection(&mut self) -> Option<String> {
         /*
          * Extracts the selected text, deletes it, and returns the text so the
@@ -2757,6 +2788,30 @@ impl AppState {
     /// inheriting behavior itself when `runs` is empty, so this mirrors
     /// `insert_str` exactly otherwise.
     pub fn insert_str_with_runs(&mut self, text: &str, runs: &[Run]) {
+        self.insert_str_with_runs_and_paragraphs(text, runs, &[]);
+    }
+
+    /// `insert_str_with_runs` that also restores the copied paragraphs'
+    /// `heading`/`alignment`.
+    ///
+    /// The paragraph pass is needed because the insertion itself goes through
+    /// `split_paragraph_at`, which is written for pressing Enter: it
+    /// deliberately gives the new paragraph `heading: 0` and default
+    /// alignment, matching how Word reverts to body style after Enter inside a
+    /// heading. Correct for typing, wrong for paste — it silently flattened
+    /// every card style in a multi-line paste. Rather than teach that
+    /// primitive about paste (it is shared with the typing path), the copied
+    /// attributes are re-applied over the affected paragraphs afterwards.
+    ///
+    /// An empty `paragraph_attrs` leaves paragraphs exactly as the split left
+    /// them — the plain-paste path, and clipboard metadata from a build that
+    /// predates paragraph attributes.
+    pub fn insert_str_with_runs_and_paragraphs(
+        &mut self,
+        text: &str,
+        runs: &[Run],
+        paragraph_attrs: &[crate::rich_clipboard::ParagraphAttrs],
+    ) {
         if text.is_empty() { return; }
         self.push_undo_snapshot();
         if self.tabs.get(self.active_tab).map(|t| t.selection.is_some()).unwrap_or(false) {
@@ -2764,10 +2819,29 @@ impl AppState {
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
+            // Which paragraph the paste starts in, resolved *before* the
+            // insert — afterwards the offsets have all moved.
+            let first_para = crate::document_ops::resolve_position(&tab.paragraphs, tab.cursor).0;
             crate::document_ops::sync_insert_str_with_runs(&mut tab.paragraphs, tab.cursor, text, runs);
             tab.content.insert_str(tab.cursor, text);
             tab.cursor += text.len();
             tab.is_modified = true;
+
+            // Only apply when the attribute list actually describes the text
+            // being inserted, one entry per paragraph it spans. A mismatch
+            // means the caller composed text and attributes from different
+            // places, and applying them positionally anyway would stamp each
+            // paragraph with its neighbour's card style — silent, and worse
+            // than leaving the split's defaults alone.
+            let spanned = text.matches('\n').count() + 1;
+            if spanned == paragraph_attrs.len() {
+                for (i, (heading, alignment)) in paragraph_attrs.iter().enumerate() {
+                    if let Some(para) = tab.paragraphs.get_mut(first_para + i) {
+                        para.heading = *heading;
+                        para.alignment = *alignment;
+                    }
+                }
+            }
         }
         if let Some(rec) = self.vim_insertion_recording.as_mut() {
             rec.push_str(text);
@@ -7361,6 +7435,131 @@ mod tests {
     // -> decode -> insert_str_with_runs, end-to-end, no GPUI involved ────────
 
     #[test]
+    /// End-to-end against the user's reported repro: the Pocket/Hat/Block/Tag
+    /// document is copied whole, pasted below itself, saved as a real .docx,
+    /// and re-parsed. Guards the whole clipboard -> paragraphs -> docx chain,
+    /// which is where the corruption actually surfaced (it survived a
+    /// save+reopen, so a state-level assertion alone would not have caught it).
+    #[test]
+    fn copy_paste_card_styles_survives_a_docx_save_and_reload() {
+        let card = |text: &str, heading: u8, size: u16| Paragraph {
+            runs: vec![Run { text: text.into(), bold: true, size, ..Run::default() }],
+            heading,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        // Five styled lines, then the blank line the user pressed Enter to
+        // reach before pasting.
+        let mut state = make_state_with_paragraphs(
+            vec![
+                card("pocket", 1, 52),
+                card("hat", 2, 44),
+                card("block", 3, 32),
+                card("tag", 4, 26),
+                para_plain("test"),
+                para_plain(""),
+            ],
+            0,
+        );
+
+        // Select the five styled lines (not the trailing blank) and copy
+        // through the real clipboard encoding.
+        let doc_len = state.tabs[0].content.len();
+        let copy_end = doc_len - 1; // excludes the trailing blank paragraph
+        state.tabs[0].selection = Some((0, copy_end));
+        let plain = state.copy_selection().unwrap();
+        let runs = state.copy_selection_runs().unwrap();
+        let attrs = state.copy_selection_paragraph_attrs().unwrap();
+        let meta = crate::rich_clipboard::encode_with_lengths(&runs, &attrs);
+        let (runs, attrs) = crate::rich_clipboard::decode(&meta, &plain).unwrap();
+
+        // Paste into the blank line at the end, as the user did.
+        state.tabs[0].selection = None;
+        state.tabs[0].cursor = doc_len;
+        state.insert_str_with_runs_and_paragraphs(&plain, &runs, &attrs);
+
+        let dir = std::env::temp_dir().join(format!("vimbatim_paste_e2e_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Paste_Test.docx");
+        state.save_active_tab_as(path.clone()).unwrap();
+
+        let (reloaded, _) = crate::docx_parser::parse_docx(&path).unwrap();
+        let headings: Vec<u8> = reloaded.iter().map(|p| p.heading).collect();
+        assert_eq!(
+            headings,
+            vec![1, 2, 3, 4, 0, 1, 2, 3, 4, 0],
+            "card-style headings must survive copy -> paste -> save -> reload"
+        );
+        for i in [5usize, 6, 7, 8] {
+            assert_eq!(reloaded[i].alignment, Alignment::Center, "alignment lost on pasted paragraph {i}");
+        }
+        // The pasted body line must not inherit the card styles' leftovers.
+        let last = reloaded.last().unwrap();
+        assert_eq!(last.runs.len(), 1, "leftover empty runs: {:?}", last.runs);
+        assert!(!last.runs[0].box_format, "spurious border on the pasted body line");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Repro of the user-reported "copy/paste jumbles formatting": write
+    /// Pocket/Hat/Block/Tag lines, select all, paste below.
+    ///
+    /// The sibling test above only ever used `heading: 0` and default
+    /// alignment, which is exactly why it never caught this — card styles are
+    /// the one thing that carries *paragraph-level* state.
+    #[test]
+    fn copy_paste_preserves_card_style_heading_and_alignment() {
+        let card = |text: &str, heading: u8, size: u16| Paragraph {
+            runs: vec![Run { text: text.into(), bold: true, size, ..Run::default() }],
+            heading,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let paragraphs = vec![
+            card("pocket", 1, 52),
+            card("hat", 2, 44),
+            card("block", 3, 32),
+            card("tag", 4, 26),
+            para_plain("test"),
+        ];
+        let mut source = make_state_with_paragraphs(paragraphs, 0);
+        let doc_len = source.tabs[0].content.len();
+        source.tabs[0].selection = Some((0, doc_len));
+
+        let plain = source.copy_selection().unwrap();
+        let runs = source.copy_selection_runs().unwrap();
+        let attrs = source.copy_selection_paragraph_attrs().unwrap();
+        let meta = crate::rich_clipboard::encode_with_lengths(&runs, &attrs);
+        let (decoded, decoded_attrs) = crate::rich_clipboard::decode(&meta, &plain)
+            .expect("decode rejected a multi-paragraph card-style copy");
+
+        let mut dest = make_state("", 0, None);
+        dest.insert_str_with_runs_and_paragraphs(&plain, &decoded, &decoded_attrs);
+
+        let paras = &dest.tabs[0].paragraphs;
+        assert_eq!(paras.len(), 5, "expected one paragraph per copied line");
+
+        // Paragraph-level card-style markers must survive the paste.
+        assert_eq!(
+            paras.iter().map(|p| p.heading).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 0],
+            "heading (Pocket/Hat/Block/Tag) lost on paste"
+        );
+        for (i, para) in paras[..4].iter().enumerate() {
+            assert_eq!(para.alignment, Alignment::Center, "alignment lost on pasted paragraph {i}");
+        }
+
+        // No empty leftover runs: they carry stale bold/size/box_format that
+        // shows up as a spurious border and wrong inherited formatting.
+        for (i, para) in paras.iter().enumerate() {
+            assert!(
+                para.runs.iter().all(|r| !r.text.is_empty()),
+                "paragraph {i} kept empty leftover runs: {:?}",
+                para.runs.iter().map(|r| (&r.text, r.size, r.box_format)).collect::<Vec<_>>()
+            );
+        }
+    }
+
     fn test_multi_paragraph_copy_paste_round_trip_preserves_per_line_formatting() {
         // Regression test: runs_in_range never emitted a run for the
         // paragraph-separating '\n', so the summed run lengths came up one
@@ -7391,10 +7590,11 @@ mod tests {
 
         let plain_text = source.copy_selection().unwrap();
         let runs = source.copy_selection_runs().unwrap();
-        let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+        let attrs = source.copy_selection_paragraph_attrs().unwrap();
+        let metadata = crate::rich_clipboard::encode_with_lengths(&runs, &attrs);
         let decoded = crate::rich_clipboard::decode(&metadata, &plain_text);
         assert!(decoded.is_some(), "decode() rejected a multi-paragraph copy -- the bug this test guards against");
-        let decoded_runs = decoded.unwrap();
+        let (decoded_runs, _) = decoded.unwrap();
 
         let mut dest = make_state("", 0, None);
         dest.insert_str_with_runs(&plain_text, &decoded_runs);

@@ -318,20 +318,22 @@ impl MainWindow {
             let state = s.read(cx);
             let Some(text) = state.copy_selection() else { return };
             let runs = state.copy_selection_runs().unwrap_or_default();
-            let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+            let paras = state.copy_selection_paragraph_attrs().unwrap_or_default();
+            let metadata = crate::rich_clipboard::encode_with_lengths(&runs, &paras);
             cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
         });
 
         let s = state.clone();
         cx.on_action(move |_: &CutAction, cx| {
             let runs = s.read(cx).copy_selection_runs().unwrap_or_default();
+            let paras = s.read(cx).copy_selection_paragraph_attrs().unwrap_or_default();
             let text = s.update(cx, |st, cx| {
                 let result = st.cut_selection();
                 if result.is_some() { cx.notify(); }
                 result
             });
             if let Some(text) = text {
-                let metadata = crate::rich_clipboard::encode_with_lengths(&runs);
+                let metadata = crate::rich_clipboard::encode_with_lengths(&runs, &paras);
                 cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
             }
         });
@@ -343,7 +345,9 @@ impl MainWindow {
             let rich = item.metadata().and_then(|m| crate::rich_clipboard::decode(m, &text));
             s.update(cx, |st, cx| {
                 match rich {
-                    Some(runs) => st.insert_str_with_runs(&text, &runs),
+                    Some((runs, paras)) => {
+                        st.insert_str_with_runs_and_paragraphs(&text, &runs, &paras)
+                    }
                     None => st.insert_str(&text),
                 }
                 cx.notify();
