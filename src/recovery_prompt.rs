@@ -33,7 +33,7 @@ impl RecoveryPrompt {
 impl Render for RecoveryPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
 
         let Some(entry) = state.pending_recovery.first() else {
             return div();

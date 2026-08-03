@@ -134,7 +134,7 @@ impl Render for TabBar {
          */
         let is_maximized = window.is_maximized();
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
         let accent_alt = p.accent_alt;
         let tabs = state.tabs.clone();
         let active_idx = state.active_tab;

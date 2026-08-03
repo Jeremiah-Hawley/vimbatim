@@ -20,6 +20,14 @@ pub enum ThemeKind {
     EverforestDark,
     RosePine,
     Kanagawa,
+    /// Settings -> Themes -> Import Theme. Deliberately absent from `all()`
+    /// (the settings modal only offers it as a pill once `AppState.custom_theme`
+    /// is actually loaded) and from `dark_palette`/`light_palette` in any
+    /// meaningful sense — its real colors live in `AppState.custom_theme`
+    /// at runtime, not in this `const fn`'s compiled-in table, so resolving
+    /// a palette for it must go through `AppState::current_palette`, never
+    /// the bare `palette()` free function.
+    Custom,
 }
 
 /// Light or dark variant of whichever `ThemeKind` is selected. Orthogonal to
@@ -115,6 +123,7 @@ impl ThemeKind {
             ThemeKind::EverforestDark => "Everforest Dark",
             ThemeKind::RosePine => "Rose Pine",
             ThemeKind::Kanagawa => "Kanagawa",
+            ThemeKind::Custom => "Custom",
         }
     }
 
@@ -128,9 +137,14 @@ impl ThemeKind {
             ThemeKind::EverforestDark => "everforest-dark",
             ThemeKind::RosePine => "rose-pine",
             ThemeKind::Kanagawa => "kanagawa",
+            ThemeKind::Custom => "custom",
         }
     }
 
+    /// `"custom"` must resolve to `ThemeKind::Custom` explicitly rather than
+    /// falling through the `_` arm — that arm means "unrecognized", and
+    /// silently downgrading a saved "custom" choice to Workbench Dark on
+    /// every launch would make Import Theme un-persistable.
     pub fn from_conf_value(value: &str) -> ThemeKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "catppuccin-mocha" | "catppuccin" => ThemeKind::CatppuccinMocha,
@@ -140,12 +154,13 @@ impl ThemeKind {
             "everforest-dark" | "everforest" => ThemeKind::EverforestDark,
             "rose-pine" | "rosepine" => ThemeKind::RosePine,
             "kanagawa" => ThemeKind::Kanagawa,
+            "custom" => ThemeKind::Custom,
             _ => ThemeKind::WorkbenchDark,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub app_bg: u32,
     pub editor_bg: u32,
@@ -354,6 +369,13 @@ const fn dark_palette(kind: ThemeKind) -> Palette {
             highlight: 0xe6c384,
             selection: 0x2d4f67,
         },
+        // Never actually resolved through here — `AppState::current_palette`
+        // intercepts `ThemeKind::Custom` and returns the loaded
+        // `AppState.custom_theme` instead, since this `const fn` has no
+        // access to runtime state. This arm exists only so the match stays
+        // exhaustive; Workbench Dark is a harmless, visibly-wrong-if-ever-hit
+        // placeholder.
+        ThemeKind::Custom => dark_palette(ThemeKind::WorkbenchDark),
     }
 }
 
@@ -549,6 +571,9 @@ const fn light_palette(kind: ThemeKind) -> Palette {
             highlight: 0xcc6d00,
             selection: 0xc9cbd1,
         },
+        // See the matching arm in `dark_palette` above — never actually
+        // resolved through here in practice.
+        ThemeKind::Custom => light_palette(ThemeKind::WorkbenchDark),
     }
 }
 
@@ -600,6 +625,145 @@ pub fn save_theme(path: &Path, theme: ThemeKind) -> std::io::Result<()> {
 
 pub fn save_theme_color_mode(path: &Path, mode: ThemeColorMode) -> std::io::Result<()> {
     save_setting_line(path, "theme_color_mode", mode.conf_value())
+}
+
+/// `Palette`'s 20 fields, always in this same order — every writer/reader of
+/// theme TOML in this module uses it, so a template, an export, and the
+/// parser's expectations can never quietly drift apart.
+const PALETTE_FIELDS: [&str; 20] = [
+    "app_bg", "editor_bg", "editor_bg_raised", "chrome", "chrome_elevated",
+    "chrome_hover", "chrome_active", "sidebar", "border", "border_subtle",
+    "text", "text_muted", "text_faint", "accent", "accent_strong",
+    "accent_muted", "accent_wash", "accent_alt", "highlight", "selection",
+];
+
+fn palette_field(p: &Palette, name: &str) -> Option<u32> {
+    Some(match name {
+        "app_bg" => p.app_bg,
+        "editor_bg" => p.editor_bg,
+        "editor_bg_raised" => p.editor_bg_raised,
+        "chrome" => p.chrome,
+        "chrome_elevated" => p.chrome_elevated,
+        "chrome_hover" => p.chrome_hover,
+        "chrome_active" => p.chrome_active,
+        "sidebar" => p.sidebar,
+        "border" => p.border,
+        "border_subtle" => p.border_subtle,
+        "text" => p.text,
+        "text_muted" => p.text_muted,
+        "text_faint" => p.text_faint,
+        "accent" => p.accent,
+        "accent_strong" => p.accent_strong,
+        "accent_muted" => p.accent_muted,
+        "accent_wash" => p.accent_wash,
+        "accent_alt" => p.accent_alt,
+        "highlight" => p.highlight,
+        "selection" => p.selection,
+        _ => return None,
+    })
+}
+
+/// Builds a `Palette` from a `field name -> hex value` map, requiring every
+/// one of `PALETTE_FIELDS` to be present — a template with a missing or
+/// misspelled key fails the whole import rather than silently substituting
+/// a color nobody asked for.
+fn palette_from_fields(values: &std::collections::HashMap<&str, u32>) -> Option<Palette> {
+    let mut p = Palette {
+        app_bg: 0, editor_bg: 0, editor_bg_raised: 0, chrome: 0, chrome_elevated: 0,
+        chrome_hover: 0, chrome_active: 0, sidebar: 0, border: 0, border_subtle: 0,
+        text: 0, text_muted: 0, text_faint: 0, accent: 0, accent_strong: 0,
+        accent_muted: 0, accent_wash: 0, accent_alt: 0, highlight: 0, selection: 0,
+    };
+    for field in PALETTE_FIELDS {
+        let value = *values.get(field)?;
+        match field {
+            "app_bg" => p.app_bg = value,
+            "editor_bg" => p.editor_bg = value,
+            "editor_bg_raised" => p.editor_bg_raised = value,
+            "chrome" => p.chrome = value,
+            "chrome_elevated" => p.chrome_elevated = value,
+            "chrome_hover" => p.chrome_hover = value,
+            "chrome_active" => p.chrome_active = value,
+            "sidebar" => p.sidebar = value,
+            "border" => p.border = value,
+            "border_subtle" => p.border_subtle = value,
+            "text" => p.text = value,
+            "text_muted" => p.text_muted = value,
+            "text_faint" => p.text_faint = value,
+            "accent" => p.accent = value,
+            "accent_strong" => p.accent_strong = value,
+            "accent_muted" => p.accent_muted = value,
+            "accent_wash" => p.accent_wash = value,
+            "accent_alt" => p.accent_alt = value,
+            "highlight" => p.highlight = value,
+            "selection" => p.selection = value,
+            _ => unreachable!("PALETTE_FIELDS is the only source of `field`"),
+        }
+    }
+    Some(p)
+}
+
+fn palette_to_toml_lines(p: &Palette) -> String {
+    PALETTE_FIELDS
+        .iter()
+        .map(|field| format!("{field} = \"{:06x}\"", palette_field(p, field).unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parses one `[dark]`/`[light]` section's `key = "hex"` lines (quotes
+/// optional, `#` comments and blank lines ignored) into a `Palette` — `None`
+/// if any of `PALETTE_FIELDS` is missing or unparseable.
+fn parse_palette_section(lines: &[&str]) -> Option<Palette> {
+    let mut values = std::collections::HashMap::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim().trim_matches('"');
+        if let Some(hex) = crate::color_picker::parse_hex(value) {
+            values.insert(key.trim(), hex);
+        }
+    }
+    palette_from_fields(&values)
+}
+
+/// Downloadable starting point for Settings -> Themes -> Import Theme: a
+/// fully valid, directly-reimportable file (Workbench Dark's own colors,
+/// not placeholder gibberish) with `[dark]` and `[light]` sections the user
+/// edits in place — matching `default_settings.conf`'s own role as a
+/// pristine, complete example rather than an empty shell.
+pub fn custom_theme_template() -> String {
+    format!(
+        "# Vimbatim custom theme.\n\
+         # Edit the hex values below (no leading '#') and re-import this\n\
+         # file from Settings -> Themes -> Import Theme.\n\n\
+         [dark]\n{}\n\n[light]\n{}\n",
+        palette_to_toml_lines(&dark_palette(ThemeKind::WorkbenchDark)),
+        palette_to_toml_lines(&light_palette(ThemeKind::WorkbenchDark)),
+    )
+}
+
+/// Parses an imported theme file into its `(dark, light)` pair. `None` on
+/// anything malformed — a missing section or an incomplete/bad palette —
+/// so the caller can fall back rather than half-apply a broken theme.
+pub fn parse_custom_theme_toml(content: &str) -> Option<(Palette, Palette)> {
+    let mut dark_lines = Vec::new();
+    let mut light_lines = Vec::new();
+    let mut section: Option<&str> = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("[dark]") { section = Some("dark"); continue; }
+        if trimmed.eq_ignore_ascii_case("[light]") { section = Some("light"); continue; }
+        match section {
+            Some("dark") => dark_lines.push(line),
+            Some("light") => light_lines.push(line),
+            _ => {}
+        }
+    }
+    let dark = parse_palette_section(&dark_lines)?;
+    let light = parse_palette_section(&light_lines)?;
+    Some((dark, light))
 }
 
 pub(crate) fn save_setting_line(path: &Path, key: &str, value: &str) -> std::io::Result<()> {
@@ -780,6 +944,43 @@ mod tests {
         let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
         let b = (hex & 0xFF) as f32 / 255.0;
         r * 0.299 + g * 0.587 + b * 0.114
+    }
+
+    #[test]
+    fn custom_theme_template_round_trips_through_parse() {
+        let template = custom_theme_template();
+        let (dark, light) = parse_custom_theme_toml(&template).expect("template must parse");
+        assert_eq!(dark, dark_palette(ThemeKind::WorkbenchDark));
+        assert_eq!(light, light_palette(ThemeKind::WorkbenchDark));
+    }
+
+    #[test]
+    fn parse_custom_theme_toml_rejects_a_missing_section() {
+        let dark_only = format!("[dark]\n{}\n", palette_to_toml_lines(&dark_palette(ThemeKind::WorkbenchDark)));
+        assert_eq!(parse_custom_theme_toml(&dark_only), None);
+    }
+
+    #[test]
+    fn parse_custom_theme_toml_rejects_a_missing_field() {
+        let mut broken = custom_theme_template();
+        // Drop the `app_bg` line from the [dark] section entirely.
+        broken = broken.lines().filter(|l| !l.trim().starts_with("app_bg")).collect::<Vec<_>>().join("\n");
+        assert_eq!(parse_custom_theme_toml(&broken), None);
+    }
+
+    #[test]
+    fn parse_custom_theme_toml_accepts_unquoted_hex_too() {
+        // The template quotes values, but a hand-edited file without quotes
+        // (still valid per `color_picker::parse_hex`) should work too.
+        let unquoted = custom_theme_template().replace('"', "");
+        let (dark, light) = parse_custom_theme_toml(&unquoted).expect("unquoted hex must still parse");
+        assert_eq!(dark, dark_palette(ThemeKind::WorkbenchDark));
+        assert_eq!(light, light_palette(ThemeKind::WorkbenchDark));
+    }
+
+    #[test]
+    fn from_conf_value_resolves_custom_explicitly_not_via_fallback() {
+        assert_eq!(ThemeKind::from_conf_value("custom"), ThemeKind::Custom);
     }
 
     #[test]

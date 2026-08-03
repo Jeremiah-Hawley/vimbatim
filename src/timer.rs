@@ -342,7 +342,11 @@ impl Timer {
     fn wpm_row(&self, p: Palette, cx: &Context<Self>) -> AnyElement {
         let state = self.state.read(cx);
         let words = state.spoken_words_in_selection();
-        let over = state.timer.displayed();
+        // Elapsed, not `displayed()` — in Countdown mode `displayed()` is time
+        // *remaining*, the opposite of what a words-per-minute calculation
+        // needs (checklist: "Fix timer functionality to use the amount of
+        // time gone... currently it uses the time left on the clock").
+        let over = state.timer.elapsed();
 
         let (label, muted) = match words {
             // Deliberately the user's own wording — the hint has to say what to
@@ -366,7 +370,7 @@ impl Timer {
 impl Render for Timer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
         let mode = state.timer.mode;
         let running = state.timer.is_running();
         let display = format_duration(state.timer.displayed());

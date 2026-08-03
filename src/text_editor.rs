@@ -1175,7 +1175,7 @@ impl Render for TextEditor {
         // The editor pane is themed like the rest of the chrome — every color
         // below comes from the palette so light mode reaches the document
         // surface too, not just the frame around it.
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
         let theme_mode = state.theme_mode;
         let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;

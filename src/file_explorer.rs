@@ -669,7 +669,7 @@ impl Render for FileExplorer {
          * scroll state is tracked per-element-ID in GPUI.
          */
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
         let sidebar_mode = state.sidebar_mode;
         let dir_name = state
             .working_directory

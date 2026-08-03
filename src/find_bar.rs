@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::{AppState, FindBar as FindBarState, FindField};
-use crate::theme::{palette, radius, space, Palette};
+use crate::theme::{radius, space, Palette};
 
 /// The find/replace panel (spec 4.6), floating under the ribbon at the top
 /// right of the editor area whenever `AppState.find_bar` is `Some`.
@@ -194,9 +194,7 @@ impl Render for FindBarView {
         let Some(bar) = self.state.read(cx).find_bar.clone() else {
             return div().into_any_element();
         };
-        let theme = self.state.read(cx).theme;
-        let theme_mode = self.state.read(cx).theme_mode;
-        let p = palette(theme, theme_mode);
+        let p = self.state.read(cx).current_palette();
 
         // The bar is only useful with the keyboard, and it opens in response
         // to a keybind — so it takes focus on the frame it appears.

@@ -26,7 +26,7 @@ impl CloseConfirm {
 impl Render for CloseConfirm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
 
         let Some(pending) = state.pending_close else {
             return div();

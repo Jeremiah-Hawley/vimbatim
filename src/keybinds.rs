@@ -9,7 +9,7 @@
  * "plain app" shortcuts that exist independent of vim mode.
  */
 
-use gpui::{actions, App, KeyBinding, Modifiers};
+use gpui::{actions, Action, App, KeyBinding, Modifiers};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -428,72 +428,144 @@ impl KeybindAction {
     }
 }
 
-/// The registry mapping each `KeybindAction` to its currently-assigned
-/// `KeyCombo`, loaded from and saved back to settings.conf.
+/// The registry mapping each `KeybindAction` to every `KeyCombo` currently
+/// assigned to it, loaded from and saved back to settings.conf.
+///
+/// A `Vec` rather than one `KeyCombo`, per "add another keybind to the same
+/// function" — an action can carry zero (unbound), one, or several combos.
+/// A combo stored here is always a real, bound one; "unbound" is simply an
+/// empty `Vec`, never a placeholder entry (unlike `KeybindAction::default_combo`,
+/// which still uses an empty-key `KeyCombo` as its own unbound sentinel since
+/// it has no `Vec` to be empty).
 #[derive(Clone, Debug)]
 pub struct Keybinds {
-    combos: HashMap<KeybindAction, KeyCombo>,
+    combos: HashMap<KeybindAction, Vec<KeyCombo>>,
 }
 
 impl Keybinds {
-    /// Every action defaults to its `default_combo()`, then whatever
-    /// settings.conf actually specifies overrides that — so a missing or
-    /// unparseable entry never leaves an action unbound.
+    /// Every action defaults to its `default_combo()` (or no combo at all,
+    /// for the handful that ship unbound), then whatever settings.conf
+    /// actually specifies overrides that — so a missing or unparseable entry
+    /// never leaves an action unexpectedly unbound.
     pub fn defaults() -> Keybinds {
-        let combos = KeybindAction::all().iter().map(|a| (*a, a.default_combo())).collect();
+        let combos = KeybindAction::all()
+            .iter()
+            .map(|a| {
+                let d = a.default_combo();
+                (*a, if d.is_unbound() { Vec::new() } else { vec![d] })
+            })
+            .collect();
         Keybinds { combos }
     }
 
     /// Parses settings.conf's flat `key=value` lines (mirroring
     /// `config_parsing.rs`'s own approach: every line starting with `[` is
     /// skipped, so any number of `[KEYBINDS: ...]` sub-headers are safe)
-    /// looking for each action's `conf_key()`.
+    /// looking for each action's `conf_key()`. Every line sharing a key is
+    /// one combo for that action — `save_to` emits one line per combo, so a
+    /// multi-keybind action round-trips as several consecutive lines with
+    /// the same key, not one delimited value (a delimiter risks colliding
+    /// with an actual bindable key, e.g. `,` — `ToggleSettings`'s own
+    /// default — so this avoids that instead of picking one and hoping).
     pub fn load(path: &Path) -> Keybinds {
         let mut keybinds = Keybinds::defaults();
         let Ok(content) = fs::read_to_string(path) else { return keybinds };
 
-        let mut values: HashMap<&str, String> = HashMap::new();
+        let mut values: HashMap<&str, Vec<String>> = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('[') { continue; }
             if let Some((key, value)) = line.split_once('=') {
-                values.insert(key.trim(), value.trim().to_string());
+                values.entry(key.trim()).or_default().push(value.trim().to_string());
             }
         }
 
         for action in KeybindAction::all() {
-            if let Some(raw) = values.get(action.conf_key()) {
-                if let Some(combo) = KeyCombo::parse(raw) {
-                    keybinds.combos.insert(*action, combo);
-                }
-            }
+            let Some(raws) = values.get(action.conf_key()) else { continue };
+            // The key being present at all is authoritative, even if every
+            // line for it is blank/unparseable — that (an empty Vec) is how
+            // a user's deliberate "no keybinds" persists across a restart,
+            // distinct from the key being absent entirely (a settings.conf
+            // that predates this action, which should keep the default).
+            let parsed: Vec<KeyCombo> = raws.iter().filter_map(|r| KeyCombo::parse(r)).collect();
+            keybinds.combos.insert(*action, parsed);
         }
         keybinds
     }
 
+    /// Every combo currently bound to `action`, in assignment order. Empty
+    /// means unbound.
+    pub fn get_all(&self, action: KeybindAction) -> Vec<KeyCombo> {
+        self.combos.get(&action).cloned().unwrap_or_default()
+    }
+
+    /// `action`'s first/primary combo, or an unbound sentinel if it has none
+    /// — for call sites that only ever need a single value: `ToggleSettings`
+    /// (which keeps its own dedicated settings.conf line, never the general
+    /// multi-combo list) and display code that only shows one at a time.
     pub fn get(&self, action: KeybindAction) -> KeyCombo {
-        self.combos.get(&action).cloned().unwrap_or_else(|| action.default_combo())
+        self.get_all(action).into_iter().next().unwrap_or_else(|| KeyCombo::new(false, false, false, ""))
     }
 
-    pub fn set(&mut self, action: KeybindAction, combo: KeyCombo) {
-        self.combos.insert(action, combo);
+    /// The settings modal's "+" button: appends `combo` as an additional
+    /// binding for `action` rather than replacing its existing one(s).
+    pub fn add(&mut self, action: KeybindAction, combo: KeyCombo) {
+        let mut combos = self.get_all(action);
+        combos.push(combo);
+        self.combos.insert(action, combos);
     }
 
-    /// Returns whichever *other* action already owns `combo`, if any —
-    /// used to block duplicate assignments and tell the user what's
-    /// currently using the combination they just pressed.
+    /// Replaces the combo at `index` — the existing "re-capture this slot"
+    /// flow, now addressed by index since an action can have more than one.
+    /// A no-op if `index` is out of range (the slot was removed from under
+    /// an in-flight capture).
+    pub fn set_at(&mut self, action: KeybindAction, index: usize, combo: KeyCombo) {
+        let mut combos = self.get_all(action);
+        if index < combos.len() {
+            combos[index] = combo;
+            self.combos.insert(action, combos);
+        }
+    }
+
+    /// The settings modal's "remove keybind" button: drops the combo at
+    /// `index` outright (no replacement prompt). A no-op if out of range.
+    pub fn remove_at(&mut self, action: KeybindAction, index: usize) {
+        let mut combos = self.get_all(action);
+        if index < combos.len() {
+            combos.remove(index);
+            self.combos.insert(action, combos);
+        }
+    }
+
+    /// Returns whichever *other* (action, slot) already owns `combo`, if
+    /// any — used to block duplicate assignments and tell the user what's
+    /// currently using the combination they just pressed. `exclude` is the
+    /// slot being edited (`None` when adding a brand new one, which can
+    /// never already exist), so re-confirming a slot's own current value
+    /// isn't reported as colliding with itself.
     ///
     /// An unbound combo owns nothing, so it never conflicts: several actions
     /// ship with no key at all (Analytic, Select Similar Formatting) and
     /// "unbound collides with unbound" is not a clash a user can act on.
-    pub fn find_conflict(&self, combo: &KeyCombo, exclude: KeybindAction) -> Option<KeybindAction> {
+    pub fn find_conflict(
+        &self,
+        combo: &KeyCombo,
+        exclude: (KeybindAction, Option<usize>),
+    ) -> Option<KeybindAction> {
         if combo.is_unbound() {
             return None;
         }
-        KeybindAction::all()
-            .iter()
-            .find(|a| **a != exclude && self.get(**a) == *combo)
-            .copied()
+        for action in KeybindAction::all() {
+            for (i, existing) in self.get_all(*action).iter().enumerate() {
+                if (*action, Some(i)) == exclude {
+                    continue;
+                }
+                if existing == combo {
+                    return Some(*action);
+                }
+            }
+        }
+        None
     }
 
     /// Rewrites only the file's `[KEYBINDS...]` portion, grouped by category
@@ -523,7 +595,19 @@ impl Keybinds {
                 if action.category() != *category || *action == KeybindAction::ToggleSettings {
                     continue;
                 }
-                out.push_str(&format!("{}={}\n", action.conf_key(), self.get(*action).to_conf_string()));
+                let combos = self.get_all(*action);
+                if combos.is_empty() {
+                    // An empty value line is still written (not omitted) so
+                    // `load` can tell "deliberately cleared to no keybinds"
+                    // apart from "this action didn't exist in an older
+                    // settings.conf" — the key being present at all is what
+                    // makes it authoritative there.
+                    out.push_str(&format!("{}=\n", action.conf_key()));
+                } else {
+                    for combo in &combos {
+                        out.push_str(&format!("{}={}\n", action.conf_key(), combo.to_conf_string()));
+                    }
+                }
             }
             out.push('\n');
         }
@@ -615,66 +699,69 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
 
     cx.clear_key_bindings();
 
-    // Each entry is an `Option` so an unbound action (`KeyCombo::is_unbound`)
-    // can be dropped rather than registered under an empty keystroke, which
-    // would either never fire or shadow a real binding.
-    let bind = |action: KeybindAction| -> Option<String> {
-        let combo = keybinds.get(action);
-        (!combo.is_unbound()).then(|| combo.to_gpui_keystroke())
-    };
+    // One `KeyBinding` per combo an action actually has (zero, one, or
+    // several — "add another keybind" means an action's list of combos
+    // isn't always length 1 anymore). `A: Clone` because `actions!` already
+    // derives it for every zero-sized action struct, so one `make` value
+    // covers every combo without needing a constructor per binding.
+    fn bind_all<A: Action + Clone>(keybinds: &Keybinds, action: KeybindAction, make: A) -> Vec<KeyBinding> {
+        keybinds
+            .get_all(action)
+            .iter()
+            .map(|combo| KeyBinding::new(&combo.to_gpui_keystroke(), make.clone(), None))
+            .collect()
+    }
 
-    cx.bind_keys([
-        bind(ToggleSettings).map(|k| KeyBinding::new(&k, ToggleSettingsAction, None)),
-        bind(ToggleSidebar).map(|k| KeyBinding::new(&k, ToggleSidebarAction, None)),
-        bind(NewTab).map(|k| KeyBinding::new(&k, NewTabAction, None)),
-        bind(CloseTab).map(|k| KeyBinding::new(&k, CloseTabAction, None)),
-        bind(ReopenClosedTab).map(|k| KeyBinding::new(&k, ReopenClosedTabAction, None)),
-        bind(Save).map(|k| KeyBinding::new(&k, SaveAction, None)),
-        bind(SaveAs).map(|k| KeyBinding::new(&k, SaveAsAction, None)),
-        bind(Find).map(|k| KeyBinding::new(&k, FindAction, None)),
-        bind(FindReplace).map(|k| KeyBinding::new(&k, FindReplaceAction, None)),
-        bind(Copy).map(|k| KeyBinding::new(&k, CopyAction, None)),
-        bind(Cut).map(|k| KeyBinding::new(&k, CutAction, None)),
-        bind(Paste).map(|k| KeyBinding::new(&k, PasteAction, None)),
-        bind(PasteWithoutFormatting).map(|k| KeyBinding::new(&k, PasteWithoutFormattingAction, None)),
-        bind(Undo).map(|k| KeyBinding::new(&k, UndoAction, None)),
-        bind(Redo).map(|k| KeyBinding::new(&k, RedoAction, None)),
-        bind(SelectAll).map(|k| KeyBinding::new(&k, SelectAllAction, None)),
-        bind(SelectSimilarFormatting)
-            .map(|k| KeyBinding::new(&k, SelectSimilarFormattingAction, None)),
-        bind(Bold).map(|k| KeyBinding::new(&k, BoldAction, None)),
-        bind(Underline).map(|k| KeyBinding::new(&k, UnderlineAction, None)),
-        bind(Shrink).map(|k| KeyBinding::new(&k, ShrinkAction, None)),
-        bind(ClearFormatting).map(|k| KeyBinding::new(&k, ClearFormattingAction, None)),
-        bind(PasteSmart).map(|k| KeyBinding::new(&k, PasteSmartAction, None)),
-        bind(Condense).map(|k| KeyBinding::new(&k, CondenseAction, None)),
-        bind(Pocket).map(|k| KeyBinding::new(&k, PocketAction, None)),
-        bind(Hat).map(|k| KeyBinding::new(&k, HatAction, None)),
-        bind(Block).map(|k| KeyBinding::new(&k, BlockAction, None)),
-        bind(Tag).map(|k| KeyBinding::new(&k, TagAction, None)),
-        bind(Cite).map(|k| KeyBinding::new(&k, CiteAction, None)),
-        bind(Analytic).map(|k| KeyBinding::new(&k, AnalyticAction, None)),
-        bind(Emphasis).map(|k| KeyBinding::new(&k, EmphasisAction, None)),
-        bind(Highlight).map(|k| KeyBinding::new(&k, HighlightAction, None)),
-        bind(DeleteTags).map(|k| KeyBinding::new(&k, DeleteTagsAction, None)),
-        bind(StartTimer).map(|k| KeyBinding::new(&k, StartTimerAction, None)),
-        bind(OpenStats).map(|k| KeyBinding::new(&k, OpenStatsAction, None)),
-        bind(CiteFromLink).map(|k| KeyBinding::new(&k, CiteFromLinkAction, None)),
-        bind(Wikifi).map(|k| KeyBinding::new(&k, WikifiAction, None)),
-        bind(ZoomIn).map(|k| KeyBinding::new(&k, ZoomInAction, None)),
-        bind(ZoomOut).map(|k| KeyBinding::new(&k, ZoomOutAction, None)),
-        bind(ZoomReset).map(|k| KeyBinding::new(&k, ZoomResetAction, None)),
-        bind(NextTab).map(|k| KeyBinding::new(&k, NextTabAction, None)),
-        bind(PrevTab).map(|k| KeyBinding::new(&k, PrevTabAction, None)),
-        Some(KeyBinding::new("f9", UnderlineAction, None)),
-        // A second, fixed binding for New Document — Ctrl+T is the
-        // browser-tab convention, not user-configurable like NewTab's own
-        // combo (Ctrl+N by default). Free: Start Timer owns Ctrl+Shift+T,
-        // not plain Ctrl+T.
-        Some(KeyBinding::new("ctrl-t", NewTabAction, None)),
-    ]
-    .into_iter()
-    .flatten());
+    let mut bindings: Vec<KeyBinding> = Vec::new();
+    bindings.extend(bind_all(keybinds, ToggleSettings, ToggleSettingsAction));
+    bindings.extend(bind_all(keybinds, ToggleSidebar, ToggleSidebarAction));
+    bindings.extend(bind_all(keybinds, NewTab, NewTabAction));
+    bindings.extend(bind_all(keybinds, CloseTab, CloseTabAction));
+    bindings.extend(bind_all(keybinds, ReopenClosedTab, ReopenClosedTabAction));
+    bindings.extend(bind_all(keybinds, Save, SaveAction));
+    bindings.extend(bind_all(keybinds, SaveAs, SaveAsAction));
+    bindings.extend(bind_all(keybinds, Find, FindAction));
+    bindings.extend(bind_all(keybinds, FindReplace, FindReplaceAction));
+    bindings.extend(bind_all(keybinds, Copy, CopyAction));
+    bindings.extend(bind_all(keybinds, Cut, CutAction));
+    bindings.extend(bind_all(keybinds, Paste, PasteAction));
+    bindings.extend(bind_all(keybinds, PasteWithoutFormatting, PasteWithoutFormattingAction));
+    bindings.extend(bind_all(keybinds, Undo, UndoAction));
+    bindings.extend(bind_all(keybinds, Redo, RedoAction));
+    bindings.extend(bind_all(keybinds, SelectAll, SelectAllAction));
+    bindings.extend(bind_all(keybinds, SelectSimilarFormatting, SelectSimilarFormattingAction));
+    bindings.extend(bind_all(keybinds, Bold, BoldAction));
+    bindings.extend(bind_all(keybinds, Underline, UnderlineAction));
+    bindings.extend(bind_all(keybinds, Shrink, ShrinkAction));
+    bindings.extend(bind_all(keybinds, ClearFormatting, ClearFormattingAction));
+    bindings.extend(bind_all(keybinds, PasteSmart, PasteSmartAction));
+    bindings.extend(bind_all(keybinds, Condense, CondenseAction));
+    bindings.extend(bind_all(keybinds, Pocket, PocketAction));
+    bindings.extend(bind_all(keybinds, Hat, HatAction));
+    bindings.extend(bind_all(keybinds, Block, BlockAction));
+    bindings.extend(bind_all(keybinds, Tag, TagAction));
+    bindings.extend(bind_all(keybinds, Cite, CiteAction));
+    bindings.extend(bind_all(keybinds, Analytic, AnalyticAction));
+    bindings.extend(bind_all(keybinds, Emphasis, EmphasisAction));
+    bindings.extend(bind_all(keybinds, Highlight, HighlightAction));
+    bindings.extend(bind_all(keybinds, DeleteTags, DeleteTagsAction));
+    bindings.extend(bind_all(keybinds, StartTimer, StartTimerAction));
+    bindings.extend(bind_all(keybinds, OpenStats, OpenStatsAction));
+    bindings.extend(bind_all(keybinds, CiteFromLink, CiteFromLinkAction));
+    bindings.extend(bind_all(keybinds, Wikifi, WikifiAction));
+    bindings.extend(bind_all(keybinds, ZoomIn, ZoomInAction));
+    bindings.extend(bind_all(keybinds, ZoomOut, ZoomOutAction));
+    bindings.extend(bind_all(keybinds, ZoomReset, ZoomResetAction));
+    bindings.extend(bind_all(keybinds, NextTab, NextTabAction));
+    bindings.extend(bind_all(keybinds, PrevTab, PrevTabAction));
+    bindings.push(KeyBinding::new("f9", UnderlineAction, None));
+    // A second, fixed binding for New Document — Ctrl+T is the
+    // browser-tab convention, not user-configurable like NewTab's own
+    // combo (Ctrl+N by default). Free: Start Timer owns Ctrl+Shift+T,
+    // not plain Ctrl+T.
+    bindings.push(KeyBinding::new("ctrl-t", NewTabAction, None));
+
+    cx.bind_keys(bindings);
 }
 
 #[cfg(test)]
@@ -771,7 +858,7 @@ mod tests {
         for action in KeybindAction::all() {
             let combo = keybinds.get(*action);
             assert_eq!(
-                keybinds.find_conflict(&combo, *action),
+                keybinds.find_conflict(&combo, (*action, Some(0))),
                 None,
                 "{:?}'s default {:?} collides with another action's default",
                 action,
@@ -784,9 +871,9 @@ mod tests {
     fn find_conflict_detects_duplicate() {
         let mut keybinds = Keybinds::defaults();
         let combo = keybinds.get(KeybindAction::Bold);
-        keybinds.set(KeybindAction::Underline, combo.clone());
+        keybinds.set_at(KeybindAction::Underline, 0, combo.clone());
         assert_eq!(
-            keybinds.find_conflict(&combo, KeybindAction::Underline),
+            keybinds.find_conflict(&combo, (KeybindAction::Underline, Some(0))),
             Some(KeybindAction::Bold)
         );
     }
@@ -795,7 +882,79 @@ mod tests {
     fn find_conflict_ignores_self() {
         let keybinds = Keybinds::defaults();
         let combo = keybinds.get(KeybindAction::Bold);
-        assert_eq!(keybinds.find_conflict(&combo, KeybindAction::Bold), None);
+        assert_eq!(keybinds.find_conflict(&combo, (KeybindAction::Bold, Some(0))), None);
+    }
+
+    #[test]
+    fn add_appends_a_second_combo_without_disturbing_the_first() {
+        let mut keybinds = Keybinds::defaults();
+        let first = keybinds.get(KeybindAction::Bold);
+        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        assert_eq!(
+            keybinds.get_all(KeybindAction::Bold),
+            vec![first, KeyCombo::new(false, false, false, "f2")]
+        );
+    }
+
+    #[test]
+    fn remove_at_drops_only_that_slot() {
+        let mut keybinds = Keybinds::defaults();
+        let first = keybinds.get(KeybindAction::Bold);
+        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        keybinds.remove_at(KeybindAction::Bold, 0);
+        assert_eq!(keybinds.get_all(KeybindAction::Bold), vec![KeyCombo::new(false, false, false, "f2")]);
+        let _ = first;
+    }
+
+    #[test]
+    fn remove_at_down_to_zero_leaves_the_action_unbound() {
+        let mut keybinds = Keybinds::defaults();
+        keybinds.remove_at(KeybindAction::Bold, 0);
+        assert!(keybinds.get_all(KeybindAction::Bold).is_empty());
+        assert_eq!(keybinds.get(KeybindAction::Bold), KeyCombo::new(false, false, false, ""));
+    }
+
+    /// The bug a naive `key=value1, value2` single-line format would hit:
+    /// `ToggleSettings`'s own default key is a literal comma, so a
+    /// comma-joined multi-combo action could parse as two combos where
+    /// there's only one bound (`,` and whatever key sat after the comma).
+    /// Repeated `key=` lines (this module's actual format) can't confuse the
+    /// two, since each line is parsed independently.
+    #[test]
+    fn add_survives_round_trip_even_when_another_actions_key_is_a_comma() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_keybind_comma_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.conf");
+
+        let mut keybinds = Keybinds::defaults();
+        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        keybinds.save_to(&path, false, &[]).unwrap();
+
+        let reloaded = Keybinds::load(&path);
+        assert_eq!(reloaded.get_all(KeybindAction::Bold).len(), 2);
+        assert_eq!(reloaded.get(KeybindAction::ToggleSettings), KeyCombo::new(true, false, false, ","));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn cleared_keybind_stays_cleared_across_a_reload() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_keybind_clear_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.conf");
+
+        let mut keybinds = Keybinds::defaults();
+        keybinds.remove_at(KeybindAction::Bold, 0);
+        keybinds.save_to(&path, false, &[]).unwrap();
+
+        // Without the "key present but empty" distinction, this would come
+        // back bound to Bold's compiled-in default instead of staying empty.
+        let reloaded = Keybinds::load(&path);
+        assert!(reloaded.get_all(KeybindAction::Bold).is_empty());
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
     }
 
     #[test]
@@ -831,11 +990,15 @@ mod tests {
         // actions collide with each other.
         let keybinds = Keybinds::load(Path::new("settings.conf"));
         for action in KeybindAction::all() {
-            let combo = keybinds.get(*action);
-            assert_eq!(
-                keybinds.find_conflict(&combo, *action), None,
-                "{:?}'s combo {:?} in settings.conf collides with another action", action, combo,
-            );
+            // Every combo of every action, not just the first — an action
+            // can carry more than one now, and a collision on its second
+            // slot is just as real as one on its first.
+            for (i, combo) in keybinds.get_all(*action).iter().enumerate() {
+                assert_eq!(
+                    keybinds.find_conflict(combo, (*action, Some(i))), None,
+                    "{:?}'s combo {:?} in settings.conf collides with another action", action, combo,
+                );
+            }
         }
     }
 

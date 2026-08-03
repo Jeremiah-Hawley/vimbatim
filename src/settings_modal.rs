@@ -103,9 +103,12 @@ pub struct SettingsModal {
     /// Needed so this view can claim keyboard focus while capturing a key
     /// combination — see `start_capture`.
     focus_handle: FocusHandle,
-    /// The action currently awaiting a keypress, if any (armed by clicking
-    /// a row's "Change" button).
-    capturing: Option<KeybindAction>,
+    /// The action (and slot) currently awaiting a keypress, if any. The slot
+    /// is `Some(index)` when re-capturing an existing combo (clicking its
+    /// chip), or `None` when adding a brand new one (the "+" button) —
+    /// `handle_capture_key` routes to `Keybinds::set_at` or `Keybinds::add`
+    /// accordingly.
+    capturing: Option<(KeybindAction, Option<usize>)>,
     /// Set when a captured combo collides with another action's existing
     /// binding — shown inline on the capturing row. Capture stays active
     /// (rather than closing) so the user can just try a different key.
@@ -173,8 +176,8 @@ impl SettingsModal {
     /// Clearing the keymap outright sidesteps both problems: with nothing
     /// registered, there's nothing for any keystroke to match, regardless
     /// of focus or context.
-    fn start_capture(&mut self, action: KeybindAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.capturing = Some(action);
+    fn start_capture(&mut self, action: KeybindAction, slot: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.capturing = Some((action, slot));
         self.conflict_message = None;
         cx.clear_key_bindings();
         self.focus_handle.clone().focus(window, cx);
@@ -193,7 +196,7 @@ impl SettingsModal {
     /// collide with another action, or showing an inline conflict message
     /// and staying in capture mode if it does.
     fn handle_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(action) = self.capturing else { return };
+        let Some((action, slot)) = self.capturing else { return };
         let ks = &event.keystroke;
 
         let Some(combo) = KeyCombo::from_capture(&ks.modifiers, &ks.key) else {
@@ -203,7 +206,7 @@ impl SettingsModal {
             return;
         };
 
-        let conflict = self.state.read(cx).keybinds.find_conflict(&combo, action);
+        let conflict = self.state.read(cx).keybinds.find_conflict(&combo, (action, slot));
         if let Some(other) = conflict {
             self.conflict_message = Some(format!(
                 "{} is already used by \"{}\". Press a different combination, or Esc to keep the current binding.",
@@ -215,7 +218,10 @@ impl SettingsModal {
         }
 
         self.state.update(cx, |s, _cx| {
-            s.keybinds.set(action, combo.clone());
+            match slot {
+                Some(index) => s.keybinds.set_at(action, index, combo.clone()),
+                None => s.keybinds.add(action, combo.clone()),
+            }
             let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
@@ -390,69 +396,141 @@ impl SettingsModal {
         cx.notify();
     }
 
-    /// Renders one action's row: its label on the left, and on the right
-    /// either its current combo + a "Change" button, or (while this
-    /// specific action is being captured) a live prompt / conflict message.
+    /// One bound combo's own chip: the combo pill, a "Change" link that
+    /// re-captures that exact slot, and a "×" that removes it outright (no
+    /// capture needed for a removal). Replaced by the live capture prompt
+    /// while this specific slot is the one being captured.
+    fn render_combo_chip(
+        &self,
+        action: KeybindAction,
+        index: usize,
+        combo: &KeyCombo,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.capturing == Some((action, Some(index))) {
+            return self.capture_prompt(p, theme_mode).into_any_element();
+        }
+        // `action as usize` alone collides across an action's own slots — a
+        // wide stride (any single action realistically has a handful of
+        // combos at most) keeps `(action, index)` pairs unique per element.
+        let base_id = (action as usize) * 64 + index;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(p.text))
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .bg(rgb(p.chrome_active))
+                    .rounded(px(4.0))
+                    .child(combo.display_string()),
+            )
+            .child(
+                div()
+                    .id(ElementId::named_usize("keybind-change", base_id))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(p.accent))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
+                        this.start_capture(action, Some(index), window, cx);
+                    }))
+                    .child("Change"),
+            )
+            .child(
+                div()
+                    .id(ElementId::named_usize("keybind-remove", base_id))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(p.text_faint))
+                    .hover(move |s| s.text_color(rgb(p.text)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                        this.state.update(cx, |s, _cx| {
+                            s.keybinds.remove_at(action, index);
+                            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+                        });
+                        this.cancel_capture(cx); // rebuilds the keymap without the removed combo
+                        cx.notify();
+                    }))
+                    .child("×"),
+            )
+            .into_any_element()
+    }
+
+    /// The live "press a key…" prompt (or an inline conflict message),
+    /// shared by whichever slot — an existing chip being re-captured, or the
+    /// "+" add slot — is the one currently active.
+    fn capture_prompt(&self, p: crate::theme::Palette, theme_mode: ThemeMode) -> AnyElement {
+        match &self.conflict_message {
+            // A conflict warning keeps its own red identity rather than
+            // becoming palette chrome, but the dark red is illegible on a
+            // light background — same per-mode pairing the editor's
+            // unsupported-document banner uses (`text_editor.rs`).
+            Some(msg) => div()
+                .text_xs()
+                .text_color(rgb(match theme_mode {
+                    ThemeMode::Dark => 0xf48771,
+                    ThemeMode::Light => 0xb02a15,
+                }))
+                .max_w(px(220.0))
+                .child(msg.clone())
+                .into_any_element(),
+            None => div()
+                .text_xs()
+                .text_color(rgb(p.accent))
+                .child("Press a key… (Esc to cancel)")
+                .into_any_element(),
+        }
+    }
+
+    /// Renders one action's row: its label on the left, and on the right one
+    /// chip per bound combo plus a small square "+" to add another — or,
+    /// while a specific slot is being captured, the live prompt in its place.
     fn render_action_row(
         &self,
         action: KeybindAction,
-        combo: KeyCombo,
+        combos: Vec<KeyCombo>,
         p: crate::theme::Palette,
         theme_mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_capturing = self.capturing == Some(action);
+        let mut slots: Vec<AnyElement> = combos
+            .iter()
+            .enumerate()
+            .map(|(i, combo)| self.render_combo_chip(action, i, combo, p, theme_mode, cx))
+            .collect();
 
-        let right_side: AnyElement = if is_capturing {
-            match &self.conflict_message {
-                // A conflict warning keeps its own red identity rather than
-                // becoming palette chrome, but the dark red is illegible on a
-                // light background — same per-mode pairing the editor's
-                // unsupported-document banner uses (`text_editor.rs`).
-                Some(msg) => div()
-                    .text_xs()
-                    .text_color(rgb(match theme_mode {
-                        ThemeMode::Dark => 0xf48771,
-                        ThemeMode::Light => 0xb02a15,
-                    }))
-                    .max_w(px(220.0))
-                    .child(msg.clone())
-                    .into_any_element(),
-                None => div()
-                    .text_xs()
-                    .text_color(rgb(p.accent))
-                    .child("Press a key… (Esc to cancel)")
-                    .into_any_element(),
-            }
+        // The "add another" slot: the capture prompt while adding, else the
+        // small square "+" button that starts it. `None` as the slot marks
+        // this as an addition (not a re-capture of an existing index) to
+        // `start_capture`/`handle_capture_key`.
+        slots.push(if self.capturing == Some((action, None)) {
+            self.capture_prompt(p, theme_mode)
         } else {
             div()
+                .id(ElementId::named_usize("keybind-add", action as usize))
                 .flex()
-                .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(p.text))
-                        .px(px(8.0))
-                        .py(px(2.0))
-                        .bg(rgb(p.chrome_active))
-                        .rounded(px(4.0))
-                        .child(combo.display_string()),
-                )
-                .child(
-                    div()
-                        .id(ElementId::named_usize("keybind-change", action as usize))
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(rgb(p.accent))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
-                            this.start_capture(action, window, cx);
-                        }))
-                        .child("Change"),
-                )
+                .justify_center()
+                .w(px(18.0))
+                .h(px(18.0))
+                .rounded(px(4.0))
+                .text_xs()
+                .cursor_pointer()
+                .text_color(rgb(p.text_faint))
+                .bg(rgb(p.chrome_active))
+                .hover(move |s| s.text_color(rgb(p.text)).bg(rgb(p.chrome_hover)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
+                    this.start_capture(action, None, window, cx);
+                }))
+                .child("+")
                 .into_any_element()
-        };
+        });
 
         div()
             .flex()
@@ -475,9 +553,12 @@ impl SettingsModal {
                                 .text_color(rgb(p.text_faint))
                                 .child("(not yet implemented)"),
                         )
+                    })
+                    .when(combos.is_empty() && self.capturing != Some((action, None)), |d| {
+                        d.child(div().text_xs().text_color(rgb(p.text_faint)).child("Unbound"))
                     }),
             )
-            .child(right_side)
+            .child(div().flex().flex_row().items_center().gap(px(8.0)).children(slots))
     }
 
     /// Renders one collapsible category section (its header + every action
@@ -531,7 +612,7 @@ impl SettingsModal {
                         .flex_col()
                         .px(px(16.0))
                         .children(actions.into_iter().map(|action| {
-                            self.render_action_row(action, keybinds.get(action), p, theme_mode, cx)
+                            self.render_action_row(action, keybinds.get_all(action), p, theme_mode, cx)
                         })),
                 )
             })
@@ -1330,7 +1411,7 @@ impl Render for SettingsModal {
         let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
-        let p = palette(current_theme, current_theme_mode);
+        let p = self.state.read(cx).current_palette();
         let theme_preview = self.theme_preview;
         let section = self.section;
 

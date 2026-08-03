@@ -38,6 +38,7 @@ pub enum FormatAction {
     CardMenu,
     Nav,
     InvisibilityMode,
+    PrintLayout,
     SwitchTabMenu,
     WindowSplit,
     CollapseAll,
@@ -636,6 +637,12 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
+                        FormatAction::PrintLayout => {
+                            st.update(cx, |state, _cx| {
+                                state.toggle_print_layout();
+                            });
+                            cx.notify();
+                        }
                         FormatAction::WindowSplit => {
                             st.update(cx, |state, _cx| {
                                 if state.split_view {
@@ -966,7 +973,7 @@ impl FormattingRibbon {
                 &[
                     ("Condense, no pilcrows", Some(AppState::condense_selection)),
                     ("Condense, pilcrows", Some(AppState::condense_with_pilcrows)),
-                    ("Uncondensed", None),
+                    ("Uncondensed", Some(AppState::uncondense_selection)),
                     ("Standardize highlighting", Some(AppState::standardize_highlighting)),
                     (
                         "Standardize highlighting with exception",
@@ -1807,9 +1814,11 @@ impl Render for FormattingRibbon {
         let state = self.state.clone();
         let (p, color_mode) = {
             let state_read = state.read(cx);
-            (palette(state_read.theme, state_read.theme_mode), state_read.theme_color_mode)
+            (state_read.current_palette(), state_read.theme_color_mode)
         };
         let invisibility_mode = self.state.read(cx).invisibility_mode;
+        // let print_layout = self.state.read(cx).print_layout; // see the
+        // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
         let timer_visible = self.state.read(cx).timer.visible;
         // The button wears the current highlight color, nudged toward
@@ -1850,7 +1859,10 @@ impl Render for FormattingRibbon {
                     ],
                     vec![
                         RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
-                        RibbonBtn::secondary("Highlight", FormatAction::Highlight),
+                        // Highlight button removed from Cards per checklist —
+                        // the Text ribbon's HL Color button covers this
+                        // (`FormatAction::HighlightColorSelect`). The keybind
+                        // (`KeybindAction::Highlight`) is untouched.
                         RibbonBtn::secondary("Shrink", FormatAction::Shrink),
                         RibbonBtn::secondary("Clear", FormatAction::Clear),
                     ],
@@ -1909,13 +1921,14 @@ impl Render for FormattingRibbon {
                         RibbonBtn::icon("Align Center", FormatAction::AlignCenter, RibbonIcon::Align(Alignment::Center)),
                         RibbonBtn::icon("Align Right", FormatAction::AlignRight, RibbonIcon::Align(Alignment::Right)),
                     ],
-                    vec![
-                        RibbonBtn::secondary(
-                            "Para Integrity",
-                            FormatAction::ToggleParagraphIntegrity,
-                        ),
-                        RibbonBtn::secondary("Pilcrows", FormatAction::TogglePilcrows),
-                    ],
+                    // Para Integrity / Pilcrows buttons removed per checklist
+                    // — Settings -> Text Settings already has the equivalent
+                    // controls ("Condense by default" / "Mark collapsed
+                    // newlines with ¶", `settings_modal.rs:1145-1167`), which
+                    // are the same two settings these ribbon buttons drove
+                    // (`AppState::toggle_paragraph_integrity`/`toggle_pilcrows`
+                    // just call `set_paste_condense`/`set_paste_condense_pilcrow`
+                    // — one switch, not two that could disagree).
                     vec![
                         RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu),
                         RibbonBtn::secondary("Card Menu", FormatAction::CardMenu),
@@ -1942,6 +1955,14 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
                         RibbonBtn::secondary("Split", FormatAction::WindowSplit),
                         RibbonBtn::secondary("Fold", FormatAction::FoldToggle).engaged(any_folded),
+                        // Print Layout: deferred (checklist) — the toggle/state
+                        // (AppState.print_layout, toggle_print_layout) and this
+                        // action's click-handler arm are left in place, inert,
+                        // for whenever the real wrap-width/hit-testing rework
+                        // lands. No button until then — one that visibly does
+                        // nothing is worse than no button.
+                        // RibbonBtn::secondary("Print Layout", FormatAction::PrintLayout)
+                        //     .engaged(print_layout),
                     ],
                 ],
                 *self.collapsed.get("view").unwrap_or(&false),

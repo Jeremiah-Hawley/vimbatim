@@ -30,6 +30,20 @@ const UNDO_STACK_BYTE_BUDGET: usize = 100_000_000;
 /// undo depth to an unusably small number.
 const UNDO_STACK_MIN_CAP: usize = 10;
 
+/// What `condense_selection` (no pilcrows) leaves behind at each collapsed
+/// newline: a real space, so condensed text still reads like one, plus a
+/// zero-width space that renders as nothing but is real text —
+/// `uncondense_selection`'s marker to find exactly where a newline used to
+/// be without also matching an ordinary space the user typed.
+const CONDENSE_MARKER: &str = "\u{200B} ";
+
+/// `uncondense_selection`'s core: turns every `CONDENSE_MARKER` and every
+/// `¶` in `text` back into a real newline, whichever condense variant
+/// produced it (or both, if the selection mixes text condensed both ways).
+fn uncondense_markers(text: &str) -> String {
+    text.replace(CONDENSE_MARKER, "\n").replace('¶', "\n")
+}
+
 /// Rough byte-size estimate of one undo/redo snapshot. Only used to keep
 /// the stacks' total memory bounded on large documents, not for anything
 /// content-accuracy-sensitive, so an approximation (content plus every
@@ -726,6 +740,14 @@ pub struct AppState {
     /// lightness, keeping the user's chosen color family.
     pub theme_mode: crate::theme::ThemeMode,
     pub theme_color_mode: crate::theme::ThemeColorMode,
+    /// The user's imported theme (Settings -> Themes -> Import Theme),
+    /// `(dark, light)`, loaded from `custom_theme_path()` at startup if that
+    /// file exists. `None` until an import happens; only one at a time —
+    /// importing again replaces it wholesale. Selected via
+    /// `theme == ThemeKind::Custom`; resolve colors through
+    /// `current_palette()`, never the bare `theme::palette()` free function,
+    /// which has no access to this runtime state.
+    pub custom_theme: Option<(crate::theme::Palette, crate::theme::Palette)>,
     /// `normal_text_size` from settings.conf, in half-points (`Run.size`'s
     /// unit) — the default body text size: what any run with no explicit
     /// `FontSize` override renders at (`text_editor.rs`'s `normal_size_px`,
@@ -869,6 +891,12 @@ pub struct AppState {
     /// a refcount bump instead of deep-cloning every word on every frame.
     pub user_dictionary: Rc<HashSet<String>>,
     pub invisibility_mode: bool,
+    /// Renders the document inside an 8.5x11in page centered in the editing
+    /// pane, wrapped to the page's text column instead of the viewport.
+    /// Continuous scroll, not true pagination — no page breaks (see
+    /// `PAGE_WIDTH_PX`/`PAGE_MARGIN_PX` in `text_editor.rs`). Not persisted,
+    /// same as `invisibility_mode` above.
+    pub print_layout: bool,
     pub split_view: bool,
     /// The tab shown in the secondary pane, as a stable `Tab.id` — never an
     /// index.
@@ -1397,6 +1425,15 @@ pub fn user_dictionary_path() -> PathBuf {
     settings_conf_path().with_file_name("user_dictionary.txt")
 }
 
+/// Settings -> Themes -> Import Theme's destination: the picked file is
+/// copied here (next to settings.conf, same "beside `current_exe()`, not
+/// the original upload path" reasoning as `user_dictionary_path()`) so a
+/// custom theme survives even if the original file the user picked is later
+/// moved or deleted.
+pub fn custom_theme_path() -> PathBuf {
+    settings_conf_path().with_file_name("custom_theme.toml")
+}
+
 /// Loads the user dictionary, lowercasing as it goes so lookups can be
 /// case-insensitive without normalizing at every call site. A missing file is
 /// the normal first-launch state, not an error.
@@ -1442,6 +1479,13 @@ impl AppState {
         let theme = crate::theme::load_theme(settings_path);
         let theme_mode = crate::theme::load_theme_mode(settings_path);
         let theme_color_mode = crate::theme::load_theme_color_mode(settings_path);
+        // Present only if the user has actually imported one — a missing
+        // file is the normal "never imported" state, not an error. Like
+        // `user_dictionary_path()`, always the real global path regardless
+        // of the `settings_path` this constructor was given.
+        let custom_theme = std::fs::read_to_string(custom_theme_path())
+            .ok()
+            .and_then(|s| crate::theme::parse_custom_theme_toml(&s));
         let normal_text_size_half_points = load_normal_text_size_half_points(settings_path);
         let pocket_size_half_points = load_font_size_half_points(settings_path, "pocket_size", 52);
         let block_size_half_points = load_font_size_half_points(settings_path, "block_size", 32);
@@ -1481,6 +1525,7 @@ impl AppState {
             theme,
             theme_mode,
             theme_color_mode,
+            custom_theme,
             normal_text_size_half_points,
             pocket_size_half_points,
             block_size_half_points,
@@ -1519,6 +1564,7 @@ impl AppState {
             ),
             user_dictionary: Rc::new(load_user_dictionary(&user_dictionary_path())),
             invisibility_mode: false,
+            print_layout: false,
             split_view: false,
             secondary_tab_id: None,
             focused_pane: Pane::Primary,
@@ -1837,6 +1883,38 @@ impl AppState {
         }
         self.refresh_find_matches();
         replaced
+    }
+
+    /// Resolves the active theme's colors, custom or built-in — every view
+    /// should call this instead of the bare `theme::palette()` free function,
+    /// which is a `const fn` with no access to `custom_theme` and would
+    /// silently fall back to a placeholder for `ThemeKind::Custom`.
+    pub fn current_palette(&self) -> crate::theme::Palette {
+        if self.theme == crate::theme::ThemeKind::Custom {
+            if let Some((dark, light)) = self.custom_theme {
+                return match self.theme_mode {
+                    crate::theme::ThemeMode::Dark => dark,
+                    crate::theme::ThemeMode::Light => light,
+                };
+            }
+        }
+        crate::theme::palette(self.theme, self.theme_mode)
+    }
+
+    /// Settings -> Themes -> Import Theme: parses `content` (the picked
+    /// file's own text) as a custom theme, and if it's valid, adopts it —
+    /// replacing any previously imported one — copies it to
+    /// `custom_theme_path()` so it survives a restart even if the original
+    /// file moves, switches `theme` to `Custom`, and persists that choice.
+    /// Returns whether the import succeeded; a caller can show an error on
+    /// `false` without touching any existing custom theme still in effect.
+    pub fn import_custom_theme(&mut self, content: &str) -> bool {
+        let Some(parsed) = crate::theme::parse_custom_theme_toml(content) else { return false };
+        self.custom_theme = Some(parsed);
+        self.theme = crate::theme::ThemeKind::Custom;
+        let _ = std::fs::write(custom_theme_path(), content);
+        let _ = crate::theme::save_theme(&settings_conf_path(), self.theme);
+        true
     }
 
     pub fn new_tab(&mut self) {
@@ -2984,8 +3062,14 @@ impl AppState {
 
     /// Card Menu → "Condense, no pilcrows", and the ribbon's own Condense
     /// button: collapses the selection's newlines into spaces.
+    ///
+    /// Each collapsed newline actually becomes `CONDENSE_MARKER` — a real
+    /// space (so condensed text still reads exactly like one) plus a
+    /// trailing zero-width space, invisible but real: it's what lets
+    /// `uncondense_selection` find exactly where a newline used to be
+    /// without also matching an ordinary space the user typed.
     pub fn condense_selection(&mut self) {
-        self.condense_selection_with(" ");
+        self.condense_selection_with(CONDENSE_MARKER);
     }
 
     /// Card Menu → "Condense, pilcrows": the same, but each collapsed newline
@@ -3042,6 +3126,45 @@ impl AppState {
             tab.content.insert_str(start, &condensed);
             tab.cursor = start;
             tab.selection = Some((start, start + condensed.len()));
+            tab.is_modified = true;
+        }
+    }
+
+    /// Card Menu → "Uncondense": undoes condensing by turning each marker it
+    /// left behind back into a real newline — `¶` if the selection was
+    /// condensed with pilcrows, `CONDENSE_MARKER` if it was condensed
+    /// without them. Whichever produced the selected text, this reverses it;
+    /// a no-op if neither marker is present. Same run-preserving mechanics as
+    /// `condense_selection_with`, just inverted.
+    pub fn uncondense_selection(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let Some((a, f)) = tab.selection else { return };
+
+        let (start, end) = (a.min(f), a.max(f));
+        if start >= end {
+            return;
+        }
+
+        let selected_text = tab.content[start..end].to_string();
+        let uncondensed = uncondense_markers(&selected_text);
+
+        if uncondensed == selected_text {
+            return;
+        }
+
+        let uncondensed_runs: Vec<Run> = runs_in_range(&tab.paragraphs, start, end)
+            .into_iter()
+            .map(|mut r| { r.text = uncondense_markers(&r.text); r })
+            .collect();
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            sync_delete_range(&mut tab.paragraphs, start, end);
+            tab.content.drain(start..end);
+            sync_insert_str_with_runs(&mut tab.paragraphs, start, &uncondensed, &uncondensed_runs);
+            tab.content.insert_str(start, &uncondensed);
+            tab.cursor = start;
+            tab.selection = Some((start, start + uncondensed.len()));
             tab.is_modified = true;
         }
     }
@@ -3513,6 +3636,10 @@ impl AppState {
          * tags, and citations are shown.
          */
         self.invisibility_mode = !self.invisibility_mode;
+    }
+
+    pub fn toggle_print_layout(&mut self) {
+        self.print_layout = !self.print_layout;
     }
 
     pub fn wikify_current_tab(&mut self) -> std::io::Result<()> {
@@ -8183,6 +8310,7 @@ mod tests {
             theme: crate::theme::ThemeKind::WorkbenchDark,
             theme_mode: crate::theme::ThemeMode::Dark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
+            custom_theme: None,
             normal_text_size_half_points: 22,
             pocket_size_half_points: 52,
             block_size_half_points: 32,
@@ -8220,6 +8348,7 @@ mod tests {
             spellcheck_underline_color: "red".to_string(),
             user_dictionary: Rc::new(HashSet::new()),
             invisibility_mode: false,
+            print_layout: false,
             split_view: false,
             secondary_tab_id: None,
             focused_pane: Pane::Primary,
@@ -14563,6 +14692,42 @@ mod tests {
         let end = state.tabs[0].content.len();
         state.tabs[0].selection = Some((0, end));
         state.condense_selection();
+        // Reads exactly like "one two" — the zero-width space renders as
+        // nothing — but the marker is real text, which is what makes
+        // uncondense_selection able to find it.
+        assert_eq!(state.tabs[0].content, "one\u{200B} two");
+    }
+
+    #[test]
+    fn test_uncondense_reverses_a_plain_condense() {
+        let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+        state.condense_selection();
+        state.tabs[0].selection = Some((0, state.tabs[0].content.len()));
+        state.uncondense_selection();
+        assert_eq!(state.tabs[0].content, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn test_uncondense_reverses_a_pilcrow_condense() {
+        let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+        state.condense_with_pilcrows();
+        state.tabs[0].selection = Some((0, state.tabs[0].content.len()));
+        state.uncondense_selection();
+        assert_eq!(state.tabs[0].content, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn test_uncondense_is_a_no_op_without_either_marker() {
+        let mut state = make_state("one two", 0, None);
+        let end = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, end));
+        state.uncondense_selection();
         assert_eq!(state.tabs[0].content, "one two");
     }
 
@@ -15013,7 +15178,7 @@ mod tests {
         state.tabs[0].selection = Some((0, end));
         state.condense_selection();
 
-        assert_eq!(state.tabs[0].content, "bold plain");
+        assert_eq!(state.tabs[0].content, "bold\u{200B} plain");
         let runs = &state.tabs[0].paragraphs[0].runs;
         let bold_run = runs.iter().find(|r| r.text.contains("bold")).unwrap();
         assert!(bold_run.bold, "bold formatting should survive condensing");

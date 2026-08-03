@@ -26,7 +26,6 @@ use crate::settings_modal::SettingsModal;
 use crate::state::{clamp_sidebar_width, clamp_split_ratio, AppState, CardStyleKind};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
-use crate::theme::palette;
 use crate::timer::Timer;
 use crate::word_count::WordCount;
 
@@ -632,9 +631,7 @@ impl Render for MainWindow {
         let split_ratio      = self.state.read(cx).split_ratio;
         let sidebar_width    = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).find_bar.is_some();
-        let theme = self.state.read(cx).theme;
-        let theme_mode = self.state.read(cx).theme_mode;
-        let p = palette(theme, theme_mode);
+        let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();
         let resize_state = self.state.clone();

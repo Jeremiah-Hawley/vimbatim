@@ -36,9 +36,11 @@ impl Render for AppToolbar {
          * command surface.
          */
         let state = self.state.read(cx);
-        let p = palette(state.theme, state.theme_mode);
+        let p = state.current_palette();
         let sidebar_visible = state.sidebar_visible;
-        let read_mode = state.read_mode;
+        // Read Mode's button is disabled below pending a real rework — see
+        // that `.child` block's comment.
+        // let read_mode = state.read_mode;
         let _ = state;
 
         let sidebar_label = if sidebar_visible {
@@ -188,44 +190,49 @@ impl Render for AppToolbar {
             .child(div().flex_1())
             // ── Future command hooks ─────────────────────────────────────────
             // ── Read Mode ─────────────────────────────────────────────────────
-            // Mutates AppState directly rather than dispatching an action, the
-            // same as the sidebar toggle beside it: there is no keybind for
-            // this, so there is no action to share.
-            .child(
-                div()
-                    .id("toolbar-read-mode")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .rounded(px(radius::MD))
-                    .text_xs()
-                    .cursor_pointer()
-                    .border_1()
-                    // Reads as engaged while active — it changes what the
-                    // arrow keys do, so it must not look like a momentary
-                    // button.
-                    .when(read_mode, |d| {
-                        d.bg(rgb(p.accent))
-                            .text_color(rgb(0xffffff))
-                            .border_color(rgb(p.accent_strong))
-                    })
-                    .when(!read_mode, |d| {
-                        d.text_color(rgb(p.text_muted))
-                            .border_color(rgb(p.border_subtle))
-                            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
-                            .active(move |s| s.bg(rgb(p.chrome_active)))
-                    })
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.toggle_read_mode();
-                            cx.notify();
-                        });
-                        cx.notify();
-                    }))
-                    .child("Read Mode"),
-            )
+            // Disabled pending a real rework (checklist: needs to be "an
+            // entirely different screen", not a flag on the current editor —
+            // the codebase has no variable-height layout model to build true
+            // pagination on, so this is deferred rather than shipped half-done).
+            // Button hidden; the supporting state/behavior (AppState.read_mode,
+            // toggle_read_mode, the ribbon's collapse-on-entry, the editor's
+            // arrow-key paging) is left in place, just unreachable, for when
+            // this is picked back up.
+            // .child(
+            //     div()
+            //         .id("toolbar-read-mode")
+            //         .flex()
+            //         .items_center()
+            //         .justify_center()
+            //         .h(px(24.0))
+            //         .px(px(10.0))
+            //         .rounded(px(radius::MD))
+            //         .text_xs()
+            //         .cursor_pointer()
+            //         .border_1()
+            //         // Reads as engaged while active — it changes what the
+            //         // arrow keys do, so it must not look like a momentary
+            //         // button.
+            //         .when(read_mode, |d| {
+            //             d.bg(rgb(p.accent))
+            //                 .text_color(rgb(0xffffff))
+            //                 .border_color(rgb(p.accent_strong))
+            //         })
+            //         .when(!read_mode, |d| {
+            //             d.text_color(rgb(p.text_muted))
+            //                 .border_color(rgb(p.border_subtle))
+            //                 .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+            //                 .active(move |s| s.bg(rgb(p.chrome_active)))
+            //         })
+            //         .on_click(cx.listener(|this, _ev, _window, cx| {
+            //             this.state.update(cx, |s, cx| {
+            //                 s.toggle_read_mode();
+            //                 cx.notify();
+            //             });
+            //             cx.notify();
+            //         }))
+            //         .child("Read Mode"),
+            // )
             // Find opens the same panel Ctrl+F does, via the shared action.
             .child(
                 div()
