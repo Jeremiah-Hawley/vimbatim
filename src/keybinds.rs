@@ -764,6 +764,60 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     cx.bind_keys(bindings);
 }
 
+/// Boxes the `*Action` struct paired with `action` — the vim-keybind
+/// system's own entry point (`text_editor.rs`'s `process_key_plain`,
+/// draining `AppState::take_pending_vim_action`) for firing a
+/// `KeybindAction` outside GPUI's own keymap, via `window.dispatch_action`,
+/// the same call already used by `app_toolbar.rs`'s toolbar buttons and
+/// `text_editor.rs`'s own paste-shortcut fallback. One match arm per
+/// variant, same enumeration `rebuild_keymap` above already needs.
+pub fn action_for(action: KeybindAction) -> Box<dyn Action> {
+    use KeybindAction::*;
+    match action {
+        ToggleSettings => Box::new(ToggleSettingsAction),
+        ToggleSidebar => Box::new(ToggleSidebarAction),
+        NewTab => Box::new(NewTabAction),
+        CloseTab => Box::new(CloseTabAction),
+        ReopenClosedTab => Box::new(ReopenClosedTabAction),
+        Save => Box::new(SaveAction),
+        SaveAs => Box::new(SaveAsAction),
+        Find => Box::new(FindAction),
+        FindReplace => Box::new(FindReplaceAction),
+        Copy => Box::new(CopyAction),
+        Cut => Box::new(CutAction),
+        Paste => Box::new(PasteAction),
+        PasteWithoutFormatting => Box::new(PasteWithoutFormattingAction),
+        Undo => Box::new(UndoAction),
+        Redo => Box::new(RedoAction),
+        SelectAll => Box::new(SelectAllAction),
+        SelectSimilarFormatting => Box::new(SelectSimilarFormattingAction),
+        Bold => Box::new(BoldAction),
+        Underline => Box::new(UnderlineAction),
+        Shrink => Box::new(ShrinkAction),
+        ClearFormatting => Box::new(ClearFormattingAction),
+        PasteSmart => Box::new(PasteSmartAction),
+        Condense => Box::new(CondenseAction),
+        Pocket => Box::new(PocketAction),
+        Hat => Box::new(HatAction),
+        Block => Box::new(BlockAction),
+        Tag => Box::new(TagAction),
+        Cite => Box::new(CiteAction),
+        Analytic => Box::new(AnalyticAction),
+        Emphasis => Box::new(EmphasisAction),
+        Highlight => Box::new(HighlightAction),
+        DeleteTags => Box::new(DeleteTagsAction),
+        StartTimer => Box::new(StartTimerAction),
+        OpenStats => Box::new(OpenStatsAction),
+        CiteFromLink => Box::new(CiteFromLinkAction),
+        Wikifi => Box::new(WikifiAction),
+        ZoomIn => Box::new(ZoomInAction),
+        ZoomOut => Box::new(ZoomOutAction),
+        ZoomReset => Box::new(ZoomResetAction),
+        NextTab => Box::new(NextTabAction),
+        PrevTab => Box::new(PrevTabAction),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

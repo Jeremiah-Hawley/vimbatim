@@ -289,6 +289,18 @@ pub struct Tab {
     /// overwrites the one under the cursor. `Escape` cancels without
     /// changing anything.
     pub vim_pending_replace: bool,
+    /// Checklist: Settings -> Vim Mode. Keystrokes typed so far toward a
+    /// user-configured vim-keybind sequence (`AppState.vim_keybinds`),
+    /// e.g. `"z"` while mid-typing `"zs"` for Save. Unrelated to
+    /// `vim_command_buf` — that field is shaped for exactly one digit-run
+    /// plus one trailing trigger char and is already fully claimed by real
+    /// vim's own `g`/`f`/`F`/`t`/`T` bookkeeping; this is a separate,
+    /// arbitrary-length buffer for a separate concern. Mutually exclusive
+    /// with every other per-tab vim pending-state field by construction: it
+    /// only ever becomes non-empty via `handle_vim_normal_key`'s final
+    /// catch-all, which is only reached once every other pending state has
+    /// already declined the keystroke — see that function's own comment.
+    pub vim_keybind_seq: String,
     /// Set when entering `VimMode::Search` (spec 5.5's `/`/`?`): `true`
     /// for `/` (forward), `false` for `?` (backward). Read once the typed
     /// pattern in `vim_command_line` (reused — the two modes are mutually
@@ -450,6 +462,7 @@ impl Tab {
             vim_pending_register_select: false,
             vim_selected_register: None,
             vim_pending_replace: false,
+            vim_keybind_seq: String::new(),
             vim_search_direction: true,
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
@@ -501,6 +514,7 @@ impl Tab {
             vim_pending_register_select: false,
             vim_selected_register: None,
             vim_pending_replace: false,
+            vim_keybind_seq: String::new(),
             vim_search_direction: true,
             vim_jump_back: Vec::new(),
             vim_jump_forward: Vec::new(),
@@ -734,6 +748,17 @@ pub struct AppState {
     /// `keybinds::rebuild_keymap` and `Keybinds::save_to` to make an edit
     /// take effect immediately and persist.
     pub keybinds: crate::keybinds::Keybinds,
+    /// Checklist: Settings -> Vim Mode. Only consulted while `vim_enabled`
+    /// and the active tab's `vim_mode == VimMode::Normal` — see
+    /// `handle_vim_normal_key`'s sequence-continuation check and its
+    /// modified final catch-all.
+    pub vim_keybinds: crate::vim_keybinds::VimKeybinds,
+    /// A vim-keybind's resolved action, staged here because `state.rs` has
+    /// no `cx`/`window` to actually dispatch it — same mailbox pattern as
+    /// `pending_clipboard_sync` below. Drained by `text_editor.rs`'s
+    /// `process_key_plain`, immediately after a vim keystroke is handled,
+    /// via `take_pending_vim_action` + `window.dispatch_action`.
+    pub pending_vim_action: Option<crate::keybinds::KeybindAction>,
     pub theme: crate::theme::ThemeKind,
     /// Light or dark variant of `theme`. Orthogonal to the theme itself —
     /// every `ThemeKind` ships both, so this only swaps the palette's
@@ -1475,6 +1500,7 @@ impl AppState {
             &load_expanded_dirs(settings_path),
         );
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
+        let vim_keybinds = crate::vim_keybinds::VimKeybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
         let theme = crate::theme::load_theme(settings_path);
         let theme_mode = crate::theme::load_theme_mode(settings_path);
@@ -1522,6 +1548,8 @@ impl AppState {
             file_tree,
             vim_enabled,
             keybinds,
+            vim_keybinds,
+            pending_vim_action: None,
             theme,
             theme_mode,
             theme_color_mode,
@@ -5407,6 +5435,15 @@ impl AppState {
         self.pending_clipboard_sync.take()
     }
 
+    /// Drains the vim-keybind mailbox. `text_editor.rs` calls this right
+    /// after dispatching every vim keystroke, same as
+    /// `take_pending_clipboard_sync`, and if it returns `Some`, dispatches
+    /// the action via `window.dispatch_action` — the one step this file
+    /// can't do itself (no `window`/`cx` here).
+    pub fn take_pending_vim_action(&mut self) -> Option<crate::keybinds::KeybindAction> {
+        self.pending_vim_action.take()
+    }
+
     fn start_macro_recording(&mut self, register: char) {
         /*
          * Begins capturing keystrokes into `register`, discarding any
@@ -5593,6 +5630,19 @@ impl AppState {
          * register q" instead of correctly abandoning the pending `d`
          * (real vim: an invalid motion just cancels the operator).
          */
+        // Checklist: Settings -> Vim Mode. A vim-keybind sequence already
+        // in progress (`Tab.vim_keybind_seq` non-empty) claims this key
+        // unconditionally, checked before even the pending operator below.
+        // Safe to check first because it's mutually exclusive with every
+        // other pending state in this function by construction: a sequence
+        // only ever *starts* via this function's final catch-all, which is
+        // only reached once every other pending state has already declined
+        // the keystroke — so if the buffer is non-empty, nothing else
+        // could be racing it.
+        if self.tabs.get(self.active_tab).is_some_and(|t| !t.vim_keybind_seq.is_empty()) {
+            return self.continue_vim_keybind_sequence(key, shift, key_char);
+        }
+
         if let Some(operator) = self.tabs.get(self.active_tab).and_then(|t| t.vim_pending_operator) {
             return self.complete_vim_operator(operator, key, shift, key_char);
         }
@@ -5721,7 +5771,80 @@ impl AppState {
             ("n", false) => { self.vim_search_next(false); true }
             ("n", true)  => { self.vim_search_next(true); true }
             (".", false) => { self.vim_repeat_last_change(); true }
-            _ => true,
+            // Real vim's Undo — this app's vim mode never wired it up before
+            // (only `g`+`u`/`U`, the case-change operator, used the letter).
+            // Calls the exact same `undo()` the app-level Undo keybind does,
+            // so vim's `u` and the configurable Ctrl+Z stay in sync rather
+            // than tracking two separate undo stacks. Shifted `U` (real
+            // vim's "undo whole line") is out of scope, left unbound.
+            ("u", false) => { self.undo(); true }
+            // Checklist: Settings -> Vim Mode. The only place a *fresh*
+            // vim-keybind sequence can start — every real vim command above
+            // has already had first refusal, so a key that reaches here is
+            // genuinely free to be claimed. A single-key binding fires
+            // immediately; a longer one starts `vim_keybind_seq` for
+            // `continue_vim_keybind_sequence` (checked at the very top of
+            // this function) to pick up on the next keystroke. No match:
+            // silently swallowed, exactly like this catch-all always has.
+            _ => {
+                if let Some(c) = vim_find_target_char(key, shift, key_char) {
+                    self.dispatch_fresh_vim_keybind_key(c);
+                }
+                true
+            }
+        }
+    }
+
+    /// The continuation half of the vim-keybind sequence state machine —
+    /// see `handle_vim_normal_key`'s own top-of-function check, which is
+    /// what routes here. `Escape`, or any key that isn't a literal
+    /// character (an arrow key, say), abandons the in-progress sequence
+    /// rather than silently absorbing something unrelated to it.
+    fn continue_vim_keybind_sequence(&mut self, key: &str, shift: bool, key_char: Option<&str>) -> bool {
+        if key == "escape" {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) { tab.vim_keybind_seq.clear(); }
+            return true;
+        }
+        let Some(c) = vim_find_target_char(key, shift, key_char) else {
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) { tab.vim_keybind_seq.clear(); }
+            return true;
+        };
+        let seq = {
+            let Some(tab) = self.tabs.get_mut(self.active_tab) else { return true };
+            tab.vim_keybind_seq.push(c);
+            tab.vim_keybind_seq.clone()
+        };
+        match self.vim_keybinds.lookup(&seq) {
+            crate::vim_keybinds::VimLookup::Exact(action) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) { tab.vim_keybind_seq.clear(); }
+                self.pending_vim_action = Some(action);
+            }
+            crate::vim_keybinds::VimLookup::Prefix => {}
+            crate::vim_keybinds::VimLookup::None => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) { tab.vim_keybind_seq.clear(); }
+            }
+        }
+        true
+    }
+
+    /// A single fresh character, unclaimed by every real vim command ahead
+    /// of it in `handle_vim_normal_key`'s dispatch order — checks whether it
+    /// starts (or, for a one-character binding, completes) a vim-keybind
+    /// sequence. Shares its match-and-branch logic with
+    /// `continue_vim_keybind_sequence` but starts from an empty buffer
+    /// rather than an in-progress one, so it's kept as its own small
+    /// function rather than forcing one path to pretend it has a buffer to
+    /// continue.
+    fn dispatch_fresh_vim_keybind_key(&mut self, c: char) {
+        let seq = c.to_string();
+        match self.vim_keybinds.lookup(&seq) {
+            crate::vim_keybinds::VimLookup::Exact(action) => {
+                self.pending_vim_action = Some(action);
+            }
+            crate::vim_keybinds::VimLookup::Prefix => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) { tab.vim_keybind_seq = seq; }
+            }
+            crate::vim_keybinds::VimLookup::None => {}
         }
     }
 
@@ -8087,6 +8210,74 @@ pub(crate) fn matches_shifted_symbol(key: &str, shift: bool, key_char: Option<&s
     key == symbol || key_char == Some(symbol) || (key == unshifted_key && shift)
 }
 
+/// True if `(key, shift)` already has a real meaning somewhere in vim's own
+/// Normal-mode dispatch (`handle_vim_normal_key`/`resolve_vim_motion`/
+/// `complete_vim_operator`), as of this writing — the keyspace a
+/// vim-keybind's *first* key (see `AppState.vim_keybind_seq`) must never
+/// collide with. Every key *after* the first is safe regardless of this
+/// check: it's consumed by our own sequence buffer before ever reaching the
+/// native dispatcher.
+///
+/// Hand-maintained, not derived — the real dispatcher has no single
+/// declarative table to derive this from; it's a long, carefully-ordered
+/// chain of match arms and if-chains. What keeps this list honest is
+/// `test_every_non_reserved_key_is_a_true_vim_noop` (below, in `tests`): an
+/// exhaustive test replaying every key/shift combination *not* covered here
+/// through a fresh Normal-mode `AppState` with no pending state, asserting
+/// zero observable change. Adding a new real vim command later means
+/// updating this function too, or that test fails — which is the point:
+/// drift becomes a build failure, not a silent shadowing bug.
+///
+/// Deliberately narrower than "everything real vim binds" — only what THIS
+/// app's vim mode actually implements today. Shifted `D`/`Y`/`C` (real vim:
+/// delete/yank/change to end of line), `U` (undo whole line), `K` (keyword
+/// lookup), `Q` (Ex mode) are genuinely unclaimed here and left out on
+/// purpose — claiming them defensively for commands that don't exist yet
+/// would take away first-keys from users for no present benefit. `H`/`M`/`L`
+/// (visual screen jump) and `@`/`@@`/`@<register>` (macro replay) are
+/// reserved here even though they're actually intercepted a layer up, in
+/// `text_editor.rs`, before a keystroke ever reaches `handle_vim_key` at all
+/// — this function can't see that layer, so it errs toward reserving them
+/// anyway rather than silently assuming they're free.
+pub(crate) fn is_vim_reserved_normal_key(key: &str, shift: bool, key_char: Option<&str>) -> bool {
+    // Digits are always reserved (count-prefix accumulation; '0' doubles as
+    // the "start of line" motion).
+    if key.len() == 1 && key.chars().next().unwrap().is_ascii_digit() {
+        return true;
+    }
+    match key {
+        // Both cases meaningful.
+        "h" | "l" | "w" | "b" | "e" | "g" | "f" | "t" | "i" | "a" | "o" | "v" | "p" | "x" | "s"
+        | "j" | "r" | "n" => true,
+        // One case meaningful today (see doc comment above for what's
+        // deliberately left unclaimed): lowercase only.
+        "d" | "y" | "c" | "u" | "q" | "_" => !shift,
+        // "m"/"k" are the odd ones out: lowercase free (marks/keyword-lookup
+        // never implemented), uppercase reserved (H/M/L visual jump).
+        "m" | "k" => shift,
+        // GPUI-reliability-dependent shifted symbols — same multi-way check
+        // used everywhere else in this file, since which of key/key_char/
+        // (key+shift) actually fires isn't consistent across backends.
+        _ => {
+            matches_shifted_symbol(key, shift, key_char, ";", ":")
+                || matches_shifted_symbol(key, shift, key_char, ".", ">")
+                || matches_shifted_symbol(key, shift, key_char, ",", "<")
+                || matches_shifted_symbol(key, shift, key_char, "`", "~")
+                || matches_shifted_symbol(key, shift, key_char, "8", "*")
+                || matches_shifted_symbol(key, shift, key_char, "3", "#")
+                || matches_shifted_symbol(key, shift, key_char, "[", "{")
+                || matches_shifted_symbol(key, shift, key_char, "]", "}")
+                || matches_shifted_symbol(key, shift, key_char, "4", "$")
+                || matches_shifted_symbol(key, shift, key_char, "6", "^")
+                || matches_shifted_symbol(key, shift, key_char, "'", "\"")
+                || (key == ";" && !shift)
+                || (key == "," && !shift)
+                || (key == "/" || key_char == Some("/"))
+                || key == "@"
+        }
+    }
+}
+
 fn find_kind_to_motion_kind(kind: char) -> MotionKind {
     /*
      * `f`/`F` (find, land *on* the target) are inclusive; `t`/`T` (till,
@@ -8274,6 +8465,7 @@ mod tests {
                 vim_pending_register_select: false,
                 vim_selected_register: None,
                 vim_pending_replace: false,
+                vim_keybind_seq: String::new(),
                 vim_search_direction: true,
                 vim_jump_back: Vec::new(),
                 vim_jump_forward: Vec::new(),
@@ -8307,6 +8499,8 @@ mod tests {
             file_tree: vec![],
             vim_enabled: true,
             keybinds: crate::keybinds::Keybinds::defaults(),
+            vim_keybinds: crate::vim_keybinds::VimKeybinds::defaults(),
+            pending_vim_action: None,
             theme: crate::theme::ThemeKind::WorkbenchDark,
             theme_mode: crate::theme::ThemeMode::Dark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
@@ -12395,6 +12589,183 @@ mod tests {
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", false, None);
         assert_eq!(state.tabs[0].content, "\nabc");
+    }
+
+    // ── bare `u` = real vim Undo (checklist: previously unwired) ──────────────
+
+    #[test]
+    fn test_bare_u_undoes_the_last_edit() {
+        let mut state = make_state("abc", 1, None);
+        state.handle_vim_key("r", false, None);
+        state.handle_vim_key("z", false, None); // "abc" -> "azc"
+        assert_eq!(state.tabs[0].content, "azc");
+        state.handle_vim_key("u", false, None);
+        assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_bare_u_is_a_noop_with_nothing_to_undo() {
+        let mut state = make_state("abc", 1, None);
+        assert!(state.handle_vim_key("u", false, None));
+        assert_eq!(state.tabs[0].content, "abc");
+    }
+
+    #[test]
+    fn test_shifted_u_is_still_unbound() {
+        // Real vim's `U` ("undo whole line") is explicitly out of scope —
+        // shifted U must not accidentally alias to plain undo.
+        let mut state = make_state("abc", 1, None);
+        state.handle_vim_key("r", false, None);
+        state.handle_vim_key("z", false, None); // "abc" -> "azc"
+        state.handle_vim_key("u", true, None);
+        assert_eq!(state.tabs[0].content, "azc", "shift+u must not undo");
+    }
+
+    // ── Vim-keybind checklist item: reserved-key registry ─────────────────────
+    // (`is_vim_reserved_normal_key`) — the parity test below is the actual
+    // safety net; these spot-checks pin the specific asymmetric cases (m/M,
+    // k/K, and the deliberately-unclaimed shifted D/Y/C/U/K/Q) that a purely
+    // exhaustive test would prove but not clearly document as intentional.
+
+    #[test]
+    fn test_z_and_lowercase_m_are_unreserved() {
+        assert!(!is_vim_reserved_normal_key("z", false, None));
+        assert!(!is_vim_reserved_normal_key("z", true, None));
+        assert!(!is_vim_reserved_normal_key("m", false, None));
+    }
+
+    #[test]
+    fn test_uppercase_m_and_k_are_reserved_despite_lowercase_being_free() {
+        assert!(is_vim_reserved_normal_key("m", true, None), "M is the visual screen-jump");
+        assert!(!is_vim_reserved_normal_key("k", false, None), "bare k is free of a built-in Normal-mode meaning at this layer");
+        assert!(is_vim_reserved_normal_key("k", true, None), "K is reserved (H/M/L jump family)");
+    }
+
+    #[test]
+    fn test_shifted_dycuqk_are_deliberately_unclaimed() {
+        for key in ["d", "y", "c", "u", "q"] {
+            assert!(!is_vim_reserved_normal_key(key, true, None), "shift+{key} should be free");
+        }
+    }
+
+    /// One frozen snapshot of every field a keystroke could observably
+    /// change, used by the exhaustive parity test below to prove a
+    /// non-reserved key is a true no-op, not just "didn't crash."
+    fn vim_dispatch_snapshot(state: &AppState) -> String {
+        let tab = &state.tabs[0];
+        format!(
+            "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            tab.cursor, tab.content, tab.selection, tab.vim_command_buf,
+            tab.vim_mode, tab.vim_pending_operator, tab.vim_command_line,
+            tab.vim_command_error, tab.vim_pending_register_select,
+            tab.vim_selected_register, tab.vim_pending_replace,
+            tab.vim_pending_text_object_prefix, tab.last_find,
+            state.registers,
+        )
+    }
+
+    /// The registry's real safety net: for every ASCII letter/digit key this
+    /// app's vim-keybind first-key check (`is_vim_reserved_normal_key`) does
+    /// *not* claim, replaying it through a fresh, otherwise-idle Normal-mode
+    /// `AppState` must produce *zero* observable change. If this ever fails,
+    /// either a real vim command was added without updating the reserved-key
+    /// list (fix the list), or the list over-claims a key vim doesn't
+    /// actually use (fine to leave reserved, but worth knowing).
+    ///
+    /// Scoped to letters + digits with `key_char: None` — the exact
+    /// representation the new vim-keybind dispatcher actually receives
+    /// keystrokes in (see `text_editor.rs`), and the only keyspace the
+    /// z-leader system's sequences are ever built from. Symbol keys are
+    /// covered by `is_vim_reserved_normal_key`'s own reuse of
+    /// `matches_shifted_symbol` (already exercised by every existing vim
+    /// test that types a symbol), not re-proven exhaustively here.
+    #[test]
+    fn test_every_non_reserved_letter_or_digit_is_a_true_vim_noop() {
+        let mut candidates: Vec<char> = ('a'..='z').collect();
+        candidates.extend('0'..='9');
+
+        for key_char in candidates {
+            let key = key_char.to_string();
+            for shift in [false, true] {
+                if is_vim_reserved_normal_key(&key, shift, None) {
+                    continue;
+                }
+                let mut state = make_state("hello world", 5, None);
+                let before = vim_dispatch_snapshot(&state);
+                state.handle_vim_key(&key, shift, None);
+                let after = vim_dispatch_snapshot(&state);
+                assert_eq!(
+                    before, after,
+                    "key {key:?} (shift={shift}) is claimed to be unreserved but changed observable state — reserve it in is_vim_reserved_normal_key"
+                );
+            }
+        }
+    }
+
+    // ── Vim-keybind runtime dispatch (checklist: Settings -> Vim Mode) ────────
+
+    #[test]
+    fn test_z_then_s_fires_save_via_pending_vim_action() {
+        // Exercises the real default table (`VimKeybinds::defaults()`,
+        // `make_state`'s vim_keybinds), not a hand-inserted binding — this
+        // is the exact sequence a user gets out of the box.
+        let mut state = make_state("hello", 0, None);
+        assert!(state.handle_vim_key("z", false, None));
+        assert!(!state.tabs[0].vim_keybind_seq.is_empty(), "z should start buffering (it's a prefix of zs)");
+        assert!(state.handle_vim_key("s", false, None));
+        assert_eq!(state.take_pending_vim_action(), Some(crate::keybinds::KeybindAction::Save));
+        assert!(state.tabs[0].vim_keybind_seq.is_empty(), "buffer must clear once resolved");
+    }
+
+    #[test]
+    fn test_d_then_z_abandons_the_pending_operator_instead_of_starting_a_sequence() {
+        // The exact interaction the plan flagged as the highest-risk case:
+        // `d` starts a real pending delete operator; `z` is not a valid
+        // motion, so real vim's own rule ("an invalid motion cancels the
+        // operator") must still apply — `z` must NOT be hijacked into
+        // starting a vim-keybind sequence instead.
+        let mut state = make_state("hello world", 0, None);
+        assert!(state.handle_vim_key("d", false, None));
+        assert_eq!(state.tabs[0].vim_pending_operator, Some('d'));
+        assert!(state.handle_vim_key("z", false, None));
+        assert_eq!(state.tabs[0].vim_pending_operator, None, "invalid motion must cancel the pending operator");
+        assert_eq!(state.tabs[0].vim_keybind_seq, "", "z must not have started a vim-keybind sequence here");
+        assert_eq!(state.tabs[0].content, "hello world", "nothing should have been deleted");
+        assert_eq!(state.take_pending_vim_action(), None);
+    }
+
+    #[test]
+    fn test_z_then_d_fires_cut_not_a_real_delete_operator() {
+        // The mirror image: once `z` has already started a sequence, `d`
+        // (which would normally start a delete operator) must be consumed
+        // as the sequence's second key instead — `zd` is Cut in the default
+        // table.
+        let mut state = make_state("hello world", 0, None);
+        assert!(state.handle_vim_key("z", false, None));
+        assert!(state.handle_vim_key("d", false, None));
+        assert_eq!(state.take_pending_vim_action(), Some(crate::keybinds::KeybindAction::Cut));
+        assert_eq!(state.tabs[0].vim_pending_operator, None, "d must not also have started a real delete operator");
+        assert_eq!(state.tabs[0].content, "hello world", "no direct deletion — Cut fires via dispatch_action, out of this function's reach");
+    }
+
+    #[test]
+    fn test_z_then_escape_clears_the_sequence_with_no_side_effects() {
+        let mut state = make_state("hello", 0, None);
+        assert!(state.handle_vim_key("z", false, None));
+        assert!(state.handle_vim_key("escape", false, None));
+        assert_eq!(state.tabs[0].vim_keybind_seq, "");
+        assert_eq!(state.take_pending_vim_action(), None);
+        assert_eq!(state.tabs[0].content, "hello");
+    }
+
+    #[test]
+    fn test_z_then_an_unbound_key_resets_silently() {
+        let mut state = make_state("hello", 0, None);
+        assert!(state.handle_vim_key("z", false, None));
+        // "j" isn't the second key of any default binding.
+        assert!(state.handle_vim_key("j", false, None));
+        assert_eq!(state.tabs[0].vim_keybind_seq, "", "an unbound continuation must reset, not stay pending forever");
+        assert_eq!(state.take_pending_vim_action(), None);
     }
 
     // ── Task I.3: R Replace mode ─────────────────────────────────────────────

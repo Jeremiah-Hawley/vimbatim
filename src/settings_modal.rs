@@ -116,6 +116,23 @@ pub struct SettingsModal {
     /// Per-category collapse state for the keybind list, mirroring
     /// `formatting_ribbon.rs`'s own collapsible-group pattern.
     collapsed: std::collections::HashMap<KeybindCategory, bool>,
+    /// The Vim Keybinds sub-list's own collapse state — kept separate from
+    /// `collapsed` above so collapsing "General" in one list doesn't also
+    /// collapse it in the other.
+    vim_collapsed: std::collections::HashMap<KeybindCategory, bool>,
+    /// The vim-keybind counterpart of `capturing` — checklist: Settings ->
+    /// Vim Mode. The second element is the *existing sequence being
+    /// replaced*, if any (re-capturing a chip), rather than an index: a
+    /// `VimKeybinds` binding is keyed by its sequence string, not by
+    /// position, so there's no natural slot index the way `Keybinds`' own
+    /// `Vec<KeyCombo>` has one.
+    vim_capturing: Option<(KeybindAction, Option<String>)>,
+    /// What's been typed so far this capture — a vim sequence can be
+    /// several keystrokes (unlike a Ctrl+key combo, which resolves in one),
+    /// so this accumulates until Enter commits or Escape cancels.
+    vim_capture_buffer: String,
+    /// The vim-keybind counterpart of `conflict_message`.
+    vim_conflict_message: Option<String>,
     /// Lightweight mode for cycling themes against the real app chrome
     /// without the dimmed backdrop or the full keybind settings list.
     theme_preview: bool,
@@ -136,6 +153,10 @@ impl SettingsModal {
             capturing: None,
             conflict_message: None,
             collapsed: std::collections::HashMap::new(),
+            vim_collapsed: std::collections::HashMap::new(),
+            vim_capturing: None,
+            vim_capture_buffer: String::new(),
+            vim_conflict_message: None,
             theme_preview: false,
             section: SettingsSection::Appearance,
         }
@@ -149,6 +170,7 @@ impl SettingsModal {
          * never leaves the keymap cleared.
          */
         self.cancel_capture(cx);
+        self.cancel_vim_capture();
         self.theme_preview = false;
         self.state.update(cx, |s, cx| {
             s.settings_visible = false;
@@ -193,9 +215,24 @@ impl SettingsModal {
 
     /// Resolves a captured keystroke into a candidate `KeyCombo`, applying
     /// it (and persisting + rebuilding the live keymap) if it doesn't
+    /// The panel's single `on_key_down` entry point — routes to whichever
+    /// capture mode is actually active. The two are mutually exclusive by
+    /// construction (starting one always cancels the other via the
+    /// section-switch/close/reset-to-defaults call sites), so checking
+    /// `capturing` first and falling back to `vim_capturing` is unambiguous.
+    fn handle_capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_capturing.is_some() {
+            self.handle_vim_capture_key(event, window, cx);
+            return;
+        }
+        self.handle_ctrl_capture_key(event, window, cx);
+    }
+
+    /// Resolves a captured keystroke into a candidate `KeyCombo`, applying
+    /// it (and persisting + rebuilding the live keymap) if it doesn't
     /// collide with another action, or showing an inline conflict message
     /// and staying in capture mode if it does.
-    fn handle_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_ctrl_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some((action, slot)) = self.capturing else { return };
         let ks = &event.keystroke;
 
@@ -226,6 +263,100 @@ impl SettingsModal {
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
         cx.notify();
+    }
+
+    /// Arms vim-keybind capture for `action`. Unlike `start_capture`, this
+    /// does *not* call `cx.clear_key_bindings()` — a raw, unmodified
+    /// letter keystroke never matches any GPUI `KeyBinding` (those are all
+    /// registered as Ctrl/Cmd combos or F-keys via `to_gpui_keystroke()`),
+    /// so there's nothing here for a plain "s" or "z" to collide with.
+    /// `existing` is the sequence being replaced, if any — `None` means
+    /// adding a fresh one via the "+" button, same distinction
+    /// `start_capture`'s `slot` makes for the Ctrl+key system.
+    fn start_vim_capture(&mut self, action: KeybindAction, existing: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.vim_capturing = Some((action, existing));
+        self.vim_capture_buffer.clear();
+        self.vim_conflict_message = None;
+        self.focus_handle.clone().focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_vim_capture(&mut self) {
+        self.vim_capturing = None;
+        self.vim_capture_buffer.clear();
+        self.vim_conflict_message = None;
+    }
+
+    /// Accumulates keystrokes into `vim_capture_buffer` until Enter commits
+    /// it (after both capture-time hard-block checks — see
+    /// `VimKeybinds::is_reserved_first_key`/`find_overlap_conflict`) or
+    /// Escape cancels. Unlike `handle_capture_key`'s single-keystroke
+    /// combo, a vim sequence is typed over several keystrokes, so this
+    /// can't resolve on the first one.
+    fn handle_vim_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some((action, existing)) = self.vim_capturing.clone() else { return };
+        let ks = &event.keystroke;
+
+        match ks.key.as_str() {
+            "escape" => {
+                self.cancel_vim_capture();
+                cx.notify();
+                return;
+            }
+            "backspace" => {
+                self.vim_capture_buffer.pop();
+                self.vim_conflict_message = None;
+                cx.notify();
+                return;
+            }
+            "enter" => {
+                if self.vim_capture_buffer.is_empty() {
+                    return;
+                }
+                let candidate = self.vim_capture_buffer.clone();
+                let exclude = existing.as_deref();
+
+                if crate::vim_keybinds::VimKeybinds::is_reserved_first_key(&candidate) {
+                    self.vim_conflict_message = Some(format!(
+                        "{candidate:?} starts with a key vim's own Normal mode already uses. Try a different sequence, or Esc to keep the current binding."
+                    ));
+                    self.vim_capture_buffer.clear();
+                    cx.notify();
+                    return;
+                }
+                let conflict = self.state.read(cx).vim_keybinds.find_overlap_conflict(&candidate, exclude);
+                if let Some((other, other_seq)) = conflict {
+                    self.vim_conflict_message = Some(format!(
+                        "{candidate:?} overlaps with {other_seq:?}, already used by \"{}\". Try a different sequence, or Esc to keep the current binding.",
+                        other.label(),
+                    ));
+                    self.vim_capture_buffer.clear();
+                    cx.notify();
+                    return;
+                }
+
+                self.state.update(cx, |s, _cx| {
+                    if let Some(old) = &existing {
+                        s.vim_keybinds.remove(old);
+                    }
+                    s.vim_keybinds.add(action, candidate.clone());
+                    let _ = s.vim_keybinds.save_to(&settings_path());
+                });
+                self.cancel_vim_capture();
+                cx.notify();
+            }
+            _ => {
+                // `vim_find_target_char` handles the same shift/key_char
+                // normalization the real vim dispatcher uses, so what's
+                // typed here matches exactly what `VimKeybinds` will later
+                // be asked to look up at runtime.
+                if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                    self.vim_capture_buffer.push(c);
+                    self.vim_conflict_message = None;
+                    cx.notify();
+                }
+            }
+        }
     }
 
     fn toggle_vim(&mut self, cx: &mut Context<Self>) {
@@ -362,6 +493,7 @@ impl SettingsModal {
     fn enter_theme_preview(&mut self, cx: &mut Context<Self>) {
         self.theme_preview = true;
         self.cancel_capture(cx);
+        self.cancel_vim_capture();
         cx.notify();
     }
 
@@ -380,6 +512,7 @@ impl SettingsModal {
         let path = settings_path();
         let path = path.as_path();
         let keybinds = Keybinds::load(path);
+        let vim_keybinds = crate::vim_keybinds::VimKeybinds::load(path);
         let vim_enabled = crate::keybinds::load_vim_enabled(path);
         let theme = crate::theme::load_theme(path);
         let theme_mode = crate::theme::load_theme_mode(path);
@@ -387,12 +520,14 @@ impl SettingsModal {
 
         self.state.update(cx, |s, _cx| {
             s.keybinds = keybinds;
+            s.vim_keybinds = vim_keybinds;
             s.vim_enabled = vim_enabled;
             s.theme = theme;
             s.theme_mode = theme_mode;
             s.theme_color_mode = theme_color_mode;
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
+        self.cancel_vim_capture();
         cx.notify();
     }
 
@@ -617,6 +752,262 @@ impl SettingsModal {
                 )
             })
     }
+
+    // ── Vim Keybinds (checklist: Settings -> Vim Mode) ────────────────────
+    // Mirrors render_combo_chip/capture_prompt/render_action_row/
+    // render_category above closely, but keyed by sequence string (a
+    // `VimKeybinds` binding has no `Vec`-index slot the way a `KeyCombo`
+    // does) and without any `cx.clear_key_bindings()` dance, since a raw
+    // vim keystroke never collides with a registered GPUI `KeyBinding`.
+
+    fn render_vim_combo_chip(
+        &self,
+        action: KeybindAction,
+        sequence: &str,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.vim_capturing.as_ref().is_some_and(|(a, s)| *a == action && s.as_deref() == Some(sequence)) {
+            return self.vim_capture_prompt(p, theme_mode).into_any_element();
+        }
+        let base_id = format!("{action:?}-{sequence}");
+        let sequence_owned = sequence.to_string();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(p.text))
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .bg(rgb(p.chrome_active))
+                    .rounded(px(4.0))
+                    .child(sequence.to_string()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("vim-keybind-change-{base_id}")))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(p.accent))
+                    .on_mouse_down(MouseButton::Left, {
+                        let sequence_owned = sequence_owned.clone();
+                        cx.listener(move |this, _ev, window, cx| {
+                            this.start_vim_capture(action, Some(sequence_owned.clone()), window, cx);
+                        })
+                    })
+                    .child("Change"),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("vim-keybind-remove-{base_id}")))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(p.text_faint))
+                    .hover(move |s| s.text_color(rgb(p.text)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                        this.state.update(cx, |s, _cx| {
+                            s.vim_keybinds.remove(&sequence_owned);
+                            let _ = s.vim_keybinds.save_to(&settings_path());
+                        });
+                        this.cancel_vim_capture();
+                        cx.notify();
+                    }))
+                    .child("×"),
+            )
+            .into_any_element()
+    }
+
+    fn vim_capture_prompt(&self, p: crate::theme::Palette, theme_mode: ThemeMode) -> AnyElement {
+        match &self.vim_conflict_message {
+            Some(msg) => div()
+                .text_xs()
+                .text_color(rgb(match theme_mode {
+                    ThemeMode::Dark => 0xf48771,
+                    ThemeMode::Light => 0xb02a15,
+                }))
+                .max_w(px(260.0))
+                .child(msg.clone())
+                .into_any_element(),
+            None => div()
+                .text_xs()
+                .text_color(rgb(p.accent))
+                .max_w(px(180.0))
+                .child(format!(
+                    "Type a sequence, Enter to save ({}), Esc to cancel",
+                    if self.vim_capture_buffer.is_empty() { "…".to_string() } else { self.vim_capture_buffer.clone() }
+                ))
+                .into_any_element(),
+        }
+    }
+
+    fn render_vim_action_row(
+        &self,
+        action: KeybindAction,
+        sequences: Vec<String>,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut slots: Vec<AnyElement> = sequences
+            .iter()
+            .map(|seq| self.render_vim_combo_chip(action, seq, p, theme_mode, cx))
+            .collect();
+
+        let is_adding = self.vim_capturing.as_ref().is_some_and(|(a, s)| *a == action && s.is_none());
+        slots.push(if is_adding {
+            self.vim_capture_prompt(p, theme_mode)
+        } else {
+            div()
+                .id(ElementId::named_usize("vim-keybind-add", action as usize))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(18.0))
+                .h(px(18.0))
+                .rounded(px(4.0))
+                .text_xs()
+                .cursor_pointer()
+                .text_color(rgb(p.text_faint))
+                .bg(rgb(p.chrome_active))
+                .hover(move |s| s.text_color(rgb(p.text)).bg(rgb(p.chrome_hover)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
+                    this.start_vim_capture(action, None, window, cx);
+                }))
+                .child("+")
+                .into_any_element()
+        });
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .py(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().text_sm().text_color(rgb(p.text)).child(action.label()))
+                    .when(sequences.is_empty() && !is_adding, |d| {
+                        d.child(div().text_xs().text_color(rgb(p.text_faint)).child("Unbound"))
+                    }),
+            )
+            .child(div().flex().flex_row().items_center().gap(px(8.0)).children(slots))
+    }
+
+    fn render_vim_category(
+        &self,
+        category: KeybindCategory,
+        vim_keybinds: &crate::vim_keybinds::VimKeybinds,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_collapsed = *self.vim_collapsed.get(&category).unwrap_or(&false);
+        let actions: Vec<KeybindAction> = KeybindAction::all()
+            .iter()
+            .copied()
+            .filter(|a| a.category() == category)
+            .collect();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(rgb(p.border_subtle))
+            .child(
+                div()
+                    .id(ElementId::named_usize("vim-keybind-category", category as u8 as usize))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_pointer()
+                    .py(px(2.0))
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(p.text))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
+                        let collapsed = this.vim_collapsed.get(&category).copied().unwrap_or(false);
+                        this.vim_collapsed.insert(category, !collapsed);
+                        cx.notify();
+                    }))
+                    .child(if is_collapsed { "▶" } else { "▼" })
+                    .child(category.label()),
+            )
+            .when(!is_collapsed, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .px(px(16.0))
+                        .children(actions.into_iter().map(|action| {
+                            self.render_vim_action_row(action, vim_keybinds.get_all(action), p, theme_mode, cx)
+                        })),
+                )
+            })
+    }
+
+    /// The Vim Keybinds sub-list — appended to the Keybindings pane, gated
+    /// on `vim_enabled` at the call site, rather than a whole separate
+    /// `SettingsSection`: that would need `SettingsSection::all()` to
+    /// become conditional, plus handling "what's the active section when
+    /// vim gets toggled off while it's showing" — real state-machine
+    /// surface a plain `when(vim_enabled, ...)` block doesn't need at all.
+    fn render_vim_keybinds_section(
+        &self,
+        vim_keybinds: &crate::vim_keybinds::VimKeybinds,
+        p: crate::theme::Palette,
+        theme_mode: ThemeMode,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .pt(px(16.0))
+            .mt(px(8.0))
+            .border_t_1()
+            .border_color(rgb(p.border_subtle))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .pb(px(8.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(p.text))
+                            .child("Vim Keybinds"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(p.text_muted))
+                            .max_w(px(500.0))
+                            .child(
+                                "Bind an app action to a vim-Normal-mode keystroke sequence. \
+                                 Only fires while Vim Mode is on and the active tab is in Normal \
+                                 mode. A sequence can't start with a key vim's own commands \
+                                 already use (h, d, g, f, and so on) — every default here lives \
+                                 under \"z\", which vim leaves free.",
+                            ),
+                    ),
+            )
+            .children(KeybindCategory::all().iter().map(|category| {
+                self.render_vim_category(*category, vim_keybinds, p, theme_mode, cx)
+            }))
+    }
 }
 
 impl SettingsModal {
@@ -656,6 +1047,7 @@ impl SettingsModal {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
                         this.section = section;
                         this.cancel_capture(cx);
+                        this.cancel_vim_capture();
                         cx.notify();
                     }))
                     .child(section.label())
@@ -1411,6 +1803,7 @@ impl Render for SettingsModal {
         let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
+        let vim_keybinds = self.state.read(cx).vim_keybinds.clone();
         let p = self.state.read(cx).current_palette();
         let theme_preview = self.theme_preview;
         let section = self.section;
@@ -1581,6 +1974,9 @@ impl Render for SettingsModal {
                                         d.children(KeybindCategory::all().iter().map(|category| {
                                             self.render_category(*category, &keybinds, p, current_theme_mode, cx)
                                         }))
+                                        .when(vim_enabled, |d| {
+                                            d.child(self.render_vim_keybinds_section(&vim_keybinds, p, current_theme_mode, cx))
+                                        })
                                     })
                                     .when(!theme_preview && section == SettingsSection::ToggleFeatures, |d| {
                                         d.child(self.render_toggle_features(

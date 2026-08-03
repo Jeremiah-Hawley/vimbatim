@@ -1,6 +1,7 @@
 mod docx_parser;
 mod document_ops;
 mod keybinds;
+mod vim_keybinds;
 mod rich_clipboard;
 mod recovery;
 mod recovery_prompt;

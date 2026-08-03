@@ -658,7 +658,7 @@ impl TextEditor {
         });
     }
 
-    fn handle_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         /*
          * Dispatches raw key-down events to `process_key`, which does the
          * actual work — split out so macro replay (`@<register>`, a
@@ -722,10 +722,10 @@ impl TextEditor {
             }
         }
 
-        self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), cx);
+        self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), window, cx);
     }
 
-    fn process_key(&mut self, key: &str, shift: bool, control: bool, platform: bool, key_char: Option<&str>, cx: &mut Context<Self>) {
+    fn process_key(&mut self, key: &str, shift: bool, control: bool, platform: bool, key_char: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         /*
          * The actual key-handling logic `handle_key_down` used to contain
          * directly, now parameterized so both a live `KeyDownEvent` and a
@@ -761,7 +761,7 @@ impl TextEditor {
         if self.state.read(cx).vim_is_recording_change() {
             self.state.update(cx, |state, _cx| state.record_change_key(key, shift, key_char));
         }
-        self.process_key_plain(key, shift, key_char, cx);
+        self.process_key_plain(key, shift, key_char, window, cx);
         if was_recording && self.state.read(cx).vim_is_recording_macro() {
             self.state.update(cx, |state, _cx| state.record_macro_key(key, shift, key_char));
         }
@@ -797,6 +797,26 @@ impl TextEditor {
                 self.state.update(cx, |state, _cx| state.vim_jump_forward());
                 cx.notify();
                 self.scroll_to_cursor(cx);
+            }
+            // Ctrl+R: real vim's Redo, in Normal mode only — the app's own
+            // configurable Redo keybind defaults to Ctrl+Y instead (see
+            // `keybinds.rs`), so this doesn't collide with it; Ctrl+R itself
+            // has no default binding and was previously a complete no-op
+            // here. Gated the same way `process_key_plain` reads vim state,
+            // just below, since this function otherwise reads none.
+            "r" => {
+                let (vim_enabled, vim_mode) = {
+                    let state = self.state.read(cx);
+                    let mode = self.tab_index(cx)
+                        .and_then(|i| state.tabs.get(i))
+                        .map(|t| t.vim_mode)
+                        .unwrap_or(VimMode::Insert);
+                    (state.vim_enabled, mode)
+                };
+                if vim_enabled && vim_mode == VimMode::Normal {
+                    self.state.update(cx, |state, _cx| state.redo());
+                    cx.notify();
+                }
             }
             // Ctrl+Left/Right jump by word; Ctrl+Home/End jump to document start/end
             // (spec 4.1). Shift+Ctrl+<key> extends the selection instead of just
@@ -841,7 +861,7 @@ impl TextEditor {
         self.scroll_to_cursor(cx);
     }
 
-    fn process_key_plain(&mut self, key: &str, shift: bool, key_char: Option<&str>, cx: &mut Context<Self>) {
+    fn process_key_plain(&mut self, key: &str, shift: bool, key_char: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         /*
          * Handles every non-Ctrl/Cmd keystroke: vim-mode routing plus the
          * plain-editor fallback. Split out of `process_key` so macro
@@ -974,7 +994,7 @@ impl TextEditor {
                                 Some(register)
                             };
                             if let Some(register) = register {
-                                self.replay_macro(register, cx);
+                                self.replay_macro(register, window, cx);
                             }
                         }
                         self.scroll_to_cursor(cx);
@@ -1000,10 +1020,10 @@ impl TextEditor {
                     }
                 }
 
-                let (consumed, clipboard_sync) = self.state.update(cx, |state, cx| {
+                let (consumed, clipboard_sync, vim_action) = self.state.update(cx, |state, cx| {
                     let handled = state.handle_vim_key(key, shift, key_char);
                     if handled { cx.notify(); }
-                    (handled, state.take_pending_clipboard_sync())
+                    (handled, state.take_pending_clipboard_sync(), state.take_pending_vim_action())
                 });
                 // `"+y`/`"+d`/`"+c` (write direction): mirrors the read
                 // direction above — `execute_vim_operator_range` stages the
@@ -1012,6 +1032,14 @@ impl TextEditor {
                 // actually push it onto the OS clipboard.
                 if let Some(text) = clipboard_sync {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                // Checklist: Settings -> Vim Mode. Same mailbox pattern as
+                // `clipboard_sync` above — `state.rs` staged the resolved
+                // `KeybindAction`, this is the one place with `window`+`cx`
+                // to actually fire it, via the same `dispatch_action` call
+                // `app_toolbar.rs`'s toolbar buttons already use.
+                if let Some(action) = vim_action {
+                    window.dispatch_action(crate::keybinds::action_for(action), cx);
                 }
                 if consumed {
                     cx.notify();
@@ -1069,7 +1097,7 @@ impl TextEditor {
         self.scroll_to_cursor(cx);
     }
 
-    fn replay_macro(&mut self, register: char, cx: &mut Context<Self>) {
+    fn replay_macro(&mut self, register: char, window: &mut Window, cx: &mut Context<Self>) {
         /*
          * Replays a recorded macro (`@<register>`) by feeding
          * its captured keystrokes back through `process_key` one at a
@@ -1087,7 +1115,7 @@ impl TextEditor {
         self.state.update(cx, |state, _cx| { state.vim_last_macro_register = Some(register); });
         let Some(keys) = self.state.read(cx).macro_keys(register) else { return };
         for k in keys {
-            self.process_key(&k.key, k.shift, false, false, k.key_char.as_deref(), cx);
+            self.process_key(&k.key, k.shift, false, false, k.key_char.as_deref(), window, cx);
         }
     }
 }
