@@ -445,6 +445,19 @@ impl Render for TabBar {
 
         // Icon reflects current state: "□" to maximize, "❐" (restore) once
         // already maximized — same convention Windows/most Linux DEs use.
+        //
+        // GPUI's Windows backend (`zoom()`, gpui_windows/src/window.rs) is
+        // unconditionally SW_MAXIMIZE — it never restores, unlike macOS/X11/
+        // Wayland's `zoom()`, which genuinely toggle. Marking this div
+        // WindowControlArea::Max routes Windows clicks through its native
+        // HTMAXBUTTON hit-test path instead (events.rs's
+        // handle_nc_mouse_up_msg), which *does* check is_maximized() and
+        // toggles correctly — same trick as the drag region above. The
+        // on_click below still fires alongside that native path (GPUI
+        // doesn't stop propagation for it), so it's gated off on Windows to
+        // avoid firing the broken always-maximize on top of the correct
+        // native toggle; macOS/Linux never consult the window-control hit
+        // test for clicks, so they still need on_click to actually work.
         let maximize_btn = div()
             .id("window-maximize-btn")
             .flex()
@@ -460,8 +473,11 @@ impl Render for TabBar {
             .border_color(rgb(p.border))
             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
             .active(move |s| s.bg(rgb(p.chrome_active)))
+            .window_control_area(WindowControlArea::Max)
             .on_click(|_ev, window, _cx| {
-                window.zoom_window();
+                if !cfg!(target_os = "windows") {
+                    window.zoom_window();
+                }
             })
             .child(if is_maximized { "❐" } else { "□" });
 

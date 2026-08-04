@@ -36,7 +36,7 @@ fn dict() -> Option<&'static Dictionary> {
         // A corrupt vendored dictionary shouldn't take the editor down with
         // it — spellcheck just goes quiet.
         Err(e) => {
-            eprintln!("[spellcheck] failed to parse bundled en_US dictionary: {e}");
+            crate::state::log_line(&format!("[spellcheck] failed to parse bundled en_US dictionary: {e}"));
             None
         }
     })

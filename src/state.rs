@@ -1109,7 +1109,7 @@ pub fn ensure_settings_file() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Err(e) = std::fs::copy(bundled_default_settings_path(), &path) {
-        eprintln!("[settings] couldn't seed {}: {e}", path.display());
+        log_line(&format!("[settings] couldn't seed {}: {e}", path.display()));
     }
 }
 
@@ -1122,6 +1122,26 @@ pub fn ensure_settings_file() {
 /// may live in.
 pub fn crash_log_path() -> PathBuf {
     crate::recovery::app_data_dir().join("crash.log")
+}
+
+/// `println!`/`eprintln!` replacement for anything reachable outside
+/// `#[cfg(test)]`. `windows_subsystem = "windows"` (main.rs, added so
+/// double-clicking the .exe stops opening a console) means `GetStdHandle`
+/// returns null with no console attached — every `print_to` call in std then
+/// hits the write error and *panics* (`library/std/src/io/stdio.rs`'s
+/// `print_to`: "failed printing to {label}"), turning a routine message like
+/// "not a .docx" into a crash. Writes to the same `crash_log_path()` file
+/// `main.rs`'s panic hook and `load_bundled_fonts` already use instead —
+/// best-effort, a failure here must never itself panic.
+pub fn log_line(msg: &str) {
+    let path = crash_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(file, "{msg}");
+    }
 }
 
 /// The file explorer's starting directory when there's no prior working
@@ -1636,7 +1656,7 @@ impl AppState {
             .open(path)
             .and_then(|mut f| writeln!(f, "{word}"));
         if let Err(e) = appended {
-            eprintln!("[spellcheck] couldn't write {}: {e}", path.display());
+            log_line(&format!("[spellcheck] couldn't write {}: {e}", path.display()));
         }
     }
 
@@ -2103,7 +2123,7 @@ impl AppState {
         if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("docx")) {
             // stderr, matching how every other non-fatal file error in this
             // file reports itself — there's no in-app notification surface.
-            eprintln!("[open] not a .docx, refusing to open: {}", path.display());
+            log_line(&format!("[open] not a .docx, refusing to open: {}", path.display()));
             return;
         }
         if let Some(idx) = self.tabs.iter().position(|t| t.file_path.as_deref() == Some(&path)) {
@@ -3654,7 +3674,7 @@ impl AppState {
     /// not break the in-memory change.
     fn save_setting(&self, key: &str, value: &str) {
         if let Err(e) = crate::theme::save_setting_line(&self.settings_path, key, value) {
-            eprintln!("[settings] couldn't save {key}: {e}");
+            log_line(&format!("[settings] couldn't save {key}: {e}"));
         }
     }
 
@@ -5061,7 +5081,7 @@ impl AppState {
             target.settings_key(),
             self.custom_colors(target),
         ) {
-            eprintln!("[settings] failed to save custom colors: {e}");
+            log_line(&format!("[settings] failed to save custom colors: {e}"));
         }
     }
 

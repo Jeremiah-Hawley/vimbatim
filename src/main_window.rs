@@ -304,7 +304,7 @@ impl MainWindow {
         cx.on_action(move |_: &SaveAction, cx| {
             s.update(cx, |st, _cx| {
                 if let Err(e) = st.save_active_tab() {
-                    eprintln!("[save] {}", e);
+                    crate::state::log_line(&format!("[save] {}", e));
                 }
             });
         });
@@ -337,7 +337,7 @@ impl MainWindow {
                 };
                 let _ = state.update(cx, |st, cx| {
                     if let Err(e) = st.save_active_tab_as(path) {
-                        eprintln!("[save as] {}", e);
+                        crate::state::log_line(&format!("[save as] {}", e));
                     }
                     cx.notify();
                 });
@@ -587,15 +587,16 @@ impl MainWindow {
         });
 
         cx.on_action(move |_: &CiteFromLinkAction, _cx| {
-            println!("[Cite From Link] not yet implemented");
+            // println!("[Cite From Link] not yet implemented");
         });
 
         let s = state.clone();
         cx.on_action(move |_: &WikifiAction, cx| {
             s.update(cx, |st, _cx| {
                 match st.wikify_current_tab() {
-                    Ok(_) => println!("Document exported to markdown"),
-                    Err(e) => println!("Export failed: {}", e),
+                    // Ok(_) => println!("Document exported to markdown"),
+                    // Err(e) => println!("Export failed: {}", e),
+                    _ => {}
                 }
             });
         });

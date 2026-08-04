@@ -75,7 +75,7 @@ impl FileExplorer {
         let dir = self.state.read(cx).working_directory.clone();
         self.state.update(cx, |s, cx| {
             if let Err(e) = s.create_new_docx_in(&dir) {
-                eprintln!("[FileExplorer] failed to create new file in {}: {}", dir.display(), e);
+                crate::state::log_line(&format!("[FileExplorer] failed to create new file in {}: {}", dir.display(), e));
             }
             cx.notify();
         });
@@ -354,7 +354,7 @@ impl FileExplorer {
                                 .on_click(move |_ev, _window, cx| {
                                     confirm_state.update(cx, |s, cx| {
                                         if let Err(e) = s.confirm_context_menu_delete() {
-                                            eprintln!("[FileExplorer] failed to delete: {}", e);
+                                            crate::state::log_line(&format!("[FileExplorer] failed to delete: {}", e));
                                         }
                                         cx.notify();
                                     });
@@ -393,7 +393,7 @@ impl FileExplorer {
                         .on_click(move |_ev, _window, cx| {
                             new_file_state.update(cx, |s, cx| {
                                 if let Err(e) = s.create_file_at_context_menu_location() {
-                                    eprintln!("[FileExplorer] failed to create file: {}", e);
+                                    crate::state::log_line(&format!("[FileExplorer] failed to create file: {}", e));
                                 }
                                 cx.notify();
                             });

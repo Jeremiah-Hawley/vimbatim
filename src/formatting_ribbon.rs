@@ -624,11 +624,9 @@ impl FormattingRibbon {
             })
             .active(move |s| s.bg(rgb(active_bg)))
             .on_mouse_down(gpui::MouseButton::Left, {
-                let label_text = label;
                 let act = action;
                 let st = state.clone();
                 cx.listener(move |this, _ev: &MouseDownEvent, _window, cx| {
-                    println!("Button pressed: {}", label_text);
                     if !matches!(
                         act,
                         FormatAction::DocMenu
@@ -784,9 +782,10 @@ impl FormattingRibbon {
                             cx.notify();
                         }
                         FormatAction::Wikifi => {
-                            st.update(cx, |state, _cx| match state.wikify_current_tab() {
-                                Ok(_) => println!("Document exported to markdown"),
-                                Err(e) => println!("Export failed: {}", e),
+                            st.update(cx, |state, _cx| {
+                                // Ok(_) => println!("Document exported to markdown"),
+                                // Err(e) => println!("Export failed: {}", e),
+                                let _ = state.wikify_current_tab();
                             });
                             cx.notify();
                         }
@@ -1415,7 +1414,7 @@ impl FormattingRibbon {
     /// the behaviour and the colour: giving an entry an action is what makes
     /// it go black.
     fn text_menu_rows(
-        menu_label: &'static str,
+        _menu_label: &'static str,
         items: &[(&'static str, Option<fn(&mut AppState)>)],
         p: Palette,
         theme_mode: ThemeMode,
@@ -1453,7 +1452,8 @@ impl FormattingRibbon {
                                     run(state);
                                     cx.notify();
                                 }),
-                                None => println!("{menu_label}: {item}"),
+                                // None => println!("{menu_label}: {item}"),
+                                None => {}
                             }
                             this.open_menu = None;
                             cx.notify();

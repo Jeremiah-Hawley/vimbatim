@@ -1,3 +1,11 @@
+// Suppresses the console window Windows otherwise opens alongside the GUI
+// window on every launch (the default "console" subsystem always allocates
+// one, regardless of whether anything is ever printed — commenting out
+// println!/eprintln! calls alone would not have stopped it). No effect on
+// macOS/Linux. Must stay the first item in this file: an inner attribute
+// placed after any item is a compile error, not a silent no-op.
+#![windows_subsystem = "windows"]
+
 mod docx_parser;
 mod document_ops;
 mod keybinds;
@@ -103,13 +111,7 @@ fn load_bundled_fonts(cx: &mut App) {
     // reasoning as `install_panic_hook`'s crash log) — so a failure here
     // gets written to that same file instead of vanishing.
     if let Err(e) = cx.text_system().add_fonts(fonts) {
-        let path = state::crash_log_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(file, "\n--- vimbatim: failed to load bundled fonts: {e} ---");
-        }
+        state::log_line(&format!("\n--- vimbatim: failed to load bundled fonts: {e} ---"));
     }
 }
 
