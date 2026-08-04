@@ -385,13 +385,18 @@ impl Render for TabBar {
             }))
             .child("+");
 
-        // Invisible spacer that fills remaining width. On mouse-down we call
-        // start_window_move() directly because Linux (X11 + Wayland) implements
-        // on_hit_test_window_control as a no-op, so WindowControlArea::Drag never fires.
+        // Invisible spacer that fills remaining width. macOS/Linux drag the window via
+        // start_window_move() on mouse-down. On Windows that call is a no-op — dragging
+        // instead requires this region to report WindowControlArea::Drag so WM_NCHITTEST
+        // returns HTCAPTION, which is also what gives real Aero-snap and
+        // double-click-to-maximize. Harmless to set on every platform: macOS/Linux never
+        // consult on_hit_test_window_control's result for the drag case, so the
+        // start_window_move() path below still does the work there.
         let drag_region =
             div()
                 .flex_1()
                 .h_full()
+                .window_control_area(WindowControlArea::Drag)
                 .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
                     window.start_window_move();
                 });

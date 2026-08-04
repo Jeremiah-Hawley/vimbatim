@@ -157,7 +157,15 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Vimbatim".into()),
-                    appears_transparent: false,
+                    // tab_bar.rs draws its own drag region + minimize/maximize/close
+                    // buttons. `false` here leaves GPUI's Windows backend showing the
+                    // native OS caption too (gpui_windows/window.rs maps this straight
+                    // to `hide_title_bar`), stacking a second, native set of window
+                    // chrome above the app's own — the "two menus" bug. macOS shows its
+                    // native traffic lights regardless of this flag (different style
+                    // mask), so scoping to Windows avoids trading a stacked duplicate
+                    // there for an overlapping one.
+                    appears_transparent: cfg!(target_os = "windows"),
                     traffic_light_position: None,
                 }),
                 ..Default::default()
