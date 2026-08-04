@@ -65,6 +65,23 @@ const FOLD_ROW_GROUP: &str = "fold-row";
 const CHAR_ADVANCE_RATIO: f32 = CHAR_WIDTH_PX / FONT_SIZE_PX;
 /// Matches the `.min_h(px(20.0))` set on each line div in render().
 const LINE_HEIGHT_PX: f32 = 20.0;
+/// A line's height as a multiple of its font size (20/14 ≈ 1.43), derived
+/// the same way `CHAR_ADVANCE_RATIO` above is: `LINE_HEIGHT_PX` alone is
+/// only correct at `FONT_SIZE_PX`, which — same gap `CHAR_ADVANCE_RATIO`'s
+/// own comment already flags for character width — body text does not
+/// actually render at. Real line spacing has to scale off the actual
+/// configured size (`normal_text_size_half_points`) via `line_height_px`
+/// below, not this constant directly; using it unscaled is what made 11pt
+/// body text (the 22-half-point default) sit in a slot calibrated for 14pt,
+/// reading as visibly too generous and never shrinking for anything smaller.
+const LINE_HEIGHT_RATIO: f32 = LINE_HEIGHT_PX / FONT_SIZE_PX;
+
+/// The real row height for one line of body text at `normal_size_px` — the
+/// zoom-scalable replacement for using `LINE_HEIGHT_PX` directly. See
+/// `LINE_HEIGHT_RATIO`.
+fn line_height_px(normal_size_px: f32) -> f32 {
+    normal_size_px * LINE_HEIGHT_RATIO
+}
 /// Matches the `.p(px(16.0))` set on the outer editor div in render().
 const CONTENT_PADDING_PX: f32 = 16.0;
 /// Number of lines of buffer to keep visible above/below the cursor —
@@ -447,8 +464,8 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom)) = self.cursor_scroll_geometry(cx) else { return };
-        let line_height    = LINE_HEIGHT_PX * zoom;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
+        let line_height    = line_height_px(normal_size_px) * zoom;
         let cursor_bottom  = cursor_top + line_height;
         let margin         = SCROLL_MARGIN_LINES * line_height;
 
@@ -477,10 +494,11 @@ impl TextEditor {
     /// and max scroll offset needed to clamp any new offset. `None` when the
     /// scroll handle hasn't been laid out yet (viewport_h <= 0), which can
     /// happen on the very first frame.
-    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32)> {
+    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32, f32)> {
         let state = self.state.read(cx);
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
         let _ = state;
 
         // `scroll_to_cursor` calls this on essentially every key event, so
@@ -497,13 +515,13 @@ impl TextEditor {
         // pushes this pixel position down by however many blank spacer
         // rows it reserved, matching what `render()` actually paints.
         let display_row = wrap_to_display[visual_row];
-        let cursor_top = display_row as f32 * LINE_HEIGHT_PX * zoom;
+        let cursor_top = display_row as f32 * line_height_px(normal_size_px) * zoom;
 
         let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
         if viewport_h <= 0.0 { return None; }
 
         let max_y = self.scroll_handle.max_offset().y.as_f32();
-        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom))
+        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom, normal_size_px))
     }
 
     /// Returns the row tables the most recent `render()` already computed
@@ -548,7 +566,7 @@ impl TextEditor {
         let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
         let (display_to_wrap, wrap_to_display) =
-            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
+            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px);
         (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
 
@@ -576,8 +594,10 @@ impl TextEditor {
     /// already at the end in that direction), so the caller can let the key
     /// fall through to its normal meaning.
     fn page_scroll(&self, forward: bool, cx: &Context<Self>) -> bool {
-        let zoom = self.state.read(cx).zoom;
-        let row_height = LINE_HEIGHT_PX * zoom;
+        let state = self.state.read(cx);
+        let zoom = state.zoom;
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let row_height = line_height_px(normal_size_px) * zoom;
         if row_height <= 0.0 {
             return false;
         }
@@ -596,8 +616,8 @@ impl TextEditor {
     }
 
     fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - LINE_HEIGHT_PX * zoom) / 2.0;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px) * zoom) / 2.0;
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -950,7 +970,7 @@ impl TextEditor {
                         cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, normal_size_px,
                     );
                     if !rows.is_empty() {
-                        let line_height = LINE_HEIGHT_PX * zoom;
+                        let line_height = line_height_px(normal_size_px) * zoom;
                         let viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
                         let top_row = ((-offset.y.as_f32()) / line_height).floor().max(0.0) as usize;
@@ -1375,7 +1395,7 @@ impl Render for TextEditor {
             let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
             let (display_to_wrap, wrap_to_display) =
-                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
+                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px);
 
             self.row_cache = Some(RowCache {
                 tab_id,
@@ -1698,16 +1718,16 @@ impl Render for TextEditor {
                     let fold_state = self.state.clone();
                     move |range: std::ops::Range<usize>, _window, _cx| {
                         range.map(|display_idx| {
-                        // A `None` slot is a blank spacer reserved after an
+                        // A `None` slot is a blank spacer reserved before an
                         // oversized (card-style/heading) row so its content
-                        // has empty space to visually spill into instead of
-                        // overlapping the row below — see
+                        // has empty space to visually spill upward into
+                        // instead of overlapping the row above — see
                         // `expand_rows_for_display`'s doc comment. Same
                         // fixed `.h()` as a real row, just no content, so
                         // `uniform_list`'s single-measurement layout still
                         // sees a uniform row height everywhere.
                         let Some(visual_idx) = display_to_wrap[display_idx] else {
-                            return div().h(px(LINE_HEIGHT_PX * zoom)).into_any_element();
+                            return div().h(px(line_height_px(normal_size_px) * zoom)).into_any_element();
                         };
                             let (li, row_start, row_end) = rows[visual_idx];
                         let chars = &line_chars[li];
@@ -1913,7 +1933,7 @@ impl Render for TextEditor {
                             // overflow this box (unchanged from before this
                             // fix, still not clipped since overflow stays
                             // visible — see the comment on `heading` above).
-                            .h(px(LINE_HEIGHT_PX * zoom))
+                            .h(px(line_height_px(normal_size_px) * zoom))
                             // Column direction + justify_end bottom-aligns
                             // `content_el` within this fixed-height slot when
                             // it's shorter (a Shrunk line next to normal-size
@@ -1926,6 +1946,30 @@ impl Render for TextEditor {
                             // is what its own internal justify_center/
                             // justify_end (paragraph alignment) and the
                             // Pocket box's `w_full()` depend on.
+                            //
+                            // `.w_full()`: this row_div is a genuine Taffy
+                            // *root* for this layout pass — uniform_list's
+                            // paint loop calls `item.layout_as_root(available_space)`
+                            // per row (`elements/uniform_list.rs`) — and
+                            // Taffy's root-sizing carve-out that auto-stretches
+                            // an unsized node to its available space only
+                            // applies to `display: block` nodes
+                            // (`compute_root_layout`, gated on
+                            // `style.is_block()`); this is `display: flex`,
+                            // so with no width of its own it fell through to
+                            // ordinary flex content-sizing and hugged its
+                            // widest child instead — the real reason
+                            // alignment silently did nothing no matter what
+                            // was set further down the tree (`line_div`'s own
+                            // `w_full()`, `box_div`'s too, both resolve
+                            // against *this* node's width, which was never
+                            // definite). Confirmed by reading Taffy's actual
+                            // `compute_root_layout`/`perform_child_layout`
+                            // source, not guessed — this is the fourth
+                            // reported attempt at this bug, and the first
+                            // three all added width one or more levels too
+                            // low to matter.
+                            .w_full()
                             .flex()
                             .flex_col()
                             .justify_end()
@@ -2206,23 +2250,26 @@ fn render_line(
     // express "some runs drawn, some not" — fall through to the per-run path
     // whenever anything might be hidden.
     if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
+        // Don't take any fast path if alignment or a box border is needed —
+        // both are only drawn by the full path below (the box wrapper in
+        // particular: a bare-div return skips it entirely, which was the bug
+        // where a Pocket's box only drew once the cursor — or a selection,
+        // forcing the same fall through — put the line on the slow path).
+        // Also the bug where a paragraph's alignment (e.g. Center, read from
+        // a real docx or set by a button click) was silently ignored on any
+        // row that reached one of these fast returns.
+        use crate::docx_parser::Alignment;
+        let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
         if run_spans.is_empty() {
-            return line.to_string().into_any_element();
-        }
-        if let [(start, end, run_idx)] = run_spans {
+            if !needs_alignment {
+                return line.to_string().into_any_element();
+            }
+        } else if let [(start, end, run_idx)] = run_spans {
             if *start == 0 && *end == chars.len() {
                 let run = para.and_then(|p| p.runs.get(*run_idx));
-                if run.is_none() {
+                if run.is_none() && !needs_alignment {
                     return line.to_string().into_any_element();
                 }
-                // Don't take the fast path if alignment or a box border is
-                // needed — both are only drawn by the full path below (the
-                // box wrapper in particular: this bare-div return skipped it
-                // entirely, which was the bug where a Pocket's box only drew
-                // once the cursor — or a selection, forcing the same fall
-                // through — put the line on the slow path).
-                use crate::docx_parser::Alignment;
-                let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
                 let needs_box = run.is_some_and(|r| r.box_format);
                 if !needs_alignment && !needs_box {
                     return apply_run_style(div(), run, zoom, pal).child(line.to_string()).into_any_element();
@@ -2342,7 +2389,14 @@ fn render_line(
     // height — cross-axis alignment decides where a shorter span sits inside
     // the row, and the default (effectively top) is what made smaller text
     // "float" above the baseline the surrounding text sits on.
-    let mut line_div = div().flex().flex_row().items_end().children(spans);
+    // `.w_full()`: justify_center()/justify_end() below only have room to
+    // move content within if this row has a definite width of its own to
+    // distribute — without it the flex row hugs its content's natural size
+    // and every alignment reads as flush-left regardless of what's set below.
+    // Row_div's own cross-axis stretch (see its comment) is meant to already
+    // provide that, but real hardware testing found alignment silently
+    // failing in every scenario, so this stops depending on that chain.
+    let mut line_div = div().flex().flex_row().w_full().items_end().children(spans);
     // Apply paragraph-level alignment if available (Phase 4.3)
     if let Some(p) = para {
         use crate::docx_parser::Alignment;
@@ -2512,7 +2566,7 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     if run.italic { el = el.italic(); }
     if run.underline { el = el.underline(); }
     if run.double_underline { el = el.underline(); }
-    // ponytail: strikethrough data is stored and toggled, rendering deferred until GPUI supports text decoration
+    if run.strikethrough { el = el.line_through(); }
     // Note: box_format is applied at the line level in render_line(), not here at the run level
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
@@ -2535,9 +2589,23 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     if run.size > 0 {
         el = el.text_size(px(run.size as f32 / 2.0 * zoom));
     }
-    if let Some(font) = &run.font {
-        el = el.font_family(font.clone());
-    }
+    // `run.font` (a real docx's own `<w:rFonts>`, e.g. "Calibri" or "Times
+    // New Roman") is deliberately NOT applied to rendering here — kept only
+    // as data so re-saving round-trips it. Every real document tested opens
+    // with bold/italic silently not rendering; tracing GPUI's font
+    // resolution (`gpui_wgpu::cosmic_text_system`'s `find_best_match`) found
+    // the same "only one face loaded" short-circuit already diagnosed for
+    // the ribbon's B/I icons (`formatting_ribbon.rs`) — except here it's
+    // whatever font the *document* names, not FONT_FAMILY, and common docx
+    // default fonts (Calibri, Times New Roman) aren't installed at all in
+    // this sandbox, let alone with a full Bold/Italic/BoldItalic face set.
+    // FONT_FAMILY ("DejaVu Sans Mono") is the one font this app actually
+    // verifies has all 4 faces, and the whole editor's click/cursor math
+    // already assumes a single monospace font throughout — so overriding it
+    // per run from arbitrary document data was never sound. Once the ribbon's
+    // Font Family picker (still a stub, `formatting_ribbon.rs`) exists with
+    // real font management (its own "+ upload a new font"), reintroduce this
+    // deliberately, for fonts the app can vouch for.
     if let Some(color) = &run.color {
         if let Ok(value) = u32::from_str_radix(color, 16) {
             el = el.text_color(rgb(value));
@@ -2632,16 +2700,19 @@ const CARD_BOX_EXTRA_PX: f32 = 18.0;
 /// measures exactly one row and forces every item in the list to that same
 /// height — a paragraph using a larger font (card styles Pocket/Hat/Block/
 /// Tag via a run-level `FontSize`, or a document heading via
-/// `heading_font_size_px`) would otherwise visually spill into the row(s)
-/// below it. `expand_rows_for_display` reserves `slot_count - 1` extra
-/// blank rows after this paragraph's row so that overflow has somewhere
+/// `heading_font_size_px`) would otherwise visually spill into the row
+/// above it (`row_div` bottom-aligns its content — see its own `justify_end`
+/// comment). `expand_rows_for_display` reserves `slot_count - 1` extra
+/// blank rows *before* this paragraph's row so that overflow has somewhere
 /// empty to land instead (see handoff.md's "card-styled lines now overlap"
-/// writeup for the full history).
+/// writeup for the earlier, fillers-after history of this bug).
 ///
-/// `font_px` and `LINE_HEIGHT_PX` both scale by `zoom` the same way, but
-/// `CARD_BOX_EXTRA_PX` doesn't, so `zoom` still has to be threaded through
-/// rather than cancelling out.
-fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32) -> usize {
+/// `font_px` and the real line height both scale by `zoom` the same way,
+/// but `CARD_BOX_EXTRA_PX` doesn't, so `zoom` still has to be threaded
+/// through rather than cancelling out. `normal_size_px` is the floor a run
+/// with no explicit size falls back to — the actual configured default
+/// (`normal_text_size_half_points`), not the stale `FONT_SIZE_PX` reference.
+fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> usize {
     let Some(para) = para else { return 1 };
     let run_max_px = para
         .runs
@@ -2658,21 +2729,26 @@ fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32) -> usize {
     // only relevant when no run carries an explicit size — plain document
     // headings with no card-style override.
     let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-    let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }.max(FONT_SIZE_PX * zoom);
+    let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }.max(normal_size_px * zoom);
     let has_box = para.runs.iter().any(|r| r.box_format);
-    let needed_px = font_px * (LINE_HEIGHT_PX / FONT_SIZE_PX)
-        + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 };
-    ((needed_px / (LINE_HEIGHT_PX * zoom)).ceil() as usize).max(1)
+    let line_height = line_height_px(normal_size_px) * zoom;
+    let needed_px = font_px * LINE_HEIGHT_RATIO + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 };
+    ((needed_px / line_height).ceil() as usize).max(1)
 }
 
 /// Expands the word-wrapped `rows` table (one entry per visual row) into a
 /// `uniform_list`-facing "display rows" table that reserves extra blank
-/// slots after any oversized paragraph (see `slot_count_for_paragraph`).
+/// slots *before* any oversized paragraph (see `slot_count_for_paragraph`).
+/// Before, not after: `row_div` bottom-aligns its content (`justify_end`),
+/// so an oversized paragraph's real overflow spills upward out of its slot,
+/// not downward — reserving the blank space after it left the overflow with
+/// nowhere to go but into the row above (or the ribbon toolbar, for the
+/// first line in the file).
 ///
 /// Returns `(display_to_wrap, wrap_to_display)`:
 /// - `display_to_wrap[display_idx]` is `Some(wrap_idx)` for the row that
-///   holds real content (the first of its reserved slots), or `None` for a
-///   blank spacer slot reserved after it.
+///   holds real content (the last of its reserved slots), or `None` for a
+///   blank spacer slot reserved before it.
 /// - `wrap_to_display[wrap_idx]` is the display index a given wrap-table
 ///   row starts at — needed anywhere pixel math is keyed off a wrap-row
 ///   index (cursor position, scroll-to-cursor) so it accounts for spacer
@@ -2737,6 +2813,7 @@ pub(crate) fn expand_rows_for_display(
     paragraphs: &[Paragraph],
     zoom: f32,
     hidden: &[bool],
+    normal_size_px: f32,
 ) -> (Vec<Option<usize>>, Vec<usize>) {
     let mut display_to_wrap = Vec::with_capacity(rows.len());
     let mut wrap_to_display = Vec::with_capacity(rows.len());
@@ -2749,12 +2826,23 @@ pub(crate) fn expand_rows_for_display(
             wrap_to_display.push(display_to_wrap.len());
             continue;
         }
-        wrap_to_display.push(display_to_wrap.len());
-        display_to_wrap.push(Some(wrap_idx));
-        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom);
+        // Blank filler slots go *before* the content row, not after: `row_div`
+        // bottom-aligns its content (`justify_end`, for aligning mixed-size
+        // text on the bottom rather than the top — see its own comment), so
+        // a paragraph too tall for one slot overflows *upward* out of its
+        // slot, not downward. Filler reserved after it left nothing above to
+        // absorb that overflow — the box of the next Pocket/Hat/heading would
+        // bleed into whatever sat above it (the previous line's text, or the
+        // ribbon toolbar if it was the first line in the file) while the
+        // filler itself just added unused space below. `wrap_to_display`
+        // still has to point at the content slot specifically (not the first
+        // filler), since cursor/scroll pixel math is keyed off it.
+        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px);
         for _ in 1..slots {
             display_to_wrap.push(None);
         }
+        wrap_to_display.push(display_to_wrap.len());
+        display_to_wrap.push(Some(wrap_idx));
     }
     (display_to_wrap, wrap_to_display)
 }
@@ -3166,7 +3254,7 @@ pub(crate) fn line_col_from_mouse_position(
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
     let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
-    let display_row = line_for_y(local_y, LINE_HEIGHT_PX * zoom, display_to_wrap.len());
+    let display_row = line_for_y(local_y, line_height_px(font_size_px) * zoom, display_to_wrap.len());
 
     // A click landing on a blank spacer slot (the empty space an oversized
     // row's content visually spills into) belongs to that row, not to
@@ -3319,7 +3407,7 @@ mod tests {
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
-        spell_ranges_cached, SpellCache,
+        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -4388,7 +4476,7 @@ mod tests {
         let rows = vec![(0usize, 0usize, 1usize), (1, 0, 1), (2, 0, 1)];
 
         let (display_to_wrap, wrap_to_display) =
-            expand_rows_for_display(&rows, &paragraphs, 1.0, &[false, true, false]);
+            expand_rows_for_display(&rows, &paragraphs, 1.0, &[false, true, false], 14.0);
 
         // The middle row is gone from the paint list entirely — that is the
         // vertical gap closing.
@@ -4552,23 +4640,42 @@ mod tests {
         }
     }
 
+    /// The actual bug fix: settings.conf's real 11pt default
+    /// (`normal_text_size_half_points: 22` — `AppState::new`'s own default)
+    /// must produce a *shorter* row than the old fixed 20px, not the same
+    /// one — 20px was calibrated for a stale 14px reference that predates
+    /// the configurable default-size setting, which is why 11pt body text
+    /// read as "far too much space between lines."
+    #[test]
+    fn test_line_height_tracks_normal_size_not_the_stale_14px_reference() {
+        let default_normal_size_px = 22.0 / 2.0; // AppState::new's normal_text_size_half_points
+        assert!(line_height_px(default_normal_size_px) < LINE_HEIGHT_PX);
+        // And it keeps scaling in both directions with the configured size,
+        // rather than flooring at the old hardcoded reference.
+        assert!(line_height_px(9.0) < line_height_px(default_normal_size_px));
+        assert!(line_height_px(default_normal_size_px) < line_height_px(18.0));
+    }
+
+    // `normal_size_px: 14.0` in these tests matches the pre-fix hardcoded
+    // `FONT_SIZE_PX` reference these numeric expectations were tuned
+    // against — see `line_height_px`/`LINE_HEIGHT_RATIO`.
     #[test]
     fn test_slot_count_plain_paragraph_is_one_slot() {
-        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0), 1);
     }
 
     #[test]
     fn test_slot_count_no_paragraph_data_is_one_slot() {
         // A brand-new tab has no parsed paragraphs yet — must not panic or
         // under/over-count when formatting data is simply absent.
-        assert_eq!(slot_count_for_paragraph(None, 1.0), 1);
+        assert_eq!(slot_count_for_paragraph(None, 1.0, 14.0), 1);
     }
 
     #[test]
     fn test_slot_count_pocket_needs_multiple_slots() {
         // 26px font (~1.86x LINE_HEIGHT_PX/FONT_SIZE_PX ratio) plus the box's
         // padding/border comfortably needs more than one 20px slot.
-        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
         assert!(slots > 1, "expected Pocket line to need multiple slots, got {slots}");
     }
 
@@ -4576,8 +4683,8 @@ mod tests {
     fn test_slot_count_scales_with_zoom() {
         // CARD_BOX_EXTRA_PX doesn't scale with zoom, so at very low zoom it
         // dominates and needs relatively more slots than at 1x.
-        let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
-        let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5);
+        let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
+        let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5, 14.0);
         assert!(at_half >= at_1x);
     }
 
@@ -4594,7 +4701,7 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 1);
     }
 
     #[test]
@@ -4602,32 +4709,35 @@ mod tests {
         // heading_font_size_px(1, 1.0) == 24px, no box — still needs 2 slots
         // (24 * 20/14 == 34.3px > 20px, <= 40px).
         let para = Paragraph { runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0), 2);
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 2);
     }
 
     #[test]
     fn test_expand_rows_for_display_plain_rows_are_untouched() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![plain_paragraph(), plain_paragraph()];
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()]);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0);
         assert_eq!(display_to_wrap, vec![Some(0), Some(1)]);
         assert_eq!(wrap_to_display, vec![0, 1]);
     }
 
     #[test]
-    fn test_expand_rows_for_display_inserts_spacers_after_oversized_row() {
+    fn test_expand_rows_for_display_inserts_spacers_before_oversized_row() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![pocket_paragraph(), plain_paragraph()];
-        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0);
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()]);
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0);
 
-        // Row 0 (Pocket) occupies `slots` display rows: itself, then blanks.
-        let mut expected = vec![Some(0)];
-        expected.extend(std::iter::repeat(None).take(slots - 1));
+        // Row 0 (Pocket) occupies `slots` display rows: blanks first, so the
+        // box's real overflow direction (upward, out of a bottom-aligned
+        // row) has somewhere empty to land, then the content itself.
+        let mut expected = std::iter::repeat(None).take(slots - 1).collect::<Vec<_>>();
+        expected.push(Some(0));
         expected.push(Some(1));
         assert_eq!(display_to_wrap, expected);
 
-        // Row 1 (plain) now starts `slots` display rows in, not 1.
-        assert_eq!(wrap_to_display, vec![0, slots]);
+        // Row 0's content now sits at display index `slots - 1`, after its
+        // own leading blanks; row 1 immediately follows at `slots`.
+        assert_eq!(wrap_to_display, vec![slots - 1, slots]);
     }
 }

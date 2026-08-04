@@ -183,7 +183,7 @@ impl AutoScroller {
         let hidden = crate::text_editor::hidden_wrap_rows(
             &rows, &paragraphs, invisibility, cite_size, &folded_paras,
         );
-        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden);
+        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, font_size_px);
         let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);

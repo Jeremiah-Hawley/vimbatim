@@ -135,6 +135,11 @@ struct RibbonBtn {
     /// Paints the button in this color instead of its tone's. Used by HL
     /// Color to show which highlight is currently selected.
     tint: Option<u32>,
+    /// Doubles an icon button's width (38px -> 76px). Font Family needs the
+    /// extra room since its content is the actual font name, not a fixed
+    /// glyph — text_editor::FONT_FAMILY's own length varies by which font
+    /// is active, unlike every other icon here.
+    wide: bool,
 }
 
 impl RibbonBtn {
@@ -146,6 +151,7 @@ impl RibbonBtn {
             icon: None,
             engaged: false,
             tint: None,
+            wide: false,
         }
     }
 
@@ -157,6 +163,7 @@ impl RibbonBtn {
             icon: None,
             engaged: false,
             tint: None,
+            wide: false,
         }
     }
 
@@ -172,6 +179,12 @@ impl RibbonBtn {
         self
     }
 
+    /// Doubles an icon button's fixed width. See the `wide` field.
+    fn wide(mut self) -> Self {
+        self.wide = true;
+        self
+    }
+
     /// A compact icon button.
     fn icon(label: &'static str, action: FormatAction, icon: RibbonIcon) -> Self {
         Self {
@@ -181,6 +194,7 @@ impl RibbonBtn {
             icon: Some(icon),
             engaged: false,
             tint: None,
+            wide: false,
         }
     }
 }
@@ -210,6 +224,34 @@ enum RibbonIcon {
     Italic,
     Underline,
     Strikethrough,
+    /// `Aa` — Case's two-case letterform, same "real text, no font-coverage
+    /// risk" reasoning as Bold/Italic/Underline/Strikethrough above.
+    Case,
+    /// `A` plus a small `▾` opening the color menu (spec: "the letter 'A'
+    /// in the currently selected color, with a small arrow next to it").
+    /// There's no tracked "current font color" default the way HL Color has
+    /// `AppState.highlight_color` to tint against, so this paints in the
+    /// button's own icon color rather than a specific tracked color.
+    FontColor,
+    /// The app's actual current font (`text_editor::FONT_FAMILY`) — real
+    /// text, shown small enough to fit the fixed button width. Per-selection
+    /// font tracking and the "+" upload button are a separate, bigger
+    /// feature (no font picker/upload exists yet); this shows the one font
+    /// the app actually renders in today.
+    FontFamily,
+    /// A bucket with a handle, filled by the button's own `.tint()`
+    /// (already the current highlight color) — the icon just needs to read
+    /// as a container, not paint the color itself.
+    HighlightBucket,
+    /// An open eye (oval + pupil) when not in invisibility mode, a closed
+    /// eye (a single flat lid line) when it is.
+    Eye(bool),
+    /// `▼`, the same glyph the per-row fold marker already uses
+    /// (`text_editor.rs`) — reusing it keeps one visual language for "fold"
+    /// across the app instead of inventing a second one.
+    Fold,
+    /// Two blocks separated by a thin rule, for splitting the pane.
+    Split,
 }
 
 #[derive(Clone, Copy)]
@@ -351,6 +393,92 @@ impl FormattingRibbon {
                     .child(letter)
                     .into_any_element()
             }
+            RibbonIcon::Case => div()
+                .text_size(px(13.0))
+                .text_color(rgb(color))
+                .font_family(crate::text_editor::FONT_FAMILY)
+                .child("Aa")
+                .into_any_element(),
+            RibbonIcon::FontColor => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(color))
+                        .font_family(crate::text_editor::FONT_FAMILY)
+                        .child("A"),
+                )
+                .child(div().text_size(px(8.0)).text_color(rgb(color)).child("▾"))
+                .into_any_element(),
+            RibbonIcon::FontFamily => div()
+                .text_size(px(9.0))
+                .text_color(rgb(color))
+                .font_family(crate::text_editor::FONT_FAMILY)
+                .child(
+                    crate::text_editor::FONT_FAMILY
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(crate::text_editor::FONT_FAMILY),
+                )
+                .into_any_element(),
+            RibbonIcon::HighlightBucket => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                // Handle: an open-bottom arc (rounded top corners only, no
+                // bottom border) sitting right above the pail, reading as
+                // the bail/handle loop on a real bucket.
+                .child(
+                    div()
+                        .w(px(9.0))
+                        .h(px(4.0))
+                        .rounded_t(px(4.0))
+                        .border_2()
+                        .border_b_0()
+                        .border_color(rgb(color)),
+                )
+                // Pail: flat top (sits flush under the handle), rounded
+                // bottom corners so the silhouette reads as a bucket rather
+                // than a plain box.
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(9.0))
+                        .rounded_b(px(3.0))
+                        .border_2()
+                        .border_color(rgb(color)),
+                )
+                .into_any_element(),
+            RibbonIcon::Eye(open) => {
+                if open {
+                    div()
+                        .w(px(16.0))
+                        .h(px(9.0))
+                        .rounded(px(5.0))
+                        .border_2()
+                        .border_color(rgb(color))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().w(px(4.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(color)))
+                        .into_any_element()
+                } else {
+                    div().w(px(16.0)).h(px(2.0)).rounded(px(1.0)).bg(rgb(color)).into_any_element()
+                }
+            }
+            RibbonIcon::Fold => div().text_size(px(10.0)).text_color(rgb(color)).child("▼").into_any_element(),
+            RibbonIcon::Split => div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(div().w(px(6.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(color)))
+                .child(div().w(px(1.0)).h(px(12.0)).bg(rgb(color)))
+                .child(div().w(px(6.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(color)))
+                .into_any_element(),
             RibbonIcon::BulletList | RibbonIcon::NumberedList => {
                 let numbered = matches!(icon, RibbonIcon::NumberedList);
                 div()
@@ -403,6 +531,7 @@ impl FormattingRibbon {
         icon: Option<RibbonIcon>,
         engaged: bool,
         tint: Option<u32>,
+        wide: bool,
         p: Palette,
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
@@ -478,7 +607,8 @@ impl FormattingRibbon {
             .items_center()
             .justify_center()
             .when(!is_icon, |d| d.min_w(px(min_width)).px(px(space::SM)))
-            .when(is_icon, |d| d.w(px(38.0)))
+            .when(is_icon && !wide, |d| d.w(px(38.0)))
+            .when(is_icon && wide, |d| d.w(px(76.0)))
             .h(px(24.0))
             .rounded(px(radius::MD))
             .bg(rgb(bg))
@@ -1720,6 +1850,7 @@ impl FormattingRibbon {
                                         btn.icon,
                                         btn.engaged,
                                         btn.tint,
+                                        btn.wide,
                                         p,
                                         color_mode,
                                         state.clone(),
@@ -1859,10 +1990,12 @@ impl Render for FormattingRibbon {
                     ],
                     vec![
                         RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
-                        // Highlight button removed from Cards per checklist —
-                        // the Text ribbon's HL Color button covers this
-                        // (`FormatAction::HighlightColorSelect`). The keybind
-                        // (`KeybindAction::Highlight`) is untouched.
+                        // Put back per Bug fixes pre test 2.md — the Text
+                        // ribbon's HL Color button keeps its own separate
+                        // behavior (opens the color menu); this one just
+                        // applies settings.conf's configured highlight_color
+                        // directly, same as `KeybindAction::Highlight`.
+                        RibbonBtn::secondary("Highlight", FormatAction::Highlight),
                         RibbonBtn::secondary("Shrink", FormatAction::Shrink),
                         RibbonBtn::secondary("Clear", FormatAction::Clear),
                     ],
@@ -1890,13 +2023,11 @@ impl Render for FormattingRibbon {
                         RibbonBtn::secondary("Font Size", FormatAction::FontSize),
                     ],
                     vec![
-                        RibbonBtn::secondary("Font Family", FormatAction::FontFamily),
-                        RibbonBtn::secondary("Font Color", FormatAction::FontColor),
-                    ],
-                    vec![
-                        RibbonBtn::secondary("HL Color", FormatAction::HighlightColorSelect)
+                        RibbonBtn::icon("Font Family", FormatAction::FontFamily, RibbonIcon::FontFamily).wide(),
+                        RibbonBtn::icon("Font Color", FormatAction::FontColor, RibbonIcon::FontColor),
+                        RibbonBtn::icon("HL Color", FormatAction::HighlightColorSelect, RibbonIcon::HighlightBucket)
                             .tint(highlight_tint),
-                        RibbonBtn::secondary("Case", FormatAction::ChangeCase),
+                        RibbonBtn::icon("Case", FormatAction::ChangeCase, RibbonIcon::Case),
                     ],
                 ],
                 *self.collapsed.get("text").unwrap_or(&false),
@@ -1946,15 +2077,15 @@ impl Render for FormattingRibbon {
                 &[
                     vec![
                         RibbonBtn::secondary("Nav", FormatAction::Nav),
-                        RibbonBtn::secondary("Invisibility", FormatAction::InvisibilityMode)
+                        RibbonBtn::icon("Invisibility", FormatAction::InvisibilityMode, RibbonIcon::Eye(!invisibility_mode))
                             .engaged(invisibility_mode),
                         RibbonBtn::secondary("Timer", FormatAction::Timer)
                             .engaged(timer_visible),
                     ],
                     vec![
                         RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
-                        RibbonBtn::secondary("Split", FormatAction::WindowSplit),
-                        RibbonBtn::secondary("Fold", FormatAction::FoldToggle).engaged(any_folded),
+                        RibbonBtn::icon("Split", FormatAction::WindowSplit, RibbonIcon::Split),
+                        RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold).engaged(any_folded),
                         // Print Layout: deferred (checklist) — the toggle/state
                         // (AppState.print_layout, toggle_print_layout) and this
                         // action's click-handler arm are left in place, inert,

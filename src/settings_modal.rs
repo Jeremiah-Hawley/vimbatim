@@ -136,6 +136,10 @@ pub struct SettingsModal {
     /// Lightweight mode for cycling themes against the real app chrome
     /// without the dimmed backdrop or the full keybind settings list.
     theme_preview: bool,
+    /// Set when Import Theme's picked file fails to parse as a valid
+    /// custom-theme TOML — shown inline under the Import Theme button,
+    /// mirroring `conflict_message`'s pattern. Cleared on the next attempt.
+    theme_import_error: Option<String>,
     /// Which sidebar pane is showing. See `SettingsSection`.
     section: SettingsSection,
 }
@@ -158,6 +162,7 @@ impl SettingsModal {
             vim_capture_buffer: String::new(),
             vim_conflict_message: None,
             theme_preview: false,
+            theme_import_error: None,
             section: SettingsSection::Appearance,
         }
     }
@@ -427,6 +432,55 @@ impl SettingsModal {
             cx.notify();
         });
         cx.notify();
+    }
+
+    /// Settings -> Appearance -> Download Theme Template: native save dialog
+    /// (same `prompt_for_new_path` gpui uses for the app's own Save As, see
+    /// `main_window.rs`), writes `theme::custom_theme_template()` verbatim —
+    /// a blank starting point the user edits and re-imports.
+    fn download_theme_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.state.read(cx).working_directory.clone();
+        let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
+        cx.spawn_in(window, async move |_this, cx| {
+            let Ok(Ok(Some(path))) = path_rx.await else { return };
+            let _ = cx.background_spawn(async move {
+                std::fs::write(path, crate::theme::custom_theme_template())
+            }).await;
+        })
+        .detach();
+    }
+
+    /// Settings -> Appearance -> Import Theme: native open dialog, then
+    /// `AppState::import_custom_theme` parses+adopts it. Invalid TOML shows
+    /// `theme_import_error` inline rather than silently doing nothing.
+    fn import_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths_rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        let state = self.state.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = paths_rx.await else { return };
+            let Some(path) = paths.pop() else { return };
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                let _ = this.update(cx, |this, cx| {
+                    this.theme_import_error = Some("Couldn't read that file.".to_string());
+                    cx.notify();
+                });
+                return;
+            };
+            let ok = state.update(cx, |s, cx| {
+                let ok = s.import_custom_theme(&content);
+                if ok { cx.notify(); }
+                ok
+            });
+            let _ = this.update(cx, |this, cx| {
+                this.theme_import_error = if ok {
+                    None
+                } else {
+                    Some("Not a valid theme file — missing a [dark]/[light] section or a color.".to_string())
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
@@ -1746,6 +1800,60 @@ impl SettingsModal {
                                     })),
                             ),
                     ),
+            )
+            // ── Custom Theme (TOML) ──────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pt(px(12.0))
+                    .border_t_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(p.text))
+                            .child("Custom Theme"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(Self::mode_pill(
+                                "download-theme-template".into(),
+                                "Download Theme Template",
+                                false,
+                                p,
+                                cx.listener(|this, _ev, window, cx| {
+                                    this.download_theme_template(window, cx);
+                                }),
+                            ))
+                            .child(Self::mode_pill(
+                                "import-theme".into(),
+                                "Import Theme",
+                                false,
+                                p,
+                                cx.listener(|this, _ev, window, cx| {
+                                    this.import_theme(window, cx);
+                                }),
+                            )),
+                    )
+                    .when_some(self.theme_import_error.as_ref(), |d, msg| {
+                        // Same red/mode pairing as `capture_prompt`'s conflict
+                        // warning (dark red is illegible on a light background).
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(match current_theme_mode {
+                                    ThemeMode::Dark => 0xf48771,
+                                    ThemeMode::Light => 0xb02a15,
+                                }))
+                                .child(msg.clone()),
+                        )
+                    }),
             )
     }
 }
