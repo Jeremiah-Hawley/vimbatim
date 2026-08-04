@@ -16,6 +16,12 @@ quick-xml     = "0.30"
 zip           = "2"
 spellbook = "0.4.2"
 
+[dev-dependencies]
+# Verifies the bundled font faces actually register under one consistent
+# family name with distinct weight/style — see main.rs's
+# test_bundled_fonts_register_as_one_family_with_four_distinct_faces.
+ttf-parser = "0.25"
+
 # cargo-bundle (closed_beta_plan.md §1) reads this to build Vimbatim.app on
 # macOS. `icon` is deliberately omitted — no .icns exists in the repo yet;
 # cargo-bundle falls back to a generic app icon until one is added.

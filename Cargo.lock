@@ -5800,6 +5800,7 @@ dependencies = [
  "quick-xml 0.30.0",
  "regex",
  "spellbook",
+ "ttf-parser",
  "zip",
 ]
 

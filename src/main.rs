@@ -64,6 +64,55 @@ fn install_panic_hook() {
     }));
 }
 
+/// Embeds `text_editor::FONT_FAMILY`'s 4 faces (`assets/DejaVuSansMono*.ttf`,
+/// Bitstream Vera license — see `assets/DejaVuSansMono.LICENSE`, free to
+/// redistribute) into the binary and registers them with GPUI's text
+/// system, so bold/italic render correctly regardless of what's actually
+/// installed on the host machine.
+///
+/// Without this, whether bold/italic show up at all silently depends on the
+/// host having "DejaVu Sans Mono" installed with *all four* weight/style
+/// faces present — this app's own click/cursor math already assumes one
+/// consistent monospace font everywhere (see `FONT_FAMILY`'s own doc
+/// comment), so relying on the system to provide it was never sound. Real
+/// hardware testing found this reproduced identically on Windows and (via a
+/// separate but related bug, since fixed — `apply_run_style` was letting a
+/// docx's own `<w:rFonts>` override this font per run) on Linux too: GPUI's
+/// font matching only resolves weight/style correctly when more than one
+/// face of the requested family is actually loaded (`candidates.len() == 1`
+/// short-circuits past weight/style selection — see the same note on
+/// `formatting_ribbon.rs`'s icon rendering, which hit this identically for
+/// the ribbon's own B/I letters).
+///
+/// Additive, not a replacement: on a machine that already has DejaVu Sans
+/// Mono installed, GPUI's family lookup will now find both the system's
+/// faces and these embedded ones under the same name — harmless, since
+/// `find_best_match`'s scoring picks whichever scores best regardless of
+/// where it came from, but expected, not a bug, if a debugger ever notices
+/// duplicate candidates.
+fn load_bundled_fonts(cx: &mut App) {
+    let fonts = vec![
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Bold.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Oblique.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf").as_slice()),
+    ];
+    // Deliberately not `let _ =`: a silently-failing font load is exactly
+    // the failure class that produced this bug in the first place, and a
+    // double-clicked GUI app has no visible console to report it to (same
+    // reasoning as `install_panic_hook`'s crash log) — so a failure here
+    // gets written to that same file instead of vanishing.
+    if let Err(e) = cx.text_system().add_fonts(fonts) {
+        let path = state::crash_log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(file, "\n--- vimbatim: failed to load bundled fonts: {e} ---");
+        }
+    }
+}
+
 fn main() {
     install_panic_hook();
 
@@ -84,6 +133,8 @@ fn main() {
     state::ensure_settings_file();
 
     application().run(|cx: &mut App| {
+        load_bundled_fonts(cx);
+
         // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
         // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
         // loaded from settings.conf and registered here. The settings modal
@@ -145,4 +196,52 @@ fn main() {
 
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    // GPUI's own font matching (`gpui_wgpu`'s cosmic-text path, and
+    // DirectWrite's `GetMatchingFonts` on Windows) both resolve weight/style
+    // by exact family-name string equality plus the font's own declared
+    // weight/style metadata — not by which file the bytes came from. If
+    // these 4 faces ever registered under *different* family strings (an
+    // old-style font naming a bold face "DejaVu Sans Mono Bold" as its own
+    // family, rather than family="DejaVu Sans Mono" + a Bold subfamily, is a
+    // real, common failure mode for older TTFs), `load_bundled_fonts` would
+    // silently load 4 unrelated one-off "families" instead of one family
+    // with 4 faces, and every fix riding on this bundling would silently do
+    // nothing — this is the check that rules that out for the actual bytes
+    // being shipped, not just this one machine's copy of the font.
+    #[test]
+    fn test_bundled_fonts_register_as_one_family_with_four_distinct_faces() {
+        let fonts: [(&str, &[u8]); 4] = [
+            ("Book", include_bytes!("../assets/DejaVuSansMono.ttf")),
+            ("Bold", include_bytes!("../assets/DejaVuSansMono-Bold.ttf")),
+            ("Oblique", include_bytes!("../assets/DejaVuSansMono-Oblique.ttf")),
+            ("BoldOblique", include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf")),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (label, bytes) in fonts {
+            let face = ttf_parser::Face::parse(bytes, 0)
+                .unwrap_or_else(|e| panic!("{label}: not a valid font file: {e:?}"));
+            let family = face
+                .names()
+                .into_iter()
+                .find(|n| n.name_id == ttf_parser::name_id::FAMILY && n.is_unicode())
+                .and_then(|n| n.to_string())
+                .unwrap_or_else(|| panic!("{label}: no Unicode family name record"));
+            assert_eq!(
+                family, "DejaVu Sans Mono",
+                "{label}: bundled font must register under the exact family FONT_FAMILY requests"
+            );
+            let bold = face.is_bold();
+            let italic = face.is_italic();
+            assert!(
+                seen.insert((bold, italic)),
+                "{label}: (bold={bold}, italic={italic}) duplicates a face already seen — \
+                 GPUI's weight/style matching can't tell these two apart"
+            );
+        }
+        assert_eq!(seen.len(), 4, "expected 4 distinct (bold, italic) combinations, got {seen:?}");
+    }
 }
