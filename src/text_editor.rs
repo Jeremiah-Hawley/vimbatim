@@ -2430,11 +2430,15 @@ fn render_line(
                 None => box_div.child(line_div),
             };
 
-            // If previous line also has a box, merge them by removing top border
+            // If previous line also has a box, merge them by removing top border.
+            // Width bumped 1px -> 2px to match Verbatim's own bolder Pocket box
+            // (see the sz=24 note on the docx writer) — kept in sync with
+            // CARD_BOX_EXTRA_PX below, which reserves row height for exactly
+            // this border weight.
             if prev_has_box {
-                box_div = box_div.border_b_1().border_l_1().border_r_1();
+                box_div = box_div.border_b_2().border_l_2().border_r_2();
             } else {
-                box_div = box_div.border_1();
+                box_div = box_div.border_2();
             }
 
             return box_div.into_any_element();
@@ -2527,10 +2531,44 @@ fn render_segment(
     let el = if hidden { el.text_color(transparent_black()) } else { el };
 
     let formatting_underline = run.is_some_and(|r| r.underline || r.double_underline);
+    // Hidden text's real underline already renders transparent via the
+    // `text_color(transparent_black())` above (`.underline()`'s own color
+    // defaults to the glyph color — see the note below); gating out here
+    // stops a hidden run from growing a *visible* second stroke where the
+    // first one is invisible.
+    let double_underline = !hidden && run.is_some_and(|r| r.double_underline);
+
+    // GPUI's `UnderlineStyle` (style.rs) is thickness/color/wavy only — no
+    // "double" variant — so `apply_run_style`'s `.underline()` can only ever
+    // paint one stroke, which is why a Hat's double underline was rendering
+    // as a single line even though the docx itself round-trips `w:u
+    // w:val="double"` correctly (this is purely a rendering gap, not a
+    // parse/save one). Fakes the second stroke with the same trick as the
+    // misspelled-squiggle overlay just below: a transparent duplicate of the
+    // glyphs carries its own `.underline()`, offset a few px below the real
+    // line so two strokes paint. `.underline()` alone defaults its color to
+    // the glyph color (line.rs's `unwrap_or(style_run.color)`), which here
+    // is transparent — so the color must be set explicitly, same as the
+    // squiggle overlay's `.text_decoration_color()` a few lines down.
+    let underline_hex = run.and_then(|r| r.color.as_deref())
+        .and_then(|c| u32::from_str_radix(c, 16).ok())
+        .unwrap_or(pal.text);
+    let double_underline_overlay = double_underline.then(|| {
+        div()
+            .absolute()
+            .left_0()
+            .top(px(3.0 * zoom))
+            .text_color(transparent_black())
+            .underline()
+            .text_decoration_color(rgb(underline_hex))
+            .child(text.clone())
+    });
+
     match misspelled {
         Some(color) if formatting_underline => el
             .relative()
             .child(text.clone())
+            .children(double_underline_overlay)
             .child(
                 div()
                     .absolute()
@@ -2548,6 +2586,11 @@ fn render_segment(
             .text_decoration_wavy()
             .text_decoration_color(rgb(color))
             .child(text)
+            .into_any_element(),
+        None if double_underline => el
+            .relative()
+            .child(text.clone())
+            .children(double_underline_overlay)
             .into_any_element(),
         None => el.child(text).into_any_element(),
     }
@@ -2687,13 +2730,16 @@ fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
     }
 }
 
-/// Vertical padding (`py(8.0)`, top+bottom) plus border (`border_1()`,
+/// Vertical padding (`py(8.0)`, top+bottom) plus border (`border_2()`,
 /// top+bottom) that `render_line`'s box wrapper (`FormatOp::Box`, used by
 /// the Pocket card style) adds around the text itself, on top of the font's
 /// own height — not scaled by `zoom` (matches the fixed `px(8.0)`/
-/// `border_1()` calls in `render_line`). Used by `slot_count_for_paragraph`
+/// `border_2()` calls in `render_line`). Used by `slot_count_for_paragraph`
 /// to reserve enough uniform_list slots for a boxed line's real height.
-const CARD_BOX_EXTRA_PX: f32 = 18.0;
+/// Must move in lockstep with `render_line`'s border width (16px padding +
+/// 2px*2 border sides = 20) — under-reserving here reproduces the box
+/// clipping/overlap bug already fixed once (see this const's own history).
+const CARD_BOX_EXTRA_PX: f32 = 20.0;
 
 /// How many uniform-height `LINE_HEIGHT_PX` slots a paragraph's rendered
 /// line actually needs. `gpui::uniform_list` (see `RowCache`/`render()`)
