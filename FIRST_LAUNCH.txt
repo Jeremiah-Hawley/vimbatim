@@ -24,6 +24,14 @@ Windows
 3. Windows SmartScreen will show a blue "Windows protected your PC" box.
    Click "More info", then click "Run anyway".
 
+Fedora
+------
+1. Open a terminal in the folder you downloaded the .rpm to.
+2. Run: sudo dnf install ./vimbatim-*.rpm
+3. Run "vimbatim" from a terminal, or launch it from your app menu.
+   (No warning dialog to click through — Fedora doesn't flag a locally
+   installed package the way macOS/Windows flag an unsigned app.)
+
 After that first launch, the app opens normally like anything else.
 
 Your settings

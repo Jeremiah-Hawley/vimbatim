@@ -1,11 +1,16 @@
 name: Beta build
 
-# closed_beta_plan.md §2: manually triggered per beta round, not on every
-# push, so testers only see deliberately-cut builds. Artifacts from a
-# workflow run are only visible to repo collaborators — that's what keeps
+# closed_beta_plan_5platforms.md §2: manually triggered per beta round, not
+# on every push, so testers only see deliberately-cut builds. Artifacts from
+# a workflow run are only visible to repo collaborators — that's what keeps
 # this "not a public GitHub Release" while still using free native build
-# machines for both OSes (GPUI's Metal/DirectX backends can't be
-# cross-compiled from Linux).
+# machines for every OS/arch here (GPUI's Metal/DirectX/X11+Vulkan backends
+# can't be cross-compiled from a different host).
+#
+# matrix.include with an explicit `label` per entry, not a plain `os:` list
+# — two Windows entries and two macOS entries would otherwise share the same
+# runner.os, which breaks both the `if:` conditions below and
+# upload-artifact's requirement that artifact names be unique per run.
 on:
   workflow_dispatch:
 
@@ -13,9 +18,33 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - label: windows-x86_64
+            runner: windows-latest
+          - label: windows-arm64
+            runner: windows-11-arm
+          - label: macos-x86_64
+            runner: macos-13
+          - label: macos-arm64
+            runner: macos-latest
+          - label: fedora-x86_64
+            runner: ubuntu-latest
+            container: fedora:latest
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
     steps:
+      - name: Install Fedora build deps
+        if: matrix.label == 'fedora-x86_64'
+        # bare fedora:latest has neither git (build.rs shells out to
+        # `git rev-parse` for VIMBATIM_GIT_SHA) nor any of GPUI's native
+        # deps. Starting-point list — expect to iterate on it.
+        run: |
+          dnf install -y git gcc gcc-c++ clang cmake pkgconf-pkg-config \
+            curl openssl-devel wayland-devel libxkbcommon-x11-devel \
+            libxcb-devel libX11-devel mesa-vulkan-drivers \
+            vulkan-loader-devel fontconfig-devel freetype-devel \
+            alsa-lib-devel zlib-devel rpm-build
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
@@ -23,13 +52,13 @@ jobs:
       - name: Build (release)
         run: cargo build --release
 
-      # ── macOS: cargo-bundle .app, wrapped in a .dmg ─────────────────────
+      # ── macOS (x86_64 + arm64): cargo-bundle .app, wrapped in a .dmg ────
       - name: Install cargo-bundle
-        if: runner.os == 'macOS'
+        if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
         run: cargo install cargo-bundle
 
       - name: Bundle .app
-        if: runner.os == 'macOS'
+        if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
         # --format osx: cargo-bundle otherwise also builds its own .dmg by
         # default, which we don't use (our own .dmg below adds
         # FIRST_LAUNCH.txt alongside the .app, which cargo-bundle's doesn't).
@@ -39,23 +68,23 @@ jobs:
         run: cargo bundle --release --format osx
 
       - name: Create .dmg
-        if: runner.os == 'macOS'
+        if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
         run: |
           mkdir -p dist/dmg-staging
           cp -R "target/release/bundle/osx/Vimbatim.app" dist/dmg-staging/
           cp FIRST_LAUNCH.txt "dist/dmg-staging/First Launch - Read Me.txt"
           hdiutil create -volname "Vimbatim" -srcfolder "dist/dmg-staging" \
-            -ov -format UDZO "dist/Vimbatim-macOS.dmg"
+            -ov -format UDZO "dist/Vimbatim-${{ matrix.label }}.dmg"
 
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS'
+        if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
         with:
-          name: vimbatim-macos
-          path: dist/Vimbatim-macOS.dmg
+          name: vimbatim-${{ matrix.label }}
+          path: dist/Vimbatim-${{ matrix.label }}.dmg
 
-      # ── Windows: plain .zip (exe + settings.conf + a First Launch doc) ──
+      # ── Windows (x86_64 + arm64): plain .zip ─────────────────────────────
       - name: Assemble zip contents
-        if: runner.os == 'Windows'
+        if: matrix.label == 'windows-x86_64' || matrix.label == 'windows-arm64'
         shell: bash
         run: |
           mkdir -p dist/Vimbatim-Windows
@@ -64,14 +93,35 @@ jobs:
           cp FIRST_LAUNCH.txt dist/Vimbatim-Windows/README.txt
 
       - name: Zip
-        if: runner.os == 'Windows'
-        shell: bash
+        if: matrix.label == 'windows-x86_64' || matrix.label == 'windows-arm64'
+        # Compress-Archive is built into PowerShell on every Windows runner
+        # — no 7z install step, and identical on both windows-latest and the
+        # newer windows-11-arm image.
+        shell: pwsh
         run: |
-          cd dist
-          7z a Vimbatim-Windows.zip Vimbatim-Windows
+          Compress-Archive -Path dist/Vimbatim-Windows -DestinationPath "dist/Vimbatim-${{ matrix.label }}.zip"
 
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
+        if: matrix.label == 'windows-x86_64' || matrix.label == 'windows-arm64'
         with:
-          name: vimbatim-windows
-          path: dist/Vimbatim-Windows.zip
+          name: vimbatim-${{ matrix.label }}
+          path: dist/Vimbatim-${{ matrix.label }}.zip
+
+      # ── Fedora (x86_64): .rpm via cargo-generate-rpm ─────────────────────
+      - name: Install cargo-generate-rpm
+        if: matrix.label == 'fedora-x86_64'
+        run: cargo install cargo-generate-rpm
+
+      - name: Build .rpm
+        if: matrix.label == 'fedora-x86_64'
+        # Assets (binary + default_settings.conf) come from
+        # [package.metadata.generate-rpm] in Cargo.toml.
+        run: |
+          mkdir -p dist
+          cargo generate-rpm -o dist/Vimbatim-fedora-x86_64.rpm
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.label == 'fedora-x86_64'
+        with:
+          name: vimbatim-fedora-x86_64
+          path: dist/Vimbatim-fedora-x86_64.rpm

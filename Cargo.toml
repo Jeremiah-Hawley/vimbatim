@@ -39,3 +39,16 @@ name = "Vimbatim"
 identifier = "com.vimbatim.app"
 short_description = ".docx editor for collegiate policy debate"
 resources = ["default_settings.conf"]
+
+# cargo-generate-rpm (closed_beta_plan_5platforms.md §1) builds the Fedora
+# .rpm from these assets after `cargo build --release` — no hand-written
+# .spec file. default_settings.conf ships into /usr/bin/ alongside the
+# binary (not /usr/share/) so state.rs's bundled_default_settings_path()
+# finds it via its existing "beside current_exe()" lookup with zero Rust
+# changes — see the plan doc for why that's an acceptable non-FHS tradeoff
+# for a closed beta.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/vimbatim", dest = "/usr/bin/vimbatim", mode = "755" },
+    { source = "default_settings.conf", dest = "/usr/bin/default_settings.conf", mode = "644" },
+]
