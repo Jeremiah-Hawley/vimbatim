@@ -339,6 +339,14 @@ impl SettingsModal {
                     cx.notify();
                     return;
                 }
+                if let Some(native) = crate::vim_keybinds::VimKeybinds::find_native_vim_conflict(&candidate) {
+                    self.vim_conflict_message = Some(format!(
+                        "{candidate:?} overlaps with {native:?}, which is vim's own scroll command. Try a different sequence, or Esc to keep the current binding."
+                    ));
+                    self.vim_capture_buffer.clear();
+                    cx.notify();
+                    return;
+                }
 
                 self.state.update(cx, |s, _cx| {
                     if let Some(old) = &existing {

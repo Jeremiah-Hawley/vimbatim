@@ -43,6 +43,17 @@ pub struct VimKeybinds {
     bindings: HashMap<String, KeybindAction>,
 }
 
+/// Real vim's `zz`/`zt`/`zb` (center/scroll-to-top/scroll-to-bottom the
+/// viewport on the cursor's line) — implemented natively in
+/// `text_editor.rs` (needs live scroll-handle geometry `AppState` doesn't
+/// have, same reason `j`/`k`/`H`/`M`/`L` are special-cased there) rather
+/// than through this sequence -> action table, since they aren't
+/// `KeybindAction`s at all. Not stored in `bindings`, but still claimed:
+/// `find_native_vim_conflict` blocks a new capture from colliding with one,
+/// the same way `find_overlap_conflict` blocks colliding with a bound
+/// sequence.
+pub const NATIVE_VIM_SEQUENCES: &[&str] = &["zz", "zt", "zb"];
+
 impl VimKeybinds {
     /// The z-leader default table: every default lives under `z` (confirmed
     /// unclaimed by vim's own Normal-mode dispatch — see
@@ -67,7 +78,11 @@ impl VimKeybinds {
             (SaveAs, "zS"),
             (Find, "zf"),
             (FindReplace, "zr"),
-            (ToggleSidebar, "zb"),
+            // Not "zb"/"zt" — those are now real vim (`text_editor.rs`'s
+            // native zz/zt/zb scroll-to-center/top/bottom, see
+            // NATIVE_VIM_SEQUENCES below), so ToggleSidebar/DeleteTags moved
+            // here instead of losing their default binding outright.
+            (ToggleSidebar, "ze"),
             (ZoomIn, "z="),
             (ZoomOut, "z-"),
             (ZoomReset, "z0"),
@@ -82,7 +97,7 @@ impl VimKeybinds {
             (Underline, "zu"),
             (ClearFormatting, "zc"),
             (Highlight, "zH"),
-            (DeleteTags, "zt"),
+            (DeleteTags, "zD"),
             (StartTimer, "zT"),
             (OpenStats, "zi"),
             (Wikifi, "zw"),
@@ -146,6 +161,17 @@ impl VimKeybinds {
         None
     }
 
+    /// Capture-time hard-block rule 3: does `candidate` collide with one of
+    /// `NATIVE_VIM_SEQUENCES`, either direction, same reasoning as
+    /// `find_overlap_conflict` (whichever is the shorter prefix always
+    /// completes first, permanently shadowing the other).
+    pub fn find_native_vim_conflict(candidate: &str) -> Option<&'static str> {
+        NATIVE_VIM_SEQUENCES
+            .iter()
+            .find(|&&native| native == candidate || native.starts_with(candidate) || candidate.starts_with(native))
+            .copied()
+    }
+
     /// Capture-time hard-block rule 1: is `candidate`'s *first* character
     /// already meaningful to vim's own Normal-mode dispatch? Only the first
     /// character matters — everything after it is consumed by this
@@ -183,7 +209,17 @@ impl VimKeybinds {
             let Some(raws) = values.get(conf_key.as_str()) else { continue };
             vim_keybinds.bindings.retain(|_, a| a != action);
             for raw in raws {
-                if !raw.is_empty() {
+                // Skips a saved sequence that now collides with vim's own
+                // zz/zt/zb (a settings.conf saved before that reservation
+                // existed can carry the old zb->ToggleSidebar/
+                // zt->DeleteTags defaults, e.g.). `text_editor.rs`'s native
+                // intercept would shadow it and it could never fire again
+                // anyway; dropping it here (rather than keeping a dead
+                // entry around) is what lets the settings UI correctly show
+                // "unbound" instead of a binding that silently does
+                // nothing, and lets the action fall back to its own new
+                // default sequence next time this action is (re)bound.
+                if !raw.is_empty() && VimKeybinds::find_native_vim_conflict(raw).is_none() {
                     vim_keybinds.bindings.insert(raw.clone(), *action);
                 }
             }
@@ -284,6 +320,40 @@ mod tests {
         assert_eq!(defaults.bindings.len(), action_count, "a default sequence was silently overwritten by another");
     }
 
+    /// Bug report: after the user added a custom vim keybind under the `z`
+    /// leader, real vim's `zz`/`zt`/`zb` "stopped working" — actually
+    /// `zt`/`zb` had never been real vim commands in this app at all, they
+    /// were this table's own defaults (DeleteTags/ToggleSidebar), and `zz`
+    /// was never bound to anything. Confirmed with the user they want real
+    /// vim scroll commands there. This locks in that the defaults table no
+    /// longer claims any of the three, freeing them for
+    /// `text_editor.rs`'s native intercept.
+    #[test]
+    fn defaults_no_longer_claim_native_vim_sequences() {
+        let defaults = VimKeybinds::defaults();
+        for native in NATIVE_VIM_SEQUENCES {
+            assert!(
+                !defaults.bindings.contains_key(*native),
+                "{native} must be free for vim's native zz/zt/zb, not a default binding"
+            );
+        }
+        // DeleteTags/ToggleSidebar didn't just lose their binding outright —
+        // they moved to a different default sequence.
+        assert!(!defaults.get_all(KeybindAction::DeleteTags).is_empty());
+        assert!(!defaults.get_all(KeybindAction::ToggleSidebar).is_empty());
+    }
+
+    #[test]
+    fn find_native_vim_conflict_catches_exact_and_either_prefix_direction() {
+        assert_eq!(VimKeybinds::find_native_vim_conflict("zt"), Some("zt"));
+        // A shorter candidate that would swallow every native sequence.
+        assert!(VimKeybinds::find_native_vim_conflict("z").is_some_and(|n| NATIVE_VIM_SEQUENCES.contains(&n)));
+        // A longer candidate a native sequence would swallow instead.
+        assert!(VimKeybinds::find_native_vim_conflict("ztx").is_some());
+        // Unrelated sequence: no conflict.
+        assert_eq!(VimKeybinds::find_native_vim_conflict("zs"), None);
+    }
+
     #[test]
     fn defaults_never_collide_or_prefix_each_other() {
         let defaults = VimKeybinds::defaults();
@@ -356,6 +426,29 @@ mod tests {
         // even though lowercase "m" (marks, unimplemented) is free.
         assert!(VimKeybinds::is_reserved_first_key("M"));
         assert!(!VimKeybinds::is_reserved_first_key("m"));
+    }
+
+    /// Bug report follow-up: a settings.conf saved before zz/zt/zb were
+    /// reserved (the exact shape of the reporter's own live config) has
+    /// `vim_sidebar=zb` on disk. Loading it must not hand back a
+    /// ToggleSidebar binding that `text_editor.rs`'s native intercept would
+    /// silently shadow forever — it should come back unbound (matching the
+    /// existing "explicitly cleared" contract), not silently rewritten to
+    /// the new default the user never chose.
+    #[test]
+    fn load_drops_a_saved_sequence_that_now_collides_with_a_native_vim_sequence() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_vim_keybinds_native_conflict_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("settings.conf");
+        fs::write(&path, "[VIM_KEYBINDS]\nvim_sidebar=zb\n").unwrap();
+
+        let loaded = VimKeybinds::load(&path);
+        assert!(
+            loaded.get_all(KeybindAction::ToggleSidebar).is_empty(),
+            "a pre-reservation zb binding must not survive load as a dead, unreachable entry"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

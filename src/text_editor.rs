@@ -108,6 +108,41 @@ const SCROLL_MARGIN_LINES: f32 = 6.0;
 /// systems, giving `find_best_match` real candidates to choose between.
 pub(crate) const FONT_FAMILY: &str = "DejaVu Sans Mono";
 
+/// The one other font this app can vouch for the same way it vouches for
+/// `FONT_FAMILY`: bundled (`main.rs`'s `load_bundled_fonts`) with all 4
+/// weight/style faces, so GPUI's `find_best_match` short-circuit (see
+/// `FONT_FAMILY`'s own doc comment) can't silently drop bold/italic for it.
+/// Not literally "Georgia" (the font a tester actually asked for) — Georgia
+/// is a proprietary Microsoft font with no redistribution rights, so it
+/// can't be bundled the same way. `formatting_ribbon.rs`'s Font Family
+/// picker only offers `CURATED_FONTS`, not every font installed on the
+/// host, specifically so a selection always renders correctly; a `run.font`
+/// read from a real imported `.docx` (naming e.g. actual Georgia, Calibri,
+/// Times New Roman) still round-trips on save, it just isn't rendered as
+/// that font on screen — see `apply_run_style`.
+pub(crate) const CURATED_SERIF_FONT: &str = "DejaVu Serif";
+
+pub(crate) const CURATED_FONTS: &[&str] = &[FONT_FAMILY, CURATED_SERIF_FONT];
+
+fn is_curated_font(name: &str) -> bool {
+    CURATED_FONTS.contains(&name)
+}
+
+/// `CURATED_SERIF_FONT`'s counterpart to `CHAR_ADVANCE_RATIO` below — same
+/// "advance as a fraction of font size" idea, but DejaVu Serif is
+/// proportional (unlike the monospace primary font), so no single ratio is
+/// exact per-character the way `CHAR_ADVANCE_RATIO` is for a font where
+/// every glyph is identically wide. Measured as the mean advance across
+/// a-z/0-9 at the font's own units-per-em (via `ttf_parser`, same
+/// empirical-constant approach `CHAR_ADVANCE_RATIO` itself already uses —
+/// see its doc comment), which is close enough to `CHAR_ADVANCE_RATIO`
+/// (0.6) that this remains a reasonable approximation for click-to-position
+/// and Up/Down column math, the same "not real glyph shaping" tradeoff
+/// `CHAR_ADVANCE_RATIO`'s own doc comment already accepts. Word-wrap
+/// decisions do *not* use this — `visual_rows_for_viewport` measures each
+/// character's real rendered width per font instead.
+const SERIF_CHAR_ADVANCE_RATIO: f32 = 0.589;
+
 /// Caches the word-wrapped row table (and the intermediate data it's built
 /// from — split lines, per-line chars, line byte offsets, and the cloned
 /// paragraph formatting) across renders that don't actually change the
@@ -622,6 +657,26 @@ impl TextEditor {
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
 
+    /// Real vim's `zt`: scrolls so the cursor's line sits at the top edge
+    /// of the viewport. Shares `cursor_scroll_geometry` with
+    /// `scroll_to_cursor_centered` above — see that function's doc comment
+    /// for why this needs live GPUI viewport geometry rather than living in
+    /// `AppState`.
+    fn scroll_to_cursor_top(&self, cx: &Context<Self>) {
+        let Some((cursor_top, _viewport_h, max_y, offset_x, _zoom, _normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
+        let new_y = (-cursor_top).clamp(-max_y.max(0.0), 0.0);
+        self.scroll_handle.set_offset(point(offset_x, px(new_y)));
+    }
+
+    /// Real vim's `zb`: scrolls so the cursor's line sits at the bottom
+    /// edge of the viewport.
+    fn scroll_to_cursor_bottom(&self, cx: &Context<Self>) {
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px) * zoom);
+        let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
+        self.scroll_handle.set_offset(point(offset_x, px(new_y)));
+    }
+
     fn move_cursor_visual_row(&self, cx: &mut Context<Self>, delta: isize, extend: bool) {
         /*
          * Moves the cursor to the visual row `delta` rows above/below its
@@ -664,7 +719,7 @@ impl TextEditor {
         let (_, row_start, _) = rows[current_row];
         let col_in_row = cursor_col - row_start;
 
-        let Some((target_line, target_col)) = visual_row_step(&rows, current_row, col_in_row, delta) else {
+        let Some((target_line, target_col)) = visual_row_step(&rows, current_row, col_in_row, delta, &paragraphs, normal_size_px, zoom) else {
             return; // no-op past the first/last visual row
         };
 
@@ -990,6 +1045,44 @@ impl TextEditor {
                         });
                         cx.notify();
                         self.scroll_to_cursor(cx);
+                        return;
+                    }
+                }
+
+                // Real vim's `zz`/`zt`/`zb` (center/scroll-to-top/scroll-
+                // to-bottom the viewport on the cursor's line) — needs live
+                // scroll-handle geometry, same GPUI-context reason j/k and
+                // H/M/L above are intercepted here rather than reaching
+                // `AppState::handle_vim_key`. Piggybacks on the z-leader
+                // custom-keybind buffer (`vim_keybind_seq`) that the first
+                // `z` keystroke already starts via the ordinary catch-all
+                // below — only *after* that buffer already holds exactly
+                // "z" does this claim the second keystroke, so every other
+                // zX default/custom binding (zs, zn, zy, ...) is completely
+                // unaffected and still resolves through the normal path.
+                // `zz`/`zt`/`zb` are deliberately no longer in
+                // `VimKeybinds::defaults()` (see `vim_keybinds.rs`'s
+                // `NATIVE_VIM_SEQUENCES`) — without this intercept they'd
+                // fall through to `continue_vim_keybind_sequence`, resolve
+                // to `VimLookup::None`, and silently do nothing, which is
+                // exactly the reported bug.
+                if vim_mode == VimMode::Normal && no_pending_trigger && !shift && matches!(key, "z" | "t" | "b") {
+                    let pending_z = self
+                        .tab_index(cx)
+                        .and_then(|i| self.state.read(cx).tabs.get(i).map(|t| t.vim_keybind_seq == "z"))
+                        .unwrap_or(false);
+                    if pending_z {
+                        self.state.update(cx, |state, _cx| {
+                            if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                                tab.vim_keybind_seq.clear();
+                            }
+                        });
+                        match key {
+                            "z" => self.scroll_to_cursor_centered(cx),
+                            "t" => self.scroll_to_cursor_top(cx),
+                            "b" => self.scroll_to_cursor_bottom(cx),
+                            _ => unreachable!(),
+                        }
                         return;
                     }
                 }
@@ -2181,6 +2274,22 @@ fn render_context_menu(
     .into_any_element()
 }
 
+/// One-char-for-one-char substitution of `'\t'` -> `' '` for display only —
+/// `render_line`'s and `char_width_fn`'s shared reasoning for why a raw tab
+/// can't be handed to GPUI's shaper (no glyph in the bundled fonts) and why
+/// swapping it for a space here can't desync any offset-based computation
+/// downstream (cursor/selection/misspelled ranges all index by position, not
+/// content). Never touches the actual document model — callers pass in a
+/// line already read out of `tab.content`/`paragraphs`, which still holds
+/// the real `'\t'` for undo/.docx export/Verbatim round-trip fidelity.
+fn display_line(line: &str) -> std::borrow::Cow<'_, str> {
+    if line.contains('\t') {
+        std::borrow::Cow::Owned(line.replace('\t', " "))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
+}
+
 fn render_line(
     line: &str,
     cursor_col: Option<usize>,
@@ -2236,6 +2345,15 @@ fn render_line(
      * unformatted run spanning the whole line, so cursor/selection
      * rendering never silently breaks when formatting data is absent.
      */
+    // Bug report: pressing Tab appeared to do nothing at all. Root cause
+    // (confirmed via `ttf_parser::Face::glyph_index('\t')` against the
+    // bundled assets/DejaVuSansMono*.ttf, which returns `None`): this app's
+    // fonts have no glyph for U+0009, so GPUI's shaper paints it with zero
+    // visible width — a `'\t'` reaches the model and the document really
+    // does contain it (`state.rs`'s `insert_char`/`indent_vim_range`), it
+    // just never became visible or advanced the on-screen cursor. See
+    // `display_line`'s own comment for why substituting it here is safe.
+    let line = display_line(line);
     let chars: Vec<char> = line.chars().collect();
 
     // Tag is the card style at heading level 4 (`CardStyleKind::heading_level`),
@@ -2632,23 +2750,28 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     if run.size > 0 {
         el = el.text_size(px(run.size as f32 / 2.0 * zoom));
     }
+    // `run.font` is only applied to rendering when it's one of
+    // `CURATED_FONTS` — this app bundles all 4 weight/style faces for those
+    // (`main.rs`'s `load_bundled_fonts`) so GPUI's font resolution always
+    // has real bold/italic candidates to match against. An arbitrary
     // `run.font` (a real docx's own `<w:rFonts>`, e.g. "Calibri" or "Times
-    // New Roman") is deliberately NOT applied to rendering here — kept only
-    // as data so re-saving round-trips it. Every real document tested opens
-    // with bold/italic silently not rendering; tracing GPUI's font
-    // resolution (`gpui_wgpu::cosmic_text_system`'s `find_best_match`) found
-    // the same "only one face loaded" short-circuit already diagnosed for
-    // the ribbon's B/I icons (`formatting_ribbon.rs`) — except here it's
-    // whatever font the *document* names, not FONT_FAMILY, and common docx
-    // default fonts (Calibri, Times New Roman) aren't installed at all in
-    // this sandbox, let alone with a full Bold/Italic/BoldItalic face set.
-    // FONT_FAMILY ("DejaVu Sans Mono") is the one font this app actually
-    // verifies has all 4 faces, and the whole editor's click/cursor math
-    // already assumes a single monospace font throughout — so overriding it
-    // per run from arbitrary document data was never sound. Once the ribbon's
-    // Font Family picker (still a stub, `formatting_ribbon.rs`) exists with
-    // real font management (its own "+ upload a new font"), reintroduce this
-    // deliberately, for fonts the app can vouch for.
+    // New Roman" from an imported document) is deliberately left applying
+    // `FONT_FAMILY` on screen instead, but still kept as data so re-saving
+    // round-trips it: every such font tested opened with bold/italic
+    // silently not rendering, because GPUI's font resolution
+    // (`gpui_wgpu::cosmic_text_system`'s `find_best_match`) short-circuits
+    // (`candidates.len() == 1 => Ok(0)`, skipping weight/style matching)
+    // whenever only one face of a family is actually loaded — the same bug
+    // already diagnosed for the ribbon's B/I icons (`formatting_ribbon.rs`)
+    // and for `FONT_FAMILY` itself (`main.rs`'s `load_bundled_fonts`).
+    // Fonts the app can't vouch for having a full face set (anything not in
+    // `CURATED_FONTS`) would hit this identically, so they don't get
+    // applied here at all.
+    if let Some(font_name) = run.font.as_deref() {
+        if is_curated_font(font_name) {
+            el = el.font_family(font_name.to_string());
+        }
+    }
     if let Some(color) = &run.color {
         if let Ok(value) = u32::from_str_radix(color, 16) {
             el = el.text_color(rgb(value));
@@ -2950,6 +3073,12 @@ fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) ->
     let mut ascii_cache: [Option<f32>; 128] = [None; 128];
     let mut other_cache: std::collections::HashMap<char, f32> = std::collections::HashMap::new();
     move |c: char| {
+        // Matches render_line's tab->space substitution (see its comment):
+        // the bundled fonts have no glyph for '\t' at all, so measuring it
+        // directly would report ~0 width — wrap/scroll math needs the same
+        // width the renderer actually paints, or the cursor's visual
+        // column and the wrap point silently disagree.
+        let c = if c == '\t' { ' ' } else { c };
         if (c as u32) < 128 {
             let idx = c as usize;
             if let Some(w) = ascii_cache[idx] {
@@ -2986,12 +3115,14 @@ pub(crate) fn visual_rows_for_viewport(
      * re-wraps at the same visual width it renders at.
      */
     let reference_px = FONT_SIZE_PX * zoom;
-    let mut measure = char_width_fn(cx, font(FONT_FAMILY), reference_px);
+    let mut mono_measure = char_width_fn(cx, font(FONT_FAMILY), reference_px);
+    let mut serif_measure = char_width_fn(cx, font(CURATED_SERIF_FONT), reference_px);
 
-    // Wrapping has to measure each character at the size it actually paints
-    // at, not one fixed size for the whole document: enlarging a run makes its
-    // characters wider, and a row wrapped for the old size then overflows the
-    // right edge instead of breaking.
+    // Wrapping has to measure each character at the size (and, since a run
+    // can now pick a curated font — bug report: font selection didn't
+    // visibly do anything — the font) it actually paints at: enlarging a
+    // run makes its characters wider, and a row wrapped for the old
+    // size/font then overflows the right edge instead of breaking.
     //
     // `build_visual_rows` walks lines in order, so a single-slot cache of the
     // current line's run-span table is enough to avoid rebuilding it per
@@ -3006,16 +3137,16 @@ pub(crate) fn visual_rows_for_viewport(
             cached_spans = Some((line_idx, spans));
         }
         let spans = cached_spans.as_ref().map(|(_, s)| s.as_slice()).unwrap_or(&[]);
-        let size = effective_char_size_px(
-            paragraphs.get(line_idx),
-            spans,
-            char_idx,
-            normal_size_px,
-            zoom,
-        );
-        let measured = measure(ch);
-        // A monospace advance scales linearly with font size, so one real
-        // glyph measurement at the reference size covers every size on the row.
+        let para = paragraphs.get(line_idx);
+        let size = effective_char_size_px(para, spans, char_idx, normal_size_px, zoom);
+        let measured = match effective_char_font(para, spans, char_idx) {
+            CURATED_SERIF_FONT => serif_measure(ch),
+            _ => mono_measure(ch),
+        };
+        // A glyph's advance scales linearly with font size (true of any
+        // font, not just a monospace one — vector outlines scale uniformly
+        // with point size), so one real glyph measurement at the reference
+        // size covers every size on the row.
         if reference_px > 0.0 { measured * (size / reference_px) } else { measured }
     };
 
@@ -3152,22 +3283,47 @@ fn visual_row_for_line_col(rows: &[(usize, usize, usize)], logical_line: usize, 
     last_row_of_line
 }
 
-fn visual_row_step(rows: &[(usize, usize, usize)], current_row: usize, col_in_row: usize, delta: isize) -> Option<(usize, usize)> {
+fn visual_row_step(
+    rows: &[(usize, usize, usize)],
+    current_row: usize,
+    col_in_row: usize,
+    delta: isize,
+    paragraphs: &[Paragraph],
+    normal_size_px: f32,
+    zoom: f32,
+) -> Option<(usize, usize)> {
     /*
      * Steps `delta` visual rows away from `current_row` (-1/+1 for Up/Down),
      * carrying `col_in_row` — the cursor's on-screen column within its
-     * current row — over onto the target row, clamped to that row's own
-     * width if it's narrower. Returns `None` past the first/last visual row,
-     * i.e. Up on the first row or Down on the last, matching the no-op
-     * behaviour of every other boundary motion in this editor.
+     * current row — over onto the target row.
+     *
+     * Not a raw index carry: `col_in_row` is first converted to a pixel X
+     * position at the *current* row's own sizes (`x_for_col_in_row`), then
+     * re-resolved into a column on the *target* row via that row's own
+     * sizes (`column_for_x_in_row`) — two rows can render at different
+     * sizes (a heading/Cite/Pocket run beside plain body text), and only
+     * the pixel position is actually preserved by real "move up/down"
+     * behavior; the same character index lands at very different on-screen
+     * columns on rows of different sizes. Degenerates to a plain index
+     * carry (clamped to the target row's width) when every character is
+     * the same size, which is why the pre-existing tests below still hold.
+     *
+     * Returns `None` past the first/last visual row, i.e. Up on the first
+     * row or Down on the last, matching the no-op behaviour of every other
+     * boundary motion in this editor.
      */
     let target_row = current_row as isize + delta;
     if target_row < 0 || target_row as usize >= rows.len() {
         return None;
     }
+    let (cur_line, cur_row_start, cur_row_end) = rows[current_row];
+    let cur_spans = paragraphs.get(cur_line).map(paragraph_run_char_spans).unwrap_or_default();
+    let target_x = x_for_col_in_row(col_in_row, paragraphs.get(cur_line), &cur_spans, cur_row_start, cur_row_end, normal_size_px, zoom);
+
     let (target_line, target_row_start, target_row_end) = rows[target_row as usize];
-    let target_col = target_row_start + col_in_row.min(target_row_end - target_row_start);
-    Some((target_line, target_col))
+    let target_spans = paragraphs.get(target_line).map(paragraph_run_char_spans).unwrap_or_default();
+    let target_col_in_row = column_for_x_in_row(target_x, paragraphs.get(target_line), &target_spans, target_row_start, target_row_end, normal_size_px, zoom);
+    Some((target_line, target_row_start + target_col_in_row))
 }
 
 pub(crate) fn document_lines(content: &str) -> Vec<String> {
@@ -3211,6 +3367,38 @@ fn effective_char_size_px(
     normal_size_px * zoom
 }
 
+/// The font family one character actually paints at — mirrors
+/// `apply_run_style`'s own rule exactly (a curated `run.font` wins,
+/// anything else falls back to `FONT_FAMILY`), so wrap/click/scroll math
+/// always measures against the same font that's actually painted. `'static`
+/// since both possible results are the compile-time constants
+/// `FONT_FAMILY`/`CURATED_SERIF_FONT`.
+fn effective_char_font(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> &'static str {
+    let run = spans
+        .iter()
+        .find(|(start, end, _)| char_idx >= *start && char_idx < *end)
+        .and_then(|(_, _, run_idx)| para.and_then(|p| p.runs.get(*run_idx)));
+    match run.and_then(|r| r.font.as_deref()) {
+        Some(CURATED_SERIF_FONT) => CURATED_SERIF_FONT,
+        _ => FONT_FAMILY,
+    }
+}
+
+/// `column_for_x_in_row`/`x_for_col_in_row`'s per-character advance-ratio
+/// lookup: `CHAR_ADVANCE_RATIO` for the monospace primary font,
+/// `SERIF_CHAR_ADVANCE_RATIO` for the curated serif font, mirroring
+/// `effective_char_font`'s own font selection exactly (so click-mapping and
+/// wrap agree on which font a character belongs to, even though wrap uses
+/// real glyph measurement and this stays the cheaper ratio approximation —
+/// see `SERIF_CHAR_ADVANCE_RATIO`'s doc comment for why that's an
+/// acceptable tradeoff here).
+fn effective_char_advance_ratio(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> f32 {
+    match effective_char_font(para, spans, char_idx) {
+        CURATED_SERIF_FONT => SERIF_CHAR_ADVANCE_RATIO,
+        _ => CHAR_ADVANCE_RATIO,
+    }
+}
+
 /// Converts an x pixel offset (relative to the start of the text, i.e. after
 /// subtracting the container's left padding) into a character column *within
 /// one visual row*, rounding to the nearest character boundary and clamping
@@ -3235,8 +3423,8 @@ fn column_for_x_in_row(
     }
     let mut left = 0.0f32;
     for char_idx in row_start..row_end {
-        let width =
-            effective_char_size_px(para, spans, char_idx, normal_size_px, zoom) * CHAR_ADVANCE_RATIO;
+        let width = effective_char_size_px(para, spans, char_idx, normal_size_px, zoom)
+            * effective_char_advance_ratio(para, spans, char_idx);
         if x < left + width {
             // Past this character's midpoint means the nearer boundary is the
             // one after it — same round-to-nearest feel as clicking in Word.
@@ -3246,6 +3434,37 @@ fn column_for_x_in_row(
         left += width;
     }
     row_end - row_start
+}
+
+/// Inverse of `column_for_x_in_row`: the pixel X position `col_in_row`
+/// characters into a row, summing each character's own effective size.
+///
+/// Bug report: pressing `k`/`j` (`visual_row_step`) to move between two
+/// rows of different font size (e.g. off the end of an 11pt line onto a
+/// larger-sized one above, or vice versa) landed the cursor far off to one
+/// side — it was carrying the raw character *index* across rows, but two
+/// rows at different sizes don't share one width-per-character, so the
+/// same index sits at very different on-screen X positions on each. This
+/// is the piece that lets `visual_row_step` convert the current row's
+/// column to a real pixel X *before* re-resolving it against the target
+/// row's own sizes via `column_for_x_in_row` — only pixel position is
+/// actually preserved by real "move up/down" behavior.
+fn x_for_col_in_row(
+    col_in_row: usize,
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    row_start: usize,
+    row_end: usize,
+    normal_size_px: f32,
+    zoom: f32,
+) -> f32 {
+    let end = row_start + col_in_row.min(row_end - row_start);
+    let mut x = 0.0f32;
+    for char_idx in row_start..end {
+        x += effective_char_size_px(para, spans, char_idx, normal_size_px, zoom)
+            * effective_char_advance_ratio(para, spans, char_idx);
+    }
+    x
 }
 
 fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
@@ -3447,13 +3666,15 @@ mod tests {
     // sends the test-attribute expansion into infinite recursion if it's in
     // scope here.
     use super::{
-        column_for_x_in_row, effective_char_size_px, line_for_y, selection_span_for_line,
-        line_segments, SegmentStyle, CHAR_ADVANCE_RATIO,
+        column_for_x_in_row, x_for_col_in_row, effective_char_size_px, effective_char_font,
+        effective_char_advance_ratio, line_for_y, selection_span_for_line,
+        line_segments, SegmentStyle, CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO,
+        FONT_FAMILY, CURATED_SERIF_FONT,
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
-        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX,
+        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -3494,6 +3715,26 @@ mod tests {
             let width = (end - start) as f32 * 14.4;
             assert!(width <= 100.0, "row {start}..{end} is {width}px, over budget");
         }
+    }
+
+    /// Bug report: pressing Tab while editing appeared to do nothing —
+    /// no visible gap, cursor didn't move. Root cause: the bundled fonts
+    /// have no glyph for U+0009, so GPUI paints a raw '\t' with zero
+    /// width. `display_line` substitutes it for a space at render time
+    /// only, which must be a strict one-char-for-one-char swap — anything
+    /// else would desync every offset-based cursor/selection computation
+    /// that indexes into the line by character position.
+    #[test]
+    fn test_display_line_swaps_tab_for_space_one_for_one() {
+        assert_eq!(display_line("a\tb"), "a b");
+        assert_eq!(
+            "a\tb".chars().count(),
+            display_line("a\tb").chars().count(),
+            "substitution must not change the char count offsets are computed against"
+        );
+        // No tab present: no allocation-worthy change, and (implementation
+        // detail worth locking in) no unnecessary copy.
+        assert!(matches!(display_line("plain text"), std::borrow::Cow::Borrowed(_)));
     }
 
     /// A size change partway along a row has to be respected mid-row, which is
@@ -3572,6 +3813,34 @@ mod tests {
         assert!((10.0 * block_char / body_char).round() as usize > 10);
     }
 
+    /// `x_for_col_in_row` is `column_for_x_in_row`'s inverse — round-tripping
+    /// a column through both must return the same column, both on a plain
+    /// uniform-size row and on a run-level-sized one (`visual_row_step`
+    /// relies on exactly this to convert a column to pixels on one row and
+    /// back to a column on another).
+    #[test]
+    fn test_x_for_col_in_row_round_trips_with_column_for_x_in_row() {
+        for col in [0usize, 1, 5, 10] {
+            let x = x_for_col_in_row(col, None, &[], 0, 10, 11.0, 1.0);
+            assert_eq!(column_for_x_in_row(x, None, &[], 0, 10, 11.0, 1.0), col);
+        }
+
+        let para = Paragraph {
+            runs: vec![Run { text: "0123456789abcdef".into(), size: 32, ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let spans = crate::document_ops::paragraph_run_char_spans(&para);
+        for col in [1usize, 5, 10] {
+            let x = x_for_col_in_row(col, Some(&para), &spans, 0, 16, 11.0, 1.0);
+            assert_eq!(column_for_x_in_row(x, Some(&para), &spans, 0, 16, 11.0, 1.0), col);
+        }
+    }
+
+    #[test]
+    fn test_x_for_col_in_row_clamps_past_the_end() {
+        assert_eq!(x_for_col_in_row(50, None, &[], 0, 10, 11.0, 1.0), x_for_col_in_row(10, None, &[], 0, 10, 11.0, 1.0));
+    }
+
     /// A row mixing sizes — a Cite-sized run after body text — has no single
     /// character width at all, which is why the column is walked rather than
     /// divided.
@@ -3612,6 +3881,70 @@ mod tests {
 
         // No paragraph data at all falls back to the body size.
         assert_eq!(effective_char_size_px(None, &[], 0, 11.0, 2.0), 22.0);
+    }
+
+    /// Bug report: choosing a font from the Font Family picker didn't
+    /// visibly change anything. `effective_char_font` is the piece that
+    /// tells wrap/click/scroll math which font a character actually paints
+    /// at — it must mirror `apply_run_style`'s own rule (a curated
+    /// `run.font` wins, anything else falls back to `FONT_FAMILY`) or wrap
+    /// decisions and what's on screen would disagree.
+    #[test]
+    fn test_effective_char_font_follows_run_font_only_when_curated() {
+        let none = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], ..Paragraph::default() };
+        let none_spans = crate::document_ops::paragraph_run_char_spans(&none);
+        assert_eq!(effective_char_font(Some(&none), &none_spans, 0), FONT_FAMILY);
+
+        let serif = Paragraph {
+            runs: vec![Run { text: "ab".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let serif_spans = crate::document_ops::paragraph_run_char_spans(&serif);
+        assert_eq!(effective_char_font(Some(&serif), &serif_spans, 0), CURATED_SERIF_FONT);
+
+        // An uncurated font (e.g. read from a real imported .docx naming
+        // "Georgia" or "Calibri") must not be applied — falls back to
+        // FONT_FAMILY exactly like `apply_run_style` does.
+        let uncurated = Paragraph {
+            runs: vec![Run { text: "ab".into(), font: Some("Georgia".to_string()), ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let uncurated_spans = crate::document_ops::paragraph_run_char_spans(&uncurated);
+        assert_eq!(effective_char_font(Some(&uncurated), &uncurated_spans, 0), FONT_FAMILY);
+
+        // No paragraph data at all falls back to FONT_FAMILY too.
+        assert_eq!(effective_char_font(None, &[], 0), FONT_FAMILY);
+    }
+
+    #[test]
+    fn test_effective_char_advance_ratio_matches_effective_char_font() {
+        let serif = Paragraph {
+            runs: vec![Run { text: "ab".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let spans = crate::document_ops::paragraph_run_char_spans(&serif);
+        assert_eq!(effective_char_advance_ratio(Some(&serif), &spans, 0), SERIF_CHAR_ADVANCE_RATIO);
+        assert_eq!(effective_char_advance_ratio(None, &[], 0), CHAR_ADVANCE_RATIO);
+    }
+
+    /// `column_for_x_in_row` must resolve a serif-font run at the serif
+    /// ratio, not the monospace one — using the wrong ratio for a
+    /// proportional font's run would put click-to-cursor consistently off
+    /// for any document that uses the curated serif font at all.
+    #[test]
+    fn test_column_in_row_uses_serif_ratio_for_a_serif_run() {
+        let para = Paragraph {
+            runs: vec![Run { text: "0123456789".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            ..Paragraph::default()
+        };
+        let spans = crate::document_ops::paragraph_run_char_spans(&para);
+        let serif_char = 11.0 * SERIF_CHAR_ADVANCE_RATIO;
+        for col in [1usize, 5, 9] {
+            assert_eq!(
+                column_for_x_in_row(col as f32 * serif_char, Some(&para), &spans, 0, 10, 11.0, 1.0),
+                col,
+            );
+        }
     }
 
     #[test]
@@ -3988,38 +4321,71 @@ mod tests {
         // Line 1 is short: [0,3). Standing at the start of line 1 (row 2,
         // col 0) and pressing Up must land on line 0's *second* row (the
         // wrapped continuation), not jump to the very start of line 0.
+        // No paragraph data (`&[]`): every character falls back to the same
+        // uniform size, so pixel-preserving and index-preserving resolve
+        // identically here — this is exercising the row-boundary logic, not
+        // the font-size-aware column math (covered separately below).
         let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 2, 0, -1), Some((0, 6)));
+        assert_eq!(visual_row_step(&rows, 2, 0, -1, &[], 11.0, 1.0), Some((0, 6)));
     }
 
     #[test]
     fn test_visual_row_step_down_into_wrapped_continuation_row() {
         let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 0, 3, 1), Some((0, 9)));
+        assert_eq!(visual_row_step(&rows, 0, 3, 1, &[], 11.0, 1.0), Some((0, 9)));
     }
 
     #[test]
     fn test_visual_row_step_preserves_screen_column() {
         let rows = vec![(0, 0, 10), (1, 0, 10)];
-        assert_eq!(visual_row_step(&rows, 0, 4, 1), Some((1, 4)));
+        assert_eq!(visual_row_step(&rows, 0, 4, 1, &[], 11.0, 1.0), Some((1, 4)));
     }
 
     #[test]
     fn test_visual_row_step_clamps_to_shorter_target_row() {
         let rows = vec![(0, 0, 10), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 0, 8, 1), Some((1, 3)));
+        assert_eq!(visual_row_step(&rows, 0, 8, 1, &[], 11.0, 1.0), Some((1, 3)));
     }
 
     #[test]
     fn test_visual_row_step_up_past_first_row_is_none() {
         let rows = vec![(0, 0, 5)];
-        assert_eq!(visual_row_step(&rows, 0, 2, -1), None);
+        assert_eq!(visual_row_step(&rows, 0, 2, -1, &[], 11.0, 1.0), None);
+    }
+
+    /// The reported bug: cursor near the end of an 11pt line, pressing `k`
+    /// to move up onto a larger-sized (Block-style, 16pt) row landed the
+    /// cursor "half way across the screen leftward" — carrying the raw
+    /// character index (18) onto the larger row put it at column 18 there
+    /// too, but 16pt characters are wider, so column 18 on that row sits
+    /// far past where column 18 sat on the narrower 11pt row. The fix must
+    /// land at the *pixel-equivalent* column instead: 18 * 6.6px (11pt) /
+    /// 9.6px (16pt) rounds to column 12, not 18.
+    #[test]
+    fn test_visual_row_step_lands_on_pixel_equivalent_column_across_a_font_size_change() {
+        let paragraphs = vec![
+            Paragraph {
+                runs: vec![Run { text: "0123456789abcdefghij".into(), size: 32, ..Run::default() }],
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run { text: "0123456789abcdefghij".into(), ..Run::default() }],
+                ..Paragraph::default()
+            },
+        ];
+        let rows = vec![(0, 0, 20), (1, 0, 20)];
+        // Moving up (line 1, col 18) -> (line 0, the 16pt row).
+        assert_eq!(
+            visual_row_step(&rows, 1, 18, -1, &paragraphs, 11.0, 1.0),
+            Some((0, 12)),
+            "must preserve on-screen X position, not the raw character index"
+        );
     }
 
     #[test]
     fn test_visual_row_step_down_past_last_row_is_none() {
         let rows = vec![(0, 0, 5)];
-        assert_eq!(visual_row_step(&rows, 0, 2, 1), None);
+        assert_eq!(visual_row_step(&rows, 0, 2, 1, &[], 11.0, 1.0), None);
     }
 
     // ── highlight_color_hex / heading_font_size_px ──────────────────────────

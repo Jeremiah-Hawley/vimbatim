@@ -1177,13 +1177,20 @@ impl FormattingRibbon {
                 ]
             }
             FormatAction::FontFamily => {
-                let mut names = cx.text_system().all_font_names();
-                names.retain(|n| !n.starts_with('.'));
-                names
-                    .into_iter()
+                // Curated, not `cx.text_system().all_font_names()` (every
+                // font installed on the host): bug report, changing font
+                // silently did nothing — `apply_run_style` only renders a
+                // `run.font` this app can vouch for having a complete
+                // bold/italic face set bundled (`main.rs`'s
+                // `load_bundled_fonts`, `text_editor::CURATED_FONTS`), so
+                // offering anything else here would let a selection look
+                // like it worked while never actually changing what's
+                // painted.
+                crate::text_editor::CURATED_FONTS
+                    .iter()
                     .enumerate()
-                    .map(|(idx, name)| {
-                        let applied_name = name.clone();
+                    .map(|(idx, &name)| {
+                        let applied_name = name.to_string();
                         div()
                             .id(ElementId::named_usize("font-family-choice", idx))
                             .px(px(space::SM))
@@ -1191,7 +1198,7 @@ impl FormattingRibbon {
                             .rounded(px(radius::SM))
                             .text_color(rgb(p.text))
                             .text_sm()
-                            .font_family(name.clone())
+                            .font_family(name)
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(p.chrome_hover)))
                             .on_mouse_down(

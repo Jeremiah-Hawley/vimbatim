@@ -78,6 +78,17 @@ fn install_panic_hook() {
 /// system, so bold/italic render correctly regardless of what's actually
 /// installed on the host machine.
 ///
+/// Also embeds `text_editor::CURATED_SERIF_FONT`'s 4 faces
+/// (`assets/DejaVuSerif*.ttf`, same Bitstream Vera license — see
+/// `assets/DejaVuSerif.LICENSE`) for the same reason: the Font Family
+/// picker (`formatting_ribbon.rs`) only offers fonts this app can vouch for
+/// having a complete weight/style set, and "vouch for" means "bundled",
+/// same as the primary font. Not literally the "Georgia" a real docx might
+/// name in its own `<w:rFonts>` — that's a proprietary Microsoft font with
+/// no redistribution rights, so it can't be bundled; a saved/reopened
+/// `run.font` still round-trips whatever the document actually named, only
+/// on-screen rendering substitutes a curated font.
+///
 /// Without this, whether bold/italic show up at all silently depends on the
 /// host having "DejaVu Sans Mono" installed with *all four* weight/style
 /// faces present — this app's own click/cursor math already assumes one
@@ -104,6 +115,10 @@ fn load_bundled_fonts(cx: &mut App) {
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Bold.ttf").as_slice()),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Oblique.ttf").as_slice()),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-Bold.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-Italic.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf").as_slice()),
     ];
     // Deliberately not `let _ =`: a silently-failing font load is exactly
     // the failure class that produced this bug in the first place, and a
@@ -222,14 +237,7 @@ mod tests {
     // with 4 faces, and every fix riding on this bundling would silently do
     // nothing — this is the check that rules that out for the actual bytes
     // being shipped, not just this one machine's copy of the font.
-    #[test]
-    fn test_bundled_fonts_register_as_one_family_with_four_distinct_faces() {
-        let fonts: [(&str, &[u8]); 4] = [
-            ("Book", include_bytes!("../assets/DejaVuSansMono.ttf")),
-            ("Bold", include_bytes!("../assets/DejaVuSansMono-Bold.ttf")),
-            ("Oblique", include_bytes!("../assets/DejaVuSansMono-Oblique.ttf")),
-            ("BoldOblique", include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf")),
-        ];
+    fn assert_family_has_four_distinct_faces(expected_family: &str, fonts: [(&str, &[u8]); 4]) {
         let mut seen = std::collections::HashSet::new();
         for (label, bytes) in fonts {
             let face = ttf_parser::Face::parse(bytes, 0)
@@ -241,8 +249,8 @@ mod tests {
                 .and_then(|n| n.to_string())
                 .unwrap_or_else(|| panic!("{label}: no Unicode family name record"));
             assert_eq!(
-                family, "DejaVu Sans Mono",
-                "{label}: bundled font must register under the exact family FONT_FAMILY requests"
+                family, expected_family,
+                "{label}: bundled font must register under the exact family requested"
             );
             let bold = face.is_bold();
             let italic = face.is_italic();
@@ -253,5 +261,36 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), 4, "expected 4 distinct (bold, italic) combinations, got {seen:?}");
+    }
+
+    #[test]
+    fn test_bundled_fonts_register_as_one_family_with_four_distinct_faces() {
+        assert_family_has_four_distinct_faces(
+            "DejaVu Sans Mono",
+            [
+                ("Book", include_bytes!("../assets/DejaVuSansMono.ttf")),
+                ("Bold", include_bytes!("../assets/DejaVuSansMono-Bold.ttf")),
+                ("Oblique", include_bytes!("../assets/DejaVuSansMono-Oblique.ttf")),
+                ("BoldOblique", include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf")),
+            ],
+        );
+    }
+
+    /// Same check for the curated Serif font (bug report: font selection
+    /// silently did nothing — part of the fix is a second bundled family
+    /// the picker can safely offer; this rules out the exact failure mode
+    /// `test_bundled_fonts_register_as_one_family_with_four_distinct_faces`
+    /// already guards against for the primary font).
+    #[test]
+    fn test_bundled_serif_fonts_register_as_one_family_with_four_distinct_faces() {
+        assert_family_has_four_distinct_faces(
+            "DejaVu Serif",
+            [
+                ("Book", include_bytes!("../assets/DejaVuSerif.ttf")),
+                ("Bold", include_bytes!("../assets/DejaVuSerif-Bold.ttf")),
+                ("Italic", include_bytes!("../assets/DejaVuSerif-Italic.ttf")),
+                ("BoldItalic", include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf")),
+            ],
+        );
     }
 }
