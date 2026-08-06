@@ -413,6 +413,45 @@ fn spell_ranges_cached(
     ranges
 }
 
+/// See `TextEditor::move_cursor_to_row_edge`'s doc comment.
+#[derive(Clone, Copy)]
+enum RowEdge {
+    Start,
+    End,
+    FirstNonBlank,
+}
+
+/// Resolves a display row (see `expand_rows_for_display`) to the nearest
+/// real content row at or before it. A display row can be a blank spacer
+/// slot reserved by an earlier oversized card-style/heading row (which has
+/// no content of its own to land on), so this walks backward to the
+/// nearest one that does — shared by `line_col_from_mouse_position` (a
+/// click landing on a spacer slot) and H/M/L's row resolution (bug report:
+/// H/M/L landed on the wrong row whenever a card-style row sat above the
+/// viewport, from assuming every row was the same pixel height instead of
+/// going through this same display-row translation).
+fn nearest_wrap_row_for_display_row(display_to_wrap: &[Option<usize>], display_row: usize) -> usize {
+    (0..=display_row).rev().find_map(|i| display_to_wrap[i]).unwrap_or(0)
+}
+
+/// Pure resolution of `RowEdge` into a char column within `line_chars`,
+/// given the current visual row's `[row_start, row_end)` char range —
+/// factored out of `TextEditor::move_cursor_to_row_edge` so this (the part
+/// with an actual branch worth testing) doesn't need a live GPUI context.
+fn row_edge_target_col(edge: RowEdge, line_chars: &[char], row_start: usize, row_end: usize) -> usize {
+    match edge {
+        RowEdge::Start => row_start,
+        RowEdge::End => row_end,
+        RowEdge::FirstNonBlank => line_chars
+            .get(row_start..row_end.min(line_chars.len()))
+            .unwrap_or(&[])
+            .iter()
+            .position(|c| !c.is_whitespace())
+            .map(|i| row_start + i)
+            .unwrap_or(row_end), // an all-whitespace row: land at its end, matching real vim's `^` on a blank line
+    }
+}
+
 impl TextEditor {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::for_pane(state, Pane::Primary, cx)
@@ -675,6 +714,53 @@ impl TextEditor {
         let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px) * zoom);
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
+    }
+
+    /// Which edge of the cursor's current *visual* row to jump to — shared
+    /// by vim's bare `$`/`0`/`^` (Normal/Visual mode) and the plain
+    /// `Home`/`End` keys (both vim-disabled and vim's Insert mode). Real
+    /// vim's `$`/`0`/`^`/Home/End all target the *logical* line; this app
+    /// deliberately inverts that, the same way `j`/`k` already do (see
+    /// `move_cursor_visual_row`'s own doc comment) — debate case files are
+    /// typically one long wrapped paragraph per card, so jumping to the
+    /// literal start/end of the whole paragraph reads as the cursor
+    /// teleporting off-screen instead of "go to the edge of this line."
+    /// `g$`/`g0`/`g^` (`state.rs`'s `resolve_vim_motion`) are the escape
+    /// hatch back to the true logical-line target when it's actually
+    /// wanted.
+    fn move_cursor_to_row_edge(&self, cx: &mut Context<Self>, edge: RowEdge, extend: bool) {
+        let idx = self.tab_index(cx);
+        let state = self.state.read(cx);
+        let content = state.pane_content(self.pane).to_string();
+        let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
+        let zoom = state.zoom;
+        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let _ = state;
+
+        let lines = document_lines(&content);
+        let rows = visual_rows_for_viewport(
+            cx,
+            &lines,
+            self.scroll_handle.bounds().size.width.as_f32(),
+            zoom,
+            &paragraphs,
+            normal_size_px,
+        );
+        let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
+        let (line, row_start, row_end) = rows[current_row];
+        let line_chars: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        let target_col = row_edge_target_col(edge, &line_chars, row_start, row_end);
+
+        self.state.update(cx, |state, cx| {
+            if extend {
+                state.extend_selection_to_line_col(line, target_col);
+            } else {
+                state.set_cursor_from_line_col(line, target_col);
+            }
+            cx.notify();
+        });
+        self.scroll_to_cursor(cx);
     }
 
     fn move_cursor_visual_row(&self, cx: &mut Context<Self>, delta: isize, extend: bool) {
@@ -1006,36 +1092,42 @@ impl TextEditor {
                 // down to a plain logical line number and hands off to
                 // `vim_move_to_line_first_nonblank`, which doesn't need to
                 // know anything about viewports.
+                //
+                // Bug report: landed on the wrong row whenever a card-style
+                // row (Pocket/Block/Tag/Cite/heading) sat above the
+                // viewport. Root cause: dividing the raw scroll offset by a
+                // single `line_height` assumes every row is the same
+                // height, but an oversized row reserves extra blank
+                // *display* spacer rows (`expand_rows_for_display`) that
+                // push everything after it down — `cursor_scroll_geometry`
+                // already accounts for this by translating through
+                // `display_to_wrap`; this now does the same translation in
+                // the opposite direction (pixels -> display row -> real
+                // content row), reusing the identical "a spacer slot
+                // belongs to the nearest real row before it" rule
+                // `line_col_from_mouse_position` already established for
+                // clicks landing on one.
                 if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger
                     && shift && matches!(key, "h" | "m" | "l")
                 {
                     let zoom = self.state.read(cx).zoom;
-                    let content = self.state.read(cx).pane_content(self.pane).to_string();
-                    let pane_idx = self.tab_index(cx);
-                    let (paragraphs, normal_size_px) = {
-                        let st = self.state.read(cx);
-                        (
-                            pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default(),
-                            st.normal_text_size_half_points as f32 / 2.0,
-                        )
-                    };
-                    let lines = document_lines(&content);
-                    let bounds = self.scroll_handle.bounds();
-                    let rows = visual_rows_for_viewport(
-                        cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, normal_size_px,
-                    );
-                    if !rows.is_empty() {
+                    let normal_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                    let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+                    let (rows, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
+                    if !rows.is_empty() && !display_to_wrap.is_empty() {
                         let line_height = line_height_px(normal_size_px) * zoom;
-                        let viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+                        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
-                        let top_row = ((-offset.y.as_f32()) / line_height).floor().max(0.0) as usize;
-                        let top_row = top_row.min(rows.len() - 1);
+                        let last_display_row = display_to_wrap.len() - 1;
+                        let top_display = (((-offset.y.as_f32()) / line_height).floor().max(0.0) as usize).min(last_display_row);
                         let visible_count = ((viewport_h / line_height).floor().max(1.0)) as usize;
-                        let bottom_row = (top_row + visible_count.saturating_sub(1)).min(rows.len() - 1);
+                        let bottom_display = (top_display + visible_count.saturating_sub(1)).min(last_display_row);
+                        let top_row = nearest_wrap_row_for_display_row(&display_to_wrap, top_display);
+                        let bottom_row = nearest_wrap_row_for_display_row(&display_to_wrap, bottom_display);
                         let target_row = match key {
                             "h" => top_row,
                             "l" => bottom_row,
-                            "m" => top_row + (bottom_row - top_row) / 2,
+                            "m" => top_row + bottom_row.saturating_sub(top_row) / 2,
                             _ => unreachable!(),
                         };
                         let target_line = rows[target_row].0;
@@ -1083,6 +1175,46 @@ impl TextEditor {
                             "b" => self.scroll_to_cursor_bottom(cx),
                             _ => unreachable!(),
                         }
+                        return;
+                    }
+                }
+
+                // Bug report: `$` jumped to the end of the whole wrapped
+                // paragraph instead of the current visual row — same
+                // "logical line vs visual row" inversion `j`/`k` already
+                // make for this heavily-wrapping app (see
+                // `move_cursor_to_row_edge`'s doc comment). `0`/`^`/Home/End
+                // get the identical treatment for consistency; `g$`/`g0`/
+                // `g^` (`state.rs`) reach the original logical-line target.
+                // Deliberately does NOT cover an operator's pending target
+                // (`d$`/`c$`/`D`/`C`) — confirmed with the reporter that
+                // those should keep deleting to the end of the paragraph,
+                // which is exactly what gating this on `no_pending_trigger`
+                // (already excludes a pending operator) achieves: with one
+                // pending, this block is skipped and the key falls through
+                // to `handle_vim_key` below, which still resolves `$`/`0`/
+                // `^`/Home/End through the unchanged, logical-line
+                // `resolve_vim_motion` arms.
+                if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger {
+                    // Bare "0" only means "start of row" when no count
+                    // digits are already being typed — "10" must still
+                    // accumulate as count 10, not treat its second "0" as
+                    // a motion.
+                    let buf_empty = self
+                        .tab_index(cx)
+                        .and_then(|i| self.state.read(cx).tabs.get(i).map(|t| t.vim_command_buf.is_empty()))
+                        .unwrap_or(true);
+                    let edge = if matches_shifted_symbol(key, shift, key_char, "4", "$") || key == "end" {
+                        Some(RowEdge::End)
+                    } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
+                        Some(RowEdge::FirstNonBlank)
+                    } else if key == "home" || (key == "0" && !shift && buf_empty) {
+                        Some(RowEdge::Start)
+                    } else {
+                        None
+                    };
+                    if let Some(edge) = edge {
+                        self.move_cursor_to_row_edge(cx, edge, is_visual);
                         return;
                     }
                 }
@@ -1181,6 +1313,17 @@ impl TextEditor {
             return;
         }
 
+        // Home/End, reached here rather than above precisely when vim is
+        // disabled or in Insert mode — the vim-Normal/Visual case is
+        // already handled above (same visual-row logic, see
+        // `move_cursor_to_row_edge`'s doc comment), and an operator-pending
+        // Home/End (`dEnd`) is consumed before ever reaching this point.
+        if key == "home" || key == "end" {
+            let edge = if key == "home" { RowEdge::Start } else { RowEdge::End };
+            self.move_cursor_to_row_edge(cx, edge, shift);
+            return;
+        }
+
         let consumed = self.state.update(cx, |state, cx| {
             match key {
                 "backspace" => { state.backspace(); cx.notify(); true }
@@ -1191,8 +1334,6 @@ impl TextEditor {
                 // Shift+<key> extends the selection instead of moving plainly (spec 4.3).
                 "left"      => { if shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
                 "right"     => { if shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
-                "home"      => { if shift { state.extend_line_start() } else { state.move_line_start() }; cx.notify(); true }
-                "end"       => { if shift { state.extend_line_end() } else { state.move_line_end() }; cx.notify(); true }
                 k if k.chars().count() == 1 => {
                     let mut ch = k.chars().next().unwrap();
                     // Apply shift for uppercase; GPUI gives lowercase key names
@@ -3524,7 +3665,7 @@ pub(crate) fn line_col_from_mouse_position(
     // A click landing on a blank spacer slot (the empty space an oversized
     // row's content visually spills into) belongs to that row, not to
     // whatever comes after it — walk back to the nearest real content row.
-    let visual_row = (0..=display_row).rev().find_map(|i| display_to_wrap[i]).unwrap_or(0);
+    let visual_row = nearest_wrap_row_for_display_row(display_to_wrap, display_row);
 
     // The row has to be resolved *before* the column: which characters are on
     // this row determines what they're sized at, and therefore how wide each
@@ -3667,7 +3808,8 @@ mod tests {
     // scope here.
     use super::{
         column_for_x_in_row, x_for_col_in_row, effective_char_size_px, effective_char_font,
-        effective_char_advance_ratio, line_for_y, selection_span_for_line,
+        effective_char_advance_ratio, line_for_y, selection_span_for_line, row_edge_target_col, RowEdge,
+        nearest_wrap_row_for_display_row,
         line_segments, SegmentStyle, CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO,
         FONT_FAMILY, CURATED_SERIF_FONT,
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
@@ -3839,6 +3981,53 @@ mod tests {
     #[test]
     fn test_x_for_col_in_row_clamps_past_the_end() {
         assert_eq!(x_for_col_in_row(50, None, &[], 0, 10, 11.0, 1.0), x_for_col_in_row(10, None, &[], 0, 10, 11.0, 1.0));
+    }
+
+    /// Bug report: `$`/`0`/`^`/Home/End jumped to the edge of the whole
+    /// wrapped paragraph instead of the current visual row. This is the
+    /// pure column-resolution `move_cursor_to_row_edge` is built on —
+    /// exercised directly against a *row* range that's narrower than the
+    /// full line, which is exactly the wrapped-continuation-row case.
+    #[test]
+    fn test_row_edge_target_col_start_and_end_use_the_row_not_the_line() {
+        // "hello world" wrapped into rows [0,6) ("hello ") and [6,11)
+        // ("world") — row 2 is the one under test.
+        let chars: Vec<char> = "hello world".chars().collect();
+        assert_eq!(row_edge_target_col(RowEdge::Start, &chars, 6, 11), 6, "row start, not line start (0)");
+        assert_eq!(row_edge_target_col(RowEdge::End, &chars, 6, 11), 11, "row end, not line end");
+        assert_eq!(row_edge_target_col(RowEdge::End, &chars, 0, 6), 6, "the *first* row's own end, not the whole line's");
+    }
+
+    #[test]
+    fn test_row_edge_target_col_first_non_blank_skips_leading_whitespace_within_the_row() {
+        let chars: Vec<char> = "one   two".chars().collect();
+        // Row [3, 9) is "   two" — first non-blank is 't' at index 6.
+        assert_eq!(row_edge_target_col(RowEdge::FirstNonBlank, &chars, 3, 9), 6);
+    }
+
+    #[test]
+    fn test_row_edge_target_col_first_non_blank_all_whitespace_row_lands_at_its_end() {
+        let chars: Vec<char> = "one    ".chars().collect();
+        // Row [3, 7) is all spaces — matches real vim's `^` on a blank line.
+        assert_eq!(row_edge_target_col(RowEdge::FirstNonBlank, &chars, 3, 7), 7);
+    }
+
+    /// Bug report: H/M/L landed on the wrong row whenever a card-style row
+    /// sat above the viewport, from dividing raw scroll offset by a single
+    /// `line_height` (assumes every row is the same height). This is the
+    /// piece that translates a *display* row (uniform height, includes
+    /// spacer slots an oversized row reserves) back to the nearest real
+    /// content row — the same rule a mouse click landing on a spacer slot
+    /// already used.
+    #[test]
+    fn test_nearest_wrap_row_for_display_row_walks_back_over_spacer_slots() {
+        // Display rows: 0 = real row 0, 1/2 = spacer slots (an oversized
+        // row 0 reserved 3 display slots total), 3 = real row 1.
+        let display_to_wrap = vec![Some(0), None, None, Some(1)];
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 0), 0);
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 1), 0, "spacer slot belongs to the row before it");
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 2), 0);
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 3), 1);
     }
 
     /// A row mixing sizes — a Cite-sized run after body text — has no single

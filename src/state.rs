@@ -5962,6 +5962,26 @@ impl AppState {
                             return MotionResolution::Resolved { target, kind: MotionKind::Linewise };
                         }
                     }
+                    // `g$`/`g0`/`g^`: the escape hatch to real vim's original
+                    // (logical-line) meaning of `$`/`0`/`^`, now that bare
+                    // `$`/`0`/`^` resolve to the current *visual* row instead
+                    // (`text_editor.rs`'s own interception, ahead of this
+                    // dispatcher, for a heavily-wrapping document editor —
+                    // see its doc comment). Deliberately the exact same
+                    // `line_end`/`line_start`/`first_nonblank` calls the
+                    // plain (non-`g`) arms below already use — this is only
+                    // reachable from a pending `g`, so it never overlaps
+                    // with them.
+                    else if matches_shifted_symbol(key, shift, key_char, "4", "$") {
+                        let target = self.tabs.get(self.active_tab).map(|tab| line_end(&tab.content, tab.cursor)).unwrap_or(0);
+                        return MotionResolution::Resolved { target, kind: MotionKind::InclusiveChar };
+                    } else if key == "0" && !shift {
+                        let target = self.tabs.get(self.active_tab).map(|tab| line_start(&tab.content, tab.cursor)).unwrap_or(0);
+                        return MotionResolution::Resolved { target, kind: MotionKind::ExclusiveChar };
+                    } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
+                        let target = self.tabs.get(self.active_tab).map(|tab| first_nonblank(&tab.content, tab.cursor)).unwrap_or(0);
+                        return MotionResolution::Resolved { target, kind: MotionKind::ExclusiveChar };
+                    }
                     // any other key: no other `g...` command exists yet,
                     // so the sequence is simply abandoned.
                 }
@@ -13986,6 +14006,30 @@ mod tests {
         let mut state2 = make_state("one\ntwo\nthree", 0, None);
         let g_shift = state2.resolve_vim_motion("g", true, None);
         assert_eq!(g_shift, MotionResolution::Resolved { target: 8, kind: MotionKind::Linewise });
+    }
+
+    /// The escape hatch back to real vim's original (paragraph-wide)
+    /// `$`/`0`/`^` now that the bare keys resolve to the current visual row
+    /// instead (`text_editor.rs`'s interception, ahead of
+    /// `resolve_vim_motion`) — same targets `resolve_vim_motion`'s own
+    /// non-`g` `$`/`0`/`^` arms already compute, just reached via a
+    /// pending `g` instead.
+    #[test]
+    fn test_resolve_vim_motion_g_dollar_g_zero_g_caret() {
+        let mut state = make_state("  hi", 2, None);
+        state.handle_vim_key("g", false, None); // pending
+        let g_dollar = state.resolve_vim_motion("4", true, Some("$"));
+        assert_eq!(g_dollar, MotionResolution::Resolved { target: 4, kind: MotionKind::InclusiveChar });
+
+        let mut state2 = make_state("  hi", 2, None);
+        state2.handle_vim_key("g", false, None);
+        let g_zero = state2.resolve_vim_motion("0", false, None);
+        assert_eq!(g_zero, MotionResolution::Resolved { target: 0, kind: MotionKind::ExclusiveChar });
+
+        let mut state3 = make_state("  hi", 3, None);
+        state3.handle_vim_key("g", false, None);
+        let g_caret = state3.resolve_vim_motion("6", true, Some("^"));
+        assert_eq!(g_caret, MotionResolution::Resolved { target: 2, kind: MotionKind::ExclusiveChar });
     }
 
     #[test]
