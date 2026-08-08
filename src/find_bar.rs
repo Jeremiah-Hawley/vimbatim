@@ -38,6 +38,35 @@ impl FindBarView {
             return;
         }
 
+        // Search From List mode has no text field: the words live in Settings.
+        // The panel still claims focus every frame (below, in `render`) so
+        // Enter/Shift+Enter reach it the way they do for a normal find — which
+        // means without this guard the catch-all arm would push every
+        // keystroke into the now-hidden `bar.query`, and typing into the
+        // document would silently stop working while the panel is open.
+        if self.state.read(cx).find_bar.as_ref().is_some_and(|b| b.list_mode) {
+            match key {
+                "escape" => {
+                    self.state.update(cx, |s, cx| {
+                        s.close_find_bar();
+                        cx.notify();
+                    });
+                }
+                "enter" => {
+                    self.state.update(cx, |s, cx| {
+                        s.find_next(!shift);
+                        cx.notify();
+                    });
+                }
+                // Everything else — including Tab, which has no second field
+                // to switch to here — is deliberately inert.
+                _ => return,
+            }
+            self.focus_handle.clone().focus(window, cx);
+            cx.notify();
+            return;
+        }
+
         match key {
             "escape" => {
                 self.state.update(cx, |s, cx| {
@@ -202,9 +231,14 @@ impl Render for FindBarView {
             self.focus_handle.clone().focus(window, cx);
         }
 
-        let FindBarState { query, replacement, focus, match_count, current_match } = bar;
-        let has_query = !query.is_empty();
-        let readout = if !has_query {
+        let FindBarState { query, replacement, focus, match_count, current_match, list_mode } = bar;
+        let word_count = self.state.read(cx).search_word_list.len();
+        // What "there is something to search for" means differs by mode — and
+        // four separate things below key off it (both fields' visibility, the
+        // buttons' enabled styling, the readout, and the Replace pair). One
+        // guard so they can't disagree.
+        let active = if list_mode { word_count > 0 } else { !query.is_empty() };
+        let readout = if !active {
             String::new()
         } else if match_count == 0 {
             "No results".to_string()
@@ -237,7 +271,38 @@ impl Render for FindBarView {
                     .items_center()
                     .justify_between()
                     .gap(px(space::SM))
-                    .child(self.field("Find", &query, FindField::Query, focus == FindField::Query, p, cx))
+                    // List mode has nothing to type into — the words live in
+                    // Settings — so the query field is replaced by a label
+                    // naming what's being searched. When the list is empty
+                    // that label is also the only signpost pointing at where
+                    // to write one, which is why the panel opens anyway.
+                    .child(if list_mode {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Search From List"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(if active { p.text_muted } else { p.text_faint }))
+                                    .child(match word_count {
+                                        0 => "No words — add them in Settings → Toggle Features".to_string(),
+                                        1 => "1 word".to_string(),
+                                        n => format!("{n} words"),
+                                    }),
+                            )
+                            .into_any_element()
+                    } else {
+                        self.field("Find", &query, FindField::Query, focus == FindField::Query, p, cx)
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .text_xs()
@@ -266,36 +331,45 @@ impl Render for FindBarView {
                             .child("×"),
                     ),
             )
-            .child(self.field("Replace", &replacement, FindField::Replace, focus == FindField::Replace, p, cx))
+            // Replace has no meaning against a word list — replacing every hit
+            // of any of N words with one string was not asked for and is
+            // destructive — so the field and both buttons are list-mode-hidden.
+            // `replace_current`/`replace_all` already early-return on an empty
+            // query, so hiding is enough; they need no extra guard.
+            .when(!list_mode, |d| {
+                d.child(self.field("Replace", &replacement, FindField::Replace, focus == FindField::Replace, p, cx))
+            })
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .gap(px(space::XS))
                     .child(
-                        Self::button("find-bar-next", "Next", has_query, p)
+                        Self::button("find-bar-next", "Next", active, p)
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.state.update(cx, |s, cx| { s.find_next(true); cx.notify(); });
                             })),
                     )
                     .child(
-                        Self::button("find-bar-prev", "Previous", has_query, p)
+                        Self::button("find-bar-prev", "Previous", active, p)
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.state.update(cx, |s, cx| { s.find_next(false); cx.notify(); });
                             })),
                     )
-                    .child(
-                        Self::button("find-bar-replace", "Replace", has_query, p)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.state.update(cx, |s, cx| { s.replace_current(); cx.notify(); });
-                            })),
-                    )
-                    .child(
-                        Self::button("find-bar-replace-all", "Replace All", has_query, p)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.state.update(cx, |s, cx| { s.replace_all(); cx.notify(); });
-                            })),
-                    ),
+                    .when(!list_mode, |d| {
+                        d.child(
+                            Self::button("find-bar-replace", "Replace", active, p)
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| { s.replace_current(); cx.notify(); });
+                                })),
+                        )
+                        .child(
+                            Self::button("find-bar-replace-all", "Replace All", active, p)
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| { s.replace_all(); cx.notify(); });
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }

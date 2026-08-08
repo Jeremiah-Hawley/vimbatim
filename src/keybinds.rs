@@ -220,6 +220,7 @@ pub enum KeybindAction {
     ZoomReset,
     NextTab,
     PrevTab,
+    CommandPalette,
 }
 
 impl KeybindAction {
@@ -235,6 +236,7 @@ impl KeybindAction {
             DeleteTags, StartTimer, OpenStats, CiteFromLink, Wikifi,
             ZoomIn, ZoomOut, ZoomReset,
             NextTab, PrevTab,
+            CommandPalette,
         ]
     }
 
@@ -286,6 +288,7 @@ impl KeybindAction {
             ZoomReset => "Reset Zoom",
             NextTab => "Next Tab",
             PrevTab => "Previous Tab",
+            CommandPalette => "Command Palette",
         }
     }
 
@@ -294,7 +297,8 @@ impl KeybindAction {
         use KeybindCategory as C;
         match self {
             ToggleSettings | ToggleSidebar | NewTab | CloseTab | ReopenClosedTab | Save | SaveAs
-                | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab => C::General,
+                | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab
+                | CommandPalette => C::General,
             Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
                 | SelectSimilarFormatting => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
@@ -349,6 +353,7 @@ impl KeybindAction {
             ZoomReset => "zoom_reset",
             NextTab => "next_tab",
             PrevTab => "prev_tab",
+            CommandPalette => "command_palette",
         }
     }
 
@@ -412,6 +417,8 @@ impl KeybindAction {
             // verified in the vendored crate before picking this literal.
             NextTab => KeyCombo::new(true, false, false, "tab"),
             PrevTab => KeyCombo::new(true, true, false, "tab"),
+            // Ctrl+P is unclaimed by every other default combo.
+            CommandPalette => KeyCombo::new(true, false, false, "p"),
         }
     }
 
@@ -681,7 +688,7 @@ actions!(
         HighlightAction,
         DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
         ZoomInAction, ZoomOutAction, ZoomResetAction,
-        NextTabAction, PrevTabAction,
+        NextTabAction, PrevTabAction, CommandPaletteAction,
     ]
 );
 
@@ -754,6 +761,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     bindings.extend(bind_all(keybinds, ZoomReset, ZoomResetAction));
     bindings.extend(bind_all(keybinds, NextTab, NextTabAction));
     bindings.extend(bind_all(keybinds, PrevTab, PrevTabAction));
+    bindings.extend(bind_all(keybinds, CommandPalette, CommandPaletteAction));
     bindings.push(KeyBinding::new("f9", UnderlineAction, None));
     // A second, fixed binding for New Document — Ctrl+T is the
     // browser-tab convention, not user-configurable like NewTab's own
@@ -815,6 +823,7 @@ pub fn action_for(action: KeybindAction) -> Box<dyn Action> {
         ZoomReset => Box::new(ZoomResetAction),
         NextTab => Box::new(NextTabAction),
         PrevTab => Box::new(PrevTabAction),
+        CommandPalette => Box::new(CommandPaletteAction),
     }
 }
 

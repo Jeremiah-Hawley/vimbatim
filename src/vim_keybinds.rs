@@ -101,6 +101,8 @@ impl VimKeybinds {
             (StartTimer, "zT"),
             (OpenStats, "zi"),
             (Wikifi, "zw"),
+            // "m" for menu — `zp`/`zP` are already Paste/PasteWithoutFormatting.
+            (CommandPalette, "zm"),
         ];
         let bindings = table.iter().map(|(action, seq)| (seq.to_string(), *action)).collect();
         VimKeybinds { bindings }

@@ -660,6 +660,15 @@ pub struct SpellTarget {
     pub suggestions: Vec<String>,
 }
 
+/// State for the command palette (`src/command_palette.rs`), `None` when
+/// closed. Just the query — the command list itself is a static registry, and
+/// which row Enter runs is always the top result (per spec), so there is no
+/// selection index to carry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CommandPaletteState {
+    pub query: String,
+}
+
 /// Which of the find bar's two text fields keystrokes go to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindField {
@@ -681,6 +690,20 @@ pub struct FindBar {
     /// every query change or jump — drives the "3 of 12" readout.
     pub match_count: usize,
     pub current_match: usize,
+    /// Search From List mode: Next/Previous walk every match of every word in
+    /// `AppState.search_word_list` (merged, in document order) instead of the
+    /// single `query`.
+    ///
+    /// A mode of this same panel rather than a second one, since "move through
+    /// them the same way they can for the normal find button" is exactly this
+    /// panel's traversal over a different needle set. `query` is left untouched
+    /// while in list mode, so reopening with Ctrl+F restores whatever was last
+    /// typed there.
+    ///
+    /// This struct is app-wide and reused across opens, so every open path must
+    /// set this explicitly — see `open_find_bar` (clears) and
+    /// `open_search_from_list` (sets).
+    pub list_mode: bool,
 }
 
 impl Default for FindField {
@@ -747,6 +770,28 @@ pub struct AppState {
     pub editor_context_menu: Option<EditorContextMenu>,
     /// Open state of the find/replace bar, `None` when closed. See `FindBar`.
     pub find_bar: Option<FindBar>,
+    /// Settings → Toggle Features "Search From List": gates the toolbar button
+    /// and the word-list editor. Off by default.
+    pub search_from_list_enabled: bool,
+    /// The words Search From List looks for, one per line as the user typed
+    /// them, already trimmed of blanks (`parse_word_list`).
+    ///
+    /// Persisted to its own `search_word_list.txt` rather than into
+    /// settings.conf: `save_setting_line` is strictly one line per key, and a
+    /// newline-separated file needs no joiner, no escaping question, and can be
+    /// edited in any text editor. Same reasoning `custom_theme_path()` already
+    /// follows for the custom theme's TOML.
+    pub search_word_list: Vec<String>,
+    /// Whether list search requires whole-word matches ("war" not matching
+    /// "warming"). On by default — a curated word list almost always means
+    /// whole words, unlike the substring semantics Find uses.
+    pub search_list_whole_words: bool,
+    /// Settings → Toggle Features "Command Palette": gates the Ctrl+P handler
+    /// and the palette's own row in Settings → Keybinds. Off by default.
+    pub command_palette_enabled: bool,
+    /// Open state of the command palette, `None` when closed. Shares its slot
+    /// under the ribbon with `find_bar` — see `open_command_palette`.
+    pub command_palette: Option<CommandPaletteState>,
     /// Whether the word-count panel (`src/word_count.rs`) is showing.
     pub word_count_visible: bool,
     /// The speech timer popup and its clock (`src/timer.rs`). Lives here
@@ -1367,6 +1412,135 @@ pub(crate) fn rfind_before(content: &str, needle: &str, before: usize) -> Option
         .find(|i| content[*i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
+// ── Search From List matching core ──────────────────────────────────────────
+//
+// The word-list counterparts of `find_from`/`rfind_before`. Both return a
+// `(start, end)` pair rather than a bare start, because a list's matches have
+// *differing* lengths — every existing find call site assumes one fixed
+// `query.len()`, which is exactly the assumption that breaks here.
+//
+// Both are built on `find_from`/`rfind_before` per word rather than a new
+// scanner, so they inherit those functions' char-boundary guards and their
+// ASCII case folding — which settles case sensitivity by reuse: list search is
+// case-insensitive, same as Find, with no second convention to remember.
+
+/// True when `[start, end)` in `content` is bounded by non-word characters on
+/// both sides — the "whole words only" test.
+///
+/// Char-based, never byte indexing. Deliberately just `is_alphanumeric`: that
+/// makes "don" match inside "don't" (an apostrophe isn't alphanumeric), which
+/// is the standard trade every editor's whole-word search makes and not worth
+/// a word-character table to avoid.
+fn is_whole_word_at(content: &str, start: usize, end: usize) -> bool {
+    let before_ok = content[..start].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+    let after_ok = content[end..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+    before_ok && after_ok
+}
+
+/// Earliest match of *any* word in `words` at or after `from`, as `(start, end)`.
+///
+/// "Earliest" is by start position, so repeated Next walks the merged match set
+/// in document order — which is what "move through them the same way they can
+/// for the normal find button" means for a list of several words.
+pub(crate) fn find_list_from(
+    content: &str,
+    words: &[String],
+    whole_words: bool,
+    from: usize,
+) -> Option<(usize, usize)> {
+    words
+        .iter()
+        .filter_map(|word| {
+            // A word can match before the first *whole-word* match, so the
+            // scan has to keep stepping past rejected hits rather than
+            // giving up on the first one.
+            let mut at = from;
+            loop {
+                let start = find_from(content, word, at)?;
+                let end = start + word.len();
+                if !whole_words || is_whole_word_at(content, start, end) {
+                    return Some((start, end));
+                }
+                at = start + 1;
+            }
+        })
+        .min()
+}
+
+/// Last match of any word in `words` that *starts* strictly before `before`,
+/// as `(start, end)`. The backward counterpart of `find_list_from`.
+pub(crate) fn rfind_list_before(
+    content: &str,
+    words: &[String],
+    whole_words: bool,
+    before: usize,
+) -> Option<(usize, usize)> {
+    words
+        .iter()
+        .filter_map(|word| {
+            let mut bound = before;
+            loop {
+                let start = rfind_before(content, word, bound)?;
+                let end = start + word.len();
+                if !whole_words || is_whole_word_at(content, start, end) {
+                    return Some((start, end));
+                }
+                bound = start; // strictly-before, so this can't loop forever
+            }
+        })
+        .max()
+}
+
+/// Every list match in the document, in the exact order Next steps through
+/// them — the whole traversal in one pass.
+///
+/// Exists for complexity, not convenience. Counting by calling
+/// `find_list_from` once per match is O(matches × words × len): each call
+/// re-scans from its start position for *every* word, and a word with no
+/// further occurrences scans to the end of the document every single time.
+/// (The single-needle loop in `refresh_find_matches` has no such problem —
+/// its successive scans partition the document, so it's linear overall.)
+/// Collecting each word's matches once first is O(words × len), which is
+/// what keeps a long list on a large card file from stalling the Next button.
+///
+/// The greedy walk at the end reproduces `find_list_from`'s own `min()`
+/// choice — smallest start, then smallest end — and steps by the match's end
+/// exactly as `find_next` does, so the "N of M" readout can never count a
+/// match that Next would never stop on.
+pub(crate) fn list_matches(content: &str, words: &[String], whole_words: bool) -> Vec<(usize, usize)> {
+    let mut all: Vec<(usize, usize)> = Vec::new();
+    for word in words {
+        let mut at = 0;
+        while let Some(start) = find_from(content, word, at) {
+            let end = start + word.len();
+            if !whole_words || is_whole_word_at(content, start, end) {
+                all.push((start, end));
+            }
+            at = start + 1;
+        }
+    }
+    all.sort_unstable();
+
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (start, end) in all {
+        if start >= at {
+            out.push((start, end));
+            at = end.max(start + 1);
+        }
+    }
+    out
+}
+
+/// Splits the user's word-list text into the words the search actually uses.
+///
+/// Trims each line and drops blanks so the panel's "N words" readout is honest
+/// — `find_from` already refuses an empty needle, so a blank line's real cost
+/// is a wrong count, not a spin.
+pub(crate) fn parse_word_list(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|w| !w.is_empty()).map(ToString::to_string).collect()
+}
+
 pub fn with_docx_extension(path: &Path) -> PathBuf {
     let already_docx = path
         .extension()
@@ -1522,6 +1696,27 @@ pub fn custom_theme_path() -> PathBuf {
     settings_conf_path().with_file_name("custom_theme.toml")
 }
 
+/// Where Search From List keeps its words — one per line, beside settings.conf.
+/// See `AppState.search_word_list` for why this isn't a settings.conf key.
+pub fn search_word_list_path() -> PathBuf {
+    settings_conf_path().with_file_name("search_word_list.txt")
+}
+
+/// Reads the word list back. A missing file is the normal state before the
+/// user has written one, not an error.
+pub(crate) fn load_word_list(path: &std::path::Path) -> Vec<String> {
+    parse_word_list(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+/// Writes the word list out, one word per line. Errors are logged, not
+/// propagated — the in-memory list is what the current session searches, and
+/// failing to persist it must not lose it.
+pub(crate) fn save_word_list(path: &std::path::Path, words: &[String]) {
+    if let Err(e) = std::fs::write(path, words.join("\n")) {
+        log_line(&format!("[settings] failed to save search word list: {e}"));
+    }
+}
+
 /// Loads the user dictionary, lowercasing as it goes so lookups can be
 /// case-insensitive without normalizing at every call site. A missing file is
 /// the normal first-launch state, not an error.
@@ -1601,6 +1796,11 @@ impl AppState {
             nav_fold_buttons: load_bool_setting(settings_path, "nav_fold_buttons", false),
             editor_context_menu: None,
             find_bar: None,
+            search_from_list_enabled: load_bool_setting(settings_path, "search_from_list", false),
+            search_word_list: load_word_list(&search_word_list_path()),
+            search_list_whole_words: load_bool_setting(settings_path, "search_list_whole_words", true),
+            command_palette_enabled: load_bool_setting(settings_path, "command_palette", false),
+            command_palette: None,
             word_count_visible: false,
             timer: crate::timer::TimerState::default(),
             spreading_wpm: load_spreading_wpm(settings_path),
@@ -1850,11 +2050,33 @@ impl AppState {
     /// Seeds the query from the current selection when there is one, matching
     /// what every editor does with Ctrl+F over selected text.
     pub fn open_find_bar(&mut self) {
+        // Mutually exclusive with the command palette — see
+        // `open_command_palette` for why this lives here and not at the call
+        // sites.
+        self.command_palette = None;
         let selected = self.copy_selection().filter(|s| !s.contains('\n'));
         let bar = self.find_bar.get_or_insert_with(FindBar::default);
         if let Some(text) = selected {
             bar.query = text;
         }
+        bar.focus = FindField::Query;
+        // `FindBar` is app-wide and reused across opens, so a stale `list_mode`
+        // would otherwise survive into a plain Ctrl+F and leave the user in a
+        // panel with no query field.
+        bar.list_mode = false;
+        self.refresh_find_matches();
+    }
+
+    /// Opens the same panel in Search From List mode — the toolbar's "Search
+    /// From List" button.
+    ///
+    /// Opens even with an empty word list: the panel's readout is what tells
+    /// the user the list lives in Settings, so refusing to open would hide the
+    /// only signpost the feature has.
+    pub fn open_search_from_list(&mut self) {
+        self.command_palette = None;
+        let bar = self.find_bar.get_or_insert_with(FindBar::default);
+        bar.list_mode = true;
         bar.focus = FindField::Query;
         self.refresh_find_matches();
     }
@@ -1864,14 +2086,127 @@ impl AppState {
         self.pending_focus_editor = Some(self.focused_pane);
     }
 
+    /// Replaces the Search From List words from the settings box's raw text
+    /// (one word per line) and persists them. Re-runs the match count so an
+    /// open panel's readout follows the edit live.
+    pub fn set_search_word_list(&mut self, text: &str) {
+        self.search_word_list = parse_word_list(text);
+        save_word_list(&search_word_list_path(), &self.search_word_list);
+        self.refresh_find_matches();
+    }
+
+    // ── Feature toggles ─────────────────────────────────────────────────────
+    //
+    // Flip *and* persist, together, here rather than in `settings_modal.rs`.
+    // These used to live on `SettingsModal`, which meant the settings switch
+    // was the only thing that saved them — so any second caller (the command
+    // palette, which can run every one of these) would flip the flag in memory
+    // and silently lose it on restart, with nothing to fail. Keeping the write
+    // beside the flip is what makes a toggle correct from any caller.
+
+    pub fn toggle_vim(&mut self) {
+        self.vim_enabled = !self.vim_enabled;
+        // Vim's flag rides in the keybinds file, not as a standalone setting.
+        let _ = self.keybinds.save_to(&self.settings_path, self.vim_enabled, &[]);
+    }
+
+    pub fn toggle_spellcheck(&mut self) {
+        self.spellcheck_enabled = !self.spellcheck_enabled;
+        self.save_flag("spellcheck", self.spellcheck_enabled);
+    }
+
+    pub fn toggle_nav_fold_buttons(&mut self) {
+        self.nav_fold_buttons = !self.nav_fold_buttons;
+        self.save_flag("nav_fold_buttons", self.nav_fold_buttons);
+    }
+
+    pub fn toggle_search_from_list(&mut self) {
+        self.search_from_list_enabled = !self.search_from_list_enabled;
+        self.save_flag("search_from_list", self.search_from_list_enabled);
+    }
+
+    pub fn toggle_search_list_whole_words(&mut self) {
+        self.search_list_whole_words = !self.search_list_whole_words;
+        self.save_flag("search_list_whole_words", self.search_list_whole_words);
+        // The match count depends on this, so an open Search From List panel's
+        // readout must follow the flip rather than going stale.
+        self.refresh_find_matches();
+    }
+
+    pub fn toggle_command_palette_enabled(&mut self) {
+        self.command_palette_enabled = !self.command_palette_enabled;
+        self.save_flag("command_palette", self.command_palette_enabled);
+        // Turning the feature off closes an already-open palette, rather than
+        // leaving a panel up that its keybind can no longer reopen.
+        if !self.command_palette_enabled {
+            self.command_palette = None;
+        }
+    }
+
+    /// Writes one boolean to settings.conf. A failed write is logged, not
+    /// propagated — losing the persisted flag must never take the flip with it.
+    fn save_flag(&self, key: &str, value: bool) {
+        if let Err(e) =
+            crate::theme::save_setting_line(&self.settings_path, key, if value { "true" } else { "false" })
+        {
+            log_line(&format!("[settings] failed to save {key}: {e}"));
+        }
+    }
+
+    // ── Command palette ─────────────────────────────────────────────────────
+
+    /// Opens the palette with an empty query.
+    ///
+    /// Closes the find bar: both panels mount in the same slot under the
+    /// ribbon (`main_window.rs`), so they cannot both be up. Enforced here (and
+    /// symmetrically in `open_find_bar`) rather than at the call sites, so a
+    /// future third opener can't forget it.
+    pub fn open_command_palette(&mut self) {
+        self.find_bar = None;
+        self.command_palette = Some(CommandPaletteState::default());
+    }
+
+    pub fn close_command_palette(&mut self) {
+        self.command_palette = None;
+        self.pending_focus_editor = Some(self.focused_pane);
+    }
+
+    /// The word list as the settings box edits it: one word per line. The
+    /// inverse of `set_search_word_list`, since the stored form is already
+    /// trimmed and blank-free.
+    pub fn search_word_list_text(&self) -> String {
+        self.search_word_list.join("\n")
+    }
+
     /// Recomputes the "N of M" readout. Cheap enough to run on every
     /// keystroke: it is one pass over the document with a byte comparison per
     /// candidate position.
     pub fn refresh_find_matches(&mut self) {
         let Some(bar) = self.find_bar.as_ref() else { return };
         let query = bar.query.clone();
+        let list_mode = bar.list_mode;
+        // Cloned up front so the `self.tabs` borrow below doesn't overlap the
+        // word list's own `&self` borrow.
+        let words = self.search_word_list.clone();
+        let whole_words = self.search_list_whole_words;
+
         let (count, current) = match self.tabs.get(self.active_tab) {
-            Some(tab) if !query.is_empty() => {
+            // List mode walks every word's matches merged into document order.
+            // Match *ends* come from the matcher rather than `query.len()` —
+            // list matches have differing lengths, which is exactly what the
+            // single-needle arithmetic below can't express.
+            Some(tab) if list_mode && !words.is_empty() => {
+                let matches = list_matches(&tab.content, &words, whole_words);
+                let cursor = tab.cursor;
+                // 1-based, like the single-needle branch; 0 means "the cursor
+                // isn't sitting on a match".
+                let current = matches
+                    .iter()
+                    .position(|&(start, end)| start < cursor && cursor <= end)
+                    .map_or(0, |i| i + 1);
+                (matches.len(), current)
+            }
+            Some(tab) if !list_mode && !query.is_empty() => {
                 let cursor = tab.cursor;
                 let mut count = 0;
                 let mut current = 0;
@@ -1899,8 +2234,15 @@ impl AppState {
     /// document like the vim `/` search this shares its wraparound semantics
     /// with. Returns false when there's nothing to find.
     pub fn find_next(&mut self, forward: bool) -> bool {
-        let Some(query) = self.find_bar.as_ref().map(|b| b.query.clone()) else { return false };
-        if query.is_empty() { return false; }
+        let Some(bar) = self.find_bar.as_ref() else { return false };
+        let (query, list_mode) = (bar.query.clone(), bar.list_mode);
+        let words = self.search_word_list.clone();
+        let whole_words = self.search_list_whole_words;
+        if list_mode {
+            if words.is_empty() { return false; }
+        } else if query.is_empty() {
+            return false;
+        }
         let Some(tab) = self.tabs.get(self.active_tab) else { return false };
 
         // Search from the current selection's far edge so repeated Next walks
@@ -1910,17 +2252,27 @@ impl AppState {
             Some((a, f)) => a.min(f),
             None => tab.cursor,
         };
-        let found = if forward {
-            find_from(&tab.content, &query, from).or_else(|| find_from(&tab.content, &query, 0))
-        } else {
-            rfind_before(&tab.content, &query, from)
+        // Both branches wrap the same way (retry from the far end of the
+        // document), the vim `/` semantics this already shared. List mode
+        // carries each match's own end, since a list's matches differ in
+        // length and `query.len()` can't stand in for them.
+        let found = match (list_mode, forward) {
+            (true, true) => find_list_from(&tab.content, &words, whole_words, from)
+                .or_else(|| find_list_from(&tab.content, &words, whole_words, 0)),
+            (true, false) => rfind_list_before(&tab.content, &words, whole_words, from)
+                .or_else(|| rfind_list_before(&tab.content, &words, whole_words, tab.content.len())),
+            (false, true) => find_from(&tab.content, &query, from)
+                .or_else(|| find_from(&tab.content, &query, 0))
+                .map(|pos| (pos, pos + query.len())),
+            (false, false) => rfind_before(&tab.content, &query, from)
                 .or_else(|| rfind_before(&tab.content, &query, tab.content.len()))
+                .map(|pos| (pos, pos + query.len())),
         };
 
-        let Some(pos) = found else { return false };
+        let Some((start, end)) = found else { return false };
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            tab.selection = Some((pos, pos + query.len()));
-            tab.cursor = pos + query.len();
+            tab.selection = Some((start, end));
+            tab.cursor = end;
             tab.pending_scroll_to_cursor = true;
         }
         self.refresh_find_matches();
@@ -8870,6 +9222,11 @@ mod tests {
             nav_fold_buttons: false,
             editor_context_menu: None,
             find_bar: None,
+            search_from_list_enabled: false,
+            search_word_list: Vec::new(),
+            search_list_whole_words: true,
+            command_palette_enabled: false,
+            command_palette: None,
             word_count_visible: false,
             timer: crate::timer::TimerState::default(),
             spreading_wpm: DEFAULT_SPREADING_WPM,
@@ -16454,6 +16811,324 @@ mod tests {
         state.create_file_at_context_menu_location().unwrap();
 
         assert!(dir.join("Untitled.docx").exists());
+    }
+
+    // ── Command palette ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_palette_and_find_bar_are_mutually_exclusive() {
+        // Both mount in the same strip under the ribbon, so they can never be
+        // up together. Enforced in the openers, not at the call sites.
+        let mut state = make_state("", 0, None);
+
+        state.open_find_bar();
+        state.open_command_palette();
+        assert!(state.find_bar.is_none(), "opening the palette must close the find bar");
+        assert!(state.command_palette.is_some());
+
+        state.open_find_bar();
+        assert!(state.command_palette.is_none(), "opening the find bar must close the palette");
+
+        state.open_command_palette();
+        state.open_search_from_list();
+        assert!(state.command_palette.is_none(), "Search From List must close the palette too");
+    }
+
+    #[test]
+    fn test_disabling_the_palette_closes_an_open_one() {
+        let mut state = make_state("", 0, None);
+        state.settings_path = temp_test_dir("palette_disable").join("settings.conf");
+        state.command_palette_enabled = true;
+        state.open_command_palette();
+
+        state.toggle_command_palette_enabled();
+
+        assert!(!state.command_palette_enabled);
+        assert!(state.command_palette.is_none(), "a panel its keybind can't reopen must not be left up");
+    }
+
+    /// Every feature toggle, flipped through its `AppState` method and read
+    /// back off disk. These used to flip in `settings_modal.rs` with the save
+    /// alongside, so any second caller (the command palette runs all of them)
+    /// flipped in memory only and lost it on restart — with nothing to fail.
+    #[test]
+    fn test_feature_toggles_flip_and_persist() {
+        let dir = temp_test_dir("toggle_persistence");
+        let conf = dir.join("settings.conf");
+        std::fs::write(&conf, "[FORMATTING]\n").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.settings_path = conf.clone();
+
+        let cases: Vec<(&str, fn(&mut AppState), fn(&AppState) -> bool)> = vec![
+            ("spellcheck", AppState::toggle_spellcheck, |s| s.spellcheck_enabled),
+            ("nav_fold_buttons", AppState::toggle_nav_fold_buttons, |s| s.nav_fold_buttons),
+            ("search_from_list", AppState::toggle_search_from_list, |s| s.search_from_list_enabled),
+            ("search_list_whole_words", AppState::toggle_search_list_whole_words, |s| s.search_list_whole_words),
+            ("command_palette", AppState::toggle_command_palette_enabled, |s| s.command_palette_enabled),
+        ];
+
+        for (key, toggle, read) in cases {
+            let before = read(&state);
+            toggle(&mut state);
+            assert_eq!(read(&state), !before, "{key} did not flip");
+            assert_eq!(
+                load_bool_setting(&conf, key, before),
+                !before,
+                "{key} flipped in memory but was not written to settings.conf",
+            );
+        }
+    }
+
+    #[test]
+    fn test_toggle_vim_persists_through_the_keybinds_file() {
+        // Vim's flag rides in the keybinds section, not as a standalone
+        // setting — a different writer from the other four.
+        let dir = temp_test_dir("toggle_vim_persistence");
+        let conf = dir.join("settings.conf");
+        std::fs::write(&conf, "[FORMATTING]\n").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.settings_path = conf.clone();
+        let before = state.vim_enabled;
+
+        state.toggle_vim();
+
+        assert_eq!(state.vim_enabled, !before);
+        assert_eq!(crate::keybinds::load_vim_enabled(&conf), !before);
+    }
+
+    // ── Search From List ────────────────────────────────────────────────────
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn test_parse_word_list_trims_and_drops_blank_lines() {
+        // A blank line's real cost is a dishonest "N words" readout —
+        // `find_from` already refuses an empty needle.
+        assert_eq!(parse_word_list("war\n\n  peace  \n\n\n"), words(&["war", "peace"]));
+        assert!(parse_word_list("   \n\n").is_empty());
+    }
+
+    #[test]
+    fn test_find_list_from_returns_the_earliest_match_across_all_words() {
+        let content = "peace then war";
+        // "war" appears later than "peace", so document order wins over list
+        // order — that's what makes repeated Next walk the merged set.
+        let got = find_list_from(content, &words(&["war", "peace"]), true, 0);
+        assert_eq!(got, Some((0, 5)));
+        // Resuming past the first match finds the later one.
+        assert_eq!(find_list_from(content, &words(&["war", "peace"]), true, 5), Some((11, 14)));
+    }
+
+    #[test]
+    fn test_find_list_from_reports_each_matches_own_end() {
+        // The whole reason the matcher returns (start, end): list matches have
+        // differing lengths, so no single `query.len()` describes them.
+        let content = "a warming war";
+        let got = find_list_from(content, &words(&["warming", "war"]), true, 0);
+        assert_eq!(got, Some((2, 9)));
+        assert_eq!(&content[2..9], "warming");
+    }
+
+    #[test]
+    fn test_whole_words_rejects_a_match_inside_a_longer_word() {
+        let content = "global warming is here";
+        // "war" is inside "warming" — whole-word must skip it entirely.
+        assert_eq!(find_list_from(content, &words(&["war"]), true, 0), None);
+        // …and substring mode must still find it.
+        assert_eq!(find_list_from(content, &words(&["war"]), false, 0), Some((7, 10)));
+    }
+
+    #[test]
+    fn test_whole_words_keeps_scanning_past_a_rejected_hit() {
+        // The first "war" is inside "warming" and must be skipped, not treated
+        // as "no match for this word at all".
+        let content = "warming then war";
+        assert_eq!(find_list_from(content, &words(&["war"]), true, 0), Some((13, 16)));
+    }
+
+    #[test]
+    fn test_whole_words_matches_at_document_start_and_end() {
+        // No character before/after counts as a boundary.
+        assert_eq!(find_list_from("war", &words(&["war"]), true, 0), Some((0, 3)));
+        assert_eq!(find_list_from("the war", &words(&["war"]), true, 0), Some((4, 7)));
+    }
+
+    #[test]
+    fn test_find_list_from_is_case_insensitive_like_find() {
+        // Inherited from `find_from`, deliberately — one convention, not two.
+        assert_eq!(find_list_from("The War", &words(&["war"]), true, 0), Some((4, 7)));
+    }
+
+    #[test]
+    fn test_find_list_from_with_no_matching_word_is_none() {
+        assert_eq!(find_list_from("nothing here", &words(&["war", "peace"]), true, 0), None);
+        assert_eq!(find_list_from("anything", &[], true, 0), None);
+    }
+
+    #[test]
+    fn test_rfind_list_before_returns_the_latest_match_across_all_words() {
+        let content = "war then peace then war";
+        let w = words(&["war", "peace"]);
+        assert_eq!(rfind_list_before(content, &w, true, content.len()), Some((20, 23)));
+        // Strictly before: searching before the last match lands on "peace".
+        assert_eq!(rfind_list_before(content, &w, true, 20), Some((9, 14)));
+        assert_eq!(rfind_list_before(content, &w, true, 9), Some((0, 3)));
+        assert_eq!(rfind_list_before(content, &w, true, 0), None);
+    }
+
+    #[test]
+    fn test_rfind_list_before_keeps_scanning_past_a_rejected_hit() {
+        let content = "war then warming";
+        // The later "war" is inside "warming"; the standalone one must win.
+        assert_eq!(rfind_list_before(content, &words(&["war"]), true, content.len()), Some((0, 3)));
+    }
+
+    #[test]
+    fn test_list_matches_reproduces_the_find_next_traversal_exactly() {
+        // The count loop and the Next button are two different code paths over
+        // the same match set — if they ever disagree, the "N of M" readout
+        // counts matches Next never stops on. This pins them together.
+        let content = "war and warming and peace, war again";
+        let list = ["war", "warming", "peace"];
+
+        let collected = list_matches(content, &words(&list), true);
+
+        let mut walked = Vec::new();
+        let mut at = 0;
+        while let Some((start, end)) = find_list_from(content, &words(&list), true, at) {
+            walked.push((start, end));
+            at = end.max(start + 1);
+        }
+
+        assert_eq!(collected, walked);
+        assert!(!collected.is_empty(), "the fixture must actually match something");
+    }
+
+    #[test]
+    fn test_list_matches_does_not_rescan_per_match() {
+        // Regression guard for the O(matches x words x len) shape: a list
+        // whose words mostly *don't* occur is the case that made every
+        // iteration scan to the end of the document. A big document here
+        // finishes instantly with the single-pass collector and crawls
+        // without it.
+        let content = "war ".repeat(20_000);
+        let mut list: Vec<String> = (0..60).map(|i| format!("absentword{i}")).collect();
+        list.push("war".to_string());
+
+        let matches = list_matches(&content, &list, true);
+        assert_eq!(matches.len(), 20_000);
+    }
+
+    /// A state with the find bar open in list mode over `list`.
+    fn make_list_search_state(content: &str, list: &[&str], whole_words: bool) -> AppState {
+        let mut state = make_state(content, 0, None);
+        state.search_word_list = words(list);
+        state.search_list_whole_words = whole_words;
+        state.open_search_from_list();
+        state
+    }
+
+    #[test]
+    fn test_open_find_bar_clears_a_stale_list_mode() {
+        // `FindBar` is app-wide and reused, so Ctrl+F after a list search must
+        // not land the user in a panel with no query field.
+        let mut state = make_list_search_state("war", &["war"], true);
+        assert!(state.find_bar.as_ref().unwrap().list_mode);
+
+        state.open_find_bar();
+        assert!(!state.find_bar.as_ref().unwrap().list_mode);
+    }
+
+    #[test]
+    fn test_list_mode_counts_every_match_of_every_word() {
+        let state = make_list_search_state("war peace war", &["war", "peace"], true);
+        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 3);
+    }
+
+    #[test]
+    fn test_list_mode_count_and_current_match_survive_differing_lengths() {
+        // "warming" (7) and "war" (3) in one list — the case the old
+        // single-needle `query.len()` arithmetic could not express.
+        let mut state = make_list_search_state("warming and war", &["warming", "war"], true);
+        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 2);
+
+        // Step onto the first match: the readout must say "1 of 2", proving
+        // the count loop and `find_next` agree about where matches start/end.
+        state.find_next(true);
+        let bar = state.find_bar.as_ref().unwrap();
+        assert_eq!((bar.current_match, bar.match_count), (1, 2));
+        assert_eq!(state.tabs[0].selection, Some((0, 7)));
+
+        state.find_next(true);
+        let bar = state.find_bar.as_ref().unwrap();
+        assert_eq!((bar.current_match, bar.match_count), (2, 2));
+        assert_eq!(state.tabs[0].selection, Some((12, 15)));
+    }
+
+    #[test]
+    fn test_list_mode_find_next_wraps_forward_and_backward() {
+        let mut state = make_list_search_state("war peace", &["war", "peace"], true);
+
+        state.find_next(true);
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+        state.find_next(true);
+        assert_eq!(state.tabs[0].selection, Some((4, 9)));
+        // Past the last match, forward wraps to the first.
+        state.find_next(true);
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+        // …and backward from the first wraps to the last.
+        state.find_next(false);
+        assert_eq!(state.tabs[0].selection, Some((4, 9)));
+    }
+
+    #[test]
+    fn test_list_mode_with_an_empty_list_finds_nothing_but_still_opens() {
+        // The panel opening on an empty list is deliberate — its readout is
+        // what tells the user where to write one.
+        let mut state = make_list_search_state("war peace", &[], true);
+        assert!(state.find_bar.is_some());
+        assert!(!state.find_next(true));
+        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 0);
+    }
+
+    #[test]
+    fn test_normal_find_is_unaffected_by_a_populated_word_list() {
+        // The two modes share one panel; a word list must not leak into a
+        // plain Ctrl+F.
+        let mut state = make_state("war peace", 0, None);
+        state.search_word_list = words(&["peace"]);
+        state.open_find_bar();
+        state.find_bar.as_mut().unwrap().query = "war".into();
+        state.refresh_find_matches();
+
+        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 1);
+        state.find_next(true);
+        assert_eq!(state.tabs[0].selection, Some((0, 3)));
+    }
+
+    #[test]
+    fn test_word_list_round_trips_through_its_own_file() {
+        let dir = temp_test_dir("word_list_file");
+        let path = dir.join("search_word_list.txt");
+
+        save_word_list(&path, &words(&["war", "peace"]));
+        assert_eq!(load_word_list(&path), words(&["war", "peace"]));
+
+        // A file that was never written is the normal pre-first-use state.
+        assert!(load_word_list(&dir.join("absent.txt")).is_empty());
+    }
+
+    #[test]
+    fn test_search_word_list_text_round_trips_the_settings_box() {
+        let mut state = make_state("", 0, None);
+        state.set_search_word_list("war\n\npeace\n");
+        // Blanks dropped on the way in, so the box reads back clean.
+        assert_eq!(state.search_word_list, words(&["war", "peace"]));
+        assert_eq!(state.search_word_list_text(), "war\npeace");
     }
 
     // ── Right-click menus: file operations ──────────────────────────────────

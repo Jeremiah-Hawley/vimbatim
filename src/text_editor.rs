@@ -1175,6 +1175,27 @@ impl TextEditor {
                             "b" => self.scroll_to_cursor_bottom(cx),
                             _ => unreachable!(),
                         }
+                        // Bug report: the view didn't move until the *next*
+                        // keystroke. The scroll helpers only call
+                        // `scroll_handle.set_offset` — they never request a
+                        // repaint, and this is the one branch in this file
+                        // that changes the offset without also mutating state.
+                        // Every other caller gets its frame for free from an
+                        // accompanying `state.update(.., cx.notify())` (the
+                        // `scroll_to_cursor` sites) or notifies explicitly
+                        // (read mode's `page_scroll`, `:879`); the
+                        // `state.update` above takes `_cx` because it only
+                        // clears the sequence buffer. So nothing scheduled a
+                        // frame, and the new offset sat unpainted until an
+                        // unrelated key (w/e/b) caused one.
+                        //
+                        // Deliberately notified here rather than inside the
+                        // three helpers: `scroll_to_cursor_centered` is also
+                        // called from inside `render()` (the
+                        // `pending_scroll_to_cursor` drain), where notifying
+                        // would dirty the view mid-paint and cost an extra
+                        // frame every time the Nav menu jumps to a line.
+                        cx.notify();
                         return;
                     }
                 }

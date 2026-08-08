@@ -140,6 +140,13 @@ pub struct SettingsModal {
     /// custom-theme TOML — shown inline under the Import Theme button,
     /// mirroring `conflict_message`'s pattern. Cleared on the next attempt.
     theme_import_error: Option<String>,
+    /// True while the Search From List word box is accepting typing — the
+    /// third mode `handle_capture_key` routes between (see its doc comment).
+    ///
+    /// The buffer is the box's live text, one word per line, only written back
+    /// to `AppState` (and disk) on each keystroke via `set_search_word_list`.
+    editing_word_list: bool,
+    word_list_buffer: String,
     /// Which sidebar pane is showing. See `SettingsSection`.
     section: SettingsSection,
 }
@@ -163,8 +170,63 @@ impl SettingsModal {
             vim_conflict_message: None,
             theme_preview: false,
             theme_import_error: None,
+            editing_word_list: false,
+            word_list_buffer: String::new(),
             section: SettingsSection::Appearance,
         }
+    }
+
+    /// Enters the Search From List word box, seeding the buffer from the saved
+    /// list. Cancels both keybind captures — all three modes share one
+    /// `on_key_down`, so only one may be live at a time.
+    fn start_word_list_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_capture(cx);
+        self.cancel_vim_capture();
+        self.word_list_buffer = self.state.read(cx).search_word_list_text();
+        self.editing_word_list = true;
+        self.focus_handle.clone().focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_word_list_edit(&mut self) {
+        self.editing_word_list = false;
+        self.word_list_buffer.clear();
+    }
+
+    /// Applies one keystroke to the word box. Enter inserts a real newline —
+    /// this is a multi-line list, and separating words is the box's whole
+    /// purpose — so it is not a commit key here; Escape leaves the box, and
+    /// Tab leaves it rather than inserting an indent nothing would read.
+    ///
+    /// Every edit writes straight through to `AppState` (and the word-list
+    /// file), so there is no unsaved-buffer state to lose and an open Search
+    /// From List panel's readout follows the typing live.
+    fn handle_word_list_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        match ks.key.as_str() {
+            "escape" | "tab" => {
+                self.cancel_word_list_edit();
+                cx.notify();
+                return;
+            }
+            "enter" => self.word_list_buffer.push('\n'),
+            "backspace" => {
+                self.word_list_buffer.pop();
+            }
+            key => {
+                let Some(c) = crate::state::vim_find_target_char(key, ks.modifiers.shift, ks.key_char.as_deref())
+                else {
+                    return;
+                };
+                self.word_list_buffer.push(c);
+            }
+        }
+        let text = self.word_list_buffer.clone();
+        self.state.update(cx, |s, cx| {
+            s.set_search_word_list(&text);
+            cx.notify();
+        });
+        cx.notify();
     }
 
     fn close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -176,6 +238,7 @@ impl SettingsModal {
          */
         self.cancel_capture(cx);
         self.cancel_vim_capture();
+        self.cancel_word_list_edit();
         self.theme_preview = false;
         self.state.update(cx, |s, cx| {
             s.settings_visible = false;
@@ -204,6 +267,7 @@ impl SettingsModal {
     /// registered, there's nothing for any keystroke to match, regardless
     /// of focus or context.
     fn start_capture(&mut self, action: KeybindAction, slot: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_word_list_edit();
         self.capturing = Some((action, slot));
         self.conflict_message = None;
         cx.clear_key_bindings();
@@ -220,12 +284,20 @@ impl SettingsModal {
 
     /// Resolves a captured keystroke into a candidate `KeyCombo`, applying
     /// it (and persisting + rebuilding the live keymap) if it doesn't
-    /// The panel's single `on_key_down` entry point — routes to whichever
-    /// capture mode is actually active. The two are mutually exclusive by
-    /// construction (starting one always cancels the other via the
-    /// section-switch/close/reset-to-defaults call sites), so checking
-    /// `capturing` first and falling back to `vim_capturing` is unambiguous.
+    /// The panel's single `on_key_down` entry point — routes to whichever of
+    /// its **three** typing modes is active: the Search From List word box,
+    /// vim-sequence capture, or Ctrl-combo capture.
+    ///
+    /// All three are mutually exclusive by construction — starting any one
+    /// cancels the other two, and the section-switch / close / reset-to-
+    /// defaults call sites cancel all three — so this ordered fall-through is
+    /// unambiguous. **Any future mode must be cancelled in those same places**;
+    /// that invariant is the only thing keeping this router honest.
     fn handle_capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_word_list {
+            self.handle_word_list_key(event, window, cx);
+            return;
+        }
         if self.vim_capturing.is_some() {
             self.handle_vim_capture_key(event, window, cx);
             return;
@@ -279,6 +351,7 @@ impl SettingsModal {
     /// adding a fresh one via the "+" button, same distinction
     /// `start_capture`'s `slot` makes for the Ctrl+key system.
     fn start_vim_capture(&mut self, action: KeybindAction, existing: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_word_list_edit();
         self.vim_capturing = Some((action, existing));
         self.vim_capture_buffer.clear();
         self.vim_conflict_message = None;
@@ -372,38 +445,122 @@ impl SettingsModal {
         }
     }
 
+    // Each of these delegates to the `AppState` method that flips *and*
+    // persists. The write used to live here, which made this modal the only
+    // thing that could save a toggle — so the command palette, which can run
+    // every one of them, would have flipped the flag and silently lost it on
+    // restart.
     fn toggle_vim(&mut self, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, _cx| {
-            s.vim_enabled = !s.vim_enabled;
-            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+        self.state.update(cx, |s, cx| {
+            s.toggle_vim();
+            cx.notify();
         });
         cx.notify();
     }
 
     fn toggle_spellcheck(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.spellcheck_enabled = !s.spellcheck_enabled;
-            // `save_setting_line` is the generic single-key writer the theme
-            // saves already use — it updates the key in place if present and
-            // appends it otherwise, so there's no spellcheck-specific writer.
-            let _ = crate::theme::save_setting_line(
-                &settings_path(),
-                "spellcheck",
-                if s.spellcheck_enabled { "true" } else { "false" },
-            );
+            s.toggle_spellcheck();
             cx.notify();
         });
         cx.notify();
     }
 
+    fn toggle_search_from_list(&mut self, cx: &mut Context<Self>) {
+        self.cancel_word_list_edit();
+        self.state.update(cx, |s, cx| {
+            s.toggle_search_from_list();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_search_list_whole_words(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.toggle_search_list_whole_words();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// The Search From List word box: a click-to-focus multi-line text area,
+    /// built the same way every other text input in this app is (no GPUI text
+    /// input exists — see `find_bar.rs`'s own note), with the panel's shared
+    /// `focus_handle` and `handle_word_list_key` doing the typing.
+    fn render_word_list_box(&self, p: crate::theme::Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let words = self.state.read(cx).search_word_list.clone();
+        let editing = self.editing_word_list;
+        // While editing, paint the live buffer (which can hold a trailing
+        // blank line the saved list deliberately drops); otherwise the saved
+        // list, so the box still shows its contents after focus moves away.
+        let lines: Vec<String> = if editing {
+            self.word_list_buffer.split('\n').map(ToString::to_string).collect()
+        } else {
+            words.clone()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(p.text_muted))
+                    .child(if editing {
+                        "One word per line. Enter starts a new line; Esc when you're done."
+                    } else {
+                        "One word per line. Click to edit."
+                    }),
+            )
+            .child(
+                div()
+                    .id("search-word-list-box")
+                    .w_full()
+                    .min_h(px(96.0))
+                    .max_h(px(220.0))
+                    .overflow_y_scroll()
+                    .p(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(p.editor_bg))
+                    .border_1()
+                    .border_color(rgb(if editing { p.accent } else { p.border_subtle }))
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(p.text))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, window, cx| {
+                        this.start_word_list_edit(window, cx);
+                    }))
+                    .when(lines.iter().all(|l| l.is_empty()) && !editing, |d| {
+                        d.child(
+                            div()
+                                .text_color(rgb(p.text_faint))
+                                .child("No words yet — click here and type one per line."),
+                        )
+                    })
+                    .children(lines.into_iter().enumerate().map(|(i, line)| {
+                        // A block caret on the last line while editing, so an
+                        // empty box still shows where typing lands — the same
+                        // stand-in the find bar's fields use.
+                        div().flex().flex_row().items_center().child(line).when(
+                            editing && i + 1 == self.word_list_buffer.split('\n').count(),
+                            |d| d.child(div().w(px(1.0)).h(px(14.0)).ml(px(1.0)).bg(rgb(p.text))),
+                        )
+                    })),
+            )
+    }
+
     fn toggle_nav_fold_buttons(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.nav_fold_buttons = !s.nav_fold_buttons;
-            let _ = crate::theme::save_setting_line(
-                &settings_path(),
-                "nav_fold_buttons",
-                if s.nav_fold_buttons { "true" } else { "false" },
-            );
+            s.toggle_nav_fold_buttons();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.toggle_command_palette_enabled();
             cx.notify();
         });
         cx.notify();
@@ -569,6 +726,7 @@ impl SettingsModal {
         self.theme_preview = true;
         self.cancel_capture(cx);
         self.cancel_vim_capture();
+        self.cancel_word_list_edit();
         cx.notify();
     }
 
@@ -603,6 +761,7 @@ impl SettingsModal {
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
         self.cancel_vim_capture();
+        self.cancel_word_list_edit();
         cx.notify();
     }
 
@@ -783,11 +942,7 @@ impl SettingsModal {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_collapsed = *self.collapsed.get(&category).unwrap_or(&false);
-        let actions: Vec<KeybindAction> = KeybindAction::all()
-            .iter()
-            .copied()
-            .filter(|a| a.category() == category)
-            .collect();
+        let actions = Self::listed_actions(category, self.state.read(cx).command_palette_enabled);
 
         div()
             .flex()
@@ -987,11 +1142,7 @@ impl SettingsModal {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_collapsed = *self.vim_collapsed.get(&category).unwrap_or(&false);
-        let actions: Vec<KeybindAction> = KeybindAction::all()
-            .iter()
-            .copied()
-            .filter(|a| a.category() == category)
-            .collect();
+        let actions = Self::listed_actions(category, self.state.read(cx).command_palette_enabled);
 
         div()
             .flex()
@@ -1123,13 +1274,30 @@ impl SettingsModal {
                         this.section = section;
                         this.cancel_capture(cx);
                         this.cancel_vim_capture();
+                        this.cancel_word_list_edit();
                         cx.notify();
                     }))
                     .child(section.label())
             }))
     }
 
-    /// A labelled on/off row with a description — the shared shape of every
+    /// The actions a keybind list shows for `category`.
+///
+/// Shared by both the Ctrl-combo list and the Vim Keybinds list so the two
+/// can't drift on what's visible. `CommandPalette` is hidden while its Toggle
+/// Features switch is off — the same "only show it once the feature is on"
+/// rule the Vim Keybinds section itself follows — so a disabled feature
+/// doesn't leave a bindable-looking dead row behind.
+fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> Vec<KeybindAction> {
+    KeybindAction::all()
+        .iter()
+        .copied()
+        .filter(|a| a.category() == category)
+        .filter(|a| *a != KeybindAction::CommandPalette || command_palette_enabled)
+        .collect()
+}
+
+/// A labelled on/off row with a description — the shared shape of every
     /// entry in the Toggle Features pane.
     fn toggle_row(
         id: &'static str,
@@ -1203,6 +1371,9 @@ impl SettingsModal {
         spellcheck_color: String,
         spreading_wpm: u32,
         nav_fold_buttons: bool,
+        search_from_list_enabled: bool,
+        search_list_whole_words: bool,
+        command_palette_enabled: bool,
         p: crate::theme::Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1279,6 +1450,44 @@ impl SettingsModal {
                         )
                     }),
             )
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            // ── Search From List ──────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(Self::toggle_row(
+                        "search-from-list-toggle",
+                        "Search From List",
+                        "Adds a \"Search From List\" button beside Find that steps through every occurrence of any word in your list, using the same Next/Previous controls.",
+                        search_from_list_enabled,
+                        p,
+                        cx.listener(|this, _ev, _window, cx| this.toggle_search_from_list(cx)),
+                    ))
+                    // The list and its matching option are only meaningful
+                    // while the feature is on — same gating the spellcheck
+                    // colour row above uses.
+                    .when(search_from_list_enabled, |d| {
+                        d.child(self.render_word_list_box(p, cx)).child(Self::toggle_row(
+                            "search-list-whole-words-toggle",
+                            "Whole words only",
+                            "On: \"war\" matches \"war\" but not \"warming\". Off: matches anywhere inside a word, the way the Find button does.",
+                            search_list_whole_words,
+                            p,
+                            cx.listener(|this, _ev, _window, cx| this.toggle_search_list_whole_words(cx)),
+                        ))
+                    }),
+            )
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            .child(Self::toggle_row(
+                "command-palette-toggle",
+                "Command Palette",
+                "Adds a searchable list of every command in Vimbatim, opened with Ctrl+P (rebindable under Keybindings once this is on). Type to filter, Enter runs the top result.",
+                command_palette_enabled,
+                p,
+                cx.listener(|this, _ev, _window, cx| this.toggle_command_palette(cx)),
+            ))
             .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
             .child(Self::toggle_row(
                 "nav-fold-buttons-toggle",
@@ -1920,6 +2129,9 @@ impl Render for SettingsModal {
         let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
         let spreading_wpm = self.state.read(cx).spreading_wpm;
         let nav_fold_buttons = self.state.read(cx).nav_fold_buttons;
+        let search_from_list_enabled = self.state.read(cx).search_from_list_enabled;
+        let search_list_whole_words = self.state.read(cx).search_list_whole_words;
+        let command_palette_enabled = self.state.read(cx).command_palette_enabled;
         let shrink_points = self.state.read(cx).small_size_half_points / 2;
         let exception = self.state.read(cx).standardize_highlight_exception.clone();
         let analytic_color = self.state.read(cx).analytic_color.clone();
@@ -2125,6 +2337,9 @@ impl Render for SettingsModal {
                                             spellcheck_color.clone(),
                                             spreading_wpm,
                                             nav_fold_buttons,
+                                            search_from_list_enabled,
+                                            search_list_whole_words,
+                                            command_palette_enabled,
                                             p,
                                             cx,
                                         ))

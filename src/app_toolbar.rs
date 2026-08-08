@@ -41,6 +41,7 @@ impl Render for AppToolbar {
         // Read Mode's button is disabled below pending a real rework — see
         // that `.child` block's comment.
         // let read_mode = state.read_mode;
+        let search_from_list_enabled = state.search_from_list_enabled;
         let _ = state;
 
         let sidebar_label = if sidebar_visible {
@@ -233,6 +234,42 @@ impl Render for AppToolbar {
             //         }))
             //         .child("Read Mode"),
             // )
+            // ── Search From List ──────────────────────────────────────────────
+            // Sits immediately left of Find (Read Mode's own slot, commented
+            // out above), and only while the Toggle Features switch is on.
+            //
+            // Updates AppState directly rather than dispatching an action: no
+            // keybind was requested for this, and a `KeybindAction` variant
+            // would drag in the enum, its defaults, `rebuild_keymap`, a
+            // `main_window` handler and a row in Settings → Keybinds for
+            // nothing. Same direct-state approach the Settings ⚙ button uses.
+            .when(search_from_list_enabled, |d| {
+                d.child(
+                    div()
+                        .id("toolbar-search-from-list")
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(24.0))
+                        .px(px(10.0))
+                        .rounded(px(radius::MD))
+                        .text_xs()
+                        .text_color(rgb(p.text_muted))
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(rgb(p.border_subtle))
+                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                        .active(move |s| s.bg(rgb(p.chrome_active)))
+                        .on_click(cx.listener(|this, _ev, _window, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.open_search_from_list();
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }))
+                        .child("Search From List"),
+                )
+            })
             // Find opens the same panel Ctrl+F does, via the shared action.
             .child(
                 div()

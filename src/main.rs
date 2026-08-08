@@ -26,6 +26,7 @@ mod find_bar;
 mod wikifi_export;
 mod settings_modal;
 mod close_confirm;
+mod command_palette;
 mod main_window;
 mod spellcheck;
 mod theme;

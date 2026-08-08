@@ -10,6 +10,7 @@ use crate::close_confirm::CloseConfirm;
 use crate::docx_parser::{DocxOrigin, Paragraph};
 use crate::document_ops::FormatOp;
 use crate::file_explorer::{FileExplorer, SidebarResizePayload};
+use crate::command_palette::CommandPaletteView;
 use crate::find_bar::FindBarView;
 use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
@@ -17,7 +18,7 @@ use crate::keybinds::{
     AnalyticAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction,
     FindAction,
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
+    CommandPaletteAction, PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
@@ -72,6 +73,7 @@ pub struct MainWindow {
     text_editor_secondary: Entity<TextEditor>,
     file_explorer: Entity<FileExplorer>,
     find_bar: Entity<FindBarView>,
+    command_palette: Entity<CommandPaletteView>,
     settings_modal: Entity<SettingsModal>,
     close_confirm: Entity<CloseConfirm>,
     recovery_prompt: Entity<RecoveryPrompt>,
@@ -103,6 +105,7 @@ impl MainWindow {
             cx.new(|cx| TextEditor::for_pane(state.clone(), crate::state::Pane::Secondary, cx));
         let file_explorer     = cx.new(|cx| FileExplorer::new(state.clone(), cx));
         let find_bar          = cx.new(|cx|  FindBarView::new(state.clone(), cx));
+        let command_palette   = cx.new(|cx|  CommandPaletteView::new(state.clone(), cx));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
         let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
@@ -243,6 +246,7 @@ impl MainWindow {
             text_editor_secondary,
             file_explorer,
             find_bar,
+            command_palette,
             settings_modal,
             close_confirm,
             recovery_prompt,
@@ -282,6 +286,19 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ReopenClosedTabAction, cx| {
             s.update(cx, |st, cx| { st.reopen_closed_tab(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &CommandPaletteAction, cx| {
+            // The *handler* is what the Toggle Features switch gates, not the
+            // key binding: `rebuild_keymap` binds unconditionally, and making
+            // it conditional would mean rebuilding the keymap on every toggle
+            // flip. Nothing else claims Ctrl+P, so swallowing the keystroke
+            // while the feature is off costs nothing.
+            if !s.read(cx).command_palette_enabled {
+                return;
+            }
+            s.update(cx, |st, cx| { st.open_command_palette(); cx.notify(); });
         });
 
         let s = state.clone();
@@ -632,6 +649,7 @@ impl Render for MainWindow {
         let split_ratio      = self.state.read(cx).split_ratio;
         let sidebar_width    = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).find_bar.is_some();
+        let command_palette_visible = self.state.read(cx).command_palette.is_some();
         let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();
@@ -744,6 +762,32 @@ impl Render for MainWindow {
                                 .justify_center()
                                 .child(self.timer.clone()),
                         ).with_priority(150))
+                    })
+                    // ── Command palette ────────────────────────────────────
+                    // Hosted by this same ribbon-relative wrapper, and for the
+                    // same reason the timer popup is: centring against the
+                    // *window* is what "centred" actually means to the eye,
+                    // and the editor area below is offset by the sidebar, so a
+                    // palette centred there sits visibly off-centre whenever
+                    // the sidebar is open. `left_0`/`right_0` here span the
+                    // ribbon's own full width, so `relative(0.5)` is half the
+                    // ribbon regardless of sidebar state or window size.
+                    //
+                    // `deferred` with a priority above the ribbon's own
+                    // dropdowns (100) and the timer (150): the palette is
+                    // taller than the ribbon and deliberately overlays it,
+                    // spilling down over the editor.
+                    .when(command_palette_visible, |d| {
+                        d.child(deferred(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(div().w(relative(0.5)).child(self.command_palette.clone())),
+                        ).with_priority(160))
                     }),
             )
             // ── Main content row ───────────────────────────────────────────
