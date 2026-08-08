@@ -396,6 +396,19 @@ impl SettingsModal {
         cx.notify();
     }
 
+    fn toggle_nav_fold_buttons(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.nav_fold_buttons = !s.nav_fold_buttons;
+            let _ = crate::theme::save_setting_line(
+                &settings_path(),
+                "nav_fold_buttons",
+                if s.nav_fold_buttons { "true" } else { "false" },
+            );
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn set_spellcheck_color(&mut self, name: &'static str, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.spellcheck_underline_color = name.to_string();
@@ -1189,6 +1202,7 @@ impl SettingsModal {
         spellcheck_enabled: bool,
         spellcheck_color: String,
         spreading_wpm: u32,
+        nav_fold_buttons: bool,
         p: crate::theme::Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1265,6 +1279,15 @@ impl SettingsModal {
                         )
                     }),
             )
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            .child(Self::toggle_row(
+                "nav-fold-buttons-toggle",
+                "Navigation Menu Heading Fold Buttons",
+                "Adds 1/2/3/4 buttons under the folder name in the Navigation sidebar that collapse the outline to that heading level. The same levels are always available by right-clicking the outline.",
+                nav_fold_buttons,
+                p,
+                cx.listener(|this, _ev, _window, cx| this.toggle_nav_fold_buttons(cx)),
+            ))
             .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
             // ── Spreading rate ────────────────────────────────────────────
             // Not a toggle, but it belongs with the other document-behaviour
@@ -1896,6 +1919,7 @@ impl Render for SettingsModal {
         let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
         let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
         let spreading_wpm = self.state.read(cx).spreading_wpm;
+        let nav_fold_buttons = self.state.read(cx).nav_fold_buttons;
         let shrink_points = self.state.read(cx).small_size_half_points / 2;
         let exception = self.state.read(cx).standardize_highlight_exception.clone();
         let analytic_color = self.state.read(cx).analytic_color.clone();
@@ -2100,6 +2124,7 @@ impl Render for SettingsModal {
                                             spellcheck_enabled,
                                             spellcheck_color.clone(),
                                             spreading_wpm,
+                                            nav_fold_buttons,
                                             p,
                                             cx,
                                         ))

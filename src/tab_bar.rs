@@ -56,6 +56,32 @@ pub struct TabBar {
     /// working precedent for a focus-driven text-capture input in this
     /// codebase (see `handle_rename_key`).
     rename_focus: FocusHandle,
+    /// Open state of the tab bar's right-click menu, `None` when closed.
+    ///
+    /// View state, not `AppState` — unlike the file explorer's menu nothing
+    /// outside this bar needs to know it's open, and its own
+    /// `on_mouse_down_out` dismisses it, so `main_window.rs`'s root handler
+    /// stays untouched.
+    context_menu: Option<TabContextMenu>,
+}
+
+/// What a tab-bar right-click landed on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TabContextTarget {
+    /// A tab, held by its stable `Tab.id` rather than an index: the "Save As"
+    /// item awaits a native file dialog, during which tabs can be reordered
+    /// or closed out from under a stored index.
+    Tab(usize),
+    /// The "+" button — only "Open Last Closed Tab" applies.
+    NewTabButton,
+}
+
+/// Position (window-relative pixels, matching `MouseDownEvent.position`) and
+/// target of the open right-click menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabContextMenu {
+    position: (f32, f32),
+    target: TabContextTarget,
 }
 
 impl TabBar {
@@ -71,7 +97,202 @@ impl TabBar {
             renaming_tab_id: None,
             rename_buffer: String::new(),
             rename_focus: cx.focus_handle(),
+            context_menu: None,
         }
+    }
+
+    /// One clickable row of the right-click menu.
+    fn menu_item(
+        id: &'static str,
+        label: &'static str,
+        p: crate::theme::Palette,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(px(26.0))
+            .px(px(space::SM))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_sm()
+            .text_color(rgb(p.text))
+            .hover(move |s| s.bg(rgb(p.chrome_hover)))
+            .on_click(on_click)
+            .child(label)
+    }
+
+    /// The tab bar's right-click menu.
+    ///
+    /// Rendered by `render` as a sibling of the whole bar, deliberately *not*
+    /// inside `tab_scroll_area` — that container is `overflow_x_scroll`, which
+    /// would clip the panel.
+    ///
+    /// Save/Save As take a tab index directly (`save_tab`/`save_tab_as`)
+    /// rather than switching tabs and dispatching the global actions: the
+    /// Save As action resolves `active_tab` *after* awaiting the file dialog,
+    /// so a tab switch while the dialog is open would save the wrong
+    /// document. The id→index lookup happens after the await here for the
+    /// same reason.
+    fn render_context_menu(
+        &self,
+        menu: TabContextMenu,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (x, y) = menu.position;
+        let state = self.state.clone();
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .w(px(190.0))
+            .bg(rgb(p.chrome))
+            .border_1()
+            .border_color(rgb(p.border))
+            .rounded(px(radius::MD))
+            .shadow_lg()
+            .py(px(space::XXS))
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .map(|d| match menu.target {
+                TabContextTarget::NewTabButton => d.child(Self::menu_item(
+                    "tab-ctx-reopen",
+                    "Open Last Closed Tab",
+                    p,
+                    cx.listener(|this, _ev, _window, cx| {
+                        this.context_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            s.reopen_closed_tab();
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }),
+                )),
+                TabContextTarget::Tab(tab_id) => {
+                    let save_as_state = state.clone();
+                    d.child(Self::menu_item("tab-ctx-save", "Save", p, cx.listener(move |this, _ev, _window, cx| {
+                        this.context_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
+                                if let Err(e) = s.save_tab(idx) {
+                                    crate::state::log_line(&format!("[save] {e}"));
+                                }
+                            }
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })))
+                    .child(Self::menu_item("tab-ctx-save-as", "Save As", p, {
+                        let s = save_as_state.clone();
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.context_menu = None;
+                            cx.notify();
+                            // Seed the dialog from *this* tab's own folder and
+                            // name, the same way the toolbar's Save As seeds
+                            // from the active one.
+                            let (dir, suggested) = {
+                                let st = s.read(cx);
+                                let tab = st.tabs.iter().find(|t| t.id == tab_id);
+                                let dir = tab
+                                    .and_then(|t| t.file_path.as_ref())
+                                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                                    .unwrap_or_else(|| st.working_directory.clone());
+                                let suggested = tab
+                                    .map(|t| t.title.clone())
+                                    .filter(|t| t.ends_with(".docx"))
+                                    .unwrap_or_else(|| "Untitled.docx".to_string());
+                                (dir, suggested)
+                            };
+                            let path_rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+                            let s = s.clone();
+                            cx.spawn(async move |_this, cx| {
+                                let Ok(Ok(Some(path))) = path_rx.await else {
+                                    return; // cancelled, or no picker available
+                                };
+                                let _ = s.update(cx, |st, cx| {
+                                    // Resolved *after* the await: tabs can be
+                                    // reordered or closed while the dialog is up.
+                                    if let Some(idx) = st.tabs.iter().position(|t| t.id == tab_id) {
+                                        if let Err(e) = st.save_tab_as(idx, path) {
+                                            crate::state::log_line(&format!("[save as] {e}"));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        })
+                    }))
+                    .child(div().h(px(1.0)).my(px(space::XXS)).bg(rgb(p.border_subtle)))
+                    .child(Self::menu_item("tab-ctx-close", "Close", p, cx.listener(move |this, _ev, _window, cx| {
+                        this.context_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            // Through `request_close_tab`, so a dirty tab gets
+                            // the same Save/Discard/Cancel dialog the × does.
+                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
+                                s.request_close_tab(idx);
+                            }
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })))
+                    .child(Self::menu_item("tab-ctx-close-left", "Close Tabs to the Left", p, cx.listener(move |this, _ev, _window, cx| {
+                        this.context_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
+                                s.close_tabs_to_left(idx);
+                            }
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })))
+                    .child(Self::menu_item("tab-ctx-close-right", "Close Tabs to the Right", p, cx.listener(move |this, _ev, _window, cx| {
+                        this.context_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
+                                s.close_tabs_to_right(idx);
+                            }
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })))
+                }
+            })
+            .into_any_element();
+
+        deferred(
+            anchored().position(point(px(x), px(y))).snap_to_window().child(
+                div()
+                    .id("tab-context-menu-dismiss")
+                    .on_mouse_down_out(cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
+                        if this.context_menu.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .child(panel),
+            ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    /// Shared right-click handler for both menu targets — records where the
+    /// click landed and what it landed on.
+    fn open_context_menu(
+        &mut self,
+        target: TabContextTarget,
+        ev: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        // A right-click abandons any in-progress inline rename, same as
+        // switching tabs does.
+        self.renaming_tab_id = None;
+        self.rename_buffer.clear();
+        self.context_menu = Some(TabContextMenu {
+            position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+            target,
+        });
+        cx.notify();
     }
 
     /// Key handler for the inline rename input, armed via `track_focus` +
@@ -300,6 +521,12 @@ impl Render for TabBar {
                         }
                         cx.notify();
                     }))
+                    // Right-click a tab → save / save as / close / close left
+                    // / close right. Carries the tab's stable id, not `idx`.
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.open_context_menu(TabContextTarget::Tab(tab_id_for_rename), ev, cx);
+                    }))
                     // Begin drag — carry the source index and title as payload.
                     // Plain closure (not cx.listener): on_drag constructor signature is
                     // Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W>, which does
@@ -361,6 +588,12 @@ impl Render for TabBar {
             })
             .collect();
 
+        // Number of tabs at render time — the insert-before position that
+        // means "past the last tab", which is what the two trailing drop
+        // targets below pass to `move_tab` (see its own doc comment: refusing
+        // this value is what made the last slot unreachable by dragging).
+        let tab_count = tabs.len();
+
         // "+" button sits immediately after the last tab
         let new_btn = div()
             .id("new-tab-btn")
@@ -376,12 +609,28 @@ impl Render for TabBar {
             .border_color(rgb(p.border))
             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
             .active(move |s| s.bg(rgb(p.chrome_active)))
+            // Dropping a tab on "+" moves it to the end.
+            .drag_over::<TabDragPayload>(move |style, _, _, _| {
+                style.border_l_2().border_color(rgb(p.accent))
+            })
+            .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                this.state.update(cx, |s, cx| {
+                    s.move_tab(payload.from_idx, tab_count);
+                    cx.notify();
+                });
+                cx.notify();
+            }))
             .on_click(cx.listener(|this, _ev, _window, cx| {
                 this.state.update(cx, |s, cx| {
                     s.new_tab();
                     cx.notify();
                 });
                 cx.notify();
+            }))
+            // Right-click "+" → open the most recently closed tab.
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.open_context_menu(TabContextTarget::NewTabButton, ev, cx);
             }))
             .child("+");
 
@@ -392,14 +641,35 @@ impl Render for TabBar {
         // double-click-to-maximize. Harmless to set on every platform: macOS/Linux never
         // consult on_hit_test_window_control's result for the drag case, so the
         // start_window_move() path below still does the work there.
-        let drag_region =
-            div()
-                .flex_1()
-                .h_full()
-                .window_control_area(WindowControlArea::Drag)
-                .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
-                    window.start_window_move();
-                });
+        //
+        // It doubles as the second "drop a tab here to send it to the end"
+        // target (the "+" button is the first). The drop target is a child
+        // div rather than this one: `window_control_area(Drag)` makes Windows
+        // hit-test the region as HTCAPTION, which is exactly what a drop needs
+        // *not* to be swallowed by. A plain, unmarked child covering the same
+        // area gives GPUI's own drag-and-drop something ordinary to land on.
+        let drag_region = div()
+            .flex_1()
+            .h_full()
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
+                window.start_window_move();
+            })
+            .child(
+                div()
+                    .id("tab-drop-end")
+                    .size_full()
+                    .drag_over::<TabDragPayload>(move |style, _, _, _| {
+                        style.border_l_2().border_color(rgb(p.accent))
+                    })
+                    .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                        this.state.update(cx, |s, cx| {
+                            s.move_tab(payload.from_idx, tab_count);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })),
+            );
 
         // Scrollable container for tabs only. min_w_0 lets it shrink so the
         // fixed "+" and "×" buttons are always visible regardless of tab count.
@@ -518,11 +788,16 @@ impl Render for TabBar {
             }))
             .child("×");
 
+        // The context menu is a child of `bar`, not of `tab_scroll_area` —
+        // that container is `overflow_x_scroll` and would clip the panel.
         bar.child(tab_scroll_area)
             .child(new_btn_fixed)
             .child(drag_region)
             .child(minimize_btn)
             .child(maximize_btn)
             .child(close_btn)
+            .when_some(self.context_menu, |el, menu| {
+                el.child(self.render_context_menu(menu, p, cx))
+            })
     }
 }

@@ -101,7 +101,7 @@ impl MainWindow {
         // — sharing one editor would make the panes fight over all four.
         let text_editor_secondary =
             cx.new(|cx| TextEditor::for_pane(state.clone(), crate::state::Pane::Secondary, cx));
-        let file_explorer     = cx.new(|_cx| FileExplorer::new(state.clone()));
+        let file_explorer     = cx.new(|cx| FileExplorer::new(state.clone(), cx));
         let find_bar          = cx.new(|cx|  FindBarView::new(state.clone(), cx));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
@@ -666,8 +666,12 @@ impl Render for MainWindow {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
                 ctx_menu_state.update(cx, |s, cx| {
-                    if s.file_context_menu.is_some() || s.editor_context_menu.is_some() {
+                    if s.file_context_menu.is_some()
+                        || s.nav_context_menu.is_some()
+                        || s.editor_context_menu.is_some()
+                    {
                         s.close_file_context_menu();
+                        s.close_nav_context_menu();
                         s.editor_context_menu = None;
                         cx.notify();
                     }

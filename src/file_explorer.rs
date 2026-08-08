@@ -4,7 +4,9 @@ use gpui::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::state::{AppState, FileContextMenu, FileContextMenuTarget, FileNode, SidebarMode};
+use crate::state::{
+    AppState, FileContextMenu, FileContextMenuTarget, FileNode, NavContextMenuTarget, SidebarMode,
+};
 use crate::theme::{palette, radius, space, Palette};
 
 /// Drag payload used solely to identify a sidebar-resize drag to
@@ -50,16 +52,106 @@ pub struct FileExplorer {
     /// edits elsewhere in the document, same as the file tree's `expanded`
     /// flags survive unrelated file operations.
     nav_collapsed: HashSet<usize>,
+    /// Nav's "Show Heading Level 1–4" filter: `Some(n)` hides every heading
+    /// deeper than `n` from the outline (the document itself is untouched).
+    ///
+    /// A *filter applied before* `build_nav_entries`, deliberately not a bulk
+    /// write into `nav_collapsed`: that function derives `has_children` from
+    /// the immediately-following heading alone, so a collapsed heading whose
+    /// next neighbour isn't deeper arms no skip at all and its descendants
+    /// leak back into view (`Pocket(1), Block(3), Hat(2)` at level 2 would
+    /// still show the Block). Filtering is correct by construction, and the
+    /// two mechanisms stay independent — per-heading arrows keep working
+    /// inside whatever the filter left visible.
+    nav_max_level: Option<u8>,
+    /// Claims keyboard focus for the context menu's inline rename input so
+    /// its `on_key_down` actually receives keystrokes. Same
+    /// `focus_handle`/`track_focus`/`on_key_down` trio `tab_bar.rs` uses for
+    /// its own inline tab rename — see `handle_rename_key`.
+    rename_focus: FocusHandle,
 }
 
 impl FileExplorer {
-    pub fn new(state: Entity<AppState>) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         /*
          * Constructs the FileExplorer. File tree data lives in AppState so that
          * the rest of the app can react to file changes without querying the
-         * sidebar directly.
+         * sidebar directly. Takes `cx` (like `TabBar::new`) only to mint its
+         * own `rename_focus` handle up front.
          */
-        FileExplorer { state, nav_collapsed: HashSet::new() }
+        FileExplorer {
+            state,
+            nav_collapsed: HashSet::new(),
+            nav_max_level: None,
+            rename_focus: cx.focus_handle(),
+        }
+    }
+
+    /// Key handler for the context menu's rename input. Byte-for-byte the
+    /// same little state machine `tab_bar.rs::handle_rename_key` runs
+    /// (Escape cancels, Enter commits, Backspace pops, everything else
+    /// resolves to a literal through `vim_find_target_char` so shifted
+    /// punctuation behaves) — the buffer just lives in `FileContextMenu`
+    /// instead of on the view, since the menu owns its own mode.
+    fn handle_rename_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        self.state.update(cx, |s, cx| {
+            let Some(menu) = s.file_context_menu.as_mut() else { return };
+            let Some(buffer) = menu.rename_buffer.as_mut() else { return };
+            match ks.key.as_str() {
+                "escape" => s.close_file_context_menu(),
+                "enter" => {
+                    let new_name = std::mem::take(buffer);
+                    let target = menu.target.clone();
+                    s.close_file_context_menu();
+                    if let FileContextMenuTarget::File(old) = target {
+                        if let Err(e) = s.rename_path(&old, &new_name) {
+                            crate::state::log_line(&format!("[FileExplorer] rename failed: {e}"));
+                        }
+                    }
+                }
+                "backspace" => {
+                    buffer.pop();
+                }
+                _ => {
+                    if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                        buffer.push(c);
+                    }
+                }
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// One clickable row in either right-click menu — the shape every item in
+    /// `render_context_menu`/`render_nav_context_menu` had been spelling out
+    /// by hand. `danger` swaps the text for the destructive red the Delete
+    /// item already used.
+    fn menu_item(
+        id: &'static str,
+        label: impl Into<SharedString>,
+        danger: bool,
+        p: Palette,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .h(px(26.0))
+            .px(px(space::SM))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_sm()
+            .when(danger, |d| d.text_color(rgb(0xf14c4c)).hover(move |s| s.bg(rgba(0xf14c4c33))))
+            .when(!danger, |d| d.text_color(rgb(p.text)).hover(move |s| s.bg(rgb(p.chrome_hover))))
+            .on_click(on_click)
+            .child(label.into())
+    }
+
+    /// A hairline between groups of menu items.
+    fn menu_separator(p: Palette) -> impl IntoElement {
+        div().h(px(1.0)).my(px(space::XXS)).bg(rgb(p.border_subtle))
     }
 
     fn create_new_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -266,19 +358,30 @@ impl FileExplorer {
     /// sits in the element tree — the same two primitives Zed's own
     /// context menus are built on.
     ///
-    /// Two states: the normal menu ("New File", plus "Delete" only for a
-    /// File target — deleting a directory needs stronger confirmation than
-    /// this menu offers, so it's not shown for Dir/Background), and a
-    /// "Delete <name>? Confirm / Cancel" step once "Delete" has been
-    /// clicked once (`FileContextMenu.confirming_delete`) — a real
-    /// filesystem delete has no undo, so it isn't one click.
+    /// Three states, checked in that order:
+    ///   • "Delete <name>? Confirm / Cancel" once "Delete" has been clicked
+    ///     once (`FileContextMenu.confirming_delete`) — a real filesystem
+    ///     delete has no undo, so it isn't one click.
+    ///   • the rename input, once "Rename" has been clicked
+    ///     (`FileContextMenu.rename_buffer`).
+    ///   • otherwise the item list, whose contents depend on the target:
+    ///     open/duplicate/copy/rename/delete for a File, open-all/paste for a
+    ///     Dir, create-only for Background. "Delete" is File-only —
+    ///     deleting a whole directory tree needs stronger confirmation than
+    ///     this menu offers.
     fn render_context_menu(
         menu: FileContextMenu,
+        has_copied_file: bool,
+        rename_focus: &FocusHandle,
         p: Palette,
         state_handle: &Entity<AppState>,
-        _cx: &mut Context<FileExplorer>,
+        cx: &mut Context<FileExplorer>,
     ) -> AnyElement {
         let (x, y) = menu.position;
+        // Clicking "Rename" has to claim focus from inside a plain (non-
+        // listener) click closure, which only gets `&mut App` — so the handle
+        // is cloned up front rather than reached for through `cx`.
+        let rename_focus_for_click = rename_focus.clone();
 
         let panel = if menu.confirming_delete {
             let display_name = match &menu.target {
@@ -363,15 +466,71 @@ impl FileExplorer {
                         ),
                 )
                 .into_any_element()
-        } else {
-            let can_delete = matches!(menu.target, FileContextMenuTarget::File(_));
-            let new_file_state = state_handle.clone();
-            let delete_state = state_handle.clone();
-
+        } else if let Some(buffer) = menu.rename_buffer.clone() {
+            // Rename mode. `stop_propagation` on left mouse-down is
+            // load-bearing here, not just tidiness: `main_window.rs`'s root
+            // handler calls `window.blur()` on every click that reaches it,
+            // which would drop `rename_focus` and stop the input receiving
+            // keystrokes after the very first click inside it.
             div()
                 .flex()
                 .flex_col()
-                .w(px(160.0))
+                .gap(px(space::XS))
+                .w(px(220.0))
+                .bg(rgb(p.chrome))
+                .border_1()
+                .border_color(rgb(p.border))
+                .rounded(px(radius::MD))
+                .shadow_lg()
+                .p(px(space::SM))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .child(div().text_xs().text_color(rgb(p.text_muted)).child("Rename to (Enter to confirm)"))
+                .child(
+                    div()
+                        .id("ctx-menu-rename-input")
+                        .track_focus(rename_focus)
+                        .on_key_down(cx.listener(Self::handle_rename_key))
+                        .h(px(26.0))
+                        .px(px(space::XS))
+                        .flex()
+                        .items_center()
+                        .rounded(px(radius::SM))
+                        .bg(rgb(p.editor_bg))
+                        .border_1()
+                        .border_color(rgb(p.accent_muted))
+                        .text_sm()
+                        .text_color(rgb(p.text))
+                        .truncate()
+                        // Trailing "▏" as a text-cursor stand-in, same as the
+                        // tab-bar rename input's.
+                        .child(format!("{buffer}\u{258f}")),
+                )
+                .into_any_element()
+        } else {
+            let is_file = matches!(menu.target, FileContextMenuTarget::File(_));
+            let file_path = match &menu.target {
+                FileContextMenuTarget::File(p) => Some(p.clone()),
+                _ => None,
+            };
+            let dir_path = match &menu.target {
+                FileContextMenuTarget::Dir(p) => Some(p.clone()),
+                _ => None,
+            };
+            // "Paste File" only appears once "Copy File" has put something on
+            // the (in-memory) clipboard — an always-visible dead item would be
+            // worse than no item. `dir_path` is already `None` for anything
+            // but a folder, so that half needs no separate check.
+            let can_paste = has_copied_file;
+
+            // Every item closes the menu as part of its own state update:
+            // several of these (`create_file_at_context_menu_location`,
+            // `confirm_context_menu_delete`) already `take()` the menu
+            // themselves, and the rest call `close_file_context_menu`
+            // explicitly, so no item leaves a stale panel behind.
+            div()
+                .flex()
+                .flex_col()
+                .w(px(200.0))
                 .bg(rgb(p.chrome))
                 .border_1()
                 .border_color(rgb(p.border))
@@ -379,47 +538,143 @@ impl FileExplorer {
                 .shadow_lg()
                 .py(px(space::XXS))
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .id("ctx-menu-new-file")
-                        .h(px(26.0))
-                        .px(px(space::SM))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(rgb(p.text))
-                        .hover(move |s| s.bg(rgb(p.chrome_hover)))
-                        .on_click(move |_ev, _window, cx| {
-                            new_file_state.update(cx, |s, cx| {
-                                if let Err(e) = s.create_file_at_context_menu_location() {
-                                    crate::state::log_line(&format!("[FileExplorer] failed to create file: {}", e));
-                                }
+                // ── File-only: the three "open it where?" variants ──────────
+                .when_some(file_path.clone(), |d, path| {
+                    let (new_tab, current_tab, side_pane) =
+                        (state_handle.clone(), state_handle.clone(), state_handle.clone());
+                    let (p1, p2, p3) = (path.clone(), path.clone(), path);
+                    d.child(Self::menu_item("ctx-open-new-tab", "Open in New Tab", false, p, move |_, _, cx| {
+                        new_tab.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.open_file(p1.clone());
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_item("ctx-open-current-tab", "Open in Current Tab", false, p, move |_, _, cx| {
+                        current_tab.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.open_file_in_current_tab(p2.clone());
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_item("ctx-open-side-pane", "Open in Side Pane", false, p, move |_, _, cx| {
+                        side_pane.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.open_file_in_side_pane(p3.clone());
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_separator(p))
+                })
+                // ── Dir-only: open everything inside it ─────────────────────
+                .when_some(dir_path.clone(), |d, path| {
+                    let open_all = state_handle.clone();
+                    d.child(Self::menu_item("ctx-open-all", "Open All Files in New Tabs", false, p, move |_, _, cx| {
+                        open_all.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.open_all_files_in_dir(&path);
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_separator(p))
+                })
+                // ── File-only: duplicate / copy / rename ───────────────────
+                .when_some(file_path, |d, path| {
+                    let (dup, copy, rename) =
+                        (state_handle.clone(), state_handle.clone(), state_handle.clone());
+                    let (p1, p2) = (path.clone(), path.clone());
+                    // Seed the rename buffer with the stem, not the full file
+                    // name — `rename_path` re-applies `.docx` via
+                    // `with_docx_extension`, so the extension is never the
+                    // user's to retype (or to accidentally delete).
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+                    d.child(Self::menu_item("ctx-duplicate", "Duplicate File", false, p, move |_, _, cx| {
+                        dup.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            if let Err(e) = s.duplicate_file(&p1) {
+                                crate::state::log_line(&format!("[FileExplorer] duplicate failed: {e}"));
+                            }
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_item("ctx-copy-file", "Copy File", false, p, move |_, _, cx| {
+                        copy.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.copy_file(p2.clone());
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_item("ctx-rename", "Rename", false, p, move |_, window, cx| {
+                        rename.update(cx, |s, cx| {
+                            if let Some(menu) = s.file_context_menu.as_mut() {
+                                menu.rename_buffer = Some(stem.clone());
+                            }
+                            cx.notify();
+                        });
+                        rename_focus_for_click.focus(window, cx);
+                    }))
+                    .child(Self::menu_separator(p))
+                })
+                // ── Paste (folders only, and only with something copied) ────
+                .when_some(dir_path.filter(|_| can_paste), |d, path| {
+                    let paste = state_handle.clone();
+                    d.child(Self::menu_item("ctx-paste-file", "Paste File", false, p, move |_, _, cx| {
+                        paste.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            if let Err(e) = s.paste_file_into(&path) {
+                                crate::state::log_line(&format!("[FileExplorer] paste failed: {e}"));
+                            }
+                            cx.notify();
+                        });
+                    }))
+                })
+                // ── Create, on every target ────────────────────────────────
+                .child({
+                    let new_file_state = state_handle.clone();
+                    Self::menu_item("ctx-menu-new-file", "New File", false, p, move |_, _, cx| {
+                        new_file_state.update(cx, |s, cx| {
+                            if let Err(e) = s.create_file_at_context_menu_location() {
+                                crate::state::log_line(&format!("[FileExplorer] failed to create file: {}", e));
+                            }
+                            cx.notify();
+                        });
+                    })
+                })
+                .child({
+                    // Same "where did the click land?" resolution "New File"
+                    // uses: inside a folder, beside a file, or at the tree root.
+                    let new_folder_state = state_handle.clone();
+                    Self::menu_item("ctx-new-folder", "New Folder", false, p, move |_, _, cx| {
+                        new_folder_state.update(cx, |s, cx| {
+                            let dir = match s.file_context_menu.take().map(|m| m.target) {
+                                Some(FileContextMenuTarget::File(path)) => path
+                                    .parent()
+                                    .map(|p| p.to_path_buf())
+                                    .unwrap_or_else(|| s.working_directory.clone()),
+                                Some(FileContextMenuTarget::Dir(path)) => path,
+                                _ => s.working_directory.clone(),
+                            };
+                            if let Err(e) = s.create_new_folder_in(&dir) {
+                                crate::state::log_line(&format!("[FileExplorer] new folder failed: {e}"));
+                            }
+                            cx.notify();
+                        });
+                    })
+                })
+                .when(is_file, |d| {
+                    let delete_state = state_handle.clone();
+                    d.child(Self::menu_separator(p)).child(Self::menu_item(
+                        "ctx-menu-delete",
+                        "Delete",
+                        true,
+                        p,
+                        move |_, _, cx| {
+                            delete_state.update(cx, |s, cx| {
+                                s.request_context_menu_delete_confirmation();
                                 cx.notify();
                             });
-                        })
-                        .child("New File"),
-                )
-                .when(can_delete, |d| {
-                    d.child(
-                        div()
-                            .id("ctx-menu-delete")
-                            .h(px(26.0))
-                            .px(px(space::SM))
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(rgb(0xf14c4c))
-                            .hover(move |s| s.bg(rgba(0xf14c4c33)))
-                            .on_click(move |_ev, _window, cx| {
-                                delete_state.update(cx, |s, cx| {
-                                    s.request_context_menu_delete_confirmation();
-                                    cx.notify();
-                                });
-                            })
-                            .child("Delete"),
-                    )
+                        },
+                    ))
                 })
                 .into_any_element()
         };
@@ -447,6 +702,144 @@ impl FileExplorer {
         )
         .with_priority(1)
         .into_any_element()
+    }
+
+    /// Nav mode's right-click menu. Same `deferred(anchored(...))` +
+    /// `on_mouse_down_out` construction as the file tree's, since both float
+    /// over the same sidebar.
+    ///
+    /// On a heading: Select / Copy / Cut / Delete "Heading and Contents", all
+    /// four built on the single `select_heading_and_contents` +
+    /// existing-operation pairing (see `AppState::heading_contents_range`) —
+    /// Copy and Cut then dispatch the app's own `CopyAction`/`CutAction`, so
+    /// they get the rich-clipboard encoding rather than a second, plainer
+    /// copy path. Those actions are registered on `App` (globally, in
+    /// `main_window.rs`), so dispatching them from the sidebar works without
+    /// the editor holding focus.
+    ///
+    /// Always: the four "Show Heading Level N" rows, which set the view-only
+    /// `nav_max_level` filter (clicking the active level clears it).
+    fn render_nav_context_menu(
+        menu: crate::state::NavContextMenu,
+        p: Palette,
+        state_handle: &Entity<AppState>,
+        cx: &mut Context<FileExplorer>,
+    ) -> AnyElement {
+        let (x, y) = menu.position;
+        let heading_line = match menu.target {
+            NavContextMenuTarget::Heading(line) => Some(line),
+            NavContextMenuTarget::Background => None,
+        };
+
+        let panel = div()
+            .flex()
+            .flex_col()
+            .w(px(220.0))
+            .bg(rgb(p.chrome))
+            .border_1()
+            .border_color(rgb(p.border))
+            .rounded(px(radius::MD))
+            .shadow_lg()
+            .py(px(space::XXS))
+            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+            .when_some(heading_line, |d, line| {
+                let (sel, copy, cut, del) = (
+                    state_handle.clone(),
+                    state_handle.clone(),
+                    state_handle.clone(),
+                    state_handle.clone(),
+                );
+                d.child(Self::menu_item("nav-ctx-select", "Select Heading and Contents", false, p, move |_, _, cx| {
+                    sel.update(cx, |s, cx| {
+                        s.close_nav_context_menu();
+                        s.select_heading_and_contents(line);
+                        cx.notify();
+                    });
+                }))
+                .child(Self::menu_item("nav-ctx-copy", "Copy Heading and Contents", false, p, move |_, window, cx| {
+                    copy.update(cx, |s, cx| {
+                        s.close_nav_context_menu();
+                        s.select_heading_and_contents(line);
+                        cx.notify();
+                    });
+                    window.dispatch_action(Box::new(crate::keybinds::CopyAction), cx);
+                }))
+                .child(Self::menu_item("nav-ctx-cut", "Cut Heading and Contents", false, p, move |_, window, cx| {
+                    cut.update(cx, |s, cx| {
+                        s.close_nav_context_menu();
+                        s.select_heading_and_contents(line);
+                        cx.notify();
+                    });
+                    window.dispatch_action(Box::new(crate::keybinds::CutAction), cx);
+                }))
+                .child(Self::menu_item("nav-ctx-delete", "Delete Heading and Contents", true, p, move |_, _, cx| {
+                    del.update(cx, |s, cx| {
+                        s.close_nav_context_menu();
+                        s.select_heading_and_contents(line);
+                        // Pushes its own undo snapshot — a section delete can
+                        // be large, and Ctrl+Z is the only way back.
+                        s.delete_selection();
+                        cx.notify();
+                    });
+                }))
+                .child(Self::menu_separator(p))
+            })
+            .children((1u8..=4).map(|level| {
+                let state_clone = state_handle.clone();
+                div()
+                    .id(ElementId::named_usize("nav-ctx-level", level as usize))
+                    .h(px(26.0))
+                    .px(px(space::SM))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(p.text))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.set_nav_max_level(level);
+                        state_clone.update(cx, |s, cx| {
+                            s.close_nav_context_menu();
+                            cx.notify();
+                        });
+                        cx.notify();
+                    }))
+                    .child(format!("Show Heading Level {level}"))
+            }))
+            .into_any_element();
+
+        let dismiss_state = state_handle.clone();
+        deferred(
+            anchored().position(point(px(x), px(y))).snap_to_window().child(
+                div()
+                    .id("nav-context-menu-dismiss")
+                    .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                        dismiss_state.update(cx, |s, cx| {
+                            if s.nav_context_menu.is_some() {
+                                s.close_nav_context_menu();
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(panel),
+            ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+
+    /// Applies (or, on the level that's already applied, clears) the Nav
+    /// outline's "Show Heading Level N" filter. Shared by the right-click
+    /// menu's rows and the optional 1/2/3/4 button strip, so the two can
+    /// never drift apart. Level 4 is "everything", which is what no filter
+    /// already means — so it clears rather than setting a redundant `Some(4)`
+    /// that the buttons would then paint as active.
+    fn set_nav_max_level(&mut self, level: u8) {
+        self.nav_max_level = if self.nav_max_level == Some(level) || level >= 4 {
+            None
+        } else {
+            Some(level)
+        };
     }
 
     /// One half of the Files/Nav header toggle: highlighted when it
@@ -511,18 +904,38 @@ impl FileExplorer {
 
         // content and paragraphs are always kept 1:1 (one paragraph per
         // line) — the same pairing wikifi_export.rs's own heading walk uses.
+        // `nav_max_level` (the "Show Heading Level N" filter) is applied right
+        // here, before any tree building — see the field's own doc comment for
+        // why it isn't expressed as a bulk collapse instead.
+        let max_level = self.nav_max_level.unwrap_or(4);
         let headings: Vec<(usize, u8, String)> = tab
             .content
             .split('\n')
             .enumerate()
             .filter_map(|(line_idx, line_text)| {
                 let heading = tab.paragraphs.get(line_idx)?.heading;
-                (1..=4).contains(&heading).then(|| (line_idx, heading, line_text.to_string()))
+                (1..=max_level).contains(&heading).then(|| (line_idx, heading, line_text.to_string()))
             })
             .collect();
 
+        // Right-click on empty Nav space — offers only the "Show Heading
+        // Level" rows, since there's no heading under the cursor to act on.
+        // Shared by the placeholder and the list, so the level filter is
+        // reachable even from a document with nothing (left) to show.
+        let background_right_click = {
+            let state_clone = state_handle.clone();
+            move |ev: &MouseDownEvent, _window: &mut Window, cx: &mut App| {
+                let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                state_clone.update(cx, |s, cx| {
+                    s.open_nav_context_menu(position, NavContextMenuTarget::Background);
+                    cx.notify();
+                });
+            }
+        };
+
         if headings.is_empty() {
             return div()
+                .id("nav-empty")
                 .flex_1()
                 .flex()
                 .items_center()
@@ -530,7 +943,12 @@ impl FileExplorer {
                 .p(px(space::MD))
                 .text_sm()
                 .text_color(rgb(p.text_faint))
-                .child("No headings yet")
+                .on_mouse_down(MouseButton::Right, background_right_click)
+                .child(if self.nav_max_level.is_some() {
+                    "No headings at this level"
+                } else {
+                    "No headings yet"
+                })
                 .into_any_element();
         }
 
@@ -541,19 +959,34 @@ impl FileExplorer {
             .flex_1()
             .overflow_y_scroll()
             .py(px(space::XS))
+            .on_mouse_down(MouseButton::Right, background_right_click)
             .children(entries.into_iter().map(|entry| {
                 let indent = px((entry.depth as f32) * 16.0);
                 let line_idx = entry.line_idx;
                 let is_collapsed = self.nav_collapsed.contains(&line_idx);
                 let state_clone = state_handle.clone();
+                let state_for_ctx = state_handle.clone();
 
                 div()
+                    .id(ElementId::named_usize("nav-row", line_idx))
                     .flex()
                     .flex_row()
                     .items_center()
                     .h(px(24.0))
                     .pl(indent + px(space::SM))
                     .pr(px(space::SM))
+                    // Right-click a heading: the Select/Copy/Cut/Delete
+                    // "Heading and Contents" items, plus the level rows.
+                    // stop_propagation so the list's own background
+                    // right-click handler doesn't retarget it to Background.
+                    .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                        state_for_ctx.update(cx, |s, cx| {
+                            s.open_nav_context_menu(position, NavContextMenuTarget::Heading(line_idx));
+                            cx.notify();
+                        });
+                    })
                     // Arrow: only present when this heading has nested
                     // headings to collapse. A fixed-width spacer otherwise,
                     // so leaf headings' text still lines up with siblings
@@ -684,9 +1117,13 @@ impl Render for FileExplorer {
             .get(state.active_tab)
             .and_then(|tab| tab.file_path.clone());
         let sidebar_width = state.sidebar_width;
+        let has_copied_file = state.copied_file.is_some();
+        let nav_fold_buttons = state.nav_fold_buttons;
         let _ = state;
 
         let state_handle = self.state.clone();
+        let rename_focus = self.rename_focus.clone();
+        let nav_max_level = self.nav_max_level;
 
         div()
             .flex()
@@ -820,6 +1257,58 @@ impl Render for FileExplorer {
                             }),
                     ),
             )
+            // ── Nav heading-fold buttons (Settings → Toggle Features) ────────
+            // Its own strip below the header rather than inside it: the header
+            // is a fixed 44px already carrying two lines of text and four
+            // buttons. This row carries the bottom rule, so it reads as "under
+            // the folder name, above the line" — where the feature was asked
+            // for. Runs the same `set_nav_max_level` the right-click menu's
+            // rows do, so the two can't disagree about what's showing.
+            .when(sidebar_mode == SidebarMode::Nav && nav_fold_buttons, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .px(px(space::MD))
+                        .py(px(space::XS))
+                        .border_b_1()
+                        .border_color(rgb(p.border))
+                        .children((1u8..=4).map(|level| {
+                            // Level 4 shows everything, which is the same as
+                            // no filter — so it's the button that reads active
+                            // when nothing is filtered.
+                            let is_active = nav_max_level.unwrap_or(4) == level;
+                            div()
+                                .id(ElementId::named_usize("nav-fold-btn", level as usize))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(24.0))
+                                .h(px(22.0))
+                                .rounded(px(radius::SM))
+                                .cursor_pointer()
+                                .text_xs()
+                                .border_1()
+                                .when(is_active, |d| {
+                                    d.bg(rgb(p.accent_wash))
+                                        .text_color(rgb(p.text))
+                                        .border_color(rgb(p.accent_muted))
+                                })
+                                .when(!is_active, |d| {
+                                    d.text_color(rgb(p.text_muted))
+                                        .border_color(rgb(p.border_subtle))
+                                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                })
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.set_nav_max_level(level);
+                                    cx.notify();
+                                }))
+                                .child(level.to_string())
+                        })),
+                )
+            })
             // ── Body: file tree or heading outline, depending on sidebar_mode ──
             // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
             // scroll position per unique element ID.
@@ -850,7 +1339,10 @@ impl Render for FileExplorer {
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
             .when_some(self.state.read(cx).file_context_menu.clone(), |el, menu| {
-                el.child(Self::render_context_menu(menu, p, &state_handle, cx))
+                el.child(Self::render_context_menu(menu, has_copied_file, &rename_focus, p, &state_handle, cx))
+            })
+            .when_some(self.state.read(cx).nav_context_menu.clone(), |el, menu| {
+                el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx))
             })
             // ── Resize handle ────────────────────────────────────────────────
             // A thin strip on the sidebar's right edge (the border shared
@@ -905,7 +1397,7 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
 /// Walks `tree` collecting the path of every currently-expanded directory
 /// (recursing into their children too), so the caller can persist the full
 /// expansion state to settings.conf (`state::save_expanded_dirs`).
-fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
+pub(crate) fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for node in tree {
         if let FileNode::Dir { path, expanded, children, .. } = node {

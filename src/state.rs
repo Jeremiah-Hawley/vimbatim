@@ -600,6 +600,34 @@ pub struct FileContextMenu {
     /// undo, so the menu shows a "Delete <name>? Confirm / Cancel" step
     /// instead of deleting on the first click.
     pub confirming_delete: bool,
+    /// The menu's third mode (alongside normal and `confirming_delete`):
+    /// `Some` swaps the item list for a single text input holding the
+    /// in-progress new name, committed by Enter. Lives here rather than on
+    /// `FileExplorer` so the menu owns every one of its own modes; the
+    /// `FocusHandle` that feeds it keystrokes stays in the view, since
+    /// `state.rs` is gpui-free.
+    pub rename_buffer: Option<String>,
+}
+
+/// What a Nav-mode right-click landed on. Unlike the file tree's own menu
+/// this needs no path — a heading is identified by its line index into the
+/// active tab's content, the same handle `jump_to_line` and
+/// `heading_contents_range` already take.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NavContextMenuTarget {
+    Heading(usize),
+    /// Right-click on empty space in the Nav list — only the "Show Heading
+    /// Level 1–4" rows apply, since there's no heading to act on.
+    Background,
+}
+
+/// State for the Nav outline's right-click menu, `None` when closed. Same
+/// plain-tuple `position` convention (and same gpui-free reason) as
+/// `FileContextMenu`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NavContextMenu {
+    pub position: (f32, f32),
+    pub target: NavContextMenuTarget,
 }
 
 /// State for the text editor's right-click menu. `position` is window-relative
@@ -699,6 +727,21 @@ pub struct AppState {
     /// Open state of the file explorer's right-click menu, `None` when
     /// closed. See `FileContextMenu`.
     pub file_context_menu: Option<FileContextMenu>,
+    /// Open state of the Nav outline's right-click menu, `None` when closed.
+    /// See `NavContextMenu`.
+    pub nav_context_menu: Option<NavContextMenu>,
+    /// The file most recently picked by the explorer's "Copy File", ready
+    /// for "Paste File" to drop into a folder. Deliberately not persisted —
+    /// a copy is a within-session gesture, and a stale path would only make
+    /// `fs::copy` fail. Only one file at a time, matching the single-select
+    /// tree.
+    pub copied_file: Option<PathBuf>,
+    /// Settings → Toggle Features "Navigation Menu Heading Fold Buttons":
+    /// shows a 1/2/3/4 row under the sidebar's folder name that applies the
+    /// same "Show Heading Level N" filter the Nav right-click menu offers.
+    /// Off by default — the right-click menu is always available, this is
+    /// just a shortcut for people who use it constantly.
+    pub nav_fold_buttons: bool,
     /// Open state of the text editor's right-click menu, `None` when closed.
     /// See `EditorContextMenu`.
     pub editor_context_menu: Option<EditorContextMenu>,
@@ -1553,6 +1596,9 @@ impl AppState {
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            nav_context_menu: None,
+            copied_file: None,
+            nav_fold_buttons: load_bool_setting(settings_path, "nav_fold_buttons", false),
             editor_context_menu: None,
             find_bar: None,
             word_count_visible: false,
@@ -2191,13 +2237,24 @@ impl AppState {
     /// changed, nothing to write) but wrong here, where the destination is a
     /// file that doesn't exist yet.
     pub fn save_active_tab_as(&mut self, path: PathBuf) -> Result<(), String> {
+        self.save_tab_as(self.active_tab, path)
+    }
+
+    /// The index-taking core of `save_active_tab_as`, split out for the same
+    /// reason `save_tab` was split out of `save_active_tab`: a caller that
+    /// already knows which tab it means shouldn't have to route through
+    /// `active_tab`.
+    ///
+    /// The tab-bar right-click menu specifically needs this — its "Save As"
+    /// awaits a native file dialog, and `active_tab` can have moved to a
+    /// different document by the time the user picks a path.
+    pub fn save_tab_as(&mut self, idx: usize, path: PathBuf) -> Result<(), String> {
         // Same funnel-level forcing the recovery Save As already does: a
         // picker (or a user typing a name) can hand back a bare or
         // wrong-extension path, and saving a docx there produces a file
         // `open_file` will refuse to reopen.
         let path = with_docx_extension(&path);
 
-        let idx = self.active_tab;
         let tab = self.tabs.get_mut(idx).ok_or("No active tab")?;
         tab.file_path = Some(path.clone());
         tab.title = path
@@ -2209,7 +2266,7 @@ impl AppState {
         self.save_tab(idx)
     }
 
-    fn save_tab(&mut self, idx: usize) -> Result<(), String> {
+    pub fn save_tab(&mut self, idx: usize) -> Result<(), String> {
         /*
          * Saves the tab at `idx` to its associated file path, from the
          * live, formatting-synced `paragraphs` (rich-text formatting plan,
@@ -2328,6 +2385,35 @@ impl AppState {
             self.pending_close = Some(PendingClose::Tab(idx));
         } else {
             self.close_tab(idx);
+        }
+    }
+
+    /// Tab-bar right-click "Close Tabs to the Left" / "…to the Right":
+    /// closes every tab on that side of `idx`.
+    ///
+    // ponytail: skips dirty tabs instead of confirming them — `pending_close`
+    // holds exactly one confirmation, so a batch close cannot ask about
+    // several unsaved tabs, and closing them anyway would be a silent
+    // discard. Upgrade path if this becomes annoying: make `pending_close`
+    // carry a queue of indices that `close_confirm.rs` walks one at a time.
+    ///
+    /// Iterates from the far end inward so each removal only shifts indices
+    /// that have already been visited.
+    pub fn close_tabs_to_right(&mut self, idx: usize) {
+        for i in (idx + 1..self.tabs.len()).rev() {
+            if self.tabs.get(i).is_some_and(|t| !t.is_modified) {
+                self.close_tab(i);
+            }
+        }
+    }
+
+    /// Mirror of `close_tabs_to_right`. Same dirty-tab skip; walks downward
+    /// from `idx - 1` so surviving (dirty) tabs below keep their indices.
+    pub fn close_tabs_to_left(&mut self, idx: usize) {
+        for i in (0..idx.min(self.tabs.len())).rev() {
+            if self.tabs.get(i).is_some_and(|t| !t.is_modified) {
+                self.close_tab(i);
+            }
         }
     }
 
@@ -2510,8 +2596,16 @@ impl AppState {
         /*
          * Moves the tab at `from` to position `to`, shifting other tabs as needed.
          * Updates `active_tab` so the visually active tab does not change.
+         *
+         * `to` is an *insert-before* position, so `to == tabs.len()` is legal
+         * and means "past the last tab". That case is the whole reason a tab
+         * could never be dragged to the end: the per-tab drop targets can only
+         * ever say "before tab N", leaving the final slot unreachable until
+         * the trailing drop targets (the "+" button and the empty strip beside
+         * it, tab_bar.rs) could pass `len` here. Rejecting it, as this guard
+         * used to, is what made those drops silent no-ops.
          */
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+        if from == to || from >= self.tabs.len() || to > self.tabs.len() {
             return;
         }
         let tab = self.tabs.remove(from);
@@ -4886,6 +4980,53 @@ impl AppState {
         }
     }
 
+    /// The byte range a Nav heading "and its contents" spans: from the start
+    /// of `line` to the start of the next heading at an equal-or-shallower
+    /// level (i.e. `1..=level`), or the end of the document.
+    ///
+    /// The **terminating newline is included** whenever there is one — decided
+    /// here, once, so all four Nav actions agree. Excluding it would leave
+    /// "Delete Heading and Contents" a stranded blank line where the section
+    /// used to be, and make a copied section paste without its own final
+    /// break.
+    ///
+    /// `None` when `line` isn't a heading (level 1–4) at all. Reads
+    /// `paragraphs` through `.get()` rather than indexing: content lines and
+    /// paragraphs are kept 1:1, but a range walk is no place to rely on that.
+    pub fn heading_contents_range(&self, line: usize) -> Option<(usize, usize)> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let level = tab.paragraphs.get(line)?.heading;
+        if !(1..=4).contains(&level) {
+            return None;
+        }
+        let line_count = tab.content.split('\n').count();
+        let end_line = (line + 1..line_count).find(|&i| {
+            tab.paragraphs.get(i).is_some_and(|p| (1..=level).contains(&p.heading))
+        });
+        let start = byte_offset_for_line_col(&tab.content, line, 0);
+        let end = match end_line {
+            // The next section's first byte — which sits just past the '\n'
+            // that terminates ours, so that newline is included.
+            Some(i) => byte_offset_for_line_col(&tab.content, i, 0),
+            None => tab.content.len(),
+        };
+        Some((start, end.max(start)))
+    }
+
+    /// Nav right-click "Select Heading and Contents": selects the whole
+    /// section and scrolls it into view. The shared first step of Select /
+    /// Copy / Cut / Delete — the other three just run the existing
+    /// selection-scoped operation afterwards, so the Nav menu adds no
+    /// second implementation of copy, cut, or delete.
+    pub fn select_heading_and_contents(&mut self, line: usize) {
+        let Some((start, end)) = self.heading_contents_range(line) else { return };
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.selection = Some((start, end));
+            tab.cursor = end;
+            tab.pending_scroll_to_cursor = true;
+        }
+    }
+
     pub fn set_cursor_from_line_col(&mut self, line: usize, col: usize) {
         /*
          * Places the cursor at the given 0-indexed (line, char_column) pair,
@@ -5000,8 +5141,17 @@ impl AppState {
         /*
          * Re-scans the working directory and updates the file tree. Call this
          * after creating new files so the explorer reflects the new state.
+         *
+         * Expansion is carried across the rescan: `scan_directory` always
+         * returns every directory collapsed, so without this every file
+         * operation (new file, new folder, rename, duplicate, paste, delete)
+         * would snap the whole tree shut and lose the user's place. Uses the
+         * same collect/restore pair startup already uses to replay persisted
+         * expansion onto a fresh scan.
          */
+        let expanded = crate::file_explorer::collect_expanded_dirs(&self.file_tree);
         self.file_tree = scan_directory(&self.working_directory);
+        crate::file_explorer::restore_expanded_dirs(&mut self.file_tree, &expanded);
     }
 
     pub fn set_working_directory(&mut self, dir: PathBuf) {
@@ -5028,11 +5178,22 @@ impl AppState {
          * right-click while a delete confirmation is showing starts over
          * rather than carrying the old confirmation state to a new target.
          */
-        self.file_context_menu = Some(FileContextMenu { position, target, confirming_delete: false });
+        self.file_context_menu =
+            Some(FileContextMenu { position, target, confirming_delete: false, rename_buffer: None });
     }
 
     pub fn close_file_context_menu(&mut self) {
         self.file_context_menu = None;
+    }
+
+    // ── Nav outline right-click menu ────────────────────────────────────────
+
+    pub fn open_nav_context_menu(&mut self, position: (f32, f32), target: NavContextMenuTarget) {
+        self.nav_context_menu = Some(NavContextMenu { position, target });
+    }
+
+    pub fn close_nav_context_menu(&mut self) {
+        self.nav_context_menu = None;
     }
 
     pub fn custom_colors(&self, target: CustomColorTarget) -> &[u32] {
@@ -5142,17 +5303,168 @@ impl AppState {
          * (dir = working_directory) and the right-click menu's "New File"
          * (dir = wherever was clicked).
          */
-        let mut name = "Untitled.docx".to_string();
-        let mut counter = 1;
-        while dir.join(&name).exists() {
-            name = format!("Untitled {}.docx", counter);
-            counter += 1;
-        }
-        let path = dir.join(&name);
+        let path = unique_path_in(dir, "Untitled", "docx");
         create_new_docx(&default_paragraphs(), &path)?;
         self.refresh_file_tree();
         self.open_file(path);
         Ok(())
+    }
+
+    // ── File explorer right-click file operations ───────────────────────────
+    //
+    // Every one of these ends in `refresh_file_tree()` so the sidebar shows
+    // the result immediately, and every one is .docx-scoped — `scan_directory`
+    // only ever surfaces .docx files and directories, so no other extension
+    // can reach here from the tree.
+
+    /// "Open file in current tab" — replaces whatever the focused pane is
+    /// showing, rather than `open_file`'s "reuse only a blank New Tab,
+    /// otherwise append".
+    ///
+    /// Refuses to replace a *modified* tab and falls back to opening
+    /// normally: replacing in place discards the tab's unsaved content with
+    /// no confirmation, which is the exact thing `request_close_tab`'s
+    /// Save/Discard/Cancel dialog exists to prevent. A clean tab has nothing
+    /// to lose, which is the case this is actually for.
+    pub fn open_file_in_current_tab(&mut self, path: PathBuf) {
+        let replaceable = self
+            .pane_tab_index(self.focused_pane)
+            .filter(|&i| self.tabs.get(i).is_some_and(|t| !t.is_modified));
+        let Some(idx) = replaceable else {
+            self.open_file(path);
+            return;
+        };
+        // Already open elsewhere: `open_file` knows how to focus that tab (or
+        // that pane) instead of pulling a second copy of the document in.
+        if self.tabs.iter().any(|t| t.file_path.as_deref() == Some(&path)) {
+            self.open_file(path);
+            return;
+        }
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("docx")) {
+            log_line(&format!("[open] not a .docx, refusing to open: {}", path.display()));
+            return;
+        }
+        let mut tab = Tab::from_path(self.next_tab_id, path.clone());
+        if let Ok((paragraphs, origin)) = parse_docx(&path) {
+            tab.content = paragraphs_to_plain_text(&paragraphs);
+            tab.paragraphs = paragraphs;
+            tab.has_unsupported_blocks = origin.has_unsupported_blocks;
+            tab.docx_origin = Some(Arc::new(origin));
+        }
+        self.next_tab_id += 1;
+        // The outgoing tab's recovery snapshot goes with it — it was clean,
+        // so there is nothing left to recover. Its path still goes on the
+        // reopen stack, so Shift+Ctrl+W brings it back exactly as it would
+        // after a deliberate close.
+        if let Some(old) = self.tabs.get(idx) {
+            crate::recovery::delete_snapshot(old.id);
+            if let Some(old_path) = old.file_path.clone() {
+                self.closed_tabs.push(old_path);
+            }
+        }
+        self.tabs[idx] = tab;
+        self.show_in_focused_pane(idx);
+    }
+
+    /// "Open file in side pane" — opens the split (idempotently) and loads
+    /// `path` into the secondary pane. `open_split` leaves a blank tab that
+    /// `open_file`'s own reuse branch then consumes, so this needs no
+    /// special-casing for the already-split case.
+    pub fn open_file_in_side_pane(&mut self, path: PathBuf) {
+        self.open_split();
+        self.open_file(path);
+    }
+
+    /// "Duplicate file" — copies `path` alongside itself as
+    /// "<name> copy.docx" (or "<name> copy 2.docx", …). Does not open the
+    /// copy: duplicating is usually a backup gesture, not an editing one.
+    pub fn duplicate_file(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = path.parent().ok_or("file has no parent directory")?;
+        let stem = path.file_stem().and_then(|s| s.to_str()).ok_or("file has no name")?;
+        let dest = unique_path_in(dir, &format!("{stem} copy"), "docx");
+        std::fs::copy(path, dest)?;
+        self.refresh_file_tree();
+        Ok(())
+    }
+
+    /// "Copy file" — remembers `path` for a later "Paste file". Nothing
+    /// touches the filesystem until the paste.
+    pub fn copy_file(&mut self, path: PathBuf) {
+        self.copied_file = Some(path);
+    }
+
+    /// "Paste file" — copies whatever "Copy file" remembered into `dir`,
+    /// under a name that can't collide (so pasting back into the source
+    /// folder produces a copy rather than overwriting the original).
+    /// `copied_file` is left set, so one copy can be pasted into several
+    /// folders.
+    pub fn paste_file_into(&mut self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let src = self.copied_file.clone().ok_or("nothing copied")?;
+        let stem = src.file_stem().and_then(|s| s.to_str()).ok_or("file has no name")?;
+        let dest = unique_path_in(dir, stem, "docx");
+        std::fs::copy(&src, dest)?;
+        self.refresh_file_tree();
+        Ok(())
+    }
+
+    /// "New folder" — creates the first free "New Folder" / "New Folder 2" /
+    /// … inside `dir`.
+    pub fn create_new_folder_in(&mut self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let mut name = "New Folder".to_string();
+        let mut counter = 2;
+        while dir.join(&name).exists() {
+            name = format!("New Folder {counter}");
+            counter += 1;
+        }
+        std::fs::create_dir(dir.join(&name))?;
+        self.refresh_file_tree();
+        Ok(())
+    }
+
+    /// "Rename" — renames the file at `old` to `new_name` in the same
+    /// directory, then re-points any open tab that was showing it.
+    ///
+    /// Re-pointing is the part that isn't optional: renaming the file you're
+    /// currently editing is the common case, and a tab left holding the old
+    /// path would write its next save to a file that no longer exists.
+    ///
+    /// `with_docx_extension` is the same funnel-level guard "Save As" uses —
+    /// a user typing a bare name must not produce a file the tree
+    /// (`scan_directory`, .docx-only) can never show again.
+    pub fn rename_path(&mut self, old: &std::path::Path, new_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err("name cannot be empty".into());
+        }
+        let dir = old.parent().ok_or("file has no parent directory")?;
+        let new = with_docx_extension(&dir.join(trimmed));
+        if new == old {
+            return Ok(());
+        }
+        if new.exists() {
+            return Err(format!("{} already exists", new.display()).into());
+        }
+        std::fs::rename(old, &new)?;
+        let title = new.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled").to_string();
+        for tab in self.tabs.iter_mut().filter(|t| t.file_path.as_deref() == Some(old)) {
+            tab.file_path = Some(new.clone());
+            tab.title = title.clone();
+        }
+        self.refresh_file_tree();
+        Ok(())
+    }
+
+    /// "Open all files in new tabs" — opens every .docx directly inside
+    /// `dir`, in tree order. Deliberately not recursive: the menu item names
+    /// the folder that was clicked, and walking a deep tree could open
+    /// hundreds of tabs from one click.
+    pub fn open_all_files_in_dir(&mut self, dir: &std::path::Path) {
+        for path in scan_directory(&dir.to_path_buf()).into_iter().filter_map(|n| match n {
+            FileNode::File { path, .. } => Some(path),
+            FileNode::Dir { .. } => None,
+        }) {
+            self.open_file(path);
+        }
     }
 
     // ── vim mode transitions (spec 5.1) ─────────────────────────────────────────
@@ -7305,6 +7617,25 @@ impl AppState {
     }
 }
 
+/// First non-existent `dir/<stem>.<ext>`, falling back to `<stem> 1`,
+/// `<stem> 2`, … — the exact collision loop "New File" has always run for
+/// "Untitled" (counter starting at 1, preserved), now shared with Duplicate
+/// and Paste so all three name their results the same way.
+///
+/// Racy by construction (something could create the path between the check
+/// and the write), which is fine here: every caller's own `fs` call reports
+/// the failure, and the alternative is exclusive-create plumbing no
+/// single-user desktop editor needs.
+pub fn unique_path_in(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
+    let mut candidate = dir.join(format!("{stem}.{ext}"));
+    let mut counter = 1;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem} {counter}.{ext}"));
+        counter += 1;
+    }
+    candidate
+}
+
 /// Recursively scans `dir` and builds a tree of FileNodes containing only .docx
 /// files (or directories that contain them).
 pub fn scan_directory(dir: &PathBuf) -> Vec<FileNode> {
@@ -8345,9 +8676,19 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
      * literal character — pressing one of those while a command is
      * pending simply abandons it (see each caller), matching vim's
      * Escape-cancels-pending-command behaviour.
+     *
+     * Space is the one exception to that rule: GPUI names it "space", a
+     * multi-character key that the fallback below would reject, but it is a
+     * real literal character — `text_editor.rs`'s own insertion arm spells it
+     * out the same way (`"space" => insert_char(' ')`). Without this, `f<space>`
+     * can't jump to a space and neither rename input (tab titles, file names)
+     * can type one, which rules out most real file names in this app.
      */
     if let Some(kc) = key_char.and_then(|s| s.chars().next()) {
         return Some(kc);
+    }
+    if key == "space" {
+        return Some(' ');
     }
     let mut chars = key.chars();
     let c = chars.next()?;
@@ -8524,6 +8865,9 @@ mod tests {
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             file_context_menu: None,
+            nav_context_menu: None,
+            copied_file: None,
+            nav_fold_buttons: false,
             editor_context_menu: None,
             find_bar: None,
             word_count_visible: false,
@@ -16110,6 +16454,336 @@ mod tests {
         state.create_file_at_context_menu_location().unwrap();
 
         assert!(dir.join("Untitled.docx").exists());
+    }
+
+    // ── Right-click menus: file operations ──────────────────────────────────
+
+    #[test]
+    fn test_vim_find_target_char_resolves_space_from_its_key_name() {
+        // GPUI names the space key "space" — a multi-character name the
+        // generic fallback rejects. Both rename inputs (file names, tab
+        // titles) and vim's `f<space>` depend on it resolving anyway.
+        assert_eq!(vim_find_target_char("space", false, None), Some(' '));
+        assert_eq!(vim_find_target_char("space", false, Some(" ")), Some(' '));
+        // Genuinely non-literal named keys still abandon the pending command.
+        assert_eq!(vim_find_target_char("escape", false, None), None);
+        assert_eq!(vim_find_target_char("enter", false, None), None);
+        // Ordinary literals are unchanged.
+        assert_eq!(vim_find_target_char("a", true, None), Some('A'));
+        assert_eq!(vim_find_target_char(".", false, None), Some('.'));
+    }
+
+    #[test]
+    fn test_unique_path_in_walks_past_collisions() {
+        let dir = temp_test_dir("unique_path");
+        // Fresh directory: the bare name is free.
+        assert_eq!(unique_path_in(&dir, "Card", "docx"), dir.join("Card.docx"));
+
+        std::fs::write(dir.join("Card.docx"), b"x").unwrap();
+        assert_eq!(unique_path_in(&dir, "Card", "docx"), dir.join("Card 1.docx"));
+
+        std::fs::write(dir.join("Card 1.docx"), b"x").unwrap();
+        assert_eq!(unique_path_in(&dir, "Card", "docx"), dir.join("Card 2.docx"));
+    }
+
+    #[test]
+    fn test_duplicate_file_writes_a_copy_beside_the_original() {
+        let dir = temp_test_dir("duplicate_file");
+        let src = dir.join("Original.docx");
+        std::fs::write(&src, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.duplicate_file(&src).unwrap();
+
+        assert!(src.exists(), "the original must survive");
+        assert_eq!(std::fs::read(dir.join("Original copy.docx")).unwrap(), b"contents");
+    }
+
+    #[test]
+    fn test_paste_file_into_same_folder_does_not_clobber_the_source() {
+        let dir = temp_test_dir("paste_same_folder");
+        let src = dir.join("Card.docx");
+        std::fs::write(&src, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.copy_file(src.clone());
+        state.paste_file_into(&dir).unwrap();
+
+        assert!(src.exists());
+        assert!(dir.join("Card 1.docx").exists());
+        // The copy stays on the clipboard so it can be pasted again elsewhere.
+        assert_eq!(state.copied_file, Some(src));
+    }
+
+    #[test]
+    fn test_paste_file_with_nothing_copied_is_an_error_not_a_panic() {
+        let dir = temp_test_dir("paste_nothing");
+        let mut state = make_state("", 0, None);
+        assert!(state.paste_file_into(&dir).is_err());
+    }
+
+    #[test]
+    fn test_create_new_folder_in_picks_first_free_name() {
+        let dir = temp_test_dir("new_folder");
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        state.create_new_folder_in(&dir).unwrap();
+        assert!(dir.join("New Folder").is_dir());
+
+        state.create_new_folder_in(&dir).unwrap();
+        assert!(dir.join("New Folder 2").is_dir());
+    }
+
+    #[test]
+    fn test_rename_path_repoints_the_open_tab_that_was_showing_the_file() {
+        let dir = temp_test_dir("rename_repoints_tab");
+        let old = dir.join("Old.docx");
+        std::fs::write(&old, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.tabs[0].file_path = Some(old.clone());
+        state.tabs[0].title = "Old.docx".into();
+
+        // Bare name, no extension — `with_docx_extension` must supply it, or
+        // the tree (.docx-only) could never show the file again.
+        state.rename_path(&old, "New").unwrap();
+
+        let new = dir.join("New.docx");
+        assert!(new.exists());
+        assert!(!old.exists());
+        assert_eq!(state.tabs[0].file_path, Some(new));
+        assert_eq!(state.tabs[0].title, "New.docx");
+    }
+
+    #[test]
+    fn test_rename_path_refuses_empty_and_existing_names() {
+        let dir = temp_test_dir("rename_refusals");
+        let old = dir.join("Old.docx");
+        let taken = dir.join("Taken.docx");
+        std::fs::write(&old, b"a").unwrap();
+        std::fs::write(&taken, b"b").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        assert!(state.rename_path(&old, "   ").is_err());
+        assert!(state.rename_path(&old, "Taken").is_err());
+        assert!(old.exists(), "a refused rename must leave the file alone");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"b", "must not overwrite");
+    }
+
+    #[test]
+    fn test_open_file_in_current_tab_refuses_to_replace_a_modified_tab() {
+        let dir = temp_test_dir("open_current_dirty");
+        let path = dir.join("Card.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
+        let mut state = make_state("unsaved work", 0, None);
+        state.working_directory = dir.clone();
+        state.tabs[0].is_modified = true;
+
+        state.open_file_in_current_tab(path.clone());
+
+        // The dirty tab is still there with its content — the file opened
+        // alongside it instead of replacing it.
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[0].content, "unsaved work");
+        assert_eq!(state.tabs[1].file_path, Some(path));
+    }
+
+    #[test]
+    fn test_open_file_in_current_tab_replaces_a_clean_tab_in_place() {
+        let dir = temp_test_dir("open_current_clean");
+        let path = dir.join("Card.docx");
+        create_new_docx(&default_paragraphs(), &path).unwrap();
+
+        let mut state = make_state("scratch", 0, None);
+        state.working_directory = dir.clone();
+
+        state.open_file_in_current_tab(path.clone());
+
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].file_path, Some(path));
+    }
+
+    // ── Right-click menus: Nav heading ranges ───────────────────────────────
+
+    /// A one-line paragraph at `heading` level — the shape `render_nav_tree`
+    /// reads to build the outline.
+    fn nav_para(text: &str, heading: u8) -> Paragraph {
+        Paragraph {
+            runs: vec![Run { text: text.to_string(), ..Run::default() }],
+            heading,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
+    }
+
+    #[test]
+    fn test_heading_contents_range_stops_at_the_next_equal_level_heading() {
+        let state = make_state_with_paragraphs(
+            vec![
+                nav_para("Pocket A", 1),
+                nav_para("body", 0),
+                nav_para("Pocket B", 1),
+            ],
+            0,
+        );
+        let (start, end) = state.heading_contents_range(0).unwrap();
+        // Up to but not including Pocket B, and carrying the '\n' that
+        // terminates "body" — so deleting this leaves no blank line behind.
+        assert_eq!(&state.tabs[0].content[start..end], "Pocket A\nbody\n");
+    }
+
+    #[test]
+    fn test_heading_contents_range_stops_at_a_shallower_heading() {
+        let state = make_state_with_paragraphs(
+            vec![
+                nav_para("Pocket", 1),
+                nav_para("Hat", 2),
+                nav_para("under hat", 0),
+                nav_para("Pocket 2", 1),
+            ],
+            0,
+        );
+        let (start, end) = state.heading_contents_range(1).unwrap();
+        assert_eq!(&state.tabs[0].content[start..end], "Hat\nunder hat\n");
+    }
+
+    #[test]
+    fn test_heading_contents_range_swallows_deeper_headings() {
+        let state = make_state_with_paragraphs(
+            vec![nav_para("Pocket", 1), nav_para("Hat", 2), nav_para("Tag", 4)],
+            0,
+        );
+        let (start, end) = state.heading_contents_range(0).unwrap();
+        // Everything nested under the Pocket comes with it.
+        assert_eq!(&state.tabs[0].content[start..end], "Pocket\nHat\nTag");
+    }
+
+    #[test]
+    fn test_heading_contents_range_of_the_last_heading_runs_to_end_of_document() {
+        let state = make_state_with_paragraphs(
+            vec![nav_para("Pocket", 1), nav_para("trailing body", 0)],
+            0,
+        );
+        let (start, end) = state.heading_contents_range(0).unwrap();
+        assert_eq!(end, state.tabs[0].content.len());
+        assert_eq!(&state.tabs[0].content[start..end], "Pocket\ntrailing body");
+    }
+
+    #[test]
+    fn test_heading_contents_range_is_none_for_a_non_heading_line() {
+        let state = make_state_with_paragraphs(vec![nav_para("just body", 0)], 0);
+        assert!(state.heading_contents_range(0).is_none());
+        assert!(state.heading_contents_range(99).is_none(), "out of range must not panic");
+    }
+
+    #[test]
+    fn test_select_heading_and_contents_then_delete_leaves_no_blank_line() {
+        let mut state = make_state_with_paragraphs(
+            vec![nav_para("Pocket A", 1), nav_para("body", 0), nav_para("Pocket B", 1)],
+            0,
+        );
+        state.select_heading_and_contents(0);
+        state.delete_selection();
+        // The '\n' that ended the deleted section went with it, so Pocket B
+        // is now the first line rather than sitting under a stranded blank.
+        assert_eq!(state.tabs[0].content, "Pocket B");
+    }
+
+    // ── Right-click menus: tab operations ───────────────────────────────────
+
+    /// A state with `n` tabs, all clean and file-backed enough for close
+    /// logic (paths are never touched by these tests).
+    fn make_state_with_tabs(n: usize) -> AppState {
+        let mut state = make_state("", 0, None);
+        for i in 1..n {
+            let mut tab = Tab::new_empty(i);
+            tab.title = format!("tab{i}");
+            state.tabs.push(tab);
+        }
+        state.next_tab_id = n;
+        state
+    }
+
+    #[test]
+    fn test_move_tab_to_len_moves_it_to_the_end() {
+        // The drag-to-end bug: per-tab drop targets can only say "before tab
+        // N", so the last slot is only reachable through `to == len`.
+        let mut state = make_state_with_tabs(3);
+        let moved_id = state.tabs[0].id;
+
+        state.move_tab(0, 3);
+
+        assert_eq!(state.tabs.last().unwrap().id, moved_id);
+        assert_eq!(state.tabs.len(), 3);
+    }
+
+    #[test]
+    fn test_move_tab_past_len_is_still_rejected() {
+        let mut state = make_state_with_tabs(3);
+        let before: Vec<usize> = state.tabs.iter().map(|t| t.id).collect();
+        state.move_tab(0, 4);
+        assert_eq!(state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn test_move_tab_of_the_already_last_tab_to_the_end_is_a_no_op() {
+        let mut state = make_state_with_tabs(3);
+        let before: Vec<usize> = state.tabs.iter().map(|t| t.id).collect();
+        state.move_tab(2, 3);
+        assert_eq!(state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn test_close_tabs_to_right_closes_everything_after_the_index() {
+        let mut state = make_state_with_tabs(4);
+        let kept: Vec<usize> = state.tabs[..2].iter().map(|t| t.id).collect();
+
+        state.close_tabs_to_right(1);
+
+        assert_eq!(state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), kept);
+    }
+
+    #[test]
+    fn test_close_tabs_to_left_closes_everything_before_the_index() {
+        let mut state = make_state_with_tabs(4);
+        let kept: Vec<usize> = state.tabs[2..].iter().map(|t| t.id).collect();
+
+        state.close_tabs_to_left(2);
+
+        assert_eq!(state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), kept);
+    }
+
+    #[test]
+    fn test_close_tabs_skips_modified_tabs_rather_than_discarding_them() {
+        // ponytail: `pending_close` holds one confirmation at a time, so a
+        // batch close can't ask about several dirty tabs — it leaves them
+        // open instead of silently dropping unsaved work.
+        let mut state = make_state_with_tabs(4);
+        state.tabs[3].is_modified = true;
+        let dirty_id = state.tabs[3].id;
+        let anchor_id = state.tabs[1].id;
+
+        state.close_tabs_to_right(1);
+
+        assert_eq!(
+            state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![state.tabs[0].id, anchor_id, dirty_id],
+        );
+    }
+
+    #[test]
+    fn test_close_tabs_to_right_of_the_last_tab_is_a_no_op() {
+        let mut state = make_state_with_tabs(3);
+        let before: Vec<usize> = state.tabs.iter().map(|t| t.id).collect();
+        state.close_tabs_to_right(2);
+        assert_eq!(state.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), before);
     }
 
     // ── Document recovery ───────────────────────────────────────────────────
