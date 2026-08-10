@@ -82,7 +82,9 @@ impl FormatAction {
             FormatAction::Block => Some(FormatOp::Bold(true)),  // Size 16 = 32 half-points
             FormatAction::Tag => Some(FormatOp::Bold(true)),    // Size 23 = 46 half-points
             FormatAction::Cite => Some(FormatOp::Bold(true)),   // Size 13 = 26 half-points
-            FormatAction::Emphasis => Some(FormatOp::Bold(true)), // Bold only
+            // Emphasis is intercepted by its own match arm below (multi-op,
+            // reads AppState::apply_emphasis_style, which this method has no
+            // access to) before ever reaching this generic mapping.
             _ => None,
         }
     }
@@ -812,6 +814,14 @@ impl FormattingRibbon {
                         // the ribbon button and hotkey behave identically.
                         FormatAction::Cite => {
                             st.update(cx, |state, _cx| state.apply_cite_style());
+                            cx.notify();
+                        }
+                        // Emphasis: applies whichever combination of
+                        // bold/underline/box Text Settings currently
+                        // configures, plus the configured size when that's
+                        // on — see AppState::apply_emphasis_style.
+                        FormatAction::Emphasis => {
+                            st.update(cx, |state, _cx| state.apply_emphasis_style());
                             cx.notify();
                         }
                         // Align Left / Center / Right: set the current line's

@@ -118,6 +118,16 @@ pub struct Run {
     pub whitespace_preserve: bool,
     /// The debate style this run was given, if any. See `CardStyle`.
     pub style: Option<CardStyle>,
+    /// Set by `AppState::apply_emphasis_style` — the Emphasis button's own
+    /// marker, independent of `bold`/`underline`/`box_format` (which
+    /// combination it applied is user-configurable and not itself proof the
+    /// text is "emphasized"). `remove_emphasis` reads this directly rather
+    /// than guessing from formatting.
+    pub emphasis: bool,
+    /// The small inline emphasis box (rendered as a border directly on the
+    /// run's span — see `text_editor::apply_run_style`), distinct from
+    /// `box_format`'s paragraph-wide Pocket box.
+    pub emphasis_boxed: bool,
 }
 
 /// One paragraph of the document, composed of zero or more runs.
@@ -875,6 +885,10 @@ fn run_props_xml(run: &Run) -> String {
     if let Some(color) = &run.color {
         out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
     }
+    // Custom markers, namespaced like `CardStyle::style_id` so they're
+    // harmless to any other editor (Word ignores elements it doesn't know).
+    if run.emphasis { out.push_str("<w:vimbatimEmphasis/>"); }
+    if run.emphasis_boxed { out.push_str("<w:vimbatimEmphasisBox/>"); }
     out
 }
 
@@ -961,6 +975,8 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
                 }
             }
         }
+        b"w:vimbatimEmphasis" => { run.emphasis = true; }
+        b"w:vimbatimEmphasisBox" => { run.emphasis_boxed = true; }
         _ => {}
     }
 }
@@ -1036,7 +1052,8 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 // A style marker alone is enough to need a `<w:rPr>` — an
                 // Analytic that happens to carry no direct formatting still
                 // has to say what it is.
-                || run.style.is_some();
+                || run.style.is_some()
+                || run.emphasis || run.emphasis_boxed;
             if has_props {
                 out.push_str("<w:rPr>");
                 out.push_str(&run_props_xml(run));
@@ -1626,6 +1643,38 @@ mod tests {
         }];
         let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
         assert!(xml.contains(r#"<w:rStyle w:val="VimbatimCite"/>"#), "got: {xml}");
+    }
+
+    /// The Emphasis markers round-trip through save/load, and independently
+    /// of each other and of `box_format`/`style` — a run can be Block-styled
+    /// and emphasized-but-not-boxed at the same time.
+    #[test]
+    fn test_emphasis_markers_survive_round_trip() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![
+                Run { text: "emphasized only".into(), emphasis: true, ..Run::default() },
+                Run {
+                    text: "emphasized and boxed".into(),
+                    emphasis: true,
+                    emphasis_boxed: true,
+                    bold: true,
+                    style: Some(CardStyle::Block),
+                    ..Run::default()
+                },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+        assert!(xml.contains("<w:vimbatimEmphasis/>"), "got: {xml}");
+        assert!(xml.contains("<w:vimbatimEmphasisBox/>"), "got: {xml}");
+
+        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let runs = &reparsed[0].runs;
+        assert!(runs[0].emphasis && !runs[0].emphasis_boxed);
+        assert!(runs[1].emphasis && runs[1].emphasis_boxed);
+        assert!(runs[1].bold && runs[1].style == Some(CardStyle::Block));
     }
 
     /// A document written in Word carries heading styles but no markers —

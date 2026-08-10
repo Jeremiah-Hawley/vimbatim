@@ -64,7 +64,7 @@ fn decode_alignment(v: u8) -> Option<Alignment> {
 
 fn encode_fields(r: &Run) -> String {
     format!(
-        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
         r.bold, r.italic, r.underline, r.double_underline, r.strikethrough,
         r.highlight, r.highlight_color, r.size,
         r.font.as_deref().unwrap_or(""), r.color.as_deref().unwrap_or(""),
@@ -72,6 +72,11 @@ fn encode_fields(r: &Run) -> String {
         // Carried so a copied Cite or Analytic is still one after pasting —
         // the marker is what every command identifying them reads.
         r.style.map(|s| s.style_id()).unwrap_or(""),
+        // Appended after `style` rather than inserted earlier, so a payload
+        // from a build predating these two fields fails the field-count
+        // check cleanly (falls back to plain-text paste) instead of
+        // misreading a field.
+        r.emphasis, r.emphasis_boxed,
     )
 }
 
@@ -105,8 +110,8 @@ pub fn decode(metadata: &str, plain_text: &str) -> Option<(Vec<Run>, Vec<Paragra
     let mut offset = 0usize;
     for record in run_section.split('\x1e') {
         let fields: Vec<&str> = record.split('\x1f').collect();
-        if fields.len() != 13 { return None; }
-        let len: usize = fields[12].parse().ok()?;
+        if fields.len() != 15 { return None; }
+        let len: usize = fields[14].parse().ok()?;
         if offset + len > plain_text.len() || !plain_text.is_char_boundary(offset)
             || !plain_text.is_char_boundary(offset + len)
         {
@@ -127,6 +132,8 @@ pub fn decode(metadata: &str, plain_text: &str) -> Option<(Vec<Run>, Vec<Paragra
             box_format: fields[10].parse().ok()?,
             whitespace_preserve: false,
             style: CardStyle::from_style_id(fields[11]),
+            emphasis: fields[12].parse().ok()?,
+            emphasis_boxed: fields[13].parse().ok()?,
         });
         offset += len;
     }
@@ -161,6 +168,25 @@ mod tests {
     #[test]
     fn rejects_malformed_metadata() {
         assert_eq!(decode("garbage", "hello"), None);
+    }
+
+    #[test]
+    fn round_trips_emphasis_markers() {
+        let run = Run { text: "hi".into(), emphasis: true, emphasis_boxed: true, ..Run::default() };
+        let encoded = encode_with_lengths(&[run.clone()], &[]);
+        let (decoded, _) = decode(&encoded, "hi").unwrap();
+        assert_eq!(decoded, vec![run]);
+    }
+
+    /// A 13-field run record (pre-emphasis-fields format, 12 formatting
+    /// fields + length) fails the new field-count check and falls back to
+    /// plain text, the same as any other malformed metadata — not a silent
+    /// misread of the two appended fields.
+    #[test]
+    fn rejects_pre_emphasis_field_run_record() {
+        let legacy_fields = ["true", "false", "false", "false", "false", "false", "", "0", "", "", "false", ""];
+        let legacy = format!("{}\x1f{}", legacy_fields.join("\x1f"), 2);
+        assert_eq!(decode(&legacy, "hi"), None);
     }
 
     /// Metadata written before the paragraph section existed has no `\x1d`,

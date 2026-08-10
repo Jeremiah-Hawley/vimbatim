@@ -2894,6 +2894,7 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     if run.double_underline { el = el.underline(); }
     if run.strikethrough { el = el.line_through(); }
     // Note: box_format is applied at the line level in render_line(), not here at the run level
+    if run.emphasis_boxed { el = el.border_1().border_color(rgb(pal.text)); }
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
         let text_hex = run.color.as_deref()

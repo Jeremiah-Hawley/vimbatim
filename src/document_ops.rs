@@ -388,6 +388,12 @@ pub enum FormatOp {
     Box(bool),
     /// The debate style marker (`Run.style`), or `None` to clear it.
     Style(Option<crate::docx_parser::CardStyle>),
+    /// The Emphasis button's own marker (`Run.emphasis`), independent of
+    /// whichever of Bold/Underline/`Box` it also applied.
+    Emphasis(bool),
+    /// The small inline emphasis box (`Run.emphasis_boxed`), distinct from
+    /// `Box`'s paragraph-wide Pocket box.
+    EmphasisBox(bool),
     /// Clears every character-formatting field (bold/italic/underline/
     /// highlight/font/color) back to the unformatted default, and size to
     /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
@@ -651,6 +657,8 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
         FormatOp::Color(color) => run.color = color.clone(),
         FormatOp::Box(b) => run.box_format = *b,
         FormatOp::Style(style) => run.style = *style,
+        FormatOp::Emphasis(b) => run.emphasis = *b,
+        FormatOp::EmphasisBox(b) => run.emphasis_boxed = *b,
         FormatOp::ClearAll { default_size } => {
             run.bold = false;
             run.italic = false;
@@ -667,6 +675,8 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
             // Cite?" while looking like body text.
             run.style = None;
             run.box_format = false;
+            run.emphasis = false;
+            run.emphasis_boxed = false;
         }
     }
 }
@@ -1080,6 +1090,8 @@ mod tests {
             size: 24,
             font: Some("Georgia".into()),
             color: Some("FF0000".into()),
+            emphasis: true,
+            emphasis_boxed: true,
             ..Run::default()
         }])];
         apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll { default_size: 22 });
@@ -1088,6 +1100,19 @@ mod tests {
         assert_eq!(r.size, 22);
         assert_eq!(r.font, None);
         assert_eq!(r.color, None);
+        assert!(!r.emphasis && !r.emphasis_boxed);
+    }
+
+    #[test]
+    fn test_apply_emphasis_and_emphasis_box_ops() {
+        let mut paragraphs = vec![para(vec![run("hello")])];
+        apply_formatting(&mut paragraphs, 0, 5, FormatOp::Emphasis(true));
+        apply_formatting(&mut paragraphs, 0, 5, FormatOp::EmphasisBox(true));
+        let r = &paragraphs[0].runs[0];
+        assert!(r.emphasis && r.emphasis_boxed);
+
+        apply_formatting(&mut paragraphs, 0, 5, FormatOp::EmphasisBox(false));
+        assert!(paragraphs[0].runs[0].emphasis && !paragraphs[0].runs[0].emphasis_boxed);
     }
 
     #[test]

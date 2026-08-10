@@ -596,6 +596,15 @@ impl SettingsModal {
         cx.notify();
     }
 
+    fn adjust_emphasis_size(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let current = (s.emphasis_size_half_points / 2) as i32;
+            s.set_emphasis_size_points((current + delta).max(0) as u16);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let next = crate::state::clamp_spreading_wpm(
@@ -1624,6 +1633,8 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
     fn render_text_settings(
         &self,
         emphasis: (bool, bool, bool),
+        emphasis_change_size: bool,
+        emphasis_size_points: u16,
         shrink_points: u16,
         exception: String,
         custom_highlights: Vec<u32>,
@@ -1817,8 +1828,42 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                                         s.set_emphasis(bold, underline, !boxed);
                                         cx.notify();
                                     });
+                                })))
+                            .child(Self::checkbox("emphasis-change-size", "Change size", emphasis_change_size, p,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_emphasis_change_size(!emphasis_change_size);
+                                        cx.notify();
+                                    });
                                 }))),
-                    ),
+                    )
+                    .when(emphasis_change_size, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(Self::stepper_btn("emphasis-size-down", "−", p).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _ev, _window, cx| this.adjust_emphasis_size(-1, cx)),
+                                ))
+                                .child(
+                                    div()
+                                        .w(px(48.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_sm()
+                                        .text_color(rgb(p.text))
+                                        .child(format!("{emphasis_size_points} pt")),
+                                )
+                                .child(Self::stepper_btn("emphasis-size-up", "+", p).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _ev, _window, cx| this.adjust_emphasis_size(1, cx)),
+                                )),
+                        )
+                    }),
             )
             // ── Paste ─────────────────────────────────────────────────────
             .child(
@@ -2143,10 +2188,12 @@ impl Render for SettingsModal {
             .read(cx)
             .custom_colors(crate::state::CustomColorTarget::Highlight)
             .to_vec();
-        let (emphasis, paste_condense, paste_condense_pilcrow) = {
+        let (emphasis, emphasis_change_size, emphasis_size_points, paste_condense, paste_condense_pilcrow) = {
             let st = self.state.read(cx);
             (
                 (st.emphasis_bold, st.emphasis_underline, st.emphasis_box),
+                st.emphasis_change_size,
+                st.emphasis_size_half_points / 2,
                 st.paste_condense,
                 st.paste_condense_pilcrow,
             )
@@ -2312,6 +2359,8 @@ impl Render for SettingsModal {
                                     .when(!theme_preview && section == SettingsSection::TextSettings, |d| {
                                         d.child(self.render_text_settings(
                                             emphasis,
+                                            emphasis_change_size,
+                                            emphasis_size_points,
                                             shrink_points,
                                             exception.clone(),
                                             custom_highlights.clone(),

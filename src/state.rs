@@ -967,13 +967,18 @@ pub struct AppState {
     pub standardize_highlight_exception: String,
     /// Which run formatting the Emphasis command applies. Independent, not
     /// mutually exclusive — Word's own "emphasis" is whatever combination a
-    /// squad has standardised on.
-    ///
-    /// Stored and surfaced only; nothing reads these yet. The Emphasis button
-    /// still applies plain bold until it is wired up separately.
+    /// squad has standardised on. Read by `AppState::apply_emphasis_style`.
     pub emphasis_bold: bool,
     pub emphasis_underline: bool,
     pub emphasis_box: bool,
+    /// Whether Emphasis also resizes text to `emphasis_size_half_points` —
+    /// its own toggle rather than always-on, so emphasizing doesn't force a
+    /// size change on documents that don't want one.
+    pub emphasis_change_size: bool,
+    /// The point size (half-points, `Run.size`'s unit) Emphasis resizes text
+    /// to when `emphasis_change_size` is on. Same stepper-clamped shape as
+    /// `small_size_half_points`.
+    pub emphasis_size_half_points: u16,
     /// Whether the paste command (f2 / the ribbon's Paste button) condenses
     /// the pasted text, collapsing its newlines instead of keeping them.
     pub paste_condense: bool,
@@ -1327,6 +1332,13 @@ pub const DEFAULT_SPREADING_WPM: u32 = 300;
 /// Wide enough for any real "small text" convention, narrow enough that the
 /// stepper can't walk it somewhere unreadable.
 pub fn clamp_shrink_size_points(points: u16) -> u16 {
+    points.clamp(4, 48)
+}
+
+/// Clamps the Emphasis size (points) to the same bounds as Shrink size —
+/// same rationale: wide enough for any real convention, narrow enough that
+/// the stepper can't walk it somewhere unreadable.
+pub fn clamp_emphasis_size_points(points: u16) -> u16 {
     points.clamp(4, 48)
 }
 
@@ -1847,6 +1859,9 @@ impl AppState {
             emphasis_bold: load_bool_setting(settings_path, "emphasis_bold", true),
             emphasis_underline: load_bool_setting(settings_path, "emphasis_underline", false),
             emphasis_box: load_bool_setting(settings_path, "emphasis_box", false),
+            emphasis_change_size: load_bool_setting(settings_path, "emphasis_change_size", false),
+            emphasis_size_half_points:
+                clamp_emphasis_size_points(load_font_size_half_points(settings_path, "emphasis_size", 24) / 2) * 2,
             paste_condense: load_bool_setting(settings_path, "paste_condense", false),
             paste_condense_pilcrow: load_bool_setting(settings_path, "paste_condense_pilcrow", false),
             settings_path: settings_path.to_path_buf(),
@@ -4117,6 +4132,20 @@ impl AppState {
         self.save_setting("small_size", &points.to_string());
     }
 
+    /// The size Emphasis resizes text to when `emphasis_change_size` is on,
+    /// in points. Same half-points-internally/points-on-disk shape as
+    /// `set_shrink_size_points`.
+    pub fn set_emphasis_size_points(&mut self, points: u16) {
+        let points = clamp_emphasis_size_points(points);
+        self.emphasis_size_half_points = points * 2;
+        self.save_setting("emphasis_size", &points.to_string());
+    }
+
+    pub fn set_emphasis_change_size(&mut self, on: bool) {
+        self.emphasis_change_size = on;
+        self.save_setting("emphasis_change_size", if on { "true" } else { "false" });
+    }
+
     /// Sets the current highlight color and persists it.
     ///
     /// Called when a color is chosen from the ribbon's HL Color dropdown —
@@ -4456,6 +4485,82 @@ impl AppState {
                 crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
             }
             tab.is_modified = true;
+        }
+    }
+
+    /// Applies whichever combination of bold/underline/box the Emphasis
+    /// settings currently specify (plus the configured size, when
+    /// `emphasis_change_size` is on), and marks every touched run with the
+    /// `Emphasis`/`EmphasisBox` markers so `remove_emphasis` can find it
+    /// again later.
+    ///
+    /// Deliberately does not go through `apply_formatting_to_selection`:
+    /// that entry point applies `toggled_off(&op)` instead of `op` when the
+    /// whole range is already in that state (Word's re-click-to-toggle-off
+    /// convention). Reusing it here would mean clicking Emphasis on text
+    /// that's already bold — inside a Tag, say — un-bolds it instead of
+    /// emphasizing it. Calling `apply_formatting` directly per attribute
+    /// sidesteps that, and collapses what would otherwise be up to 6 undo
+    /// entries per click (one per `apply_formatting_to_selection` call) into
+    /// one `push_undo_snapshot` for the whole operation.
+    ///
+    /// Also deliberately does not arm `pending_format` for the no-selection
+    /// case — same reasoning `apply_formatting_to_line` already documents
+    /// for its own multi-op card-style sequences: `pending_format` is a
+    /// single slot, so the last of several `apply_formatting_to_selection`
+    /// calls would silently win and the rest would be lost to the next
+    /// keystroke, and a previous version of that exact bug leaked
+    /// indefinitely across lines.
+    pub fn apply_emphasis_style(&mut self) {
+        let ranges: Option<Vec<(usize, usize)>> = self.tabs.get(self.active_tab).and_then(|t| {
+            if !t.similar_ranges.is_empty() {
+                Some(t.similar_ranges.clone())
+            } else {
+                t.selection.map(|(a, f)| vec![(a.min(f), a.max(f))])
+            }
+        });
+
+        let bold = self.emphasis_bold;
+        let underline = self.emphasis_underline;
+        let boxed = self.emphasis_box;
+        let size = self.emphasis_change_size.then_some(self.emphasis_size_half_points);
+
+        let apply_all = |paragraphs: &mut Vec<Paragraph>, start: usize, end: usize| {
+            if bold { apply_formatting(paragraphs, start, end, FormatOp::Bold(true)); }
+            if underline { apply_formatting(paragraphs, start, end, FormatOp::Underline(true)); }
+            // Not `FormatOp::Box` — that's Pocket's paragraph-wide box
+            // (`has_box`/`slot_count_for_paragraph` in text_editor.rs both
+            // read `run.box_format`, not `emphasis_boxed`), which would wrap
+            // the whole paragraph and reserve extra row height for what's
+            // meant to be a small inline span.
+            if let Some(size) = size { apply_formatting(paragraphs, start, end, FormatOp::FontSize(size)); }
+            apply_formatting(paragraphs, start, end, FormatOp::Emphasis(true));
+            if boxed { apply_formatting(paragraphs, start, end, FormatOp::EmphasisBox(true)); }
+        };
+
+        match ranges {
+            Some(ranges) => {
+                self.push_undo_snapshot();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    for &(start, end) in &ranges {
+                        apply_all(&mut tab.paragraphs, start, end);
+                    }
+                    tab.is_modified = true;
+                }
+            }
+            None => {
+                let Some(tab) = self.tabs.get(self.active_tab) else { return };
+                let cursor = tab.cursor;
+                let content_len = tab.content.len();
+                if cursor < content_len {
+                    let next_char_boundary = char_right(&tab.content, cursor);
+                    self.push_undo_snapshot();
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        apply_all(&mut tab.paragraphs, cursor, next_char_boundary);
+                        tab.is_modified = true;
+                    }
+                }
+            }
         }
     }
 
@@ -5138,35 +5243,24 @@ impl AppState {
         })
     }
 
-    /// Doc Menu → Remove emphasis: clears bold/underline/box from any run
-    /// whose formatting matches the Emphasis button's own configured
-    /// combination (`emphasis_bold`/`emphasis_underline`/`emphasis_box`)
-    /// *exactly* — highlight doesn't factor in, so a highlighted emphasis
-    /// run is fair game exactly like a plain one. Scope is the active
-    /// selection, or the whole document with none, same as its three
-    /// siblings below.
+    /// Doc Menu → Remove emphasis: clears bold/underline/box (and the
+    /// emphasis markers themselves) from any run carrying `Run.emphasis` —
+    /// the marker `apply_emphasis_style` sets, not a guess from formatting.
+    /// Scope is the active selection, or the whole document with none, same
+    /// as its three siblings below.
     ///
-    /// Runs carrying a card-style marker (Tag/Cite/Analytic — Pocket/Hat/
-    /// Block too, via `apply_card_style`'s `FormatOp::Style`) are excluded
-    /// even when their formatting happens to coincide: Emphasis itself has
-    /// no marker of its own, so "exactly that formatting" has to mean
-    /// *unstyled* text, or emphasis configured to bold-only would eat every
-    /// Tag in the document.
+    /// Marker-only, with no fallback to matching bold/underline/box
+    /// combinations directly: the old heuristic couldn't tell manually-bolded
+    /// plain text from Emphasis-applied text (neither had a marker) and could
+    /// silently strip the former. The tradeoff is that text emphasized before
+    /// this marker existed has none, and won't be caught here until
+    /// re-emphasized once.
+    ///
+    /// Font size is left untouched — nothing here tracks what a run's size
+    /// was before emphasis touched it, so there's nothing correct to revert
+    /// to.
     pub fn remove_emphasis(&mut self) {
-        let (want_bold, want_underline, want_box) =
-            (self.emphasis_bold, self.emphasis_underline, self.emphasis_box);
-        // All three off means Emphasis applies no formatting at all — matching
-        // "exactly that" would otherwise mean every plain unstyled run in the
-        // document, which is not what this command is for.
-        if !want_bold && !want_underline && !want_box {
-            return;
-        }
-        let matches = |r: &Run| {
-            r.style.is_none()
-                && r.bold == want_bold
-                && r.underline == want_underline
-                && r.box_format == want_box
-        };
+        let matches = |r: &Run| r.emphasis;
 
         let Some((start, end)) = self.selection_or_whole_document() else { return };
         if start >= end {
@@ -5197,6 +5291,8 @@ impl AppState {
                         run.bold = false;
                         run.underline = false;
                         run.box_format = false;
+                        run.emphasis = false;
+                        run.emphasis_boxed = false;
                     }
                     cumulative = run_end;
                 }
@@ -9320,6 +9416,8 @@ mod tests {
             emphasis_bold: true,
             emphasis_underline: false,
             emphasis_box: false,
+            emphasis_change_size: false,
+            emphasis_size_half_points: 24,
             paste_condense: false,
             paste_condense_pilcrow: false,
             // A temp file, never the real ~/.vimbatim/settings.conf — see
@@ -10089,6 +10187,27 @@ mod tests {
         assert_eq!(state.small_size_half_points, 96); // 48pt ceiling
     }
 
+    #[test]
+    fn emphasis_size_setter_stores_half_points_and_clamps() {
+        let mut state = make_state("", 0, None);
+
+        state.set_emphasis_size_points(8);
+        assert_eq!(state.emphasis_size_half_points, 16, "stored in half-points");
+
+        state.set_emphasis_size_points(0);
+        assert_eq!(state.emphasis_size_half_points, 8); // 4pt floor
+        state.set_emphasis_size_points(999);
+        assert_eq!(state.emphasis_size_half_points, 96); // 48pt ceiling
+    }
+
+    #[test]
+    fn emphasis_change_size_setter_persists() {
+        let mut state = make_state("", 0, None);
+        assert!(!state.emphasis_change_size);
+        state.set_emphasis_change_size(true);
+        assert!(state.emphasis_change_size);
+    }
+
     /// Shrink applies whatever the setting currently says, not a fixed size.
     #[test]
     fn shrink_uses_the_configured_size() {
@@ -10115,7 +10234,8 @@ mod tests {
         std::fs::write(
             &path,
             "[FORMATTING]\nhighlight_color=cyan\n\n[TEXT]\nemphasis_bold=false\n\
-             emphasis_underline=true\nemphasis_box=true\npaste_condense=true\n\
+             emphasis_underline=true\nemphasis_box=true\nemphasis_change_size=true\n\
+             emphasis_size=18\npaste_condense=true\n\
              paste_condense_pilcrow=true\n",
         )
         .unwrap();
@@ -10124,8 +10244,10 @@ mod tests {
         assert!(!load_bool_setting(&path, "emphasis_bold", true));
         assert!(load_bool_setting(&path, "emphasis_underline", false));
         assert!(load_bool_setting(&path, "emphasis_box", false));
+        assert!(load_bool_setting(&path, "emphasis_change_size", false));
         assert!(load_bool_setting(&path, "paste_condense", false));
         assert!(load_bool_setting(&path, "paste_condense_pilcrow", false));
+        assert_eq!(load_font_size_half_points(&path, "emphasis_size", 24), 36, "18pt = 36 half-points");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10217,6 +10339,102 @@ mod tests {
 
         state.set_emphasis(false, true, true);
         assert!(!state.emphasis_bold && state.emphasis_underline && state.emphasis_box);
+    }
+
+    #[test]
+    fn apply_emphasis_style_applies_exactly_the_configured_combination() {
+        let mut state = make_state("hello", 0, None);
+        state.set_emphasis(true, false, true); // bold + box, no underline
+        state.tabs[0].selection = Some((0, 5));
+
+        state.apply_emphasis_style();
+
+        let r = &state.tabs[0].paragraphs[0].runs[0];
+        assert!(r.bold && !r.underline);
+        // Emphasis's "Box" is the small inline border (`emphasis_boxed`),
+        // never Pocket's paragraph-wide box (`box_format`) — regression
+        // guard for a bug where this called `FormatOp::Box(true)` and wrapped
+        // the whole paragraph instead.
+        assert!(!r.box_format, "emphasis must never set Pocket's paragraph-wide box");
+        assert!(r.emphasis && r.emphasis_boxed);
+        assert_eq!(r.size, 0, "emphasis_change_size is off by default");
+    }
+
+    #[test]
+    fn apply_emphasis_style_applies_the_configured_size_only_when_change_size_is_on() {
+        let mut state = make_state("hello", 0, None);
+        state.set_emphasis(false, false, false);
+        state.set_emphasis_change_size(true);
+        state.set_emphasis_size_points(18);
+        state.tabs[0].selection = Some((0, 5));
+
+        state.apply_emphasis_style();
+
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].size, 36);
+    }
+
+    /// The bug `apply_cite_style`'s pattern would have carried over:
+    /// re-clicking Emphasis on text already bold (e.g. inside a Tag) must
+    /// emphasize it, not toggle bold back off.
+    #[test]
+    fn apply_emphasis_style_does_not_toggle_off_already_bold_text() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "hello".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            }],
+            0,
+        );
+        state.set_emphasis(true, false, false);
+        state.tabs[0].selection = Some((0, 5));
+
+        state.apply_emphasis_style();
+
+        let r = &state.tabs[0].paragraphs[0].runs[0];
+        assert!(r.bold, "already-bold text must stay bold, not toggle off");
+        assert!(r.emphasis);
+    }
+
+    /// Emphasizing a phrase inside a Block must not erase the Block marker —
+    /// the exact landmine that ruled out modeling Emphasis as a `CardStyle`.
+    #[test]
+    fn apply_emphasis_style_preserves_an_existing_card_style_marker() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run {
+                    text: "evidence text".into(),
+                    bold: true,
+                    style: Some(CardStyle::Block),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            }],
+            0,
+        );
+        state.set_emphasis(false, true, false);
+        state.tabs[0].selection = Some((0, 8)); // "evidence"
+
+        state.apply_emphasis_style();
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(runs[0].emphasis && runs[0].style == Some(CardStyle::Block));
+    }
+
+    #[test]
+    fn apply_emphasis_style_pushes_exactly_one_undo_entry() {
+        let mut state = make_state("hello", 0, None);
+        state.set_emphasis(true, true, true);
+        state.set_emphasis_change_size(true);
+        state.tabs[0].selection = Some((0, 5));
+        let undo_depth_before = state.tabs[0].undo_stack.len();
+
+        state.apply_emphasis_style();
+
+        assert_eq!(state.tabs[0].undo_stack.len(), undo_depth_before + 1);
     }
 
     // ── Read mode ──────────────────────────────────────────────────────────
@@ -15995,12 +16213,23 @@ mod tests {
 
     // ── Doc Menu cleanup commands ───────────────────────────────────────────
 
+    /// Marker-only removal: an Emphasis-marked run is cleared, but a run
+    /// that merely happens to look the same (manually bolded plain text, or
+    /// a Tag's own bold) is left alone — the exact bug the old
+    /// formatting-match heuristic had, since neither case ever carried a
+    /// real marker to tell them apart.
     #[test]
-    fn remove_emphasis_strips_bold_from_unstyled_runs_only() {
+    fn remove_emphasis_strips_only_marked_runs() {
         let paragraphs = vec![
             para_plain("plain"),
             Paragraph {
-                runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
+                runs: vec![Run { text: "manually bold".into(), bold: true, ..Run::default() }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run { text: "emphasized".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
@@ -16008,38 +16237,41 @@ mod tests {
             tag_para("a tag"),
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        // Default settings.conf: emphasis_bold=true, underline/box=false.
         state.remove_emphasis();
 
-        assert!(!state.tabs[0].paragraphs[1].runs[0].bold, "bold-only run should be cleared");
-        assert!(state.tabs[0].paragraphs[2].runs[0].bold, "a Tag's own bold must survive");
+        assert!(state.tabs[0].paragraphs[1].runs[0].bold, "manually-bolded text must survive");
+        assert!(!state.tabs[0].paragraphs[2].runs[0].bold, "the marked emphasis run should be cleared");
+        assert!(!state.tabs[0].paragraphs[2].runs[0].emphasis);
+        assert!(state.tabs[0].paragraphs[3].runs[0].bold, "a Tag's own bold must survive");
     }
 
     #[test]
-    fn remove_emphasis_is_a_no_op_when_nothing_is_configured() {
-        let paragraphs = vec![para_plain("plain text")];
+    fn remove_emphasis_is_a_no_op_when_nothing_is_marked() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "plain text".into(), bold: true, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        state.emphasis_bold = false;
-        state.emphasis_underline = false;
-        state.emphasis_box = false;
         let before = state.tabs[0].undo_stack.len();
 
         state.remove_emphasis();
 
-        assert_eq!(state.tabs[0].undo_stack.len(), before, "no formatting is defined, so nothing to undo");
+        assert_eq!(state.tabs[0].undo_stack.len(), before, "no run is marked, so nothing to undo");
     }
 
     #[test]
     fn remove_emphasis_respects_an_active_selection() {
         let paragraphs = vec![
             Paragraph {
-                runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }],
+                runs: vec![Run { text: "one".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
             Paragraph {
-                runs: vec![Run { text: "two".into(), bold: true, ..Run::default() }],
+                runs: vec![Run { text: "two".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
