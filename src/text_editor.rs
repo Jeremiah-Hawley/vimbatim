@@ -1778,31 +1778,6 @@ impl Render for TextEditor {
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
-                // TEMPORARY diagnostic for the "click near bottom of a large
-                // file lands several lines above the pointer" bug report —
-                // logs both the old (independently computed) and new
-                // (GPUI-measured, now actually used) row heights and the
-                // (line, col) each would resolve to, for one before/after
-                // comparison from a single device click. Remove once
-                // confirmed fixed on device.
-                {
-                    let local_y = ev.position.y.as_f32() - bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_y;
-                    let assumed_row_height = line_height_px(font_size_px) * zoom;
-                    let old_display_row = line_for_y(local_y, assumed_row_height, display_to_wrap.len());
-                    let old_visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, old_display_row);
-                    let new_display_row = line_for_y(local_y, row_height_px, display_to_wrap.len());
-                    let new_visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, new_display_row);
-                    crate::state::log_line(&format!(
-                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} \
-                        assumed_row_height={:.4} old_display_row={} old_is_content={:?} old_visual_row={} old_rows[visual_row]={:?} \
-                        row_height_px={:.4} new_display_row={} new_is_content={:?} new_visual_row={} new_rows[visual_row]={:?} \
-                        display_len={} rows_len={} -> line={} col={}",
-                        ev.position.y.as_f32(), bounds.origin.y.as_f32(), bounds.size.height.as_f32(), scroll_y, local_y,
-                        assumed_row_height, old_display_row, display_to_wrap.get(old_display_row).map(|s| s.is_some()), old_visual_row, rows.get(old_visual_row),
-                        row_height_px, new_display_row, display_to_wrap.get(new_display_row).map(|s| s.is_some()), new_visual_row, rows.get(new_visual_row),
-                        display_to_wrap.len(), rows.len(), line, col
-                    ));
-                }
                 let click_count = ev.click_count;
                 this.state.update(cx, |state, cx| {
                     state.editor_context_menu = None;

@@ -2502,6 +2502,18 @@ impl AppState {
         self.pending_focus_editor = Some(Pane::Primary);
     }
 
+    /// Toggles editing focus between the primary and secondary pane. A
+    /// no-op while unsplit — `focus_pane(Secondary)` already early-returns
+    /// via `pane_tab_index(Secondary)` returning `None` when
+    /// `!self.split_view`, so this needs no guard of its own.
+    pub fn switch_active_pane(&mut self) {
+        let other = match self.focused_pane {
+            Pane::Primary => Pane::Secondary,
+            Pane::Secondary => Pane::Primary,
+        };
+        self.focus_pane(other);
+    }
+
     pub fn open_file(&mut self, path: PathBuf) {
         /*
          * Opens a file in a new tab, parsing its docx content immediately.
@@ -5685,6 +5697,17 @@ impl AppState {
         self.refresh_file_tree();
         self.open_file(path);
         Ok(())
+    }
+
+    /// The "New File" keybind/palette entry — same `create_new_docx_in`
+    /// the sidebar's own "+" button (`FileExplorer::create_new_file`)
+    /// calls, just resolving `dir = working_directory` itself since a
+    /// global keybind handler has no clicked file-tree node to target.
+    pub fn create_new_file_in_working_directory(&mut self) {
+        let dir = self.working_directory.clone();
+        if let Err(e) = self.create_new_docx_in(&dir) {
+            log_line(&format!("[new file] failed to create new file in {}: {}", dir.display(), e));
+        }
     }
 
     // ── File explorer right-click file operations ───────────────────────────
@@ -9319,6 +9342,24 @@ mod tests {
             sidebar_before_read_mode: true,
         };
         state
+    }
+
+    #[test]
+    fn test_switch_active_pane_toggles_and_no_ops_while_unsplit() {
+        let mut state = make_state("hello", 0, None);
+        // Unsplit: nothing to switch to, so this stays on Primary rather
+        // than reporting a phantom Secondary focus.
+        state.switch_active_pane();
+        assert_eq!(state.focused_pane, Pane::Primary);
+
+        state.open_split();
+        assert_eq!(state.focused_pane, Pane::Secondary);
+
+        state.switch_active_pane();
+        assert_eq!(state.focused_pane, Pane::Primary);
+
+        state.switch_active_pane();
+        assert_eq!(state.focused_pane, Pane::Secondary);
     }
 
     /// Mirrors `text_editor.rs`'s `process_key`: records the keystroke

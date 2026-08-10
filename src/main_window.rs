@@ -21,6 +21,7 @@ use crate::keybinds::{
     CommandPaletteAction, PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
+    OpenFileAction, OpenFolderAction, SwitchActivePaneAction, NewFileAction, RefreshFileTreeAction,
 };
 use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
@@ -360,6 +361,77 @@ impl MainWindow {
                 });
             })
             .detach();
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &OpenFileAction, cx| {
+            // Same native picker + `AppState::open_file` as the toolbar's own
+            // "Open File" button (`app_toolbar.rs`) — this handler exists so
+            // the same action is reachable from a keybind and the command
+            // palette too. No `window` in scope here (a global `on_action`,
+            // not a view's `cx.listener`), so this uses plain `cx.spawn`
+            // rather than `cx.spawn_in`, same as `SaveAsAction` above.
+            let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: None,
+            });
+            let state = s.clone();
+            cx.spawn(async move |cx| {
+                let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                    return;
+                };
+                let Some(file) = paths.pop() else {
+                    return;
+                };
+                let _ = state.update(cx, |st, cx| {
+                    st.open_file(file);
+                    cx.notify();
+                });
+            })
+            .detach();
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &OpenFolderAction, cx| {
+            // Same native picker + `AppState::set_working_directory` as the
+            // toolbar's own "Open Folder" button.
+            let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: None,
+            });
+            let state = s.clone();
+            cx.spawn(async move |cx| {
+                let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                    return;
+                };
+                let Some(dir) = paths.pop() else {
+                    return;
+                };
+                let _ = state.update(cx, |st, cx| {
+                    st.set_working_directory(dir);
+                    cx.notify();
+                });
+            })
+            .detach();
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &SwitchActivePaneAction, cx| {
+            s.update(cx, |st, cx| { st.switch_active_pane(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &NewFileAction, cx| {
+            s.update(cx, |st, cx| { st.create_new_file_in_working_directory(); cx.notify(); });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &RefreshFileTreeAction, cx| {
+            s.update(cx, |st, cx| { st.refresh_file_tree(); cx.notify(); });
         });
 
         // Ctrl+F and Ctrl+H open the same panel — it always carries both a

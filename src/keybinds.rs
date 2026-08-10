@@ -221,6 +221,11 @@ pub enum KeybindAction {
     NextTab,
     PrevTab,
     CommandPalette,
+    OpenFile,
+    OpenFolder,
+    SwitchActivePane,
+    NewFile,
+    RefreshFileTree,
 }
 
 impl KeybindAction {
@@ -237,6 +242,8 @@ impl KeybindAction {
             ZoomIn, ZoomOut, ZoomReset,
             NextTab, PrevTab,
             CommandPalette,
+            OpenFile, OpenFolder, SwitchActivePane,
+            NewFile, RefreshFileTree,
         ]
     }
 
@@ -289,6 +296,11 @@ impl KeybindAction {
             NextTab => "Next Tab",
             PrevTab => "Previous Tab",
             CommandPalette => "Command Palette",
+            OpenFile => "Open File",
+            OpenFolder => "Open Folder",
+            SwitchActivePane => "Switch Active Pane",
+            NewFile => "New File",
+            RefreshFileTree => "Refresh File Tree",
         }
     }
 
@@ -298,7 +310,8 @@ impl KeybindAction {
         match self {
             ToggleSettings | ToggleSidebar | NewTab | CloseTab | ReopenClosedTab | Save | SaveAs
                 | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab
-                | CommandPalette => C::General,
+                | CommandPalette | OpenFile | OpenFolder | SwitchActivePane
+                | NewFile | RefreshFileTree => C::General,
             Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
                 | SelectSimilarFormatting => C::Editing,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
@@ -354,6 +367,11 @@ impl KeybindAction {
             NextTab => "next_tab",
             PrevTab => "prev_tab",
             CommandPalette => "command_palette",
+            OpenFile => "open_file",
+            OpenFolder => "open_folder",
+            SwitchActivePane => "switch_active_pane",
+            NewFile => "new_file",
+            RefreshFileTree => "refresh_file_tree",
         }
     }
 
@@ -419,6 +437,23 @@ impl KeybindAction {
             PrevTab => KeyCombo::new(true, true, false, "tab"),
             // Ctrl+P is unclaimed by every other default combo.
             CommandPalette => KeyCombo::new(true, false, false, "p"),
+            // All three ship unbound: Open File/Open Folder already have a
+            // toolbar button and no obvious free combo (Ctrl+O collides with
+            // no existing default, but claiming it unprompted for a rarely-
+            // keyboard-driven action isn't this task's call to make), and
+            // Switch Active Pane only means anything once split view is
+            // open — same "ships unbound, user picks one" reasoning as
+            // Analytic/SelectSimilarFormatting above.
+            OpenFile => KeyCombo::new(false, false, false, ""),
+            OpenFolder => KeyCombo::new(false, false, false, ""),
+            SwitchActivePane => KeyCombo::new(false, false, false, ""),
+            // Same reasoning: both already have a sidebar button, and
+            // NewTab already owns Ctrl+N for a *blank tab*, which this is
+            // deliberately not (it writes a new .docx to the working
+            // directory) — reusing a similar combo for a similarly-named
+            // but different action would be the confusing choice.
+            NewFile => KeyCombo::new(false, false, false, ""),
+            RefreshFileTree => KeyCombo::new(false, false, false, ""),
         }
     }
 
@@ -689,6 +724,8 @@ actions!(
         DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
         ZoomInAction, ZoomOutAction, ZoomResetAction,
         NextTabAction, PrevTabAction, CommandPaletteAction,
+        OpenFileAction, OpenFolderAction, SwitchActivePaneAction,
+        NewFileAction, RefreshFileTreeAction,
     ]
 );
 
@@ -762,6 +799,11 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     bindings.extend(bind_all(keybinds, NextTab, NextTabAction));
     bindings.extend(bind_all(keybinds, PrevTab, PrevTabAction));
     bindings.extend(bind_all(keybinds, CommandPalette, CommandPaletteAction));
+    bindings.extend(bind_all(keybinds, OpenFile, OpenFileAction));
+    bindings.extend(bind_all(keybinds, OpenFolder, OpenFolderAction));
+    bindings.extend(bind_all(keybinds, SwitchActivePane, SwitchActivePaneAction));
+    bindings.extend(bind_all(keybinds, NewFile, NewFileAction));
+    bindings.extend(bind_all(keybinds, RefreshFileTree, RefreshFileTreeAction));
     bindings.push(KeyBinding::new("f9", UnderlineAction, None));
     // A second, fixed binding for New Document — Ctrl+T is the
     // browser-tab convention, not user-configurable like NewTab's own
@@ -824,6 +866,11 @@ pub fn action_for(action: KeybindAction) -> Box<dyn Action> {
         NextTab => Box::new(NextTabAction),
         PrevTab => Box::new(PrevTabAction),
         CommandPalette => Box::new(CommandPaletteAction),
+        OpenFile => Box::new(OpenFileAction),
+        OpenFolder => Box::new(OpenFolderAction),
+        SwitchActivePane => Box::new(SwitchActivePaneAction),
+        NewFile => Box::new(NewFileAction),
+        RefreshFileTree => Box::new(RefreshFileTreeAction),
     }
 }
 

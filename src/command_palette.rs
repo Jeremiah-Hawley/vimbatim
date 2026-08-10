@@ -551,6 +551,17 @@ mod tests {
         assert!(has("Align Center"), "ribbon-only commands missing");
         assert!(has("Toggle Spellcheck"), "settings toggles missing");
         assert!(has("Open Tabroom"), "links missing");
+        // Bug report: Open File, Open Folder and Switch Active Pane were
+        // reachable only from the toolbar button / not reachable at all
+        // (pane switching had no method), missing from both the palette and
+        // Settings → Keybinds. Fixed by making them real `KeybindAction`
+        // variants, which block 1's loop over `KeybindAction::all()` above
+        // already surfaces automatically — this pins that down.
+        assert!(has("Open File"), "Open File missing from the palette");
+        assert!(has("Open Folder"), "Open Folder missing from the palette");
+        assert!(has("Switch Active Pane"), "Switch Active Pane missing from the palette");
+        assert!(has("New File"), "New File missing from the palette");
+        assert!(has("Refresh File Tree"), "Refresh File Tree missing from the palette");
     }
 
     #[test]
