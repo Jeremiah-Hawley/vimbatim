@@ -481,7 +481,7 @@ impl TextEditor {
         let focus_handle = cx.focus_handle();
         let uniform_list_scroll_handle = UniformListScrollHandle::new();
         let scroll_handle = uniform_list_scroll_handle.0.borrow().base_handle.clone();
-        let auto_scroller = AutoScroller::new(scroll_handle.clone(), state.clone());
+        let auto_scroller = AutoScroller::new(scroll_handle.clone(), uniform_list_scroll_handle.clone(), state.clone());
         TextEditor {
             state,
             focus_handle,
@@ -1776,39 +1776,31 @@ impl Render for TextEditor {
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 // TEMPORARY diagnostic for the "click near bottom of a large
                 // file lands several lines above the pointer" bug report —
-                // duplicates line_col_from_mouse_position's own local_y/
-                // display_row/visual_row math so we can see which stage
-                // diverges, without changing that function's signature.
-                // Remove once the root cause is confirmed.
+                // logs both the old (independently computed) and new
+                // (GPUI-measured, now actually used) row heights and the
+                // (line, col) each would resolve to, for one before/after
+                // comparison from a single device click. Remove once
+                // confirmed fixed on device.
                 {
                     let local_y = ev.position.y.as_f32() - bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_y;
                     let assumed_row_height = line_height_px(font_size_px) * zoom;
-                    let display_row = line_for_y(local_y, assumed_row_height, display_to_wrap.len());
-                    let visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, display_row);
-                    let is_content_row = display_to_wrap.get(display_row).map(|s| s.is_some());
-                    // GPUI's own measured per-row height, back-derived from
-                    // `content_size.height = item_height * item_count` and
-                    // `max_offset = content_size - viewport` — compared against
-                    // `assumed_row_height` (what click math divides local_y by)
-                    // to check whether they actually agree, per the advisor's
-                    // steer: a small per-row mismatch multiplies by row index,
-                    // so it'd be invisible near the top and large near the
-                    // bottom, matching the reported shape exactly.
-                    let max_offset_y = this.scroll_handle.max_offset().y.as_f32();
-                    let padded_viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
-                    let item_height_actual = if display_to_wrap.len() > 0 {
-                        (max_offset_y + padded_viewport_h) / display_to_wrap.len() as f32
-                    } else {
-                        0.0
-                    };
+                    let old_display_row = line_for_y(local_y, assumed_row_height, display_to_wrap.len());
+                    let old_visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, old_display_row);
+                    let new_display_row = line_for_y(local_y, row_height_px, display_to_wrap.len());
+                    let new_visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, new_display_row);
                     crate::state::log_line(&format!(
-                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} display_row={} is_content_row={:?} visual_row={} rows[visual_row]={:?} display_len={} rows_len={} max_offset_y={:.3} item_height_actual={:.4} assumed_row_height={:.4} -> line={} col={}",
+                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} \
+                        assumed_row_height={:.4} old_display_row={} old_is_content={:?} old_visual_row={} old_rows[visual_row]={:?} \
+                        row_height_px={:.4} new_display_row={} new_is_content={:?} new_visual_row={} new_rows[visual_row]={:?} \
+                        display_len={} rows_len={} -> line={} col={}",
                         ev.position.y.as_f32(), bounds.origin.y.as_f32(), bounds.size.height.as_f32(), scroll_y, local_y,
-                        display_row, is_content_row, visual_row, rows.get(visual_row), display_to_wrap.len(), rows.len(),
-                        max_offset_y, item_height_actual, assumed_row_height, line, col
+                        assumed_row_height, old_display_row, display_to_wrap.get(old_display_row).map(|s| s.is_some()), old_visual_row, rows.get(old_visual_row),
+                        row_height_px, new_display_row, display_to_wrap.get(new_display_row).map(|s| s.is_some()), new_visual_row, rows.get(new_visual_row),
+                        display_to_wrap.len(), rows.len(), line, col
                     ));
                 }
                 let click_count = ev.click_count;
@@ -1862,7 +1854,8 @@ impl Render for TextEditor {
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 if !has_selection {
                     this.state.update(cx, |state, _cx| state.set_cursor_from_line_col(line, col));
                 }
@@ -1921,7 +1914,8 @@ impl Render for TextEditor {
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 this.state.update(cx, |state, cx| {
                     state.extend_selection_to_line_col(line, col);
                     cx.notify();
@@ -3675,6 +3669,44 @@ fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
     ((y / line_height) as usize).min(num_rows - 1)
 }
 
+/// GPUI's own measured per-row pixel height — `UniformListScrollHandle`'s
+/// `last_item_size`, populated every `prepaint` from `measure_item`'s real
+/// Taffy layout of one row div — rather than independently recomputing
+/// `line_height_px(font_size_px) * zoom` and trusting it matches. Device
+/// logging from a real bug report showed those two diverging by a fraction
+/// of a pixel on the reporter's hardware (consistent with device-pixel
+/// snapping), which is exactly what `line_col_from_mouse_position` divides
+/// local Y by — see its own comment on the `row_height_px` param.
+///
+/// `ItemSize.item` is *not* one row's height — it's `padded_bounds.size`,
+/// the whole viewport box (confirmed against the vendored
+/// `uniform_list.rs`'s `prepaint`, `item: padded_bounds.size`). The real
+/// per-row height only recovers by dividing `ItemSize.contents.height`
+/// (`longest_item_size.height * item_count`, i.e. total content extent) by
+/// `item_count` — the same value this file's own `content_size.height =
+/// longest_item_size.height * self.item_count` computation is built from.
+/// `item_count` must be the same `display_to_wrap.len()` passed to
+/// `uniform_list(...)`, or this divides by the wrong count.
+///
+/// Shared by `TextEditor`'s own click/drag handlers and
+/// `AutoScroller::tick` (which resolves a cursor position during
+/// edge-scrolling), so neither can drift from the other. Falls back to the
+/// computed value before any layout has run yet (`last_item_size` is
+/// `None` until then) or when `item_count` is 0, same "not laid out yet"
+/// sentinel pattern `usable_wrap_width` already uses.
+pub(crate) fn real_row_height_px(handle: &UniformListScrollHandle, item_count: usize, font_size_px: f32, zoom: f32) -> f32 {
+    if item_count == 0 {
+        return line_height_px(font_size_px) * zoom;
+    }
+    handle
+        .0
+        .borrow()
+        .last_item_size
+        .map(|s| s.contents.height.as_f32() / item_count as f32)
+        .filter(|h| *h > 0.0)
+        .unwrap_or_else(|| line_height_px(font_size_px) * zoom)
+}
+
 pub(crate) fn line_col_from_mouse_position(
     position: Point<Pixels>,
     content_bounds: Bounds<Pixels>,
@@ -3684,6 +3716,18 @@ pub(crate) fn line_col_from_mouse_position(
     zoom: f32,
     font_size_px: f32,
     paragraphs: &[Paragraph],
+    // GPUI's own measured per-row pixel height (`real_row_height_px`),
+    // not `line_height_px(font_size_px) * zoom` recomputed here — bug report:
+    // clicking near the bottom of a large file landed the cursor several
+    // lines above the pointer. Root cause, confirmed via device logging: on
+    // the reporter's hardware, GPUI's `uniform_list` actually measured and
+    // positioned every row at a slightly different pixel height than this
+    // formula computes (consistent with device-pixel snapping) — a
+    // fraction-of-a-pixel-per-row error that's invisible near the top of a
+    // document and compounds, several rows deep, near the bottom of a long
+    // one. `font_size_px`/`zoom` are still used below for horizontal
+    // (per-character) sizing, which is unrelated and unaffected.
+    row_height_px: f32,
 ) -> (usize, usize) {
     /*
      * Converts a window-space mouse position into a (logical_line,
@@ -3715,7 +3759,7 @@ pub(crate) fn line_col_from_mouse_position(
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
     let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
-    let display_row = line_for_y(local_y, line_height_px(font_size_px) * zoom, display_to_wrap.len());
+    let display_row = line_for_y(local_y, row_height_px, display_to_wrap.len());
 
     // A click landing on a blank spacer slot (the empty space an oversized
     // row's content visually spills into) belongs to that row, not to
@@ -3893,7 +3937,7 @@ mod tests {
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
-        line_col_from_mouse_position,
+        line_col_from_mouse_position, real_row_height_px,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -4023,8 +4067,40 @@ mod tests {
         let position = point(px(16.0 + indent), px(0.0));
         let (line, col) = line_col_from_mouse_position(
             position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0, &paragraphs,
+            line_height_px(11.0),
         );
         assert_eq!((line, col), (0, 0));
+    }
+
+    /// Bug report: clicking near the bottom of a large file landed the
+    /// cursor several lines above the pointer. Root cause, confirmed via
+    /// device logging: GPUI's actual measured per-row height can differ
+    /// (by a fraction of a pixel — device-pixel snapping) from
+    /// `line_height_px(font_size_px) * zoom` recomputed independently, and
+    /// that per-row error compounds with row index. `real_row_height_px`
+    /// must prefer GPUI's own measurement once one exists.
+    #[test]
+    fn real_row_height_px_prefers_gpuis_measured_height_over_the_computed_one() {
+        let handle = gpui::UniformListScrollHandle::new();
+        let item_count = 100usize;
+        // Before any layout has run, there's nothing measured yet — falls
+        // back to the computed value.
+        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0), line_height_px(11.0));
+
+        // `ItemSize.item` is the *viewport's* box (`padded_bounds.size` in
+        // GPUI's own `prepaint`, confirmed against the vendored source), not
+        // one row's height — a stub that (wrongly) set `item.height` to the
+        // real row height would pass even if `real_row_height_px` read the
+        // wrong field, which is exactly the bug this test needs to catch.
+        // The real per-row height only recovers from `contents.height /
+        // item_count` (`contents.height = longest_item_size.height *
+        // item_count`), matching this reported bug's device data (measured
+        // 15.5 vs. computed ~15.71).
+        handle.0.borrow_mut().last_item_size = Some(gpui::ItemSize {
+            item: gpui::size(gpui::px(999.0), gpui::px(524.5)), // a viewport-sized box
+            contents: gpui::size(gpui::px(999.0), gpui::px(15.5 * item_count as f32)),
+        });
+        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0), 15.5);
     }
 
     #[test]

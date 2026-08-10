@@ -1,10 +1,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, Window};
+use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window};
 
 use crate::state::AppState;
-use crate::text_editor::{document_lines, expand_rows_for_display, line_col_from_mouse_position, visual_rows_for_viewport};
+use crate::text_editor::{document_lines, expand_rows_for_display, line_col_from_mouse_position, real_row_height_px, visual_rows_for_viewport};
 
 /// How close a click-drag has to get to the top/bottom of the viewport
 /// before auto-scroll kicks in.
@@ -60,13 +60,19 @@ fn clamp_scroll_offset(offset_y: f32, max_offset_y: f32) -> f32 {
 #[derive(Clone)]
 pub struct AutoScroller {
     scroll_handle: ScrollHandle,
+    // Shares the same underlying `Rc<RefCell<..>>` as the owning TextEditor's
+    // own copy (both are clones of the one `UniformListScrollHandle` created
+    // in `TextEditor::new()`) — so `real_row_height_px` here always reads the
+    // same GPUI-measured row height the editor's own click handlers do,
+    // rather than resolving a click position against a different height.
+    uniform_list_scroll_handle: UniformListScrollHandle,
     state: Entity<AppState>,
     last_mouse_position: Rc<Cell<Point<Pixels>>>,
     running: Rc<Cell<bool>>,
 }
 
 impl AutoScroller {
-    pub fn new(scroll_handle: ScrollHandle, state: Entity<AppState>) -> Self {
+    pub fn new(scroll_handle: ScrollHandle, uniform_list_scroll_handle: UniformListScrollHandle, state: Entity<AppState>) -> Self {
         /*
          * Constructs an idle AutoScroller. `scroll_handle` should be the
          * same handle the owning TextEditor tracks via `.track_scroll()`,
@@ -79,6 +85,7 @@ impl AutoScroller {
          */
         AutoScroller {
             scroll_handle,
+            uniform_list_scroll_handle,
             state,
             last_mouse_position: Rc::new(Cell::new(Point::default())),
             running: Rc::new(Cell::new(false)),
@@ -184,7 +191,8 @@ impl AutoScroller {
             &rows, &paragraphs, invisibility, cite_size, &folded_paras,
         );
         let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, font_size_px);
-        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+        let row_height_px = real_row_height_px(&self.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);
             cx.notify();
