@@ -2022,4 +2022,30 @@ mod tests {
         std::fs::remove_file(&snapshot).ok();
         std::fs::remove_dir(&dir).ok();
     }
+
+    /// Not a real test — a reusable probe for inspecting a specific real
+    /// .docx's paragraph structure (heading level, box_format, run sizes)
+    /// while chasing a click-position bug report. `#[ignore]`d so it never
+    /// runs in the normal suite, and skips cleanly if the file named here
+    /// isn't present (e.g. in CI, or once whoever's debugging is done with
+    /// it) rather than failing. Run with:
+    /// `cargo test --bin vimbatim diagnostic_dump_paragraphs -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn diagnostic_dump_paragraphs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("SeptOct-Kankee-Jeremiah.docx");
+        let Ok((paragraphs, _origin)) = parse_docx(&path) else {
+            eprintln!("skipping: {path:?} not found or unparsable");
+            return;
+        };
+        for (i, p) in paragraphs.iter().enumerate() {
+            let text: String = p.runs.iter().map(|r| r.text.as_str()).collect();
+            let sizes: Vec<u16> = p.runs.iter().map(|r| r.size).collect();
+            let boxed = p.runs.iter().any(|r| r.box_format);
+            println!(
+                "[{i}] heading={} align={:?} boxed={boxed} sizes={sizes:?} text={:?}",
+                p.heading, p.alignment, text.chars().take(70).collect::<String>()
+            );
+        }
+    }
 }

@@ -1785,12 +1785,30 @@ impl Render for TextEditor {
                 // Remove once the root cause is confirmed.
                 {
                     let local_y = ev.position.y.as_f32() - bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_y;
-                    let display_row = line_for_y(local_y, line_height_px(font_size_px) * zoom, display_to_wrap.len());
+                    let assumed_row_height = line_height_px(font_size_px) * zoom;
+                    let display_row = line_for_y(local_y, assumed_row_height, display_to_wrap.len());
                     let visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, display_row);
+                    let is_content_row = display_to_wrap.get(display_row).map(|s| s.is_some());
+                    // GPUI's own measured per-row height, back-derived from
+                    // `content_size.height = item_height * item_count` and
+                    // `max_offset = content_size - viewport` — compared against
+                    // `assumed_row_height` (what click math divides local_y by)
+                    // to check whether they actually agree, per the advisor's
+                    // steer: a small per-row mismatch multiplies by row index,
+                    // so it'd be invisible near the top and large near the
+                    // bottom, matching the reported shape exactly.
+                    let max_offset_y = this.scroll_handle.max_offset().y.as_f32();
+                    let padded_viewport_h = bounds.size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+                    let item_height_actual = if display_to_wrap.len() > 0 {
+                        (max_offset_y + padded_viewport_h) / display_to_wrap.len() as f32
+                    } else {
+                        0.0
+                    };
                     crate::state::log_line(&format!(
-                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} display_row={} visual_row={} display_len={} rows_len={} -> line={} col={}",
+                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} display_row={} is_content_row={:?} visual_row={} rows[visual_row]={:?} display_len={} rows_len={} max_offset_y={:.3} item_height_actual={:.4} assumed_row_height={:.4} -> line={} col={}",
                         ev.position.y.as_f32(), bounds.origin.y.as_f32(), bounds.size.height.as_f32(), scroll_y, local_y,
-                        display_row, visual_row, display_to_wrap.len(), rows.len(), line, col
+                        display_row, is_content_row, visual_row, rows.get(visual_row), display_to_wrap.len(), rows.len(),
+                        max_offset_y, item_height_actual, assumed_row_height, line, col
                     ));
                 }
                 let click_count = ev.click_count;
@@ -3710,8 +3728,29 @@ pub(crate) fn line_col_from_mouse_position(
     let (logical_line, row_start, row_end) = rows[visual_row];
     let para = paragraphs.get(logical_line);
     let spans = para.map(paragraph_run_char_spans).unwrap_or_default();
+    // Center/Right alignment (`render_line`'s `justify_center`/`justify_end`)
+    // indents a row's text from the row's raw left edge — `local_x` measures
+    // from that same raw edge, so without this every click on centered or
+    // right-aligned text resolved to a column shifted right by exactly the
+    // alignment's own indent. `x_for_col_in_row` is the same real-width
+    // summation `column_for_x_in_row` uses, so this indent always matches
+    // what actually got laid out, mixed run sizes included. `avail_width`
+    // mirrors `usable_wrap_width`, the same available width word-wrap itself
+    // assumed the row's content fills (`render()`'s `content_el` sits in a
+    // `.w_full()` row with the same padding subtracted).
+    use crate::docx_parser::Alignment;
+    let text_width = x_for_col_in_row(row_end - row_start, para, &spans, row_start, row_end, font_size_px, zoom);
+    let avail_width = usable_wrap_width(content_bounds.size.width.as_f32());
+    let indent = match para.map(|p| p.alignment) {
+        Some(Alignment::Center) => ((avail_width - text_width) / 2.0).max(0.0),
+        Some(Alignment::Right) => (avail_width - text_width).max(0.0),
+        // Left is flush already; Justify only stretches inter-word gaps
+        // (render()'s own comment calls it an approximation), which doesn't
+        // move the row's first character, so no indent applies there either.
+        _ => 0.0,
+    };
     let col_in_row = column_for_x_in_row(
-        local_x, para, &spans, row_start, row_end, font_size_px, zoom,
+        local_x - indent, para, &spans, row_start, row_end, font_size_px, zoom,
     );
     let col = row_start + col_in_row.min(row_end - row_start);
     (logical_line, col)
@@ -3854,6 +3893,7 @@ mod tests {
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
+        line_col_from_mouse_position,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -3958,6 +3998,33 @@ mod tests {
         assert_eq!(column_for_x_in_row(9999.0, None, &[], 0, 10, 11.0, 1.0), 10);
         // An empty row has no column but 0.
         assert_eq!(column_for_x_in_row(50.0, None, &[], 4, 4, 11.0, 1.0), 0);
+    }
+
+    /// Bug report: clicking a centered line placed the cursor to the right of
+    /// the pointer by roughly the centering indent. `line_col_from_mouse_position`
+    /// used to measure `local_x` from the row's raw left edge regardless of
+    /// alignment, which is only correct for `Alignment::Left`.
+    #[test]
+    fn line_col_from_mouse_position_accounts_for_center_alignment() {
+        use gpui::{point, px, size, Bounds};
+        let para = Paragraph { alignment: Alignment::Center, ..Paragraph::default() };
+        let paragraphs = vec![para];
+        let rows = vec![(0usize, 0usize, 10usize)]; // one row, 10 chars
+        let display_to_wrap = vec![Some(0usize)];
+        let content_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(232.0), px(100.0)));
+        // avail_width = 232 - 2*16 = 200; text_width = 10 * (11*CHAR_ADVANCE_RATIO) = 66;
+        // indent = (200 - 66) / 2 = 67.
+        let indent = 67.0;
+        // Clicking exactly at the text's real (indented) left edge must land on
+        // column 0. Without accounting for alignment, this same pixel — 67px
+        // right of the row's raw edge — would resolve as if it were 67px into
+        // a row that starts flush left, landing at the row's *last* column
+        // instead (67 / 6.6 ≈ 10, clamped to row_end - row_start).
+        let position = point(px(16.0 + indent), px(0.0));
+        let (line, col) = line_col_from_mouse_position(
+            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0, &paragraphs,
+        );
+        assert_eq!((line, col), (0, 0));
     }
 
     #[test]
