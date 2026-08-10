@@ -3915,8 +3915,32 @@ impl AppState {
         match selection {
             Some((a, f)) => {
                 let (start, end) = (a.min(f), a.max(f));
+                if start >= end {
+                    return;
+                }
                 self.push_undo_snapshot();
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let (start_para, start_run, start_char) =
+                        resolve_position(&tab.paragraphs, start);
+                    let (end_para, end_run, end_char) = resolve_position(&tab.paragraphs, end);
+                    // Split at the boundaries first — same pattern as
+                    // `apply_formatting` — so a run that only partially
+                    // overlaps the selection doesn't get skipped entirely.
+                    // End before start so start's already-resolved indices
+                    // aren't shifted by a run being inserted ahead of it.
+                    crate::document_ops::split_run_at_position(
+                        &mut tab.paragraphs,
+                        end_para,
+                        end_run,
+                        end_char,
+                    );
+                    crate::document_ops::split_run_at_position(
+                        &mut tab.paragraphs,
+                        start_para,
+                        start_run,
+                        start_char,
+                    );
+
                     let mut cumulative = 0usize;
                     for para in &mut tab.paragraphs {
                         for run in &mut para.runs {
@@ -3928,6 +3952,7 @@ impl AppState {
                             cumulative = run_end;
                         }
                         cumulative += 1;
+                        crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
                     }
                     tab.is_modified = true;
                     // Update content to match
@@ -15396,6 +15421,23 @@ mod tests {
         state.handle_vim_key("l", false, None); // selects "On"
         assert!(state.handle_vim_key("`", true, Some("~")));
         assert_eq!(state.tabs[0].content, "oNe two");
+    }
+
+    #[test]
+    fn test_apply_case_to_selection_mid_run() {
+        // The whole document is one paragraph, one run — a selection that
+        // starts and ends mid-run (not "an active selection" alone) is what
+        // the run-splitting in `apply_case_to_selection` exists for.
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "one two three".to_string(), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].selection = Some((4, 7));
+        state.apply_case_to_selection(crate::case_converter::CaseType::Upper);
+        assert_eq!(state.tabs[0].content, "one TWO three");
     }
 
     #[test]

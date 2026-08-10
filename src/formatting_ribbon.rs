@@ -670,15 +670,6 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        FormatAction::ChangeCase => {
-                            st.update(cx, |state, _cx| {
-                                // Default to Title case for now
-                                state.apply_case_to_selection(
-                                    crate::case_converter::CaseType::Title,
-                                );
-                            });
-                            cx.notify();
-                        }
                         FormatAction::Strikethrough => {
                             st.update(cx, |state, _cx| {
                                 state.toggle_strikethrough();
@@ -708,7 +699,8 @@ impl FormattingRibbon {
                         | FormatAction::SwitchTabMenu
                         | FormatAction::FontFamily
                         | FormatAction::FontColor
-                        | FormatAction::HighlightColorSelect => {
+                        | FormatAction::HighlightColorSelect
+                        | FormatAction::ChangeCase => {
                             // `dismissed` means the panel's capture-phase
                             // out-handler already closed this menu during this
                             // same click — treat it as "was open" so clicking
@@ -1097,6 +1089,54 @@ impl FormattingRibbon {
                 cx,
             ),
             FormatAction::SwitchTabMenu => self.switch_tab_rows(p, cx),
+            FormatAction::ChangeCase => Self::text_menu_rows(
+                "Case",
+                &[
+                    (
+                        "Sentence",
+                        Some(
+                            (|s: &mut AppState| {
+                                s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
+                            }) as fn(&mut AppState),
+                        ),
+                    ),
+                    (
+                        "lower",
+                        Some(
+                            (|s: &mut AppState| {
+                                s.apply_case_to_selection(crate::case_converter::CaseType::Lower)
+                            }) as fn(&mut AppState),
+                        ),
+                    ),
+                    (
+                        "UPPER",
+                        Some(
+                            (|s: &mut AppState| {
+                                s.apply_case_to_selection(crate::case_converter::CaseType::Upper)
+                            }) as fn(&mut AppState),
+                        ),
+                    ),
+                    (
+                        "Capitalize Each Word",
+                        Some(
+                            (|s: &mut AppState| {
+                                s.apply_case_to_selection(crate::case_converter::CaseType::Title)
+                            }) as fn(&mut AppState),
+                        ),
+                    ),
+                    (
+                        "tOGGLE cASE",
+                        Some(
+                            (|s: &mut AppState| {
+                                s.apply_case_to_selection(crate::case_converter::CaseType::Toggle)
+                            }) as fn(&mut AppState),
+                        ),
+                    ),
+                ],
+                p,
+                theme_mode,
+                cx,
+            ),
             FormatAction::CardMenu => Self::text_menu_rows(
                 "Card Menu",
                 &[

@@ -113,8 +113,20 @@ pub fn registry() -> Vec<PaletteCommand> {
         ("Italics", |s| s.apply_formatting_to_selection(FormatOp::Italic(true))),
         ("Strikethrough", AppState::toggle_strikethrough),
         ("Normal Size", |s| s.apply_formatting_to_selection(FormatOp::FontSize(24))),
-        ("Change Case (Title)", |s| {
+        ("Change Case: Sentence", |s| {
+            s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
+        }),
+        ("Change Case: lower", |s| {
+            s.apply_case_to_selection(crate::case_converter::CaseType::Lower)
+        }),
+        ("Change Case: UPPER", |s| {
+            s.apply_case_to_selection(crate::case_converter::CaseType::Upper)
+        }),
+        ("Change Case: Capitalize Each Word", |s| {
             s.apply_case_to_selection(crate::case_converter::CaseType::Title)
+        }),
+        ("Change Case: tOGGLE cASE", |s| {
+            s.apply_case_to_selection(crate::case_converter::CaseType::Toggle)
         }),
         ("Align Left", |s| s.apply_line_alignment(Alignment::Left)),
         ("Align Center", |s| s.apply_line_alignment(Alignment::Center)),
