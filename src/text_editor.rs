@@ -1777,6 +1777,22 @@ impl Render for TextEditor {
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs);
+                // TEMPORARY diagnostic for the "click near bottom of a large
+                // file lands several lines above the pointer" bug report —
+                // duplicates line_col_from_mouse_position's own local_y/
+                // display_row/visual_row math so we can see which stage
+                // diverges, without changing that function's signature.
+                // Remove once the root cause is confirmed.
+                {
+                    let local_y = ev.position.y.as_f32() - bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_y;
+                    let display_row = line_for_y(local_y, line_height_px(font_size_px) * zoom, display_to_wrap.len());
+                    let visual_row = nearest_wrap_row_for_display_row(&display_to_wrap, display_row);
+                    crate::state::log_line(&format!(
+                        "CLICK DEBUG: pointer_y={:.1} bounds_origin_y={:.1} bounds_h={:.1} scroll_y={:.1} local_y={:.1} display_row={} visual_row={} display_len={} rows_len={} -> line={} col={}",
+                        ev.position.y.as_f32(), bounds.origin.y.as_f32(), bounds.size.height.as_f32(), scroll_y, local_y,
+                        display_row, visual_row, display_to_wrap.len(), rows.len(), line, col
+                    ));
+                }
                 let click_count = ev.click_count;
                 this.state.update(cx, |state, cx| {
                     state.editor_context_menu = None;
