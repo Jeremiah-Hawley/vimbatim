@@ -388,6 +388,7 @@ struct StyleDefaults {
     size: u16,
     underline: bool,
     double_underline: bool,
+    emphasis_boxed: bool,
 }
 
 /// Parses `word/styles.xml` into a `styleId -> StyleDefaults` map. Missing or
@@ -440,6 +441,7 @@ fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
                         current.size = scratch_run.size;
                         current.underline = scratch_run.underline;
                         current.double_underline = scratch_run.double_underline;
+                        current.emphasis_boxed = scratch_run.emphasis_boxed;
                         if let Some(id) = current_id.take() {
                             styles.insert(id, current.clone());
                         }
@@ -827,6 +829,23 @@ fn apply_run_style_marker(e: &BytesStart, run: &mut Run) {
 /// paragraph's own border (`word/styles.xml`'s character styles don't
 /// currently contribute a box themselves — parsing a character style's own
 /// `<w:bdr>` is a separate, unreported gap).
+/// Resolves a `<w:rStyle w:val="...">` — a *character* style referenced
+/// directly on a run's `<w:rPr>`, distinct from a paragraph's `<w:pStyle>`.
+/// Debate-community docx files commonly underline/bold the emphasized
+/// "read" portion of a card this way (e.g. a "StyleUnderline" character
+/// style) rather than with direct `<w:u>`/`<w:b>` — left unhandled, that
+/// text silently lost its formatting. Real Verbatim encodes its own
+/// "Emphasis" card type the same way: the run carries only the `<w:rStyle>`
+/// reference, and bold/underline/size/box all live on the named character
+/// style in `word/styles.xml`.
+///
+/// Applies as this run's baseline the same way a paragraph style's
+/// defaults already do (see `apply_paragraph_style_defaults`): any direct
+/// `<w:b>`/`<w:u>`/etc. appearing later in this same `<w:rPr>` is processed
+/// afterward by `apply_run_prop` and still wins, matching Word's own
+/// direct-formatting-beats-style cascade. `box_format` is OR'd rather than
+/// overwritten so this can't clear a box this run already has from its
+/// paragraph's own border.
 fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<String, StyleDefaults>) {
     let Some(style_id) = e.attributes().flatten().find_map(|attr| {
         (attr.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&attr.value).into_owned())
@@ -837,6 +856,10 @@ fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<Str
     run.underline = defaults.underline;
     run.double_underline = defaults.double_underline;
     run.box_format = run.box_format || defaults.box_format;
+    if defaults.emphasis_boxed {
+        run.emphasis_boxed = true;
+        run.emphasis = true;
+    }
 }
 
 /// Applies a run-property element to `run` based on the element's tag name.
@@ -986,6 +1009,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
         }
         b"w:vimbatimEmphasis" => { run.emphasis = true; }
         b"w:vimbatimEmphasisBox" => { run.emphasis_boxed = true; }
+        b"w:bdr" => { run.emphasis_boxed = true; run.emphasis = true; }
         _ => {}
     }
 }
@@ -1545,6 +1569,43 @@ mod tests {
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/><w:u w:val="none"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles).unwrap();
         assert!(!paragraphs[0].runs[0].underline, "direct <w:u w:val=\"none\"/> after rStyle should win");
+    }
+
+    #[test]
+    fn test_rstyle_resolves_character_style_bdr_into_emphasis_boxed_and_emphasis() {
+        // Mirrors real Verbatim output: the run carries only an rStyle
+        // reference; bold/underline/size/border all live on the referenced
+        // character style.
+        let styles_xml = r#"<w:styles>
+            <w:style w:type="character" w:styleId="Emphasis">
+                <w:rPr>
+                    <w:b/><w:sz w:val="24"/><w:u w:val="single"/>
+                    <w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/>
+                </w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let styles = parse_styles_xml(styles_xml);
+        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        let run = &paragraphs[0].runs[0];
+        assert!(run.emphasis_boxed, "style-referenced <w:bdr> should set emphasis_boxed");
+        assert!(run.emphasis, "a real box implies Emphasis, so Remove Emphasis can find it");
+        assert!(run.bold && run.underline, "existing bold/underline resolution must still work");
+    }
+
+    #[test]
+    fn test_direct_bdr_on_a_run_sets_emphasis_boxed_and_emphasis() {
+        let xml = wrap_run_xml(r#"<w:rPr><w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        assert!(paragraphs[0].runs[0].emphasis_boxed);
+        assert!(paragraphs[0].runs[0].emphasis);
+    }
+
+    #[test]
+    fn test_run_without_bdr_has_emphasis_boxed_false() {
+        let xml = wrap_run_xml("<w:rPr><w:b/></w:rPr>");
+        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        assert!(!paragraphs[0].runs[0].emphasis_boxed);
     }
 
     #[test]
