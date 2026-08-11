@@ -334,6 +334,8 @@ pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
             && runs[i].color == runs[i + 1].color
             && runs[i].box_format == runs[i + 1].box_format
             && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve
+            && runs[i].emphasis == runs[i + 1].emphasis
+            && runs[i].emphasis_boxed == runs[i + 1].emphasis_boxed
             // Two runs that look identical but carry different markers are
             // different things — fusing them would erase one.
             && runs[i].style == runs[i + 1].style;
@@ -1059,6 +1061,20 @@ mod tests {
         assert_eq!(paragraphs[0].runs.len(), 1);
         assert_eq!(paragraphs[0].runs[0].text, "onetwothree");
         assert!(paragraphs[0].runs[0].bold);
+    }
+
+    #[test]
+    fn test_merge_adjacent_runs_does_not_merge_differing_emphasis_boxed() {
+        // Same text formatting, but one run carries the Emphasis box and the
+        // other doesn't — merging would silently drop or spread the box.
+        let mut runs = vec![
+            Run { text: "one".into(), emphasis: true, emphasis_boxed: true, ..Run::default() },
+            Run { text: "two".into(), emphasis: true, emphasis_boxed: false, ..Run::default() },
+        ];
+        merge_adjacent_same_format_runs(&mut runs);
+        assert_eq!(runs.len(), 2, "runs differing only in emphasis_boxed must not merge");
+        assert!(runs[0].emphasis_boxed);
+        assert!(!runs[1].emphasis_boxed);
     }
 
     #[test]

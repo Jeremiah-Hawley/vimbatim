@@ -909,8 +909,9 @@ fn run_props_xml(run: &Run) -> String {
 }
 
 /// Handles `w:b` (bold), `w:u` (underline), `w:highlight` (highlight colour),
-/// `w:shd` (custom hex highlight, written as shading), and `w:sz` (font size
-/// in half-points).  Unknown tags are silently ignored.
+/// `w:shd` (custom hex highlight, written as shading), `w:sz` (font size in
+/// half-points), and `w:bdr` (border, i.e. the Emphasis box).  Unknown tags
+/// are silently ignored.
 fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     /*
      * This function is called for both `Event::Start` and `Event::Empty`
@@ -1969,6 +1970,11 @@ mod tests {
             .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (Size")))
             .expect("Emphasis paragraph not found after save/reload");
         assert!(emphasis_para.runs.iter().all(|r| r.emphasis && r.emphasis_boxed));
+
+        let pocket = reparsed.iter()
+            .find(|p| p.runs.iter().any(|r| r.text == "Pocket"))
+            .expect("Pocket paragraph not found after save/reload");
+        assert!(pocket.runs[0].box_format, "Pocket's box_format should survive save/reload");
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
