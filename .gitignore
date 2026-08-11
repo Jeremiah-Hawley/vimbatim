@@ -11,6 +11,7 @@ graphify-out/
 *.hpp
 *.cpp
 *.docx
+!/tests/fixtures/verbatim_emphasis_reference.docx
 *.log
 
 # Added by cargo

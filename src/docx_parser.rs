@@ -1918,6 +1918,62 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
+    // ── regression tests against a real Verbatim-authored reference file ───
+
+    /// Parses the actual file real Verbatim produced (the reference pair the
+    /// `Round Trip Bug Fixes.md` tracker itself was built from) and confirms
+    /// Emphasis's box now survives, using real Verbatim bytes rather than a
+    /// hand-written XML fixture.
+    #[test]
+    fn test_parses_real_verbatim_authored_emphasis_box() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verbatim_emphasis_reference.docx");
+        let (paragraphs, _origin) = parse_docx(&path).unwrap();
+
+        let pocket = paragraphs.iter().find(|p| p.runs.iter().any(|r| r.text == "Pocket")).unwrap();
+        assert!(pocket.runs[0].box_format, "Pocket paragraph should carry the paragraph-wide box");
+
+        let emphasis_para = paragraphs.iter()
+            .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (Size")))
+            .expect("Emphasis paragraph not found");
+        assert!(
+            emphasis_para.runs.iter().all(|r| r.emphasis && r.emphasis_boxed),
+            "every run in the Emphasis paragraph should be marked emphasis + emphasis_boxed, got: {:?}",
+            emphasis_para.runs,
+        );
+
+        let emphasis_highlight_para = paragraphs.iter()
+            .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (same as above) and highlight")))
+            .expect("Emphasis+highlight paragraph not found");
+        let run = &emphasis_highlight_para.runs[0];
+        assert!(run.emphasis && run.emphasis_boxed, "Emphasis+highlight should also carry the box");
+        assert!(run.highlight && run.highlight_color == "yellow");
+    }
+
+    /// Round-trips that same real Verbatim file through a real save/reload
+    /// (ZIP write, not a bare string), confirming the fix survives the whole
+    /// pipeline the app actually uses when a user opens a Verbatim file, edits
+    /// it, and saves — not just an in-memory transformation.
+    #[test]
+    fn test_real_verbatim_file_emphasis_box_survives_save_and_reload() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verbatim_emphasis_reference.docx");
+        let dir = std::env::temp_dir().join(format!("vimbatim_verbatim_roundtrip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+        std::fs::copy(&src, &path).unwrap();
+
+        let (paragraphs, origin) = parse_docx(&path).unwrap();
+        origin.save(&paragraphs, &path).unwrap();
+
+        let (reparsed, _origin2) = parse_docx(&path).unwrap();
+        let emphasis_para = reparsed.iter()
+            .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (Size")))
+            .expect("Emphasis paragraph not found after save/reload");
+        assert!(emphasis_para.runs.iter().all(|r| r.emphasis && r.emphasis_boxed));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     // ── heading style round-trips against Word's actual built-in styleId ────
 
     #[test]
