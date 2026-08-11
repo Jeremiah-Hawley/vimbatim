@@ -818,22 +818,6 @@ fn apply_run_style_marker(e: &BytesStart, run: &mut Run) {
 /// Debate-community docx files commonly underline/bold the emphasized
 /// "read" portion of a card this way (e.g. a "StyleUnderline" character
 /// style) rather than with direct `<w:u>`/`<w:b>` — left unhandled, that
-/// text silently lost its formatting.
-///
-/// Applies as this run's baseline the same way a paragraph style's
-/// defaults already do (see `apply_paragraph_style_defaults`): any direct
-/// `<w:b>`/`<w:u>`/etc. appearing later in this same `<w:rPr>` is processed
-/// afterward by `apply_run_prop` and still wins, matching Word's own
-/// direct-formatting-beats-style cascade. `box_format` is OR'd rather than
-/// overwritten so this can't clear a box this run already has from its
-/// paragraph's own border (`word/styles.xml`'s character styles don't
-/// currently contribute a box themselves — parsing a character style's own
-/// `<w:bdr>` is a separate, unreported gap).
-/// Resolves a `<w:rStyle w:val="...">` — a *character* style referenced
-/// directly on a run's `<w:rPr>`, distinct from a paragraph's `<w:pStyle>`.
-/// Debate-community docx files commonly underline/bold the emphasized
-/// "read" portion of a card this way (e.g. a "StyleUnderline" character
-/// style) rather than with direct `<w:u>`/`<w:b>` — left unhandled, that
 /// text silently lost its formatting. Real Verbatim encodes its own
 /// "Emphasis" card type the same way: the run carries only the `<w:rStyle>`
 /// reference, and bold/underline/size/box all live on the named character
@@ -1009,7 +993,29 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
         }
         b"w:vimbatimEmphasis" => { run.emphasis = true; }
         b"w:vimbatimEmphasisBox" => { run.emphasis_boxed = true; }
-        b"w:bdr" => { run.emphasis_boxed = true; run.emphasis = true; }
+        b"w:bdr" => {
+            // OOXML: w:val="none" or w:val="nil" explicitly cancels an inherited border.
+            // Otherwise, the border is present and we set emphasis_boxed/emphasis.
+            let mut has_cancel_value = false;
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"w:val" {
+                    let val = String::from_utf8_lossy(&attr.value);
+                    if val == "none" || val == "nil" {
+                        has_cancel_value = true;
+                    }
+                    break;
+                }
+            }
+            if has_cancel_value {
+                // Explicit cancellation: clear the box
+                run.emphasis_boxed = false;
+                run.emphasis = false;
+            } else {
+                // Border is present (no w:val attribute, or w:val is not "none"/"nil")
+                run.emphasis_boxed = true;
+                run.emphasis = true;
+            }
+        }
         _ => {}
     }
 }
@@ -1606,6 +1612,26 @@ mod tests {
         let xml = wrap_run_xml("<w:rPr><w:b/></w:rPr>");
         let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
         assert!(!paragraphs[0].runs[0].emphasis_boxed);
+    }
+
+    #[test]
+    fn test_bdr_val_none_cancels_inherited_emphasis_boxed() {
+        // A run with rStyle pointing to Emphasis (which has a border) can
+        // explicitly cancel the border with <w:bdr w:val="none"/>.
+        // This mirrors the existing behavior for <w:u w:val="none"/> canceling
+        // underline from the style.
+        let styles_xml = r#"<w:styles>
+            <w:style w:type="character" w:styleId="Emphasis">
+                <w:rPr>
+                    <w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/>
+                </w:rPr>
+            </w:style>
+        </w:styles>"#;
+        let styles = parse_styles_xml(styles_xml);
+        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/><w:bdr w:val="none"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        assert!(!paragraphs[0].runs[0].emphasis_boxed, "direct <w:bdr w:val=\"none\"/> after rStyle should cancel the box");
+        assert!(!paragraphs[0].runs[0].emphasis, "canceling the box should also clear emphasis");
     }
 
     #[test]
