@@ -1069,12 +1069,18 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
             // against one saved from vimbatim) — vimbatim was previously
             // writing 4 (0.5pt), a visibly thinner box once reopened in Word
             // even though both apps' in-app rendering looked fine.
+            //
+            // w:space (the gap between border and text) also has to match
+            // per side: Verbatim's own style uses 1 on top/bottom but 4 on
+            // left/right — a uniform 1 on all four sides (the previous
+            // value here) rendered a visibly narrower box on the left/right
+            // than Verbatim's native one, even with sz already matching.
             ppr.push_str(
                 "<w:pBdr>\
                 <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
                 <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
-                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
-                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
+                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>\
+                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>\
                 </w:pBdr>",
             );
         }
@@ -1723,10 +1729,14 @@ mod tests {
     }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:pBdr>"));
+        // top/bottom: space="1"; left/right: space="4" — matching real Verbatim's
+        // own Heading1/"Pocket" style exactly (Verbatim_Formatting_To_Compare_To.docx),
+        // not a uniform value. A uniform space="1" is what made Vimbatim's pocket
+        // box render visibly narrower than Verbatim's when opened in Verbatim.
         assert!(xml.contains("<w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
         assert!(xml.contains("<w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
-        assert!(xml.contains("<w:left w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
-        assert!(xml.contains("<w:right w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
+        assert!(xml.contains("<w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>"));
+        assert!(xml.contains("<w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>"));
     }
 
     #[test]
