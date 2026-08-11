@@ -31,9 +31,9 @@ You can email me at uwyohawleyj@gmail.com with any ideas, suggestions, or to req
 
 
 # COMING SOON (V2.0)
-Custom theming
-Knowledge Graph
-Native dropbox integration
-Native slack integration
-Extension support
+More Compact File Format,
+Knowledge Graph,
+Dropbox integration, 
+Slack integration, 
+Extension support, 
 AI powered card cutting
