@@ -863,6 +863,15 @@ fn run_props_xml(run: &Run) -> String {
     if run.strikethrough { out.push_str("<w:strike/>"); }
     if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
     else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
+    if run.emphasis_boxed {
+        // Real OOXML run border, matching real Verbatim's own "Emphasis"
+        // character style's <w:bdr> exactly (found by diffing
+        // Verbatim_Formatting_To_Compare_To.docx's word/styles.xml).
+        // Emitted before highlight/shd: <w:bdr> after <w:shd> in a run's
+        // <w:rPr> violates CT_RPr's element order and Word has been
+        // observed to silently drop it on reopen.
+        out.push_str("<w:bdr w:val=\"single\" w:sz=\"12\" w:space=\"0\" w:color=\"auto\"/>");
+    }
     if run.highlight {
         // `w:highlight` only accepts the 16 names above — Word silently drops
         // anything else. A custom hex color goes out as shading, which Word
@@ -1205,6 +1214,48 @@ mod tests {
             "got {xml}",
         );
         assert!(!xml.contains("w:highlight"), "got {xml}");
+    }
+
+    #[test]
+    fn test_emphasis_boxed_emits_a_real_bdr() {
+        let run = Run { text: "hi".into(), emphasis: true, emphasis_boxed: true, ..Run::default() };
+        let xml = run_props_xml(&run);
+        assert!(
+            xml.contains(r#"<w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/>"#),
+            "got: {xml}"
+        );
+    }
+
+    #[test]
+    fn test_non_boxed_emphasis_emits_no_bdr() {
+        let run = Run { text: "hi".into(), emphasis: true, ..Run::default() };
+        let xml = run_props_xml(&run);
+        assert!(!xml.contains("w:bdr"), "got: {xml}");
+    }
+
+    #[test]
+    fn test_emphasis_box_bdr_precedes_highlight_and_shd() {
+        // CT_RPr's schema order (and Word's real-world tolerance) requires
+        // <w:bdr> before <w:shd>; a border emitted after <w:highlight>/<w:shd>
+        // has been observed silently dropped by Word on reopen even though this
+        // parser's own reparse (which is order-insensitive) would still pass.
+        let named_highlight = Run {
+            text: "hi".into(), emphasis: true, emphasis_boxed: true,
+            highlight: true, highlight_color: "yellow".into(), ..Run::default()
+        };
+        let xml = run_props_xml(&named_highlight);
+        let bdr_pos = xml.find("<w:bdr").expect("bdr missing");
+        let highlight_pos = xml.find("<w:highlight").expect("highlight missing");
+        assert!(bdr_pos < highlight_pos, "bdr must precede highlight, got: {xml}");
+
+        let custom_hex_highlight = Run {
+            text: "hi".into(), emphasis: true, emphasis_boxed: true,
+            highlight: true, highlight_color: "00ff88".into(), ..Run::default()
+        };
+        let xml = run_props_xml(&custom_hex_highlight);
+        let bdr_pos = xml.find("<w:bdr").expect("bdr missing");
+        let shd_pos = xml.find("<w:shd").expect("shd missing");
+        assert!(bdr_pos < shd_pos, "bdr must precede shd, got: {xml}");
     }
 
     #[test]
