@@ -2533,14 +2533,22 @@ fn render_line(
     // express "some runs drawn, some not" — fall through to the per-run path
     // whenever anything might be hidden.
     if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
-        // Don't take any fast path if alignment or a box border is needed —
-        // both are only drawn by the full path below (the box wrapper in
-        // particular: a bare-div return skips it entirely, which was the bug
-        // where a Pocket's box only drew once the cursor — or a selection,
-        // forcing the same fall through — put the line on the slow path).
-        // Also the bug where a paragraph's alignment (e.g. Center, read from
-        // a real docx or set by a button click) was silently ignored on any
-        // row that reached one of these fast returns.
+        // Don't take any fast path if alignment or a box-shaped visual is
+        // needed — both are only drawn correctly by the full path below (the
+        // box wrapper in particular: a bare-div return skips it entirely,
+        // which was the bug where a Pocket's box only drew once the cursor —
+        // or a selection, forcing the same fall through — put the line on
+        // the slow path). Also the bug where a paragraph's alignment (e.g.
+        // Center, read from a real docx or set by a button click) was
+        // silently ignored on any row that reached one of these fast
+        // returns.
+        //
+        // `paints_run_box`'s three properties hit the same bug for a
+        // different reason: a bare-div return here isn't wrapped in
+        // `line_div`, so the div carrying the highlight/box paint has no
+        // constraint against its `flex_col` parent's cross-axis stretch and
+        // visibly fills the whole row even when the line is one short word —
+        // the slow path avoids this via each span's own `flex_shrink(0.0)`.
         use crate::docx_parser::Alignment;
         let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
         if run_spans.is_empty() {
@@ -2553,8 +2561,7 @@ fn render_line(
                 if run.is_none() && !needs_alignment {
                     return line.to_string().into_any_element();
                 }
-                let needs_box = run.is_some_and(|r| r.box_format);
-                if !needs_alignment && !needs_box {
+                if !needs_alignment && !paints_run_box(run) {
                     return apply_run_style(div(), run, zoom, pal).child(line.to_string()).into_any_element();
                 }
             }
@@ -2877,6 +2884,17 @@ fn render_segment(
             .into_any_element(),
         None => el.child(text).into_any_element(),
     }
+}
+
+/// Whether `run` paints a box-shaped visual (a background fill or a border)
+/// rather than just styling the glyphs themselves — `render_line`'s fast
+/// path has to skip any such run, since its bare-div return isn't wrapped in
+/// `line_div`'s per-span `flex_shrink(0.0)` and would otherwise stretch the
+/// paint to the full row width instead of hugging the text. `underline`/
+/// `strikethrough`/`bold`/`size`/`font`/`color` don't paint a box, so they're
+/// deliberately not here.
+fn paints_run_box(run: Option<&Run>) -> bool {
+    run.is_some_and(|r| r.box_format || r.highlight || r.emphasis_boxed)
 }
 
 fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
@@ -3913,7 +3931,7 @@ mod tests {
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
-        line_col_from_mouse_position, real_row_height_px,
+        line_col_from_mouse_position, real_row_height_px, paints_run_box,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -3921,6 +3939,24 @@ mod tests {
     use crate::state::AppState;
     use crate::docx_parser::{Paragraph, Run, Alignment};
     use std::time::Instant;
+
+    /// The three run properties that paint a box-shaped visual (background
+    /// fill or border) — and nothing else — need `render_line`'s fast path
+    /// excluded, or the paint stretches to the full row width instead of
+    /// hugging the text. Regression guard for whichever property is added
+    /// next needing the same treatment: it has to show up here too, or the
+    /// fast-path exclusion silently misses it exactly like `emphasis_boxed`
+    /// originally did.
+    #[test]
+    fn test_paints_run_box_covers_exactly_box_format_highlight_and_emphasis_boxed() {
+        assert!(!paints_run_box(None));
+        assert!(!paints_run_box(Some(&Run::default())));
+        assert!(paints_run_box(Some(&Run { box_format: true, ..Run::default() })));
+        assert!(paints_run_box(Some(&Run { highlight: true, ..Run::default() })));
+        assert!(paints_run_box(Some(&Run { emphasis_boxed: true, ..Run::default() })));
+        // A plain style property (no box shape) must not trip the exclusion.
+        assert!(!paints_run_box(Some(&Run { bold: true, underline: true, ..Run::default() })));
+    }
 
     /// A plain body-text row: 11px text (settings.conf's `normal_text_size`)
     /// means 6.6px characters, so a click N characters in resolves to column N.
