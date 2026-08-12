@@ -1336,6 +1336,31 @@ fn build_abstract_num_xml(id: u32, kind: ListKind, num_fmt: &str, lvl_text: &str
     out
 }
 
+/// Assigns a `numId` to every list paragraph's index, one fresh id per
+/// contiguous run of list paragraphs (a run ends at the next paragraph with
+/// `list: None`, or the end of the document). Shared by `build_numbering_xml`
+/// (which needs the same numId->abstractNum `<w:num>` entries) and
+/// `rebuild_document_xml` (which writes the numId onto each paragraph's own
+/// `<w:numPr>`) so the two can never disagree about which paragraph got
+/// which id.
+fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
+    let mut assignment = HashMap::new();
+    let mut next_num_id = 1u32;
+    let mut i = 0;
+    while i < paragraphs.len() {
+        if paragraphs[i].list.is_some() {
+            while i < paragraphs.len() && paragraphs[i].list.is_some() {
+                assignment.insert(i, next_num_id);
+                i += 1;
+            }
+            next_num_id += 1;
+        } else {
+            i += 1;
+        }
+    }
+    assignment
+}
+
 /// Builds `word/numbering.xml`, or `None` if `paragraphs` has no list at
 /// all (in which case the caller — the package-plumbing write path — omits
 /// the part entirely, unchanged from a non-list document today).
@@ -1351,22 +1376,21 @@ fn build_numbering_xml(paragraphs: &[Paragraph]) -> Option<String> {
         out.push_str(&build_abstract_num_xml(id as u32, *kind, num_fmt, lvl_text, *font));
     }
 
-    // One <w:num> per contiguous run of list paragraphs.
-    let mut next_num_id = 1u32;
-    let mut i = 0;
-    while i < paragraphs.len() {
-        if let Some(item) = paragraphs[i].list {
-            out.push_str(&format!(
-                "<w:num w:numId=\"{next_num_id}\"><w:abstractNumId w:val=\"{}\"/></w:num>",
-                abstract_num_id_for(item.kind),
-            ));
-            next_num_id += 1;
-            while i < paragraphs.len() && paragraphs[i].list.is_some() {
-                i += 1;
-            }
-        } else {
-            i += 1;
-        }
+    let num_ids = assign_list_num_ids(paragraphs);
+    // One <w:num> per distinct numId, ordered by id; each looks up its
+    // abstractNum via the *first* paragraph index that carries that id —
+    // every paragraph in one run shares the same ListKind by construction
+    // (apply_list_style only ever sets one kind per selection).
+    let mut seen: Vec<u32> = num_ids.values().copied().collect();
+    seen.sort_unstable();
+    seen.dedup();
+    for num_id in seen {
+        let para_idx = num_ids.iter().find(|(_, id)| **id == num_id).map(|(idx, _)| *idx).unwrap();
+        let kind = paragraphs[para_idx].list.unwrap().kind;
+        out.push_str(&format!(
+            "<w:num w:numId=\"{num_id}\"><w:abstractNumId w:val=\"{}\"/></w:num>",
+            abstract_num_id_for(kind),
+        ));
     }
 
     out.push_str("</w:numbering>");
@@ -1392,7 +1416,8 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
     out.push_str(preamble);
     out.push_str("<w:body>");
 
-    for para in paragraphs {
+    let list_num_ids = assign_list_num_ids(paragraphs);
+    for (para_index, para) in paragraphs.iter().enumerate() {
         out.push_str("<w:p>");
         if let Some(raw) = &para.unsupported_xml {
             out.push_str(raw);
@@ -1436,6 +1461,17 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>\
                 </w:pBdr>",
             );
+        }
+        if let Some(item) = para.list {
+            if let Some(num_id) = list_num_ids.get(&para_index) {
+                // Matches Lists.docx exactly, where every list-item
+                // paragraph carries both — not <w:numPr> alone.
+                ppr.push_str("<w:pStyle w:val=\"ListParagraph\"/>");
+                ppr.push_str(&format!(
+                    "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
+                    item.level, num_id,
+                ));
+            }
         }
         if !ppr.is_empty() {
             out.push_str("<w:pPr>");
@@ -2755,5 +2791,47 @@ mod tests {
         let xml = build_numbering_xml(&paragraphs).unwrap();
         // Two runs of decimal-dot list paragraphs (a,b) and (c) -> two <w:num> entries.
         assert_eq!(xml.matches("<w:num ").count(), 2, "got: {xml}");
+    }
+
+    // ── pStyle/numPr emission + shared numId assignment ─────────────────────
+
+    #[test]
+    fn test_rebuild_emits_pstyle_and_numpr_for_list_paragraphs() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "one".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "two".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
+        ];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert_eq!(xml.matches("<w:pStyle w:val=\"ListParagraph\"/>").count(), 2, "got: {xml}");
+        // Both paragraphs are one contiguous run -> same numId, both ilvl 0.
+        assert_eq!(xml.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>").count(), 2, "got: {xml}");
+    }
+
+    #[test]
+    fn test_rebuild_gives_separate_list_runs_different_numids() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: None, unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+        ];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(xml.contains("<w:numId w:val=\"1\"/>"), "got: {xml}");
+        assert!(xml.contains("<w:numId w:val=\"2\"/>"), "got: {xml}");
+    }
+
+    #[test]
+    fn test_rebuild_omits_pstyle_numpr_for_non_list_paragraphs() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(!xml.contains("ListParagraph"), "got: {xml}");
+        assert!(!xml.contains("w:numPr"), "got: {xml}");
     }
 }
