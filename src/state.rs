@@ -3777,6 +3777,46 @@ impl AppState {
         }
     }
 
+    /// Tab inside a list paragraph: increments its level, capped at 8
+    /// (Word's own max `w:ilvl`). No-op when the cursor's paragraph isn't a
+    /// list item — the call site (`text_editor.rs`) falls through to
+    /// inserting a literal tab character in that case.
+    pub fn indent_list_item(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let (para_idx, ..) = resolve_position(&tab.paragraphs, tab.cursor);
+        let Some(item) = tab.paragraphs.get(para_idx).and_then(|p| p.list) else { return };
+        if item.level >= 8 { return; }
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if let Some(para) = tab.paragraphs.get_mut(para_idx) {
+                para.list = Some(ListItem { level: item.level + 1, ..item });
+            }
+            tab.is_modified = true;
+        }
+    }
+
+    /// Shift+Tab inside a list paragraph: decrements its level, or clears
+    /// `list` entirely when already at level 0 (matching Word: outdenting a
+    /// top-level list item removes it from the list).
+    pub fn outdent_list_item(&mut self) {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        let (para_idx, ..) = resolve_position(&tab.paragraphs, tab.cursor);
+        let Some(item) = tab.paragraphs.get(para_idx).and_then(|p| p.list) else { return };
+
+        self.push_undo_snapshot();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            if let Some(para) = tab.paragraphs.get_mut(para_idx) {
+                para.list = if item.level == 0 {
+                    None
+                } else {
+                    Some(ListItem { level: item.level - 1, ..item })
+                };
+            }
+            tab.is_modified = true;
+        }
+    }
+
     /// The font size (in half-points, `Run.size`'s unit) shared by every run
     /// the selection touches — or by the run under the cursor when nothing is
     /// selected — and `None` when the range mixes sizes. A `0` means the run
@@ -11270,6 +11310,75 @@ mod tests {
         state.backspace();
         assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "iem");
         assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+    }
+
+    // ── Phase 2: multi-level indent (indent_list_item/outdent_list_item) ────
+
+    #[test]
+    fn test_indent_list_item_increments_level() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                ..Paragraph::default()
+            }],
+            1,
+        );
+        state.indent_list_item();
+        assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 1 }));
+    }
+
+    #[test]
+    fn test_indent_list_item_caps_at_level_8() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 8 }),
+                ..Paragraph::default()
+            }],
+            1,
+        );
+        state.indent_list_item();
+        assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 8 }));
+    }
+
+    #[test]
+    fn test_outdent_list_item_decrements_level() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 1 }),
+                ..Paragraph::default()
+            }],
+            1,
+        );
+        state.outdent_list_item();
+        assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+    }
+
+    #[test]
+    fn test_outdent_list_item_at_level_0_removes_list() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                ..Paragraph::default()
+            }],
+            1,
+        );
+        state.outdent_list_item();
+        assert_eq!(state.tabs[0].paragraphs[0].list, None);
+    }
+
+    #[test]
+    fn test_indent_list_item_on_non_list_paragraph_is_a_noop() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph { runs: vec![Run { text: "one".into(), ..Run::default() }], ..Paragraph::default() }],
+            1,
+        );
+        let before = state.tabs[0].paragraphs.clone();
+        state.indent_list_item();
+        assert_eq!(state.tabs[0].paragraphs, before);
     }
 
     // ── Font size box (ribbon spinner) ──────────────────────────────────────

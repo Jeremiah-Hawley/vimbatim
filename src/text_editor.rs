@@ -1351,7 +1351,19 @@ impl TextEditor {
                 "delete"    => { state.delete_forward(); cx.notify(); true }
                 "enter"     => { state.insert_char('\n'); cx.notify(); true }
                 "space"     => { state.insert_char(' '); cx.notify(); true }
-                "tab"       => { state.insert_char('\t'); cx.notify(); true }
+                "tab" => {
+                    let in_list = state.tabs.get(state.active_tab).is_some_and(|t| {
+                        let (para_idx, ..) = crate::document_ops::resolve_position(&t.paragraphs, t.cursor);
+                        t.paragraphs.get(para_idx).is_some_and(|p| p.list.is_some())
+                    });
+                    if in_list {
+                        if shift { state.outdent_list_item() } else { state.indent_list_item() }
+                    } else {
+                        state.insert_char('\t');
+                    }
+                    cx.notify();
+                    true
+                }
                 // Shift+<key> extends the selection instead of moving plainly (spec 4.3).
                 "left"      => { if shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
                 "right"     => { if shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
