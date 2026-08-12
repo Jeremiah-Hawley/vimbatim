@@ -1399,26 +1399,40 @@ fn build_abstract_num_xml(id: u32, kind: ListKind, num_fmt: &str, lvl_text: &str
 }
 
 /// Assigns a `numId` to every list paragraph's index, one fresh id per
-/// contiguous run of list paragraphs (a run ends at the next paragraph with
-/// `list: None`, or the end of the document). Shared by `build_numbering_xml`
-/// (which needs the same numId->abstractNum `<w:num>` entries) and
-/// `rebuild_document_xml` (which writes the numId onto each paragraph's own
-/// `<w:numPr>`) so the two can never disagree about which paragraph got
-/// which id.
+/// contiguous run of list paragraphs *of the same `ListKind`* — a run ends
+/// at the next paragraph with `list: None`, the next paragraph whose
+/// `ListKind` differs from this run's, or the end of the document.
+///
+/// Confirmed against `Lists.docx` itself, not assumed: its six-different-
+/// bullet-styles example (`Solid Bullet`, `Hollow Bullet`, ...) and its
+/// seven-different-number-styles example are each six/seven *immediately
+/// consecutive* paragraphs, and real Word still gives every single one its
+/// own `numId` — a style change starts a new list even with no non-list
+/// paragraph between them. Breaking only on `list.is_some()` becoming
+/// false (an earlier version of this function) silently collapsed all six
+/// bullet styles onto one shared `numId`, so only one of the six could
+/// ever be looked up as that run's `ListKind` — caught by
+/// `test_real_lists_docx_survives_save_and_reload` resolving a saved
+/// `Checkmark` paragraph back as `BulletArrow` after a round trip.
+///
+/// Shared by `build_numbering_xml` (which needs the same numId->abstractNum
+/// `<w:num>` entries) and `rebuild_document_xml` (which writes the numId
+/// onto each paragraph's own `<w:numPr>`) so the two can never disagree
+/// about which paragraph got which id.
 fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
     let mut assignment = HashMap::new();
     let mut next_num_id = 1u32;
     let mut i = 0;
     while i < paragraphs.len() {
-        if paragraphs[i].list.is_some() {
-            while i < paragraphs.len() && paragraphs[i].list.is_some() {
-                assignment.insert(i, next_num_id);
-                i += 1;
-            }
-            next_num_id += 1;
-        } else {
+        let Some(run_kind) = paragraphs[i].list.map(|item| item.kind) else {
+            i += 1;
+            continue;
+        };
+        while i < paragraphs.len() && paragraphs[i].list.map(|item| item.kind) == Some(run_kind) {
+            assignment.insert(i, next_num_id);
             i += 1;
         }
+        next_num_id += 1;
     }
     assignment
 }
@@ -2872,6 +2886,42 @@ mod tests {
         assert_eq!(xml.matches("<w:num ").count(), 2, "got: {xml}");
     }
 
+    /// Confirmed against real Word (`Lists.docx`'s six-different-bullets
+    /// example, six immediately consecutive paragraphs each with their own
+    /// numId): a `ListKind` change starts a new numbering run even with no
+    /// non-list paragraph between them. An earlier version of
+    /// `assign_list_num_ids` broke runs only on `list.is_some()` going
+    /// false, silently collapsing all six styles onto one shared numId —
+    /// caught by `test_real_lists_docx_survives_save_and_reload` resolving
+    /// a saved `Checkmark` paragraph back as a different style entirely
+    /// after a round trip.
+    #[test]
+    fn test_build_numbering_xml_gives_each_list_kind_its_own_num_even_with_no_break_between() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletHollow, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletCheckmark, level: 0 }), unsupported_xml: None },
+        ];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        // Three different kinds, immediately adjacent -> three distinct numIds.
+        assert!(xml.contains("<w:numId w:val=\"1\"/>"), "got: {xml}");
+        assert!(xml.contains("<w:numId w:val=\"2\"/>"), "got: {xml}");
+        assert!(xml.contains("<w:numId w:val=\"3\"/>"), "got: {xml}");
+
+        let numbering_xml = build_numbering_xml(&paragraphs).unwrap();
+        assert_eq!(numbering_xml.matches("<w:num ").count(), 3, "got: {numbering_xml}");
+        // Each numId must resolve back to its own paragraph's real kind,
+        // not an arbitrary one sharing the id.
+        let numbering = parse_numbering_xml(&numbering_xml);
+        let reparsed = parse_document_xml(&xml, &no_styles(), &numbering).unwrap();
+        assert_eq!(reparsed[0].list.map(|l| l.kind), Some(ListKind::BulletSolid));
+        assert_eq!(reparsed[1].list.map(|l| l.kind), Some(ListKind::BulletHollow));
+        assert_eq!(reparsed[2].list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
+    }
+
     // ── pStyle/numPr emission + shared numId assignment ─────────────────────
 
     #[test]
@@ -2987,6 +3037,85 @@ mod tests {
 
         let (reparsed, _origin2) = parse_docx(&path).unwrap();
         assert_eq!(reparsed[0].list, Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    // ── real Lists.docx regression (all four examples) ──────────────────────
+
+    /// `Lists.docx`'s "Item One"/"Item Two"/"Item Three" text is reused
+    /// verbatim by both the plain bulleted list (paragraphs 1-3) and the
+    /// plain numbered list (paragraphs 5-7) — asserted by paragraph index,
+    /// not by text search, since a text search can't distinguish the two.
+    /// Every other example uses unique item text.
+    #[test]
+    fn test_parses_real_lists_docx_all_four_examples() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
+        let (paragraphs, _origin) = parse_docx(&path).unwrap();
+
+        // By concatenated paragraph text, not a single run's text: some of
+        // this real Word file's own paragraphs split across multiple runs
+        // that can't merge (e.g. the intro sentences, whose middle run
+        // lacks the `xml:space="preserve"` its neighbors have, a genuine
+        // per-run formatting difference in the source file, not a parser
+        // gap) — a single-run search would miss those paragraphs entirely.
+        let find = |text: &str| -> &Paragraph {
+            paragraphs
+                .iter()
+                .find(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>() == text)
+                .unwrap_or_else(|| panic!("paragraph with text {text:?} not found"))
+        };
+
+        // Plain bulleted list (example 1): three items, indices 1-3.
+        for i in 1..=3 {
+            assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::BulletSolid), "index {i}");
+        }
+        // Plain numbered list (example 2): three items, indices 5-7.
+        for i in 5..=7 {
+            assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::NumberDecimalDot), "index {i}");
+        }
+
+        // Six distinct bullet options (example 3).
+        assert_eq!(find("Solid Bullet").list.map(|l| l.kind), Some(ListKind::BulletSolid));
+        assert_eq!(find("Hollow Bullet").list.map(|l| l.kind), Some(ListKind::BulletHollow));
+        assert_eq!(find("Solid Box").list.map(|l| l.kind), Some(ListKind::BulletSolidBox));
+        assert_eq!(find("Four Diamonds").list.map(|l| l.kind), Some(ListKind::BulletDiamond));
+        assert_eq!(find("Arrow").list.map(|l| l.kind), Some(ListKind::BulletArrow));
+        assert_eq!(find("Checkmark").list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
+
+        // Seven distinct number options (example 4).
+        assert_eq!(find("One Dot").list.map(|l| l.kind), Some(ListKind::NumberDecimalDot));
+        assert_eq!(find("One Parenthesis").list.map(|l| l.kind), Some(ListKind::NumberDecimalParen));
+        assert_eq!(find("Roman Numeral One").list.map(|l| l.kind), Some(ListKind::NumberUpperRoman));
+        assert_eq!(find("Capital A Dot").list.map(|l| l.kind), Some(ListKind::NumberUpperLetter));
+        assert_eq!(find("Lowercase A Parenthesis").list.map(|l| l.kind), Some(ListKind::NumberLowerLetterParen));
+        assert_eq!(find("Lowercase A Dot").list.map(|l| l.kind), Some(ListKind::NumberLowerLetterDot));
+        assert_eq!(find("Roman Numeral Lowercase one").list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
+
+        // Non-list lines (the four intro sentences) stay unlisted.
+        assert_eq!(find("This is a line above a bulleted list:").list, None);
+        assert_eq!(find("This is a line above a numbered list:").list, None);
+        assert_eq!(find("Here are items with different bullets:").list, None);
+        assert_eq!(find("Here are items with different types of numbers:").list, None);
+    }
+
+    #[test]
+    fn test_real_lists_docx_survives_save_and_reload() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
+        let dir = std::env::temp_dir().join(format!("vimbatim_lists_roundtrip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+        std::fs::copy(&src, &path).unwrap();
+
+        let (paragraphs, origin) = parse_docx(&path).unwrap();
+        origin.save(&paragraphs, &path).unwrap();
+
+        let (reparsed, _origin2) = parse_docx(&path).unwrap();
+        let checkmark = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Checkmark")).unwrap();
+        assert_eq!(checkmark.list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
+        let roman_lower = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Roman Numeral Lowercase one")).unwrap();
+        assert_eq!(roman_lower.list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();

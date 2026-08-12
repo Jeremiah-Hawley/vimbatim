@@ -3171,17 +3171,22 @@ pub(crate) fn list_marker_text(kind: ListKind, ordinal: u32) -> String {
 }
 
 /// 1-indexed position of `paragraphs[index]` within its own contiguous run
-/// of list paragraphs — the same run-boundary rule
-/// `docx_parser::assign_list_num_ids` uses on the write side, so the
-/// on-screen ordinal always matches what gets saved. Walks backward from
-/// `index` while `list.is_some()` holds; a non-list paragraph (or the start
-/// of the document) ends the run. `index` itself must carry a list, or the
-/// count is meaningless — callers only invoke this after checking
+/// of *same-`ListKind`* list paragraphs — the same run-boundary rule
+/// `docx_parser::assign_list_num_ids` uses on the write side (confirmed
+/// against real Word's own behavior: a style change starts a new list even
+/// with no non-list paragraph between them — see that function's own doc
+/// comment), so the on-screen ordinal always matches what gets saved and
+/// what numId a paragraph actually resolves to. Walks backward from `index`
+/// while the preceding paragraph is a list item of the *same kind*; a
+/// non-list paragraph, a different `ListKind`, or the start of the document
+/// ends the run. `index` itself must carry a list, or the count is
+/// meaningless — callers only invoke this after checking
 /// `paragraphs[index].list.is_some()`.
 pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
+    let Some(run_kind) = paragraphs[index].list.map(|item| item.kind) else { return 1 };
     let mut ordinal = 1u32;
     let mut i = index;
-    while i > 0 && paragraphs[i - 1].list.is_some() {
+    while i > 0 && paragraphs[i - 1].list.map(|item| item.kind) == Some(run_kind) {
         ordinal += 1;
         i -= 1;
     }
@@ -5726,6 +5731,31 @@ mod tests {
         assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
         // A fresh run after the non-list break restarts at 1.
         assert_eq!(list_item_ordinal(&paragraphs, 3), 1);
+    }
+
+    /// Confirmed against real Word (`Lists.docx`'s six-different-bullets and
+    /// seven-different-numbers examples, each immediately consecutive
+    /// paragraphs): changing `ListKind` starts a new run even with no
+    /// non-list paragraph between them — a bullet-style row's ordinal
+    /// doesn't matter visually, but a numbered row's does, and an earlier
+    /// version of this function (breaking only on `list.is_some()` going
+    /// false) silently let a style change continue the previous run's
+    /// count instead of restarting it.
+    #[test]
+    fn test_list_item_ordinal_restarts_on_list_kind_change_with_no_break_between() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), ..Paragraph::default() },
+            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), ..Paragraph::default() },
+            // Different kind, immediately adjacent — no non-list paragraph
+            // between them, but this must still be a fresh run.
+            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }), ..Paragraph::default() },
+        ];
+        assert_eq!(list_item_ordinal(&paragraphs, 0), 1);
+        assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
+        assert_eq!(list_item_ordinal(&paragraphs, 2), 1);
     }
 
     #[test]
