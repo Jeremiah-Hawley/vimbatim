@@ -299,7 +299,8 @@ impl DocxOrigin {
          * compression they ask for.
          */
         let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, paragraphs);
-        write_docx(&self.raw_zip, &new_xml, path, method)
+        let numbering_xml = build_numbering_xml(paragraphs);
+        write_docx(&self.raw_zip, &new_xml, numbering_xml.as_deref(), path, method)
     }
 }
 
@@ -412,6 +413,7 @@ fn tmp_write_path(path: &Path) -> PathBuf {
 fn write_docx(
     raw_zip: &[u8],
     new_xml: &str,
+    numbering_xml: Option<&str>,
     path: &Path,
     document_compression: zip::CompressionMethod,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -420,6 +422,15 @@ fn write_docx(
      * entry into a new ZIP writer:
      *  - For word/document.xml: write the freshly generated XML using
      *    `document_compression` (the caller decides Deflated vs. Stored).
+     *  - For word/numbering.xml: write the freshly generated numbering (or
+     *    omit it) rather than copying the source's own — same "regenerate,
+     *    don't preserve" policy as word/document.xml, safe because a real
+     *    Verbatim-authored file's own numbering.xml is confirmed inert
+     *    boilerplate when unused (see the design doc's "Ground truth"
+     *    section).
+     *  - For [Content_Types].xml / word/_rels/document.xml.rels: patch in
+     *    the numbering override/relationship if the current document needs
+     *    one and the source doesn't already declare it.
      *  - For everything else: raw_copy_file copies the compressed bytes without
      *    decompressing, preserving the original compression level and metadata.
      *
@@ -433,19 +444,70 @@ fn write_docx(
     let tmp_file = std::fs::File::create(&tmp_path)?;
     let mut writer = ZipWriter::new(tmp_file);
 
+    let mut wrote_numbering = false;
     for i in 0..archive.len() {
         let file = archive.by_index_raw(i)?;
         let name = file.name().to_string();
-        if name == "word/document.xml" {
-            // Drop the borrow on `archive` before writing to `writer`.
-            drop(file);
-            let options = SimpleFileOptions::default()
-                .compression_method(document_compression);
-            writer.start_file(&name, options)?;
-            writer.write_all(new_xml.as_bytes())?;
-        } else {
-            // Raw copy — no decompression, preserves all metadata.
-            writer.raw_copy_file(file)?;
+        match name.as_str() {
+            "word/document.xml" => {
+                drop(file);
+                let options = SimpleFileOptions::default().compression_method(document_compression);
+                writer.start_file(&name, options)?;
+                writer.write_all(new_xml.as_bytes())?;
+            }
+            "word/numbering.xml" => {
+                drop(file);
+                if let Some(xml) = numbering_xml {
+                    writer.start_file(&name, SimpleFileOptions::default())?;
+                    writer.write_all(xml.as_bytes())?;
+                    wrote_numbering = true;
+                }
+                // Source had one but the current document has no list at
+                // all: omit it (dropped, not copied) — matches
+                // `create_new_docx`'s "no list -> no numbering.xml" policy.
+            }
+            "[Content_Types].xml" if numbering_xml.is_some() => {
+                // `by_index_raw`'s `file` handle (bound above) yields the
+                // still-compressed bytes, meant for `raw_copy_file`, not
+                // text reading — re-open this same entry through the
+                // decompressing `by_index` to actually read its content.
+                drop(file);
+                let mut content = String::new();
+                std::io::Read::read_to_string(&mut archive.by_index(i)?, &mut content)?;
+                if !content.contains("wordprocessingml.numbering+xml") {
+                    content = content.replace(
+                        "</Types>",
+                        "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/></Types>",
+                    );
+                }
+                writer.start_file(&name, SimpleFileOptions::default())?;
+                writer.write_all(content.as_bytes())?;
+            }
+            "word/_rels/document.xml.rels" if numbering_xml.is_some() => {
+                drop(file);
+                let mut content = String::new();
+                std::io::Read::read_to_string(&mut archive.by_index(i)?, &mut content)?;
+                if !content.contains("relationships/numbering") {
+                    content = content.replace(
+                        "</Relationships>",
+                        "<Relationship Id=\"rIdVimbatimNumbering\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/></Relationships>",
+                    );
+                }
+                writer.start_file(&name, SimpleFileOptions::default())?;
+                writer.write_all(content.as_bytes())?;
+            }
+            _ => {
+                writer.raw_copy_file(file)?;
+            }
+        }
+    }
+
+    // Source never had word/numbering.xml at all, but the current document
+    // needs one (a brand-new list added to a file that never had any).
+    if let Some(xml) = numbering_xml {
+        if !wrote_numbering {
+            writer.start_file("word/numbering.xml", SimpleFileOptions::default())?;
+            writer.write_all(xml.as_bytes())?;
         }
     }
 
@@ -1561,6 +1623,7 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
      */
     let preamble = fallback_preamble();
     let document_xml = rebuild_document_xml(&preamble, "", paragraphs);
+    let numbering_xml = build_numbering_xml(paragraphs);
 
     let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
@@ -1568,15 +1631,21 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
     let opts = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    let content_types_numbering_override = if numbering_xml.is_some() {
+        "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
+    } else {
+        ""
+    };
     writer.start_file("[Content_Types].xml", opts)?;
-    writer.write_all(
-        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+    writer.write_all(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
 <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
 <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
+{content_types_numbering_override}\
 </Types>"
-    )?;
+    ).as_bytes())?;
 
     writer.start_file("_rels/.rels", opts)?;
     writer.write_all(
@@ -1588,14 +1657,24 @@ Target=\"word/document.xml\"/>\
 </Relationships>"
     )?;
 
+    let rels_numbering = if numbering_xml.is_some() {
+        "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/>"
+    } else {
+        ""
+    };
     writer.start_file("word/_rels/document.xml.rels", opts)?;
-    writer.write_all(
-        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"/>"
-    )?;
+    writer.write_all(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{rels_numbering}</Relationships>"
+    ).as_bytes())?;
 
     writer.start_file("word/document.xml", opts)?;
     writer.write_all(document_xml.as_bytes())?;
+
+    if let Some(numbering_xml) = &numbering_xml {
+        writer.start_file("word/numbering.xml", opts)?;
+        writer.write_all(numbering_xml.as_bytes())?;
+    }
 
     writer.finish()?;
     std::fs::rename(&tmp_path, path)?;
@@ -2833,5 +2912,83 @@ mod tests {
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("ListParagraph"), "got: {xml}");
         assert!(!xml.contains("w:numPr"), "got: {xml}");
+    }
+
+    // ── package plumbing (numbering.xml + Content_Types + rels) ─────────────
+
+    #[test]
+    fn test_write_docx_includes_numbering_xml_and_plumbing_when_document_has_a_list() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_list_plumbing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "item".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(),
+            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            unsupported_xml: None,
+        }];
+        create_new_docx(&paragraphs, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        let mut numbering_xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/numbering.xml").unwrap(), &mut numbering_xml).unwrap();
+        assert!(numbering_xml.contains("<w:abstractNum"), "got: {numbering_xml}");
+
+        let mut content_types = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("[Content_Types].xml").unwrap(), &mut content_types).unwrap();
+        assert!(content_types.contains("numbering"), "got: {content_types}");
+
+        let mut rels = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/_rels/document.xml.rels").unwrap(), &mut rels).unwrap();
+        assert!(rels.contains("numbering"), "got: {rels}");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_write_docx_omits_numbering_xml_when_document_has_no_list() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_no_list_plumbing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "plain".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+        }];
+        create_new_docx(&paragraphs, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(archive.by_name("word/numbering.xml").is_err());
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_real_file_round_trip_preserves_list_through_save() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_list_roundtrip_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        let initial = vec![Paragraph {
+            runs: vec![Run { text: "hello".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+        }];
+        create_new_docx(&initial, &path).unwrap();
+
+        let (mut paragraphs, origin) = parse_docx(&path).unwrap();
+        paragraphs[0].list = Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 });
+        origin.save(&paragraphs, &path).unwrap();
+
+        let (reparsed, _origin2) = parse_docx(&path).unwrap();
+        assert_eq!(reparsed[0].list, Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 }
