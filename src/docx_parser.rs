@@ -1263,6 +1263,116 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     }
 }
 
+/// `(ListKind, numFmt, level-0 lvlText, level-0 font)` in the exact order
+/// `abstractNumId`s 0-12 are assigned — stable across saves, matching
+/// `docs/superpowers/specs/2026-08-11-lists-design.md`'s ground-truth table
+/// (values read directly from `Lists.docx`).
+const LIST_KIND_TABLE: [(ListKind, &str, &str, Option<&str>); 13] = [
+    (ListKind::BulletSolid, "bullet", "\u{f0b7}", Some("Symbol")),
+    (ListKind::BulletHollow, "bullet", "o", Some("Courier New")),
+    (ListKind::BulletSolidBox, "bullet", "\u{f0a7}", Some("Wingdings")),
+    (ListKind::BulletDiamond, "bullet", "\u{f076}", Some("Wingdings")),
+    (ListKind::BulletArrow, "bullet", "\u{f0d8}", Some("Wingdings")),
+    (ListKind::BulletCheckmark, "bullet", "\u{f0fc}", Some("Wingdings")),
+    (ListKind::NumberDecimalDot, "decimal", "%1.", None),
+    (ListKind::NumberDecimalParen, "decimal", "%1)", None),
+    (ListKind::NumberUpperRoman, "upperRoman", "%1.", None),
+    (ListKind::NumberUpperLetter, "upperLetter", "%1.", None),
+    (ListKind::NumberLowerLetterParen, "lowerLetter", "%1)", None),
+    (ListKind::NumberLowerLetterDot, "lowerLetter", "%1.", None),
+    (ListKind::NumberLowerRoman, "lowerRoman", "%1.", None),
+];
+
+fn abstract_num_id_for(kind: ListKind) -> u32 {
+    LIST_KIND_TABLE.iter().position(|(k, ..)| *k == kind).unwrap() as u32
+}
+
+/// One `<w:lvl>` element. `ind_left`/`ind_hanging` are in twips (1/20 pt),
+/// matching Word's own defaults confirmed from `Lists.docx`: `left`
+/// increases 720 per level, `hanging` is 360 (180 at level 2 for the
+/// numbered cascade specifically — see `cascade_level_xml`).
+fn build_lvl_xml(ilvl: u8, num_fmt: &str, lvl_text: &str, font: Option<&str>, ind_left: u32, ind_hanging: u32) -> String {
+    let font_xml = match font {
+        Some(f) => format!("<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\"/>"),
+        None => String::new(),
+    };
+    format!(
+        "<w:lvl w:ilvl=\"{ilvl}\"><w:start w:val=\"1\"/><w:numFmt w:val=\"{num_fmt}\"/><w:lvlText w:val=\"{lvl_text}\"/><w:lvlJc w:val=\"left\"/><w:pPr><w:ind w:left=\"{ind_left}\" w:hanging=\"{ind_hanging}\"/></w:pPr><w:rPr>{font_xml}</w:rPr></w:lvl>",
+    )
+}
+
+/// The one fixed cascade every one of the 13 styles' levels 1-8 use,
+/// independent of the level-0 style — confirmed (not guessed) by dumping
+/// ilvl 0/1/2 across all 13 of `Lists.docx`'s real `abstractNum`
+/// definitions: bullets go `<own glyph>` (level 0) -> `o`/Courier New
+/// (level 1) -> `\u{f0a7}`/Wingdings (level 2), repeating every 3 levels;
+/// numbers go `<own format>` (level 0) -> `lowerLetter "%2."` (level 1) ->
+/// `lowerRoman "%3."` (level 2), repeating every 3 levels.
+fn cascade_level_xml(ilvl: u8, is_bullet: bool) -> String {
+    let ind_left = 720 * (ilvl as u32 + 1);
+    let cascade_pos = (ilvl - 1) % 3; // ilvl 1,4,7 -> 0; 2,5,8 -> 1; 3,6 -> 2
+    if is_bullet {
+        let (lvl_text, font, hanging) = match cascade_pos {
+            0 => ("o", "Courier New", 360),
+            _ => ("\u{f0a7}", "Wingdings", 360),
+        };
+        build_lvl_xml(ilvl, "bullet", lvl_text, Some(font), ind_left, hanging)
+    } else {
+        let (num_fmt, hanging) = match cascade_pos {
+            0 => ("lowerLetter", 360),
+            _ => ("lowerRoman", 180),
+        };
+        build_lvl_xml(ilvl, num_fmt, &format!("%{}.", ilvl + 1), None, ind_left, hanging)
+    }
+}
+
+fn build_abstract_num_xml(id: u32, kind: ListKind, num_fmt: &str, lvl_text: &str, font: Option<&str>) -> String {
+    let mut out = format!("<w:abstractNum w:abstractNumId=\"{id}\">");
+    out.push_str(&build_lvl_xml(0, num_fmt, lvl_text, font, 720, 360));
+    for ilvl in 1..=8u8 {
+        out.push_str(&cascade_level_xml(ilvl, kind.is_bullet()));
+    }
+    out.push_str("</w:abstractNum>");
+    out
+}
+
+/// Builds `word/numbering.xml`, or `None` if `paragraphs` has no list at
+/// all (in which case the caller — the package-plumbing write path — omits
+/// the part entirely, unchanged from a non-list document today).
+fn build_numbering_xml(paragraphs: &[Paragraph]) -> Option<String> {
+    if !paragraphs.iter().any(|p| p.list.is_some()) {
+        return None;
+    }
+
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
+    );
+    for (id, (kind, num_fmt, lvl_text, font)) in LIST_KIND_TABLE.iter().enumerate() {
+        out.push_str(&build_abstract_num_xml(id as u32, *kind, num_fmt, lvl_text, *font));
+    }
+
+    // One <w:num> per contiguous run of list paragraphs.
+    let mut next_num_id = 1u32;
+    let mut i = 0;
+    while i < paragraphs.len() {
+        if let Some(item) = paragraphs[i].list {
+            out.push_str(&format!(
+                "<w:num w:numId=\"{next_num_id}\"><w:abstractNumId w:val=\"{}\"/></w:num>",
+                abstract_num_id_for(item.kind),
+            ));
+            next_num_id += 1;
+            while i < paragraphs.len() && paragraphs[i].list.is_some() {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    out.push_str("</w:numbering>");
+    Some(out)
+}
+
 /// Serialises `paragraphs` back to a `word/document.xml` string, using
 /// `preamble` (everything before `<w:body>`) and `sect_pr` (the `<w:sectPr>`
 /// block) extracted from the original file to preserve document-level settings.
@@ -2598,5 +2708,52 @@ mod tests {
         let xml = wrap_run_xml("<w:rPr><w:b/></w:rPr>");
         let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].list, None);
+    }
+
+    // ── word/numbering.xml generation ───────────────────────────────────────
+
+    #[test]
+    fn test_build_numbering_xml_returns_none_for_no_lists() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+        }];
+        assert!(build_numbering_xml(&paragraphs).is_none());
+    }
+
+    #[test]
+    fn test_build_numbering_xml_emits_all_13_abstract_nums_with_9_levels_each() {
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(),
+            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            unsupported_xml: None,
+        }];
+        let xml = build_numbering_xml(&paragraphs).unwrap();
+        assert_eq!(xml.matches("<w:abstractNum ").count(), 13, "got: {xml}");
+        // Spot-check one full abstractNum's level-0/1/2, matching Lists.docx exactly.
+        assert!(xml.contains("<w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"\u{f0b7}\"/>"), "got: {xml}");
+        assert!(xml.contains("<w:rFonts w:ascii=\"Symbol\" w:hAnsi=\"Symbol\"/>"), "got: {xml}");
+        // Confirmed cascade: every bullet style's level 1 is 'o'/Courier New,
+        // level 2 is /Wingdings, regardless of the level-0 style.
+        assert!(xml.matches("<w:lvlText w:val=\"o\"/>").count() >= 6, "got: {xml}");
+        assert!(xml.matches("<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\"/>").count() >= 6, "got: {xml}");
+    }
+
+    #[test]
+    fn test_build_numbering_xml_emits_one_num_per_contiguous_list_run() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: None, unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+        ];
+        let xml = build_numbering_xml(&paragraphs).unwrap();
+        // Two runs of decimal-dot list paragraphs (a,b) and (c) -> two <w:num> entries.
+        assert_eq!(xml.matches("<w:num ").count(), 2, "got: {xml}");
     }
 }
