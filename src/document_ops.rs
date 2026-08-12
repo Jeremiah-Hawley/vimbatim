@@ -175,6 +175,16 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
 
     let heading = para.heading;
     let alignment = para.alignment;
+    let list = para.list;
+    // Word's own "press Enter inside a list item" convention: the new line
+    // continues the list (same kind/level — its on-screen ordinal, if any,
+    // falls out of `list_item_ordinal` recomputing from position, no extra
+    // bookkeeping needed here) if and only if the line being split had any
+    // character at all following its marker — an empty item's Enter starts
+    // a plain line instead. The *original* (head) line's own list status is
+    // untouched either way; only the newly-created line's is decided here.
+    let line_had_any_text = para.runs.iter().any(|r| !r.text.is_empty());
+    let new_line_list = list.filter(|_| line_had_any_text);
     // A card style (Pocket/Hat/Block/Tag) is entirely run-level formatting
     // plus this paragraph-level `heading` marker (state.rs's
     // `apply_card_style`) — so splitting a heading line must revert the
@@ -185,6 +195,11 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     // a brand-new blank document's first paragraph starts with), so this
     // doesn't need a caller-supplied default size.
     let was_heading = heading != 0;
+    // A heading line resets the new paragraph to fully plain formatting
+    // (see above) — list continuation shouldn't survive that reset either,
+    // even though a paragraph carrying both `heading` and `list` isn't
+    // reachable through this app's own UI today.
+    let new_line_list = if was_heading { None } else { new_line_list };
     let tail_text = split_run.text[char_offset..].to_string();
     let (tail_run, new_alignment) = if was_heading {
         (Run { text: tail_text, ..Run::default() }, Alignment::default())
@@ -203,8 +218,8 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { list: None, runs: para_a_runs, heading, alignment, unsupported_xml: None },
-            Paragraph { list: None, runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
+            Paragraph { list, runs: para_a_runs, heading, alignment, unsupported_xml: None },
+            Paragraph { list: new_line_list, runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
         ],
     );
 }
@@ -814,6 +829,56 @@ mod tests {
         assert_eq!(paragraphs[0].runs[0].text, "foo");
         assert_eq!(paragraphs[0].runs[1].text, "b");
         assert_eq!(paragraphs[1].runs[0].text, "ar");
+    }
+
+    #[test]
+    fn test_insert_newline_on_nonempty_list_item_continues_the_list_on_both_halves() {
+        let mut item = para(vec![run("hello")]);
+        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        let mut paragraphs = vec![item];
+        sync_insert_char(&mut paragraphs, 2, '\n'); // splits "he" | "llo"
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+    }
+
+    #[test]
+    fn test_insert_newline_on_nonempty_numbered_item_continues_numbering_on_new_line() {
+        let mut item = para(vec![run("hello")]);
+        item.list = Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 });
+        let mut paragraphs = vec![item];
+        sync_insert_char(&mut paragraphs, 5, '\n'); // cursor at end of "hello"
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }));
+    }
+
+    #[test]
+    fn test_insert_newline_on_empty_list_item_does_not_continue_the_list() {
+        let mut item = para(vec![run("")]);
+        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        let mut paragraphs = vec![item];
+        sync_insert_char(&mut paragraphs, 0, '\n');
+        assert_eq!(paragraphs.len(), 2);
+        // The original (now still-empty) line keeps whatever it had — this
+        // task only specifies the *new* line's behavior.
+        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        // The new line does not continue the list: no character followed
+        // the marker on the line that was split.
+        assert_eq!(paragraphs[1].list, None);
+    }
+
+    #[test]
+    fn test_insert_newline_at_start_of_nonempty_list_item_still_continues_the_list() {
+        // Cursor right after the marker but text exists later in the line
+        // ("|hello", not "hello|" or empty) — still counts as "a character
+        // follows the marker" on the pre-split line as a whole.
+        let mut item = para(vec![run("hello")]);
+        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        let mut paragraphs = vec![item];
+        sync_insert_char(&mut paragraphs, 0, '\n');
+        assert_eq!(paragraphs.len(), 2);
+        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(paragraphs[1].runs[0].text, "hello");
     }
 
     #[test]

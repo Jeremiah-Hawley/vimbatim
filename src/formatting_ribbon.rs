@@ -1369,15 +1369,18 @@ impl FormattingRibbon {
                 p,
                 cx,
             ),
+            // Labels match Lists.docx's own example names for these exact
+            // seven styles verbatim, not the format string (which the
+            // row's own glyph preview already shows).
             FormatAction::NumberGallery => Self::list_gallery_rows(
                 &[
-                    (crate::docx_parser::ListKind::NumberDecimalDot, "1."),
-                    (crate::docx_parser::ListKind::NumberDecimalParen, "1)"),
-                    (crate::docx_parser::ListKind::NumberUpperRoman, "I."),
-                    (crate::docx_parser::ListKind::NumberUpperLetter, "A."),
-                    (crate::docx_parser::ListKind::NumberLowerLetterParen, "a)"),
-                    (crate::docx_parser::ListKind::NumberLowerLetterDot, "a."),
-                    (crate::docx_parser::ListKind::NumberLowerRoman, "i."),
+                    (crate::docx_parser::ListKind::NumberDecimalDot, "One Dot"),
+                    (crate::docx_parser::ListKind::NumberDecimalParen, "One Parenthesis"),
+                    (crate::docx_parser::ListKind::NumberUpperRoman, "Roman Numeral One"),
+                    (crate::docx_parser::ListKind::NumberUpperLetter, "Capital A Dot"),
+                    (crate::docx_parser::ListKind::NumberLowerLetterParen, "Lowercase A Parenthesis"),
+                    (crate::docx_parser::ListKind::NumberLowerLetterDot, "Lowercase A Dot"),
+                    (crate::docx_parser::ListKind::NumberLowerRoman, "Roman Numeral Lowercase One"),
                 ],
                 false,
                 p,
