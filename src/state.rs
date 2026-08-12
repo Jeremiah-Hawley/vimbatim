@@ -3184,6 +3184,26 @@ impl AppState {
         }
         let at_document_start = self.tabs.get(self.active_tab).map(|t| t.cursor == 0).unwrap_or(true);
         if at_document_start { return; }
+
+        // Backspace at the very start of a list paragraph's text un-lists it
+        // (matching Word) instead of falling through to the normal
+        // cross-paragraph merge/delete — a list item's marker isn't a
+        // character in the buffer, so there's nothing else for this
+        // backspace to visibly remove first.
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            let (para_idx, run_idx, char_idx) = resolve_position(&tab.paragraphs, tab.cursor);
+            if run_idx == 0 && char_idx == 0 && tab.paragraphs.get(para_idx).is_some_and(|p| p.list.is_some()) {
+                self.push_undo_snapshot();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(para) = tab.paragraphs.get_mut(para_idx) {
+                        para.list = None;
+                    }
+                    tab.is_modified = true;
+                }
+                return;
+            }
+        }
+
         self.push_undo_snapshot();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             // Walk back one char boundary
@@ -11214,6 +11234,42 @@ mod tests {
         state.tabs[0].selection = Some((0, 3));
         state.remove_list_formatting();
         assert_eq!(state.tabs[0].paragraphs[0].list, None);
+    }
+
+    #[test]
+    fn test_backspace_at_start_of_list_item_removes_list_formatting_not_text() {
+        let mut state = make_state_with_paragraphs(
+            vec![
+                Paragraph { runs: vec![Run { text: "before".into(), ..Run::default() }], ..Paragraph::default() },
+                Paragraph {
+                    runs: vec![Run { text: "item".into(), ..Run::default() }],
+                    list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                    ..Paragraph::default()
+                },
+            ],
+            0,
+        );
+        // Cursor at the very start of "item"'s text, right after "before\n".
+        state.tabs[0].cursor = 7;
+        state.backspace();
+        assert_eq!(state.tabs[0].paragraphs.len(), 2, "paragraphs should not have merged");
+        assert_eq!(state.tabs[0].paragraphs[1].runs[0].text, "item", "text should be untouched");
+        assert_eq!(state.tabs[0].paragraphs[1].list, None, "list formatting should be cleared");
+    }
+
+    #[test]
+    fn test_backspace_mid_list_item_deletes_text_normally() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "item".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                ..Paragraph::default()
+            }],
+            2, // between "it" and "em"
+        );
+        state.backspace();
+        assert_eq!(state.tabs[0].paragraphs[0].runs[0].text, "iem");
+        assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
     }
 
     // ── Font size box (ribbon spinner) ──────────────────────────────────────

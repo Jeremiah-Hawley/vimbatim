@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::auto_scroll::AutoScroller;
-use crate::docx_parser::{Paragraph, Run};
+use crate::docx_parser::{ListKind, Paragraph, Run};
 use crate::document_ops::paragraph_run_char_spans;
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{
@@ -2110,6 +2110,31 @@ impl Render for TextEditor {
                                 .into_any_element()
                         });
 
+                        // List marker (bullet glyph or number), on a list
+                        // paragraph's *first* row only — see
+                        // `LIST_GUTTER_PX`'s doc comment on why wrapped
+                        // continuation rows don't get one. `list_item_ordinal`
+                        // uses the same contiguous-run rule
+                        // `docx_parser::assign_list_num_ids` uses on the
+                        // write side, so what's on screen always matches
+                        // what gets saved.
+                        let list_marker = (row_start == 0)
+                            .then(|| paragraphs.get(li).and_then(|para| para.list))
+                            .flatten()
+                            .map(|item| {
+                                let ordinal = list_item_ordinal(&paragraphs, li);
+                                div()
+                                    .id(ElementId::named_usize("list-marker", li))
+                                    .w(px(LIST_GUTTER_PX * zoom))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .pr(px(4.0 * zoom))
+                                    .text_color(rgb(p.text))
+                                    .child(list_marker_text(item.kind, ordinal))
+                                    .into_any_element()
+                            });
+
                         let content_el = render_line(
                             &row_text,
                             row_cursor_col,
@@ -2125,6 +2150,7 @@ impl Render for TextEditor {
                             invisibility_mode,
                             cite_size_half_points,
                             fold_toggle,
+                            list_marker,
                         );
                         // Heading styles (spec 6.5): a paragraph-wide default
                         // that per-run formatting (bold/size/etc., applied
@@ -2490,6 +2516,14 @@ fn render_line(
     // within — which is what silently un-centred every card style the first
     // time this marker was added.
     fold_toggle: Option<AnyElement>,
+    // The bullet/number marker for this row, when it is a list paragraph's
+    // first row (`row_start == 0` — see `LIST_GUTTER_PX`'s doc comment on
+    // why wrapped continuation rows don't get one). Composed the same way
+    // as `fold_toggle` above and for the same reason: it has to sit beside
+    // the `flex_1` line wrapper, inside a Pocket's box if this line
+    // happens to also be boxed (not a realistic combination in practice,
+    // but composed correctly regardless rather than assumed away).
+    list_marker: Option<AnyElement>,
 ) -> AnyElement {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
@@ -2531,8 +2565,14 @@ fn render_line(
 
     // The fast paths below emit one element for the whole row, which cannot
     // express "some runs drawn, some not" — fall through to the per-run path
-    // whenever anything might be hidden.
-    if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
+    // whenever anything might be hidden. `list_marker.is_none()` for the
+    // same reason as the alignment/box checks a few lines down: a fast
+    // return here is a bare div with no room to compose a leading gutter
+    // element beside it, which would silently drop the marker on exactly
+    // the most common case (a plain, single-run, unformatted list item).
+    if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty()
+        && list_marker.is_none()
+    {
         // Don't take any fast path if alignment or a box-shaped visual is
         // needed — both are only drawn correctly by the full path below (the
         // box wrapper in particular: a bare-div return skips it entirely,
@@ -2708,16 +2748,20 @@ fn render_line(
                 .px(px(8.0))
                 .py(px(8.0));
 
-            box_div = match fold_toggle {
-                // Inside the border, so a Pocket's marker reads as part of the
-                // box rather than floating outside it.
-                Some(toggle) => box_div
+            // Inside the border, so a fold marker/list marker reads as part
+            // of the box rather than floating outside it. Not a realistic
+            // combination in practice (list paragraphs don't carry
+            // box_format), but composed generally rather than assumed away.
+            let leading: Vec<AnyElement> = fold_toggle.into_iter().chain(list_marker).collect();
+            box_div = if leading.is_empty() {
+                box_div.child(line_div)
+            } else {
+                box_div
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(toggle)
-                    .child(div().flex_1().min_w_0().child(line_div)),
-                None => box_div.child(line_div),
+                    .children(leading)
+                    .child(div().flex_1().min_w_0().child(line_div))
             };
 
             // If previous line also has a box, merge them by removing top border.
@@ -2734,15 +2778,16 @@ fn render_line(
             return box_div.into_any_element();
         }
     }
-    match fold_toggle {
-        Some(toggle) => div()
+    let leading: Vec<AnyElement> = fold_toggle.into_iter().chain(list_marker).collect();
+    match leading.is_empty() {
+        false => div()
             .flex()
             .flex_row()
             .items_center()
-            .child(toggle)
+            .children(leading)
             .child(div().flex_1().min_w_0().child(line_div))
             .into_any_element(),
-        None => line_div.into_any_element(),
+        true => line_div.into_any_element(),
     }
 }
 
@@ -3047,6 +3092,101 @@ fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
 /// 2px*2 border sides = 20) — under-reserving here reproduces the box
 /// clipping/overlap bug already fixed once (see this const's own history).
 const CARD_BOX_EXTRA_PX: f32 = 20.0;
+
+/// Fixed pixel width reserved for a list paragraph's marker gutter — wide
+/// enough for the longest ordinal this app's practical list lengths need
+/// ("99." or "iii.") at the default zoom, scaled by `zoom` like every other
+/// row-metric constant in this file. Only the *first* visual row of a
+/// (possibly word-wrapped) list paragraph gets a gutter and a marker —
+/// wrapped continuation rows render flush-left, not Word's true hanging
+/// indent.
+/// ponytail: simplification, not Word's hanging-indent-on-every-wrapped-row;
+/// upgrade if wrapped list items turn out to need it visually.
+pub(crate) const LIST_GUTTER_PX: f32 = 28.0;
+
+/// 1-indexed letter for `NumberLowerLetterDot`/`NumberLowerLetterParen`/
+/// `NumberUpperLetter` — `1 -> "a"`, `26 -> "z"`, wrapping into double
+/// letters beyond that the way Word's own `lowerLetter`/`upperLetter`
+/// formats do (`27 -> "aa"`), which this app's practical list lengths won't
+/// reach but is cheap to get right regardless.
+pub(crate) fn to_letter(n: u32) -> String {
+    let mut n = n;
+    let mut out = Vec::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        out.push((b'a' + rem as u8) as char);
+        n = (n - 1) / 26;
+    }
+    out.iter().rev().collect()
+}
+
+/// 1-indexed lowercase Roman numeral, for `NumberLowerRoman`/`NumberUpperRoman`
+/// (the caller upper-cases when needed). Covers this app's practical list
+/// range (well past 100) with the standard subtractive-notation table.
+pub(crate) fn to_roman(n: u32) -> String {
+    const TABLE: [(u32, &str); 13] = [
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for (value, symbol) in TABLE {
+        while n >= value {
+            out.push_str(symbol);
+            n -= value;
+        }
+    }
+    out
+}
+
+/// The text painted in a list paragraph's gutter: the fixed glyph for a
+/// bullet kind, or `ordinal` formatted per the number kind's own template.
+///
+/// Deliberately does **not** paint Word's real Wingdings/Symbol
+/// private-use-area codepoints (`docs/superpowers/specs/2026-08-11-lists-design.md`'s
+/// ground-truth table) — this app bundles only DejaVu Sans Mono
+/// (`FONT_FAMILY`), which has no glyphs at those codepoints, so painting
+/// them here would show missing-glyph boxes on screen. The saved `.docx`
+/// still gets Word's real codepoints (`docx_parser::build_numbering_xml`) —
+/// this is purely an in-app rendering substitution, the same category of
+/// deliberate simplification as `Run.font` already not being applied to
+/// on-screen rendering (see that field's own doc comment).
+pub(crate) fn list_marker_text(kind: ListKind, ordinal: u32) -> String {
+    match kind {
+        ListKind::BulletSolid => "\u{2022}".to_string(),
+        ListKind::BulletHollow => "o".to_string(),
+        ListKind::BulletSolidBox => "\u{25aa}".to_string(),
+        ListKind::BulletDiamond => "\u{25c6}".to_string(),
+        ListKind::BulletArrow => "\u{2192}".to_string(),
+        ListKind::BulletCheckmark => "\u{2713}".to_string(),
+        ListKind::NumberDecimalDot => format!("{ordinal}."),
+        ListKind::NumberDecimalParen => format!("{ordinal})"),
+        ListKind::NumberUpperRoman => format!("{}.", to_roman(ordinal).to_uppercase()),
+        ListKind::NumberUpperLetter => format!("{}.", to_letter(ordinal).to_uppercase()),
+        ListKind::NumberLowerLetterParen => format!("{})", to_letter(ordinal)),
+        ListKind::NumberLowerLetterDot => format!("{}.", to_letter(ordinal)),
+        ListKind::NumberLowerRoman => format!("{}.", to_roman(ordinal)),
+    }
+}
+
+/// 1-indexed position of `paragraphs[index]` within its own contiguous run
+/// of list paragraphs — the same run-boundary rule
+/// `docx_parser::assign_list_num_ids` uses on the write side, so the
+/// on-screen ordinal always matches what gets saved. Walks backward from
+/// `index` while `list.is_some()` holds; a non-list paragraph (or the start
+/// of the document) ends the run. `index` itself must carry a list, or the
+/// count is meaningless — callers only invoke this after checking
+/// `paragraphs[index].list.is_some()`.
+pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
+    let mut ordinal = 1u32;
+    let mut i = index;
+    while i > 0 && paragraphs[i - 1].list.is_some() {
+        ordinal += 1;
+        i -= 1;
+    }
+    ordinal
+}
 
 /// How many uniform-height `LINE_HEIGHT_PX` slots a paragraph's rendered
 /// line actually needs. `gpui::uniform_list` (see `RowCache`/`render()`)
@@ -3787,8 +3927,18 @@ pub(crate) fn line_col_from_mouse_position(
         // move the row's first character, so no indent applies there either.
         _ => 0.0,
     };
+    // A list paragraph's *first* row (`row_start == 0`, matching where the
+    // marker gutter actually renders — see `LIST_GUTTER_PX`'s own doc
+    // comment on wrapped continuation rows) eats into the row the same way
+    // an alignment indent does: text starts `LIST_GUTTER_PX * zoom` further
+    // right than the row's raw edge.
+    let gutter = if row_start == 0 && para.is_some_and(|p| p.list.is_some()) {
+        LIST_GUTTER_PX * zoom
+    } else {
+        0.0
+    };
     let col_in_row = column_for_x_in_row(
-        local_x - indent, para, &spans, row_start, row_end, font_size_px, zoom,
+        local_x - indent - gutter, para, &spans, row_start, row_end, font_size_px, zoom,
     );
     let col = row_start + col_in_row.min(row_end - row_start);
     (logical_line, col)
@@ -3932,12 +4082,13 @@ mod tests {
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
         line_col_from_mouse_position, real_row_height_px, paints_run_box,
+        list_marker_text, to_roman, to_letter, list_item_ordinal, LIST_GUTTER_PX,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
     use crate::state::AppState;
-    use crate::docx_parser::{Paragraph, Run, Alignment};
+    use crate::docx_parser::{Paragraph, Run, Alignment, ListItem, ListKind};
     use std::time::Instant;
 
     /// The three run properties that paint a box-shaped visual (background
@@ -5532,5 +5683,79 @@ mod tests {
         // Row 0's content now sits at display index `slots - 1`, after its
         // own leading blanks; row 1 immediately follows at `slots`.
         assert_eq!(wrap_to_display, vec![slots - 1, slots]);
+    }
+
+    // ── list marker rendering (non-GPUI pure logic only) ─────────────────────
+
+    #[test]
+    fn test_list_marker_text_bullets() {
+        assert_eq!(list_marker_text(ListKind::BulletHollow, 1), "o");
+    }
+
+    #[test]
+    fn test_list_marker_text_number_formats() {
+        assert_eq!(list_marker_text(ListKind::NumberDecimalDot, 3), "3.");
+        assert_eq!(list_marker_text(ListKind::NumberDecimalParen, 3), "3)");
+        assert_eq!(list_marker_text(ListKind::NumberUpperLetter, 3), "C.");
+        assert_eq!(list_marker_text(ListKind::NumberLowerLetterDot, 3), "c.");
+        assert_eq!(list_marker_text(ListKind::NumberLowerRoman, 3), "iii.");
+        assert_eq!(list_marker_text(ListKind::NumberUpperRoman, 4), "IV.");
+    }
+
+    #[test]
+    fn test_to_letter_and_to_roman_ranges() {
+        assert_eq!(to_letter(1), "a");
+        assert_eq!(to_letter(26), "z");
+        assert_eq!(to_roman(1), "i");
+        assert_eq!(to_roman(9), "ix");
+        assert_eq!(to_roman(40), "xl");
+    }
+
+    #[test]
+    fn test_list_item_ordinal_counts_within_contiguous_run() {
+        let paragraphs = vec![
+            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
+            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
+            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], ..Paragraph::default() },
+            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
+        ];
+        assert_eq!(list_item_ordinal(&paragraphs, 0), 1);
+        assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
+        // A fresh run after the non-list break restarts at 1.
+        assert_eq!(list_item_ordinal(&paragraphs, 3), 1);
+    }
+
+    #[test]
+    fn test_line_col_from_mouse_position_accounts_for_list_gutter_width() {
+        use gpui::{point, px, size, Bounds};
+        // A click at the same raw x lands on an earlier column when the row
+        // is a list paragraph's first row, since the gutter eats into the
+        // available text width before any character starts.
+        let list_para = Paragraph {
+            runs: vec![Run { text: "hello".into(), ..Run::default() }],
+            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            ..Paragraph::default()
+        };
+        let plain_para = Paragraph { runs: vec![Run { text: "hello".into(), ..Run::default() }], ..Paragraph::default() };
+        let rows = vec![(0usize, 0usize, 5usize)];
+        let display_to_wrap = vec![Some(0usize)];
+        let content_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(1000.0)));
+        // A click positioned past one gutter width but still within the
+        // first character or two.
+        let x = 16.0 + LIST_GUTTER_PX + 4.0;
+        let position = point(px(x), px(0.0));
+
+        let (_line, col_list) = line_col_from_mouse_position(
+            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
+            &[list_para], line_height_px(11.0),
+        );
+        let (_line, col_plain) = line_col_from_mouse_position(
+            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
+            &[plain_para], line_height_px(11.0),
+        );
+        assert!(col_list < col_plain, "list col {col_list} should be earlier than plain col {col_plain}");
     }
 }
