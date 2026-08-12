@@ -3179,4 +3179,21 @@ mod tests {
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
     }
+
+    // ── multi-level (Phase 2) round trip ─────────────────────────────────────
+
+    #[test]
+    fn test_multilevel_list_round_trips_through_parse_and_rebuild() {
+        let original = vec![
+            Paragraph { runs: vec![Run { text: "top".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
+            Paragraph { runs: vec![Run { text: "nested".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 1 }), unsupported_xml: None },
+        ];
+        let xml = rebuild_document_xml(&fallback_preamble(), "", &original);
+        let numbering = parse_numbering_xml(&build_numbering_xml(&original).unwrap());
+        let reparsed = parse_document_xml(&xml, &no_styles(), &numbering).unwrap();
+        assert_eq!(reparsed[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(reparsed[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 1 }));
+    }
 }
