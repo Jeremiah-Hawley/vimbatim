@@ -203,8 +203,8 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { runs: para_a_runs, heading, alignment, unsupported_xml: None },
-            Paragraph { runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
+            Paragraph { list: None, runs: para_a_runs, heading, alignment, unsupported_xml: None },
+            Paragraph { list: None, runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
         ],
     );
 }
@@ -232,6 +232,7 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
 
     let heading = paragraphs[start_para].heading;
     let alignment = paragraphs[start_para].alignment;
+    let list = paragraphs[start_para].list;
     let mut merged_runs: Vec<Run> = paragraphs[start_para].runs[..start_run].to_vec();
     let mut head_run = paragraphs[start_para].runs[start_run].clone();
     head_run.text.truncate(start_char);
@@ -245,24 +246,29 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
     merged_runs.retain(|r| !r.text.is_empty());
     merge_adjacent_same_format_runs(&mut merged_runs);
     // A card style's box/bold/size lives on its runs, but its heading/
-    // center-alignment are paragraph-level fields deletion never otherwise
-    // touches. Merging across a paragraph boundary should carry over the
-    // surviving (start) paragraph's own heading/alignment — e.g. backspacing
-    // away just an empty trailing line should leave a Pocket line exactly as
-    // it was, still centered. But if this merge also emptied out all the
-    // text, there's no run-level formatting left to justify keeping them
-    // either: reset both to plain, matching what Clear Formatting already
-    // does explicitly (see `apply_formatting_to_line`'s `ClearAll` arm) —
-    // otherwise `text_editor.rs`'s heading-driven bold/oversized paragraph
-    // render keeps applying to an empty line whose actual pocket-formatted
-    // text has been fully backspaced away.
+    // center-alignment/list-ness are paragraph-level fields deletion never
+    // otherwise touches. Merging across a paragraph boundary should carry
+    // over the surviving (start) paragraph's own heading/alignment/list —
+    // e.g. backspacing away just an empty trailing line should leave a
+    // Pocket line exactly as it was, still centered, and a list item exactly
+    // as it was, still a list item. But if this merge also emptied out all
+    // the text, there's no run-level formatting left to justify keeping them
+    // either: reset all three to plain, matching what Clear Formatting
+    // already does explicitly (see `apply_formatting_to_line`'s `ClearAll`
+    // arm) — otherwise `text_editor.rs`'s heading-driven bold/oversized
+    // paragraph render (and the list marker gutter) keeps applying to an
+    // empty line whose actual formatted text has been fully backspaced away.
     let now_empty = merged_runs.is_empty();
     if now_empty {
         merged_runs.push(Run::default());
     }
-    let (heading, alignment) = if now_empty { (0, Alignment::default()) } else { (heading, alignment) };
+    let (heading, alignment, list) = if now_empty {
+        (0, Alignment::default(), None)
+    } else {
+        (heading, alignment, list)
+    };
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment, unsupported_xml: None }]);
+    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment, list, unsupported_xml: None }]);
 }
 
 /// Once a paragraph's own within-paragraph deletion (not a cross-paragraph
@@ -686,14 +692,14 @@ pub(crate) fn apply_format_op(run: &mut Run, op: &FormatOp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::docx_parser::{CardStyle, Run};
+    use crate::docx_parser::{CardStyle, ListItem, ListKind, Run};
 
     fn run(text: &str) -> Run {
         Run { text: text.to_string(), ..Run::default() }
     }
 
     fn para(runs: Vec<Run>) -> Paragraph {
-        Paragraph { runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+        Paragraph { list: None, runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     #[test]
@@ -815,7 +821,7 @@ mod tests {
         // A Pocket-styled line (heading 1, bold, sized, boxed, centered) —
         // pressing Enter at its end should start a plain body-text line,
         // not continue looking like a Pocket.
-        let heading_line = Paragraph {
+        let heading_line = Paragraph { list: None,
             runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
             heading: 1,
             alignment: Alignment::Center,
@@ -841,7 +847,7 @@ mod tests {
         // Splitting in the middle of a Hat-styled line: the trailing half
         // that moves to the new paragraph loses the Hat formatting too,
         // matching Word's "Enter inside a heading reverts to body style".
-        let heading_line = Paragraph {
+        let heading_line = Paragraph { list: None,
             runs: vec![Run { text: "hello world".into(), bold: true, size: 44, double_underline: true, ..Run::default() }],
             heading: 2,
             alignment: Alignment::Center,
@@ -915,6 +921,28 @@ mod tests {
         sync_delete_range(&mut paragraphs, 2, 5);
         assert_eq!(paragraphs.len(), 1);
         assert_eq!(paragraphs[0].runs[0].text, "onwo");
+    }
+
+    #[test]
+    fn test_delete_across_paragraph_boundary_carries_over_start_paragraphs_list() {
+        let mut start = para(vec![run("item")]);
+        start.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        let mut paragraphs = vec![start, para(vec![run("")])];
+        // content = "item\n"; delete the newline (byte offset 4..5) to merge.
+        sync_delete_range(&mut paragraphs, 4, 5);
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+    }
+
+    #[test]
+    fn test_delete_across_paragraph_boundary_clears_list_when_result_is_empty() {
+        let mut start = para(vec![run("x")]);
+        start.list = Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 });
+        let mut paragraphs = vec![start, para(vec![run("")])];
+        // content = "x\n"; delete everything (both chars) so the merge result is empty.
+        sync_delete_range(&mut paragraphs, 0, 2);
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].list, None);
     }
 
     #[test]

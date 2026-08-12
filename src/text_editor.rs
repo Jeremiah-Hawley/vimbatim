@@ -4944,7 +4944,7 @@ mod tests {
     fn bench_diagnostic_large_document_per_keystroke_costs() {
         let big_text: String = "the quick brown fox jumps over the lazy dog "
             .repeat(340); // ~15,300 chars, one giant paragraph
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: big_text.clone(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -5044,7 +5044,7 @@ mod tests {
                     ..Run::default()
                 });
             }
-            paragraphs.push(Paragraph { runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None });
+            paragraphs.push(Paragraph { list: None, runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None });
         }
         let content: String = paragraphs
             .iter()
@@ -5148,7 +5148,7 @@ mod tests {
     }
 
     fn para_plain(text: &str) -> Paragraph {
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![run_plain(text)],
             heading: 0,
             alignment: Alignment::default(),
@@ -5170,7 +5170,7 @@ mod tests {
     }
 
     fn card_para(text: &str, heading: u8) -> Paragraph {
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![run_plain(text)],
             heading,
             alignment: Alignment::default(),
@@ -5205,7 +5205,7 @@ mod tests {
     /// highlighted text that invisibility mode would have kept.
     #[test]
     fn test_fold_hides_body_rows_that_invisibility_would_keep() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl_run("highlighted body")],
             heading: 0,
             alignment: Alignment::default(),
@@ -5223,7 +5223,7 @@ mod tests {
     fn test_hidden_wrap_rows_marks_only_fully_hidden_rows() {
         let paragraphs = vec![
             // 0: body text with a highlight in it — stays.
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![run_plain("plain "), hl_run("read this")],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -5232,7 +5232,7 @@ mod tests {
             // 1: body text with nothing marked — goes.
             para_plain("unread body text"),
             // 2: a Tag line — stays whole.
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![run_plain("a tag")],
                 heading: 4,
                 alignment: Alignment::default(),
@@ -5252,7 +5252,7 @@ mod tests {
     /// wrapped paragraph must not keep an earlier all-plain row visible.
     #[test]
     fn test_hidden_wrap_rows_judges_each_wrapped_row_separately() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![run_plain("aaaaa"), hl_run("bbbbb")],
             heading: 0,
             alignment: Alignment::default(),
@@ -5419,13 +5419,13 @@ mod tests {
     // (card-style row-overlap fix — handoff.md)
 
     fn plain_paragraph() -> Paragraph {
-        Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+        Paragraph { list: None, runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     fn pocket_paragraph() -> Paragraph {
         // Mirrors AppState::apply_card_style(CardStyleKind::Pocket): bold +
         // FontSize(52 half-points = 26px) + Box(true), heading level 1.
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![Run { size: 52, bold: true, box_format: true, ..Run::default() }],
             heading: 1,
             alignment: Alignment::default(),
@@ -5488,7 +5488,7 @@ mod tests {
         // than body text (14px), so despite heading level 4's generic 16px
         // fallback, the actual rendered line fits comfortably in one slot —
         // it must not reserve a spurious blank row underneath.
-        let para = Paragraph {
+        let para = Paragraph { list: None,
             runs: vec![Run { size: 26, bold: true, ..Run::default() }],
             heading: 4,
             alignment: Alignment::default(),
@@ -5501,7 +5501,7 @@ mod tests {
     fn test_slot_count_heading_without_box_still_oversized() {
         // heading_font_size_px(1, 1.0) == 24px, no box — still needs 2 slots
         // (24 * 20/14 == 34.3px > 20px, <= 40px).
-        let para = Paragraph { runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
+        let para = Paragraph { list: None, runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
         assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 2);
     }
 

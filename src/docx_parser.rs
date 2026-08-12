@@ -87,6 +87,56 @@ impl CardStyle {
     }
 }
 
+/// The list style a paragraph carries, if any. `level` is always 0 in
+/// Phase 1 (single-level); Phase 2 uses 0-8, matching Word's own `w:ilvl`
+/// range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListItem {
+    pub kind: ListKind,
+    pub level: u8,
+}
+
+/// One of the 13 real-Word list styles this app supports, exactly matching
+/// the reference file `Lists.docx`'s four examples (a plain bulleted list,
+/// a plain numbered list, six distinct bullet options, seven distinct
+/// number options). No open-ended "custom" variant — an unrecognized
+/// foreign list is classified to the nearest of these via
+/// `ListKind::classify`, never dropped or stored raw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKind {
+    BulletSolid,
+    BulletHollow,
+    BulletSolidBox,
+    BulletDiamond,
+    BulletArrow,
+    BulletCheckmark,
+    NumberDecimalDot,
+    NumberDecimalParen,
+    NumberUpperRoman,
+    NumberUpperLetter,
+    NumberLowerLetterParen,
+    NumberLowerLetterDot,
+    NumberLowerRoman,
+}
+
+impl ListKind {
+    /// `true` for the six bullet variants, `false` for the seven number
+    /// variants — used by the gallery UI to pick which button's menu a
+    /// style belongs in, and by marker rendering to decide whether to
+    /// paint a fixed glyph or a computed ordinal.
+    pub fn is_bullet(&self) -> bool {
+        matches!(
+            self,
+            ListKind::BulletSolid
+                | ListKind::BulletHollow
+                | ListKind::BulletSolidBox
+                | ListKind::BulletDiamond
+                | ListKind::BulletArrow
+                | ListKind::BulletCheckmark
+        )
+    }
+}
+
 /// A single formatting run within a paragraph — the smallest unit of text with
 /// consistent styling. Word documents split paragraphs into runs whenever
 /// formatting changes (e.g., switching from plain to bold text).
@@ -137,6 +187,8 @@ pub struct Paragraph {
     pub runs: Vec<Run>,
     pub heading: u8,
     pub alignment: Alignment,  // left, center, right, justify
+    /// The list style/level this paragraph carries, if any. See `ListItem`.
+    pub list: Option<ListItem>,
     /// Raw inner XML (everything between `<w:p...>` and `</w:p>`), captured
     /// at parse time only when this paragraph contains one of a narrow,
     /// explicit list of elements the app doesn't model (hyperlinks, inline
@@ -423,7 +475,7 @@ fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
                     b"w:pPr" => { in_ppr = true; }
                     b"w:rPr" => { in_rpr = true; }
                     b"w:jc" if in_ppr => {
-                        let mut para = Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+                        let mut para = Paragraph { list: None, runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None };
                         apply_para_alignment(e, &mut para);
                         current.alignment = Some(para.alignment);
                     }
@@ -531,7 +583,7 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
             Event::Start(ref e) => {
                 match e.name().as_ref() {
                     b"w:p" => {
-                        current_para = Some(Paragraph { runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
+                        current_para = Some(Paragraph { list: None, runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
                         para_has_box_border = false;
                         current_style_defaults = None;
                         para_has_unsupported_content = false;
@@ -1433,7 +1485,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_center_alignment() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Center,
@@ -1445,7 +1497,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_jc_for_left_alignment() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
@@ -1457,7 +1509,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_heading_style() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 2,
             alignment: Alignment::Left,
@@ -1473,7 +1525,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_pstyle_for_body_text() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
@@ -1485,7 +1537,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_ppr_entirely_for_plain_paragraph() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::Left,
@@ -1497,7 +1549,7 @@ mod tests {
 
     #[test]
     fn test_alignment_and_heading_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph {
+        let original = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 1,
             alignment: Alignment::Center,
@@ -1643,7 +1695,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_double_underline() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1655,7 +1707,7 @@ mod tests {
 
     #[test]
     fn test_double_underline_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph {
+        let original = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1678,7 +1730,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_strikethrough() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1690,7 +1742,7 @@ mod tests {
 
     #[test]
     fn test_strikethrough_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph {
+        let original = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1722,7 +1774,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_four_sided_pbdr_when_box_format_set() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), box_format: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1742,7 +1794,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_pbdr_when_no_run_has_box_format() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1764,7 +1816,7 @@ mod tests {
             CardStyle::Cite,
             CardStyle::Analytic,
         ] {
-            let paragraphs = vec![Paragraph {
+            let paragraphs = vec![Paragraph { list: None,
                 runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -1784,7 +1836,7 @@ mod tests {
     /// the style isn't defined — so a marked document opens cleanly elsewhere.
     #[test]
     fn test_style_marker_is_written_as_an_rstyle_reference() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "a cite".into(), style: Some(CardStyle::Cite), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1799,7 +1851,7 @@ mod tests {
     /// and emphasized-but-not-boxed at the same time.
     #[test]
     fn test_emphasis_markers_survive_round_trip() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![
                 Run { text: "emphasized only".into(), emphasis: true, ..Run::default() },
                 Run {
@@ -1853,7 +1905,7 @@ mod tests {
 
     #[test]
     fn test_box_format_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph {
+        let original = vec![Paragraph { list: None,
             runs: vec![
                 Run { text: "a".into(), box_format: true, ..Run::default() },
                 Run { text: "b".into(), box_format: true, ..Run::default() },
@@ -1879,7 +1931,7 @@ mod tests {
         let path = dir.join("test.docx");
 
         // 1. Create a minimal real .docx on disk.
-        let initial = vec![Paragraph {
+        let initial = vec![Paragraph { list: None,
             runs: vec![Run { text: "hello".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -1995,7 +2047,7 @@ mod tests {
         // drops out of Word's Navigation pane, even though parsing it back
         // into Vimbatim still shows a heading (apply_para_style lower-cases
         // before matching, so it doesn't notice the mismatch).
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 1,
             alignment: Alignment::default(),
@@ -2019,7 +2071,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("with_table.docx");
 
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "before table".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2154,7 +2206,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_reemits_unsupported_xml_verbatim_when_present() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "ignored".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2188,7 +2240,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_italic() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), italic: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2200,7 +2252,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_font_ascii() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), font: Some("Georgia".into()), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2212,7 +2264,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_color() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), color: Some("FF0000".into()), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2224,7 +2276,7 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_rpr_entirely_when_no_properties_set() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "hi".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -2236,7 +2288,7 @@ mod tests {
 
     #[test]
     fn test_italic_font_color_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph {
+        let original = vec![Paragraph { list: None,
             runs: vec![Run {
                 text: "hi".into(),
                 italic: true,

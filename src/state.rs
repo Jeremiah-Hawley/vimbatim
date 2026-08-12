@@ -380,7 +380,7 @@ pub struct TabSnapshot {
 /// it. Never `vec![]`: every rich-text-aware function assumes at least one
 /// paragraph and run always exist.
 pub fn default_paragraphs() -> Vec<Paragraph> {
-    vec![Paragraph { runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }]
+    vec![Paragraph { list: None, runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }]
 }
 
 /// The file explorer sidebar's starting width in pixels — not persisted
@@ -9543,7 +9543,7 @@ mod tests {
     // ── Level-aware folding ────────────────────────────────────────────────
 
     fn outline() -> Vec<Paragraph> {
-        let card = |text: &str, heading: u8| Paragraph {
+        let card = |text: &str, heading: u8| Paragraph { list: None,
             runs: vec![Run { text: text.into(), ..Run::default() }],
             heading,
             alignment: Alignment::default(),
@@ -9662,7 +9662,7 @@ mod tests {
     // ── Standardize highlighting ───────────────────────────────────────────
     // ── Analytic style ─────────────────────────────────────────────────────
     fn analytic_para(text: &str, size: u16, color: &str) -> Paragraph {
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![Run {
                 text: text.into(),
                 bold: true,
@@ -9758,7 +9758,7 @@ mod tests {
     /// though its bold/size/color no longer match the signature.
     #[test]
     fn a_marked_analytic_is_recognised_regardless_of_its_formatting() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run {
                 text: "reformatted".into(),
                 bold: false,
@@ -9784,7 +9784,7 @@ mod tests {
     /// misidentification the marker exists to prevent.
     #[test]
     fn a_marked_cite_is_not_mistaken_for_an_analytic() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run {
                 text: "a cite".into(),
                 bold: true,
@@ -9974,7 +9974,7 @@ mod tests {
     /// idea of "current".
     #[test]
     fn standardize_follows_the_most_recently_picked_color() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("marked", "green")],
             heading: 0,
             alignment: Alignment::default(),
@@ -9996,13 +9996,13 @@ mod tests {
     #[test]
     fn standardize_repaints_every_highlight_to_the_current_color() {
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![hl("green bit", "green"), run_plain(" plain "), hl("cyan bit", "cyan")],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![hl("magenta bit", "magenta")],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -10027,7 +10027,7 @@ mod tests {
     /// text moves.
     #[test]
     fn standardize_leaves_unhighlighted_text_alone() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![run_plain("before "), hl("marked", "green"), run_plain(" after")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10050,7 +10050,7 @@ mod tests {
     /// no longer exists.
     #[test]
     fn standardize_merges_runs_that_now_match() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("one ", "green"), hl("two", "cyan")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10067,7 +10067,7 @@ mod tests {
 
     #[test]
     fn standardize_with_exception_spares_the_chosen_color() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![
                 hl("ordinary", "green"),
                 run_plain(" "),
@@ -10097,7 +10097,7 @@ mod tests {
     /// With nothing configured, the exception command is the plain one.
     #[test]
     fn standardize_with_no_exception_repaints_everything() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("a", "green"), hl("b", "cyan")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10118,7 +10118,7 @@ mod tests {
     /// no undo entry, so Ctrl+Z still undoes whatever the user actually did.
     #[test]
     fn standardize_with_exception_is_a_no_op_when_only_the_exception_differs() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("kept", "cyan"), hl(" done", "yellow")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10137,7 +10137,7 @@ mod tests {
 
     #[test]
     fn standardize_is_undoable() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("marked", "green")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10157,7 +10157,7 @@ mod tests {
     /// Ctrl+Z afterwards should undo whatever the user actually did last.
     #[test]
     fn standardize_is_a_no_op_when_already_uniform() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![hl("marked", "yellow")],
             heading: 0,
             alignment: Alignment::default(),
@@ -10211,7 +10211,7 @@ mod tests {
     /// Shrink applies whatever the setting currently says, not a fixed size.
     #[test]
     fn shrink_uses_the_configured_size() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "shrink me".into(), size: 44, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -10379,7 +10379,7 @@ mod tests {
     #[test]
     fn apply_emphasis_style_does_not_toggle_off_already_bold_text() {
         let mut state = make_state_with_paragraphs(
-            vec![Paragraph {
+            vec![Paragraph { list: None,
                 runs: vec![Run { text: "hello".into(), bold: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -10402,7 +10402,7 @@ mod tests {
     #[test]
     fn apply_emphasis_style_preserves_an_existing_card_style_marker() {
         let mut state = make_state_with_paragraphs(
-            vec![Paragraph {
+            vec![Paragraph { list: None,
                 runs: vec![Run {
                     text: "evidence text".into(),
                     bold: true,
@@ -11292,7 +11292,7 @@ mod tests {
 
     #[test]
     fn test_insert_char_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "abc".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -11307,7 +11307,7 @@ mod tests {
 
     #[test]
     fn test_backspace_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
+        let paragraphs = vec![Paragraph { list: None, runs: vec![Run { text: "abc".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.backspace();
         assert_eq!(state.tabs[0].content, "ac");
@@ -11316,7 +11316,7 @@ mod tests {
 
     #[test]
     fn test_delete_selection_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }, Run { text: " plain".into(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -11337,8 +11337,8 @@ mod tests {
     #[test]
     fn test_vim_dd_choke_point_keeps_paragraphs_synced() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("two")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![Run { text: "one".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("two")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.handle_vim_key("d", false, None);
@@ -11350,7 +11350,7 @@ mod tests {
 
     #[test]
     fn test_vim_paste_choke_point_keeps_paragraphs_synced() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("abc")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
+        let paragraphs = vec![Paragraph { list: None, runs: vec![run_plain("abc")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
@@ -11361,8 +11361,8 @@ mod tests {
     #[test]
     fn test_dispatch_vim_substitute_only_touches_changed_paragraphs() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("untouched")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![Run { text: "foo bar".into(), bold: true, ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("untouched")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.dispatch_vim_command("%s/foo/baz/");
@@ -11376,7 +11376,7 @@ mod tests {
 
     #[test]
     fn test_insert_newline_via_enter_splits_paragraph_in_sync() {
-        let paragraphs = vec![Paragraph { runs: vec![run_plain("hello")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
+        let paragraphs = vec![Paragraph { list: None, runs: vec![run_plain("hello")], heading: 0, alignment: Alignment::default(), unsupported_xml: None }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.insert_char('\n');
         assert_eq!(state.tabs[0].content, "he\nllo");
@@ -11440,7 +11440,7 @@ mod tests {
     /// save+reopen, so a state-level assertion alone would not have caught it).
     #[test]
     fn copy_paste_card_styles_survives_a_docx_save_and_reload() {
-        let card = |text: &str, heading: u8, size: u16| Paragraph {
+        let card = |text: &str, heading: u8, size: u16| Paragraph { list: None,
             runs: vec![Run { text: text.into(), bold: true, size, ..Run::default() }],
             heading,
             alignment: Alignment::Center,
@@ -11507,7 +11507,7 @@ mod tests {
     /// the one thing that carries *paragraph-level* state.
     #[test]
     fn copy_paste_preserves_card_style_heading_and_alignment() {
-        let card = |text: &str, heading: u8, size: u16| Paragraph {
+        let card = |text: &str, heading: u8, size: u16| Paragraph { list: None,
             runs: vec![Run { text: text.into(), bold: true, size, ..Run::default() }],
             heading,
             alignment: Alignment::Center,
@@ -11569,14 +11569,14 @@ mod tests {
         // "copy a formatted card spanning several lines" use case; only
         // single-paragraph copies worked before this fix.
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "bold line".into(), bold: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
             para_plain("plain line"),
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "hi line".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -12423,7 +12423,7 @@ mod tests {
 
     #[test]
     fn test_undo_restores_paragraphs_not_just_content() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -12440,7 +12440,7 @@ mod tests {
 
     #[test]
     fn test_redo_restores_paragraphs_not_just_content() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -12622,7 +12622,7 @@ mod tests {
     }
 
     fn para_plain(text: &str) -> Paragraph {
-        Paragraph { runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+        Paragraph { list: None, runs: vec![Run { text: text.to_string(), ..Run::default() }], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
     }
 
     #[test]
@@ -12735,7 +12735,7 @@ mod tests {
     #[test]
     fn test_snapshot_byte_estimate_sums_content_and_run_strings() {
         let content = "hello world"; // 11 bytes
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run {
                 text: "hello world".into(), // 11 bytes, counted again (runs are the source of truth for formatted text)
                 highlight_color: "yellow".into(), // 6 bytes
@@ -15687,7 +15687,7 @@ mod tests {
         // The whole document is one paragraph, one run — a selection that
         // starts and ends mid-run (not "an active selection" alone) is what
         // the run-splitting in `apply_case_to_selection` exists for.
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "one two three".to_string(), ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -15804,8 +15804,8 @@ mod tests {
     #[test]
     fn test_apply_line_alignment_only_affects_current_line_not_whole_document() {
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.apply_line_alignment(Alignment::Center);
@@ -15817,8 +15817,8 @@ mod tests {
     #[test]
     fn test_apply_line_alignment_targets_line_under_cursor_not_first_line() {
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let cursor = "first line\n".len(); // start of "second line"
         let mut state = make_state_with_paragraphs(paragraphs, cursor);
@@ -16186,13 +16186,13 @@ mod tests {
     #[test]
     fn test_condense_with_pilcrows_preserves_run_formatting() {
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![run_plain("plain")],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -16222,13 +16222,13 @@ mod tests {
     fn remove_emphasis_strips_only_marked_runs() {
         let paragraphs = vec![
             para_plain("plain"),
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "manually bold".into(), bold: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "emphasized".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -16247,7 +16247,7 @@ mod tests {
 
     #[test]
     fn remove_emphasis_is_a_no_op_when_nothing_is_marked() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "plain text".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -16264,13 +16264,13 @@ mod tests {
     #[test]
     fn remove_emphasis_respects_an_active_selection() {
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "one".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "two".into(), bold: true, emphasis: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -16289,7 +16289,7 @@ mod tests {
 
     #[test]
     fn remove_non_highlighted_underlining_skips_highlighted_runs() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![
                 Run { text: "plain-underline".into(), underline: true, ..Run::default() },
                 Run { text: "highlighted-underline".into(), underline: true, highlight: true, ..Run::default() },
@@ -16310,13 +16310,13 @@ mod tests {
     #[test]
     fn remove_non_highlighted_underlining_respects_an_active_selection() {
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "one".into(), underline: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "two".into(), underline: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -16359,7 +16359,7 @@ mod tests {
 
     #[test]
     fn remove_pilcrows_strips_the_marker_and_keeps_formatting() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![Run { text: "bold¶text".into(), bold: true, ..Run::default() }],
             heading: 0,
             alignment: Alignment::default(),
@@ -16387,7 +16387,7 @@ mod tests {
     // ── Delete tags / spoken-word counting ────────────────────────────────
 
     fn tag_para(text: &str) -> Paragraph {
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![Run {
                 text: text.into(),
                 bold: true,
@@ -16465,7 +16465,7 @@ mod tests {
     /// highlighted runs plus tags and cites — and nothing else.
     #[test]
     fn spoken_words_in_selection_counts_only_read_aloud_text() {
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![
                 run_plain("skip these four words "),
                 Run { text: "two highlighted ".into(), highlight: true, ..Run::default() },
@@ -16501,7 +16501,7 @@ mod tests {
 
     /// Two paragraphs, each "TAG" + " body". Cursor inside the first tag.
     fn tagged_doc(cursor: usize) -> AppState {
-        let para = || Paragraph {
+        let para = || Paragraph { list: None,
             runs: vec![tagged("TAG"), run_plain(" body")],
             heading: 0,
             alignment: Alignment::default(),
@@ -16616,13 +16616,13 @@ mod tests {
         // highlight/size/etc. Each character's original formatting must
         // survive condensing, just with '\n' swapped for ' '.
         let paragraphs = vec![
-            Paragraph {
+            Paragraph { list: None,
                 runs: vec![Run { text: "bold".into(), bold: true, ..Run::default() }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
             },
-            Paragraph { runs: vec![run_plain("plain")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("plain")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         let end = state.tabs[0].content.len();
@@ -16655,7 +16655,7 @@ mod tests {
         // settings.conf's `small_size`, but skips underlined runs entirely
         // (e.g. a debate card's underlined emphasis shouldn't shrink along
         // with the rest of the tag).
-        let paragraphs = vec![Paragraph {
+        let paragraphs = vec![Paragraph { list: None,
             runs: vec![
                 Run { text: "under".into(), underline: true, size: 24, ..Run::default() },
                 Run { text: "plain".into(), size: 24, ..Run::default() },
@@ -16677,8 +16677,8 @@ mod tests {
     #[test]
     fn test_apply_card_style_sets_heading_on_correct_line_when_cursor_on_second_line() {
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("first line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("second line")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         // content is "first line\nsecond line" — byte 11 is the start of "second line".
         let mut state = make_state_with_paragraphs(paragraphs, 11);
@@ -16709,11 +16709,11 @@ mod tests {
         // set Paragraph.heading (wikify_export.rs's own test covers the
         // export function in isolation with hand-built headings).
         let paragraphs = vec![
-            Paragraph { runs: vec![run_plain("Case Title")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("Off-case Subtitle")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("Block heading")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("Tag text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
-            Paragraph { runs: vec![run_plain("plain body text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("Case Title")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("Off-case Subtitle")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("Block heading")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("Tag text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None, runs: vec![run_plain("plain body text")], heading: 0, alignment: Alignment::default(), unsupported_xml: None },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
 
@@ -16751,13 +16751,13 @@ mod tests {
 
     #[test]
     fn document_stats_counts_total_tag_and_highlighted_words() {
-        let tag_para = Paragraph {
+        let tag_para = Paragraph { list: None,
             runs: vec![Run { text: "extinction comes first".into(), bold: true, ..Run::default() }],
             heading: 4, // Tag — CardStyleKind::heading_level
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        let body = Paragraph {
+        let body = Paragraph { list: None,
             runs: vec![
                 Run { text: "unread lead in ".into(), ..Run::default() },
                 Run { text: "three highlighted words".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() },
@@ -16780,7 +16780,7 @@ mod tests {
     #[test]
     fn document_stats_ignores_heading_levels_that_are_not_tag() {
         // Pocket/Hat/Block are headings 1..3 and are not read aloud.
-        let pocket = Paragraph {
+        let pocket = Paragraph { list: None,
             runs: vec![Run { text: "not a tag".into(), ..Run::default() }],
             heading: 1,
             alignment: Alignment::default(),
@@ -17605,7 +17605,7 @@ mod tests {
     /// A one-line paragraph at `heading` level — the shape `render_nav_tree`
     /// reads to build the outline.
     fn nav_para(text: &str, heading: u8) -> Paragraph {
-        Paragraph {
+        Paragraph { list: None,
             runs: vec![Run { text: text.to_string(), ..Run::default() }],
             heading,
             alignment: Alignment::default(),
