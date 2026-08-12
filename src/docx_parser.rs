@@ -1364,25 +1364,43 @@ fn build_lvl_xml(ilvl: u8, num_fmt: &str, lvl_text: &str, font: Option<&str>, in
 }
 
 /// The one fixed cascade every one of the 13 styles' levels 1-8 use,
-/// independent of the level-0 style — confirmed (not guessed) by dumping
-/// ilvl 0/1/2 across all 13 of `Lists.docx`'s real `abstractNum`
-/// definitions: bullets go `<own glyph>` (level 0) -> `o`/Courier New
-/// (level 1) -> `\u{f0a7}`/Wingdings (level 2), repeating every 3 levels;
-/// numbers go `<own format>` (level 0) -> `lowerLetter "%2."` (level 1) ->
-/// `lowerRoman "%3."` (level 2), repeating every 3 levels.
+/// independent of the level-0 style — confirmed by dumping the *complete*
+/// ilvl 0-8 range (not just 0-2, an earlier gap in this function that
+/// shipped a wrong 2-value cascade — see the fix history below) across
+/// `Lists.docx`'s `BulletSolid` and `NumberDecimalDot`/`NumberUpperRoman`
+/// abstractNums:
+/// - Bullets: `o`/Courier New (level 1) -> `\u{f0a7}`/Wingdings (level 2) ->
+///   `\u{f0b7}`/Symbol (level 3) -> repeats every 3 levels. `hanging` is 360
+///   at every level.
+/// - Numbers: `lowerLetter "%N."` (level 1) -> `lowerRoman "%N."` (level 2)
+///   -> `decimal "%N."` (level 3) -> repeats every 3 levels, **independent
+///   of the level-0 format** (confirmed against `NumberUpperRoman`'s own
+///   abstractNum: its level 3 is `decimal`, not `upperRoman` again).
+///   `hanging` is 360 except 180 at the `lowerRoman` position (level 2, 5, 8).
+///
+/// Fix history: the version that shipped with this function's own Task 3
+/// only verified ilvl 0/1/2 and collapsed cascade positions 1 and 2 into
+/// one `_ =>` match arm — silently correct for 2 of every 3 wrapped levels
+/// and wrong on the third (bullets showed `\u{f0a7}` where real Word shows
+/// `\u{f0b7}`; numbers showed `lowerRoman` where real Word shows `decimal`).
+/// Caught by `test_list_marker_text_for_level_bullet_cascade_values`
+/// (`text_editor.rs`, this fix's rendering-side counterpart) failing at
+/// level 3 once that test was extended past level 2.
 fn cascade_level_xml(ilvl: u8, is_bullet: bool) -> String {
     let ind_left = 720 * (ilvl as u32 + 1);
     let cascade_pos = (ilvl - 1) % 3; // ilvl 1,4,7 -> 0; 2,5,8 -> 1; 3,6 -> 2
     if is_bullet {
-        let (lvl_text, font, hanging) = match cascade_pos {
-            0 => ("o", "Courier New", 360),
-            _ => ("\u{f0a7}", "Wingdings", 360),
+        let (lvl_text, font) = match cascade_pos {
+            0 => ("o", "Courier New"),
+            1 => ("\u{f0a7}", "Wingdings"),
+            _ => ("\u{f0b7}", "Symbol"),
         };
-        build_lvl_xml(ilvl, "bullet", lvl_text, Some(font), ind_left, hanging)
+        build_lvl_xml(ilvl, "bullet", lvl_text, Some(font), ind_left, 360)
     } else {
         let (num_fmt, hanging) = match cascade_pos {
             0 => ("lowerLetter", 360),
-            _ => ("lowerRoman", 180),
+            1 => ("lowerRoman", 180),
+            _ => ("decimal", 360),
         };
         build_lvl_xml(ilvl, num_fmt, &format!("%{}.", ilvl + 1), None, ind_left, hanging)
     }
@@ -2867,6 +2885,47 @@ mod tests {
         // level 2 is /Wingdings, regardless of the level-0 style.
         assert!(xml.matches("<w:lvlText w:val=\"o\"/>").count() >= 6, "got: {xml}");
         assert!(xml.matches("<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\"/>").count() >= 6, "got: {xml}");
+    }
+
+    /// Exhaustive ilvl 1-8 check against the *complete* real-Word cascade
+    /// (not just ilvl 1-2, which the version of `cascade_level_xml` that
+    /// first shipped in Task 3 checked — it collapsed cascade positions 1
+    /// and 2 into one match arm, silently wrong at ilvl 3, 6 for both
+    /// bullets and numbers; see that function's own doc comment for the
+    /// full fix history).
+    #[test]
+    fn test_cascade_level_xml_matches_the_complete_real_word_cascade() {
+        let bullet_expected = [
+            (1u8, "o", "Courier New"),
+            (2, "\u{f0a7}", "Wingdings"),
+            (3, "\u{f0b7}", "Symbol"),
+            (4, "o", "Courier New"),
+            (5, "\u{f0a7}", "Wingdings"),
+            (6, "\u{f0b7}", "Symbol"),
+            (7, "o", "Courier New"),
+            (8, "\u{f0a7}", "Wingdings"),
+        ];
+        for (ilvl, lvl_text, font) in bullet_expected {
+            let xml = cascade_level_xml(ilvl, true);
+            assert!(xml.contains(&format!("<w:lvlText w:val=\"{lvl_text}\"/>")), "ilvl {ilvl}, got: {xml}");
+            assert!(xml.contains(&format!("w:ascii=\"{font}\"")), "ilvl {ilvl}, got: {xml}");
+        }
+
+        let number_expected = [
+            (1u8, "lowerLetter", 360u32),
+            (2, "lowerRoman", 180),
+            (3, "decimal", 360),
+            (4, "lowerLetter", 360),
+            (5, "lowerRoman", 180),
+            (6, "decimal", 360),
+            (7, "lowerLetter", 360),
+            (8, "lowerRoman", 180),
+        ];
+        for (ilvl, num_fmt, hanging) in number_expected {
+            let xml = cascade_level_xml(ilvl, false);
+            assert!(xml.contains(&format!("<w:numFmt w:val=\"{num_fmt}\"/>")), "ilvl {ilvl}, got: {xml}");
+            assert!(xml.contains(&format!("w:hanging=\"{hanging}\"")), "ilvl {ilvl}, got: {xml}");
+        }
     }
 
     #[test]

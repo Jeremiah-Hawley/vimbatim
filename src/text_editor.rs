@@ -2129,7 +2129,13 @@ impl Render for TextEditor {
                         // uses the same contiguous-run rule
                         // `docx_parser::assign_list_num_ids` uses on the
                         // write side, so what's on screen always matches
-                        // what gets saved.
+                        // what gets saved. `(level + 1)` widths: level 0
+                        // gets one gutter's worth of indent (unchanged from
+                        // Phase 1), each deeper level shifts the marker one
+                        // more gutter-width right — approximates Word's real
+                        // per-level indent step (720 twips per
+                        // `cascade_level_xml`) as a single fixed pixel step
+                        // rather than modeling twips.
                         let list_marker = (row_start == 0)
                             .then(|| paragraphs.get(li).and_then(|para| para.list))
                             .flatten()
@@ -2137,13 +2143,13 @@ impl Render for TextEditor {
                                 let ordinal = list_item_ordinal(&paragraphs, li);
                                 div()
                                     .id(ElementId::named_usize("list-marker", li))
-                                    .w(px(LIST_GUTTER_PX * zoom))
+                                    .w(px(LIST_GUTTER_PX * (item.level as f32 + 1.0) * zoom))
                                     .flex_none()
                                     .flex()
                                     .justify_end()
                                     .pr(px(4.0 * zoom))
                                     .text_color(rgb(p.text))
-                                    .child(list_marker_text(item.kind, ordinal))
+                                    .child(list_marker_text_for_level(item.kind, item.level, ordinal))
                                     .into_any_element()
                             });
 
@@ -3182,6 +3188,43 @@ pub(crate) fn list_marker_text(kind: ListKind, ordinal: u32) -> String {
     }
 }
 
+/// `list_marker_text`, extended for `level` (Phase 2 multi-level indent).
+/// Level 0 uses the paragraph's own picked `kind`; levels 1+ always use the
+/// one fixed cascade confirmed from real Word — the *complete* ilvl 0-8
+/// range dumped from `Lists.docx`'s `BulletSolid`/`NumberDecimalDot`/
+/// `NumberUpperRoman` `abstractNum`s, matching `docx_parser::cascade_level_xml`
+/// exactly (see that function's own doc comment, including its fix
+/// history — an earlier version of this pair only checked ilvl 0-2 and
+/// shipped a wrong 2-value cascade for 1 for every 3 wrapped levels):
+/// bullets go hollow `o` (level 1) -> filled square (level 2) -> plain
+/// solid bullet (level 3) -> repeats every 3 levels; numbers go
+/// `lowerLetter` (level 1) -> `lowerRoman` (level 2) -> `decimal` (level 3)
+/// -> repeats every 3 levels — independent of which style was picked at
+/// level 0. Uses this app's own in-app glyph substitutes (see
+/// `list_marker_text`'s doc comment on why), not Word's real Wingdings
+/// codepoints — reusing `list_marker_text`'s own `BulletSolid`/
+/// `NumberDecimalDot` cases for the level-3-position glyph/format keeps
+/// both cascade positions in exactly one place each.
+pub(crate) fn list_marker_text_for_level(kind: ListKind, level: u8, ordinal: u32) -> String {
+    if level == 0 {
+        return list_marker_text(kind, ordinal);
+    }
+    let cascade_pos = (level - 1) % 3;
+    if kind.is_bullet() {
+        match cascade_pos {
+            0 => "o".to_string(),
+            1 => "\u{25aa}".to_string(),
+            _ => list_marker_text(ListKind::BulletSolid, ordinal),
+        }
+    } else {
+        match cascade_pos {
+            0 => format!("{}.", to_letter(ordinal)),
+            1 => format!("{}.", to_roman(ordinal)),
+            _ => list_marker_text(ListKind::NumberDecimalDot, ordinal),
+        }
+    }
+}
+
 /// 1-indexed position of `paragraphs[index]` within its own contiguous run
 /// of *same-`ListKind`* list paragraphs — the same run-boundary rule
 /// `docx_parser::assign_list_num_ids` uses on the write side (confirmed
@@ -3947,12 +3990,12 @@ pub(crate) fn line_col_from_mouse_position(
     // A list paragraph's *first* row (`row_start == 0`, matching where the
     // marker gutter actually renders — see `LIST_GUTTER_PX`'s own doc
     // comment on wrapped continuation rows) eats into the row the same way
-    // an alignment indent does: text starts `LIST_GUTTER_PX * zoom` further
-    // right than the row's raw edge.
-    let gutter = if row_start == 0 && para.is_some_and(|p| p.list.is_some()) {
-        LIST_GUTTER_PX * zoom
-    } else {
-        0.0
+    // an alignment indent does: text starts `LIST_GUTTER_PX * (level + 1) *
+    // zoom` further right than the row's raw edge — same per-level widening
+    // the renderer itself uses (Phase 2 multi-level indent).
+    let gutter = match para.and_then(|p| p.list) {
+        Some(item) if row_start == 0 => LIST_GUTTER_PX * (item.level as f32 + 1.0) * zoom,
+        _ => 0.0,
     };
     let col_in_row = column_for_x_in_row(
         local_x - indent - gutter, para, &spans, row_start, row_end, font_size_px, zoom,
@@ -4100,6 +4143,7 @@ mod tests {
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
         line_col_from_mouse_position, real_row_height_px, paints_run_box,
         list_marker_text, to_roman, to_letter, list_item_ordinal, LIST_GUTTER_PX,
+        list_marker_text_for_level,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -5768,6 +5812,53 @@ mod tests {
         assert_eq!(list_item_ordinal(&paragraphs, 0), 1);
         assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
         assert_eq!(list_item_ordinal(&paragraphs, 2), 1);
+    }
+
+    // ── Phase 2: multi-level marker cascade ──────────────────────────────────
+
+    #[test]
+    fn test_list_marker_text_for_level_0_matches_the_picked_style() {
+        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 0, 1), list_marker_text(ListKind::BulletSolid, 1));
+        assert_eq!(list_marker_text_for_level(ListKind::NumberUpperRoman, 0, 4), list_marker_text(ListKind::NumberUpperRoman, 4));
+    }
+
+    #[test]
+    fn test_list_marker_text_for_level_cascades_regardless_of_level_0_style() {
+        // Two different level-0 styles should converge to the same level-1/2 marker.
+        assert_eq!(
+            list_marker_text_for_level(ListKind::BulletCheckmark, 1, 1),
+            list_marker_text_for_level(ListKind::BulletSolid, 1, 1),
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberUpperRoman, 1, 3),
+            list_marker_text_for_level(ListKind::NumberLowerLetterParen, 1, 3),
+        );
+    }
+
+    #[test]
+    fn test_list_marker_text_for_level_bullet_cascade_values() {
+        // Confirmed against the *complete* ilvl 0-8 range dumped from real
+        // Word (docx_parser::cascade_level_xml's own doc comment has the
+        // full history): level 1 -> hollow 'o', level 2 -> filled square,
+        // level 3 -> plain solid bullet again, repeating every 3. Level 3
+        // specifically is what an earlier, ilvl-0/1/2-only version of this
+        // cascade got wrong (it repeated level 2's filled square instead).
+        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 1, 1), "o");
+        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 2, 1), "\u{25aa}");
+        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 3, 1), "\u{2022}");
+        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 4, 1), "o");
+    }
+
+    #[test]
+    fn test_list_marker_text_for_level_number_cascade_values() {
+        // level 1 -> lowerLetter, level 2 -> lowerRoman, level 3 -> decimal
+        // again, repeating every 3 — independent of the level-0 format
+        // (confirmed against NumberUpperRoman's own real-Word cascade,
+        // whose level 3 is also plain decimal, not upperRoman again).
+        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 1, 3), "c.");
+        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 2, 3), "iii.");
+        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 3, 3), "3.");
+        assert_eq!(list_marker_text_for_level(ListKind::NumberUpperRoman, 3, 3), "3.");
     }
 
     #[test]
