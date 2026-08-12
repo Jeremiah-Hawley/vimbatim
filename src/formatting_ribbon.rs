@@ -58,6 +58,11 @@ pub enum FormatAction {
     CloseBlock,
     NormalSize,
     Timer,
+    /// The small caret beside the Bullets button — opens a gallery of the
+    /// 6 supported bullet styles.
+    BulletGallery,
+    /// Same for Numbered — 7 supported number styles.
+    NumberGallery,
 }
 
 impl FormatAction {
@@ -142,6 +147,13 @@ struct RibbonBtn {
     /// glyph — text_editor::FONT_FAMILY's own length varies by which font
     /// is active, unlike every other icon here.
     wide: bool,
+    /// When set, this button renders as a split pair: the button itself
+    /// (unchanged) plus a small `▾` caret beside it that opens a gallery
+    /// menu for *this* action — Bullets/Numbered's style picker. The
+    /// caret's own click toggles `open_menu` on this `FormatAction`
+    /// (`BulletGallery`/`NumberGallery`), independent of the main button's
+    /// own `action`, so clicking the caret never also applies a style.
+    gallery: Option<FormatAction>,
 }
 
 impl RibbonBtn {
@@ -154,6 +166,7 @@ impl RibbonBtn {
             engaged: false,
             tint: None,
             wide: false,
+            gallery: None,
         }
     }
 
@@ -166,6 +179,7 @@ impl RibbonBtn {
             engaged: false,
             tint: None,
             wide: false,
+            gallery: None,
         }
     }
 
@@ -187,6 +201,13 @@ impl RibbonBtn {
         self
     }
 
+    /// Pairs this button with a small `▾` caret that opens a gallery menu
+    /// on `action`. See the `gallery` field.
+    fn gallery(mut self, action: FormatAction) -> Self {
+        self.gallery = Some(action);
+        self
+    }
+
     /// A compact icon button.
     fn icon(label: &'static str, action: FormatAction, icon: RibbonIcon) -> Self {
         Self {
@@ -197,6 +218,7 @@ impl RibbonBtn {
             engaged: false,
             tint: None,
             wide: false,
+            gallery: None,
         }
     }
 }
@@ -302,6 +324,14 @@ pub struct FormattingRibbon {
     /// override held for the duration, so a group can still be expanded while
     /// reading — but the user's own layout shouldn't be lost to have done so.
     collapsed_before_read_mode: Option<std::collections::HashMap<&'static str, bool>>,
+    /// The Bullets button's last-applied style — starts at the plain solid
+    /// bullet (`Lists.docx`'s first example), matching Word's own "first
+    /// click uses the default gallery item" behavior. Clicking the main
+    /// Bullets button re-applies whichever style was last picked from its
+    /// gallery.
+    last_bullet_kind: crate::docx_parser::ListKind,
+    /// Same for the Numbered button, starting at plain decimal-dot.
+    last_number_kind: crate::docx_parser::ListKind,
 }
 
 impl FormattingRibbon {
@@ -328,6 +358,8 @@ impl FormattingRibbon {
             picker: crate::color_picker::CustomColorPicker::new(),
             last_seen_read_mode: false,
             collapsed_before_read_mode: None,
+            last_bullet_kind: crate::docx_parser::ListKind::BulletSolid,
+            last_number_kind: crate::docx_parser::ListKind::NumberDecimalDot,
         }
     }
 
@@ -534,6 +566,7 @@ impl FormattingRibbon {
         engaged: bool,
         tint: Option<u32>,
         wide: bool,
+        gallery: Option<FormatAction>,
         p: Palette,
         color_mode: ThemeColorMode,
         state: Entity<AppState>,
@@ -654,19 +687,22 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
-                        // Applies the default style for now; Task 8 wires
-                        // this to the button's own "last picked" ListKind
-                        // (tracked by the split-button gallery) instead of
-                        // always the default.
+                        // Re-applies whichever style the button's own
+                        // gallery last picked (Word's own "main button
+                        // repeats the last gallery choice" behavior) —
+                        // BulletSolid/NumberDecimalDot the first time,
+                        // before any gallery pick has happened yet.
                         FormatAction::BulletList => {
+                            let kind = this.last_bullet_kind;
                             st.update(cx, |state, _cx| {
-                                state.apply_list_style(crate::docx_parser::ListKind::BulletSolid);
+                                state.apply_list_style(kind);
                             });
                             cx.notify();
                         }
                         FormatAction::NumberedList => {
+                            let kind = this.last_number_kind;
                             st.update(cx, |state, _cx| {
-                                state.apply_list_style(crate::docx_parser::ListKind::NumberDecimalDot);
+                                state.apply_list_style(kind);
                             });
                             cx.notify();
                         }
@@ -706,6 +742,8 @@ impl FormattingRibbon {
                         | FormatAction::FontFamily
                         | FormatAction::FontColor
                         | FormatAction::HighlightColorSelect
+                        | FormatAction::BulletGallery
+                        | FormatAction::NumberGallery
                         | FormatAction::ChangeCase => {
                             // `dismissed` means the panel's capture-phase
                             // out-handler already closed this menu during this
@@ -889,11 +927,56 @@ impl FormattingRibbon {
         // It went unnoticed while Doc Menu / Card Menu had another row beneath
         // them; once the ribbon dropped from four rows to three they became
         // the last row and the menus opened into empty space below it.
-        div()
-            .relative()
-            .child(button)
-            .when(self.open_menu == Some(action), |d| {
-                let panel = self.render_menu_panel(action, p, cx);
+        // A split button (Bullets/Numbered): the button itself keeps its own
+        // click behavior (apply the last-picked style), and a small `▾`
+        // caret beside it — same compact sizing as the font-size steppers
+        // below — opens a gallery menu on its own `gallery` action,
+        // independent of the button's `action`. `popup_action` is whichever
+        // of the two this button's popup (if any) actually keys off.
+        let gallery_caret = gallery.map(|gallery_action| {
+            div()
+                .id(ElementId::named_usize("ribbon-btn-gallery-caret", gallery_action as usize))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(14.0))
+                .h(px(24.0))
+                .rounded(px(radius::MD))
+                .bg(rgb(p.chrome_elevated))
+                .text_color(rgb(p.text_muted))
+                .text_xs()
+                .cursor_pointer()
+                .border_1()
+                .border_color(rgb(p.border_subtle))
+                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                .active(move |s| s.bg(rgb(p.chrome_active)))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _ev, _window, cx| {
+                        cx.stop_propagation();
+                        if this.open_menu == Some(gallery_action) || this.dismissed == Some(gallery_action) {
+                            this.open_menu = None;
+                        } else {
+                            this.open_menu = Some(gallery_action);
+                            this.editing_custom = None;
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child("▾")
+        });
+        let popup_action = gallery.unwrap_or(action);
+
+        let wrapper = div().relative();
+        let wrapper = match gallery_caret {
+            Some(caret) => wrapper.child(
+                div().flex().flex_row().items_center().gap(px(1.0)).child(button).child(caret),
+            ),
+            None => wrapper.child(button),
+        };
+        wrapper
+            .when(self.open_menu == Some(popup_action), |d| {
+                let panel = self.render_menu_panel(popup_action, p, cx);
                 d.child(
                     deferred(
                         anchored()
@@ -1273,6 +1356,33 @@ impl FormattingRibbon {
                     })
                     .collect()
             }
+            FormatAction::BulletGallery => Self::list_gallery_rows(
+                &[
+                    (crate::docx_parser::ListKind::BulletSolid, "Solid Bullet"),
+                    (crate::docx_parser::ListKind::BulletHollow, "Hollow Bullet"),
+                    (crate::docx_parser::ListKind::BulletSolidBox, "Solid Box"),
+                    (crate::docx_parser::ListKind::BulletDiamond, "Diamond"),
+                    (crate::docx_parser::ListKind::BulletArrow, "Arrow"),
+                    (crate::docx_parser::ListKind::BulletCheckmark, "Checkmark"),
+                ],
+                true,
+                p,
+                cx,
+            ),
+            FormatAction::NumberGallery => Self::list_gallery_rows(
+                &[
+                    (crate::docx_parser::ListKind::NumberDecimalDot, "1."),
+                    (crate::docx_parser::ListKind::NumberDecimalParen, "1)"),
+                    (crate::docx_parser::ListKind::NumberUpperRoman, "I."),
+                    (crate::docx_parser::ListKind::NumberUpperLetter, "A."),
+                    (crate::docx_parser::ListKind::NumberLowerLetterParen, "a)"),
+                    (crate::docx_parser::ListKind::NumberLowerLetterDot, "a."),
+                    (crate::docx_parser::ListKind::NumberLowerRoman, "i."),
+                ],
+                false,
+                p,
+                cx,
+            ),
             _ => vec![],
         };
 
@@ -1465,6 +1575,70 @@ impl FormattingRibbon {
             }
         }
         cx.notify();
+    }
+
+    /// Rows for the Bullets/Numbered galleries — one per `ListKind`, with a
+    /// small preview of the style's own marker glyph/format. Clicking a row
+    /// applies that style immediately (Word's own gallery interaction, not
+    /// a separate pick-then-apply step) and remembers it as the button's
+    /// new "last style" via `is_bullet_gallery` (true = update
+    /// `last_bullet_kind`, false = `last_number_kind` — a plain bool
+    /// rather than a field-selector closure, since a closure returning
+    /// `&mut Self::field` needs higher-ranked lifetime bounds that aren't
+    /// worth the complexity here for two call sites).
+    fn list_gallery_rows(
+        items: &[(crate::docx_parser::ListKind, &'static str)],
+        is_bullet_gallery: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(idx, &(kind, label))| {
+                div()
+                    .id(ElementId::named_usize(
+                        if is_bullet_gallery { "bullet-gallery-item" } else { "number-gallery-item" },
+                        idx,
+                    ))
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .text_color(rgb(p.text))
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(p.chrome_hover)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.state.update(cx, |state, _cx| {
+                                state.apply_list_style(kind);
+                            });
+                            if is_bullet_gallery {
+                                this.last_bullet_kind = kind;
+                            } else {
+                                this.last_number_kind = kind;
+                            }
+                            this.open_menu = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w(px(20.0))
+                            .flex()
+                            .justify_center()
+                            .child(crate::text_editor::list_marker_text(kind, 1)),
+                    )
+                    .child(label)
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// Rows for the Doc Menu / Card Menu dropdowns.
@@ -1912,6 +2086,7 @@ impl FormattingRibbon {
                                         btn.engaged,
                                         btn.tint,
                                         btn.wide,
+                                        btn.gallery,
                                         p,
                                         color_mode,
                                         state.clone(),
@@ -2107,8 +2282,10 @@ impl Render for FormattingRibbon {
                     // DOCUMENT — the only four-row group — to three, which is
                     // what sets the ribbon's height.
                     vec![
-                        RibbonBtn::icon("Bullets", FormatAction::BulletList, RibbonIcon::BulletList),
-                        RibbonBtn::icon("Numbered", FormatAction::NumberedList, RibbonIcon::NumberedList),
+                        RibbonBtn::icon("Bullets", FormatAction::BulletList, RibbonIcon::BulletList)
+                            .gallery(FormatAction::BulletGallery),
+                        RibbonBtn::icon("Numbered", FormatAction::NumberedList, RibbonIcon::NumberedList)
+                            .gallery(FormatAction::NumberGallery),
                         RibbonBtn::icon("Align Left", FormatAction::AlignLeft, RibbonIcon::Align(Alignment::Left)),
                         RibbonBtn::icon("Align Center", FormatAction::AlignCenter, RibbonIcon::Align(Alignment::Center)),
                         RibbonBtn::icon("Align Right", FormatAction::AlignRight, RibbonIcon::Align(Alignment::Right)),
