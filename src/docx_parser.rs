@@ -135,6 +135,35 @@ impl ListKind {
                 | ListKind::BulletCheckmark
         )
     }
+
+    /// Resolves a parsed `(numFmt, lvlText, font)` triple to the nearest of
+    /// the 13 supported styles, per the exact fallback order in
+    /// `docs/superpowers/specs/2026-08-11-lists-design.md`'s "Data model"
+    /// section — never drops or represents a foreign list as raw data.
+    pub fn classify(num_fmt: &str, lvl_text: &str, font: Option<&str>) -> ListKind {
+        match (num_fmt, lvl_text, font) {
+            ("bullet", "\u{f0b7}", Some("Symbol")) => ListKind::BulletSolid,
+            ("bullet", "o", Some("Courier New")) => ListKind::BulletHollow,
+            ("bullet", "\u{f0a7}", Some("Wingdings")) => ListKind::BulletSolidBox,
+            ("bullet", "\u{f076}", Some("Wingdings")) => ListKind::BulletDiamond,
+            ("bullet", "\u{f0d8}", Some("Wingdings")) => ListKind::BulletArrow,
+            ("bullet", "\u{f0fc}", Some("Wingdings")) => ListKind::BulletCheckmark,
+            ("decimal", "%1.", _) => ListKind::NumberDecimalDot,
+            ("decimal", "%1)", _) => ListKind::NumberDecimalParen,
+            ("upperRoman", "%1.", _) => ListKind::NumberUpperRoman,
+            ("upperLetter", "%1.", _) => ListKind::NumberUpperLetter,
+            ("lowerLetter", "%1)", _) => ListKind::NumberLowerLetterParen,
+            ("lowerLetter", "%1.", _) => ListKind::NumberLowerLetterDot,
+            ("lowerRoman", "%1.", _) => ListKind::NumberLowerRoman,
+            ("bullet", _, _) => ListKind::BulletSolid,
+            ("decimal", _, _) => ListKind::NumberDecimalDot,
+            ("upperRoman", _, _) => ListKind::NumberUpperRoman,
+            ("upperLetter", _, _) => ListKind::NumberUpperLetter,
+            ("lowerLetter", _, _) => ListKind::NumberLowerLetterDot,
+            ("lowerRoman", _, _) => ListKind::NumberLowerRoman,
+            _ => ListKind::NumberDecimalDot,
+        }
+    }
 }
 
 /// A single formatting run within a paragraph — the smallest unit of text with
@@ -328,7 +357,18 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
         Err(_) => HashMap::new(),
     };
 
-    let paragraphs = parse_document_xml(&document_xml, &styles)?;
+    // word/numbering.xml doesn't exist for every .docx either (no lists) —
+    // same "absent means empty" convention as word/styles.xml above.
+    let numbering = match archive.by_name("word/numbering.xml") {
+        Ok(mut file) => {
+            let mut xml = String::new();
+            file.read_to_string(&mut xml)?;
+            parse_numbering_xml(&xml)
+        }
+        Err(_) => HashMap::new(),
+    };
+
+    let paragraphs = parse_document_xml(&document_xml, &styles, &numbering)?;
 
     // Extract the fragments we need for round-trip serialisation at parse
     // time so we can discard the full XML string afterwards.
@@ -511,13 +551,131 @@ fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
     styles
 }
 
+/// Parses `word/numbering.xml` into a `numId -> (numFmt, lvlText, font)` map
+/// for level 0 only (Phase 1 — Phase 2 extends this to every level once
+/// multi-level indent lands). Resolves the `w:num -> w:abstractNumId ->
+/// w:lvl[ilvl=0]` indirection in one pass: `abstractNum` definitions are
+/// collected first, then `w:num` entries are resolved against them as each
+/// is encountered (`word/numbering.xml` always defines every `abstractNum`
+/// before any `w:num` that references it, per every real Word file
+/// inspected for this feature).
+fn parse_numbering_xml(xml: &str) -> HashMap<u32, (String, String, Option<String>)> {
+    let mut abstract_defs: HashMap<u32, (String, String, Option<String>)> = HashMap::new();
+    let mut num_to_abstract: HashMap<u32, u32> = HashMap::new();
+
+    let mut reader = Reader::from_str(xml);
+    reader.trim_text(false);
+
+    let mut current_abstract_id: Option<u32> = None;
+    let mut current_num_id: Option<u32> = None;
+    let mut in_lvl0 = false;
+    let mut current_numfmt = String::new();
+    let mut current_lvltext = String::new();
+    let mut current_font: Option<String> = None;
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                match e.name().as_ref() {
+                    b"w:abstractNum" => {
+                        current_abstract_id = e.attributes().flatten().find_map(|attr| {
+                            (attr.key.as_ref() == b"w:abstractNumId")
+                                .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+                                .flatten()
+                        });
+                    }
+                    b"w:lvl" => {
+                        in_lvl0 = e.attributes().flatten().any(|attr| {
+                            attr.key.as_ref() == b"w:ilvl" && attr.value.as_ref() == b"0"
+                        });
+                        current_numfmt.clear();
+                        current_lvltext.clear();
+                        current_font = None;
+                    }
+                    b"w:numFmt" if in_lvl0 => {
+                        if let Some(v) = e.attributes().flatten().find_map(|a| {
+                            (a.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&a.value).into_owned())
+                        }) {
+                            current_numfmt = v;
+                        }
+                    }
+                    b"w:lvlText" if in_lvl0 => {
+                        if let Some(v) = e.attributes().flatten().find_map(|a| {
+                            (a.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&a.value).into_owned())
+                        }) {
+                            current_lvltext = v;
+                        }
+                    }
+                    b"w:rFonts" if in_lvl0 => {
+                        current_font = e.attributes().flatten().find_map(|a| {
+                            (a.key.as_ref() == b"w:ascii").then(|| String::from_utf8_lossy(&a.value).into_owned())
+                        });
+                    }
+                    b"w:num" => {
+                        current_num_id = e.attributes().flatten().find_map(|attr| {
+                            (attr.key.as_ref() == b"w:numId")
+                                .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+                                .flatten()
+                        });
+                    }
+                    b"w:abstractNumId" => {
+                        if let Some(num_id) = current_num_id {
+                            if let Some(abs_id) = e.attributes().flatten().find_map(|attr| {
+                                (attr.key.as_ref() == b"w:val")
+                                    .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+                                    .flatten()
+                            }) {
+                                num_to_abstract.insert(num_id, abs_id);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                match e.name().as_ref() {
+                    b"w:lvl" if in_lvl0 => {
+                        if let Some(id) = current_abstract_id {
+                            abstract_defs.insert(
+                                id,
+                                (
+                                    current_numfmt.clone(),
+                                    current_lvltext.clone(),
+                                    current_font.clone(),
+                                ),
+                            );
+                        }
+                        in_lvl0 = false;
+                    }
+                    b"w:num" => { current_num_id = None; }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    num_to_abstract
+        .into_iter()
+        .filter_map(|(num_id, abs_id)| abstract_defs.get(&abs_id).cloned().map(|def| (num_id, def)))
+        .collect()
+}
+
 /// Parses the XML string from `word/document.xml` into a flat `Vec<Paragraph>`.
 ///
 /// Uses quick-xml's streaming event API (no DOM tree is built) to keep memory
 /// use proportional to the longest run of text, not the full document size.
 /// Boolean flags (`in_ppr`, `in_rpr`, `in_text`) track the parser's position
 /// in the nesting hierarchy so attribute-reading only fires in the right context.
-fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Result<Vec<Paragraph>, Box<dyn std::error::Error>> {
+fn parse_document_xml(
+    xml: &str,
+    styles: &HashMap<String, StyleDefaults>,
+    numbering: &HashMap<u32, (String, String, Option<String>)>,
+) -> Result<Vec<Paragraph>, Box<dyn std::error::Error>> {
     /*
      * Relevant element hierarchy in Word XML:
      *
@@ -559,6 +717,14 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
     // as it's created, since <w:pPr> always precedes every <w:r> in a
     // well-formed <w:p>.
     let mut para_has_box_border = false;
+    // Set while inside the current paragraph's <w:pPr><w:numPr> — gates the
+    // <w:ilvl>/<w:numId> handlers below the same way `in_ppr`/`in_rpr` gate
+    // their own children.
+    let mut in_numpr = false;
+    // The current paragraph's <w:numPr><w:numId>/<w:ilvl>, if any — resolved
+    // against `numbering` into `Paragraph.list` when the paragraph ends.
+    let mut current_para_num_id: Option<u32> = None;
+    let mut current_para_ilvl: u8 = 0;
     // The current paragraph's resolved named-style defaults (if its
     // <w:pStyle> references one `styles` has an entry for) — seeds each new
     // <w:r> this paragraph creates, mirroring how `para_has_box_border`
@@ -587,9 +753,12 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                         para_has_box_border = false;
                         current_style_defaults = None;
                         para_has_unsupported_content = false;
+                        current_para_num_id = None;
+                        current_para_ilvl = 0;
                         para_start_pos = reader.buffer_position();
                     }
                     b"w:pPr" => { in_ppr = true; }
+                    b"w:numPr" if in_ppr => { in_numpr = true; }
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
@@ -672,6 +841,18 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                     b"w:pBdr" if in_ppr => {
                         para_has_box_border = true;
                     }
+                    b"w:ilvl" if in_numpr => {
+                        if let Some(v) = e.attributes().flatten().find_map(|a| {
+                            (a.key.as_ref() == b"w:val").then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                        }).flatten() {
+                            current_para_ilvl = v;
+                        }
+                    }
+                    b"w:numId" if in_numpr => {
+                        current_para_num_id = e.attributes().flatten().find_map(|a| {
+                            (a.key.as_ref() == b"w:val").then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                        }).flatten();
+                    }
                     b"w:rStyle" if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
                             // This app's own marker is read straight off the
@@ -741,12 +922,21 @@ fn parse_document_xml(xml: &str, styles: &HashMap<String, StyleDefaults>) -> Res
                                     }
                                 }
                             }
+                            if let Some(num_id) = current_para_num_id {
+                                if let Some((fmt, text, font)) = numbering.get(&num_id) {
+                                    para.list = Some(ListItem {
+                                        kind: ListKind::classify(fmt, text, font.as_deref()),
+                                        level: current_para_ilvl,
+                                    });
+                                }
+                            }
                             crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
                             paragraphs.push(para);
                         }
                         in_ppr = false;
                     }
                     b"w:pPr" => { in_ppr = false; }
+                    b"w:numPr" => { in_numpr = false; }
                     b"w:r" => {
                         // Flush the completed run into the current paragraph.
                         if let (Some(run), Some(para)) = (current_run.take(), current_para.as_mut()) {
@@ -1420,40 +1610,44 @@ mod tests {
         HashMap::new()
     }
 
+    fn no_numbering() -> HashMap<u32, (String, String, Option<String>)> {
+        HashMap::new()
+    }
+
     // ── italic/font/color parsing (rich-text formatting plan, Phase 1) ──────
 
     #[test]
     fn test_parses_italic_run_property() {
         let xml = wrap_run_xml("<w:rPr><w:i/></w:rPr>");
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].italic);
     }
 
     #[test]
     fn test_parses_run_font_ascii_attribute() {
         let xml = wrap_run_xml(r#"<w:rPr><w:rFonts w:ascii="Georgia"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs[0].font, Some("Georgia".to_string()));
     }
 
     #[test]
     fn test_parses_run_color_value() {
         let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="FF0000"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs[0].color, Some("FF0000".to_string()));
     }
 
     #[test]
     fn test_color_val_auto_is_treated_as_none() {
         let xml = wrap_run_xml(r#"<w:rPr><w:color w:val="auto"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs[0].color, None);
     }
 
     #[test]
     fn test_run_without_new_properties_defaults_to_none() {
         let xml = wrap_run_xml("");
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].italic);
         assert_eq!(paragraphs[0].runs[0].font, None);
         assert_eq!(paragraphs[0].runs[0].color, None);
@@ -1464,7 +1658,7 @@ mod tests {
     #[test]
     fn test_parses_center_alignment() {
         let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Center);
     }
 
@@ -1472,14 +1666,14 @@ mod tests {
     fn test_parses_justify_alignment_from_both_value() {
         // Word's own OOXML value for full justification is "both", not "justify".
         let xml = "<w:document><w:body><w:p><w:pPr><w:jc w:val=\"both\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Justify);
     }
 
     #[test]
     fn test_paragraph_without_jc_defaults_to_left_alignment() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
     }
 
@@ -1556,7 +1750,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(reparsed[0].heading, 1);
         assert_eq!(reparsed[0].alignment, Alignment::Center);
     }
@@ -1566,7 +1760,7 @@ mod tests {
     #[test]
     fn test_parses_double_underline_distinctly_from_single() {
         let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="double"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].double_underline);
         assert!(!paragraphs[0].runs[0].underline);
     }
@@ -1574,7 +1768,7 @@ mod tests {
     #[test]
     fn test_parses_single_underline_val_as_plain_underline() {
         let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="single"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].underline);
         assert!(!paragraphs[0].runs[0].double_underline);
     }
@@ -1588,7 +1782,7 @@ mod tests {
         // styles like "Style13ptBold" (`<w:u w:val="none"/>`) to explicitly
         // suppress underline that would otherwise carry over.
         let xml = wrap_run_xml(r#"<w:rPr><w:u w:val="none"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].underline);
         assert!(!paragraphs[0].runs[0].double_underline);
     }
@@ -1596,7 +1790,7 @@ mod tests {
     #[test]
     fn test_b_val_0_is_not_bold() {
         let xml = wrap_run_xml(r#"<w:rPr><w:b w:val="0"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].bold);
     }
 
@@ -1615,7 +1809,7 @@ mod tests {
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].underline, "character-style underline not applied");
     }
 
@@ -1632,7 +1826,7 @@ mod tests {
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/><w:u w:val="none"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].underline, "direct <w:u w:val=\"none\"/> after rStyle should win");
     }
 
@@ -1651,7 +1845,7 @@ mod tests {
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
         let run = &paragraphs[0].runs[0];
         assert!(run.emphasis_boxed, "style-referenced <w:bdr> should set emphasis_boxed");
         assert!(run.emphasis, "a real box implies Emphasis, so Remove Emphasis can find it");
@@ -1661,7 +1855,7 @@ mod tests {
     #[test]
     fn test_direct_bdr_on_a_run_sets_emphasis_boxed_and_emphasis() {
         let xml = wrap_run_xml(r#"<w:rPr><w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].emphasis_boxed);
         assert!(paragraphs[0].runs[0].emphasis);
     }
@@ -1669,7 +1863,7 @@ mod tests {
     #[test]
     fn test_run_without_bdr_has_emphasis_boxed_false() {
         let xml = wrap_run_xml("<w:rPr><w:b/></w:rPr>");
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].emphasis_boxed);
     }
 
@@ -1688,7 +1882,7 @@ mod tests {
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/><w:bdr w:val="none"/></w:rPr>"#);
-        let paragraphs = parse_document_xml(&xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].emphasis_boxed, "direct <w:bdr w:val=\"none\"/> after rStyle should cancel the box");
         assert!(!paragraphs[0].runs[0].emphasis, "canceling the box should also clear emphasis");
     }
@@ -1714,7 +1908,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(reparsed[0].runs[0].double_underline);
         assert!(!reparsed[0].runs[0].underline);
     }
@@ -1724,7 +1918,7 @@ mod tests {
     #[test]
     fn test_parses_strikethrough_run_property() {
         let xml = wrap_run_xml("<w:rPr><w:strike/></w:rPr>");
-        let paragraphs = parse_document_xml(&xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].strikethrough);
     }
 
@@ -1749,7 +1943,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(reparsed[0].runs[0].strikethrough);
     }
 
@@ -1758,7 +1952,7 @@ mod tests {
     #[test]
     fn test_parses_paragraph_border_as_box_format_on_every_run() {
         let xml = "<w:document><w:body><w:p><w:pPr><w:pBdr><w:top w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:left w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/><w:right w:val=\"single\" w:sz=\"4\" w:space=\"1\" w:color=\"000000\"/></w:pBdr></w:pPr><w:r><w:t>a</w:t></w:r><w:r><w:t>b</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         // Parse-time run merging collapses "a"+"b" (identical formatting)
         // into one run, so check the property holds across whatever runs
         // remain rather than hardcoding a run count.
@@ -1768,7 +1962,7 @@ mod tests {
     #[test]
     fn test_paragraph_without_pbdr_has_box_format_false() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert!(!paragraphs[0].runs[0].box_format);
     }
 
@@ -1823,7 +2017,7 @@ mod tests {
                 unsupported_xml: None,
             }];
             let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
-            let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+            let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
             assert_eq!(
                 reparsed[0].runs[0].style,
                 Some(style),
@@ -1871,7 +2065,7 @@ mod tests {
         assert!(xml.contains("<w:vimbatimEmphasis/>"), "got: {xml}");
         assert!(xml.contains("<w:vimbatimEmphasisBox/>"), "got: {xml}");
 
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         let runs = &reparsed[0].runs;
         assert!(runs[0].emphasis && !runs[0].emphasis_boxed);
         assert!(runs[1].emphasis && runs[1].emphasis_boxed);
@@ -1886,7 +2080,7 @@ mod tests {
                    <w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>\
                    <w:r><w:t>a pocket</w:t></w:r>\
                    </w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].heading, 1);
         assert_eq!(paragraphs[0].runs[0].style, Some(CardStyle::Pocket));
     }
@@ -1915,7 +2109,7 @@ mod tests {
         unsupported_xml: None,
     }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         // Parse-time run merging collapses "a"+"b" (identical formatting)
         // into one run, so check the property holds across whatever runs
         // remain rather than hardcoding a run count.
@@ -2103,7 +2297,7 @@ mod tests {
         let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
         let styles = parse_styles_xml(&styles_xml);
         let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Center);
         assert_eq!(paragraphs[0].heading, 1);
         assert!(paragraphs[0].runs[0].box_format);
@@ -2118,7 +2312,7 @@ mod tests {
         // Same style reference as above, but this paragraph ALSO carries its
         // own direct <w:jc> - direct formatting must win over the style's.
         let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/><w:jc w:val=\"left\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
     }
 
@@ -2128,7 +2322,7 @@ mod tests {
         let styles = parse_styles_xml(&styles_xml);
         // The style says sz=52; this run's own <w:sz> should win.
         let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"80\"/></w:rPr><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs[0].size, 80);
         assert!(paragraphs[0].runs[0].bold); // still inherited from the style
     }
@@ -2138,7 +2332,7 @@ mod tests {
         let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
         let styles = parse_styles_xml(&styles_xml);
         let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
         assert!(!paragraphs[0].runs[0].box_format);
         assert!(!paragraphs[0].runs[0].bold);
@@ -2154,7 +2348,7 @@ mod tests {
         // every later per-keystroke edit as cheap on a loaded document as on
         // a freshly-typed one (both O(runs), but this keeps `runs` small).
         let xml = "<w:document><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>foo</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>bar</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs.len(), 1);
         assert_eq!(paragraphs[0].runs[0].text, "foobar");
         assert!(paragraphs[0].runs[0].bold);
@@ -2163,7 +2357,7 @@ mod tests {
     #[test]
     fn test_adjacent_runs_with_different_formatting_stay_separate_at_parse_time() {
         let xml = "<w:document><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>foo</w:t></w:r><w:r><w:t>bar</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].runs.len(), 2);
         assert!(paragraphs[0].runs[0].bold);
         assert!(!paragraphs[0].runs[1].bold);
@@ -2173,7 +2367,7 @@ mod tests {
     fn test_pstyle_referencing_unknown_style_id_is_unaffected() {
         let styles = parse_styles_xml("<w:styles></w:styles>");
         let xml = "<w:document><w:body><w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &styles).unwrap();
+        let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].heading, 1); // name-based heading detection still works
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
         assert!(!paragraphs[0].runs[0].box_format);
@@ -2184,7 +2378,7 @@ mod tests {
     #[test]
     fn test_captures_unsupported_xml_for_paragraph_with_hyperlink() {
         let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].unsupported_xml.is_some());
         assert!(paragraphs[0].unsupported_xml.as_ref().unwrap().contains("w:hyperlink"));
     }
@@ -2192,7 +2386,7 @@ mod tests {
     #[test]
     fn test_plain_paragraph_has_no_unsupported_xml() {
         let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].unsupported_xml, None);
     }
 
@@ -2200,7 +2394,7 @@ mod tests {
     fn test_incidental_tags_do_not_trigger_unsupported_xml_capture() {
         // Bookmarks are common and harmless - must NOT freeze this paragraph.
         let xml = "<w:document><w:body><w:p><w:bookmarkStart w:id=\"0\" w:name=\"_Test\"/><w:r><w:t>plain</w:t></w:r><w:bookmarkEnd w:id=\"0\"/></w:p></w:body></w:document>";
-        let paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].unsupported_xml, None);
     }
 
@@ -2224,7 +2418,7 @@ mod tests {
     #[test]
     fn test_unsupported_xml_round_trips_through_untouched_edit_elsewhere() {
         let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p><w:p><w:r><w:t>other paragraph</w:t></w:r></w:p></w:body></w:document>";
-        let mut paragraphs = parse_document_xml(xml, &no_styles()).unwrap();
+        let mut paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].unsupported_xml.is_some());
 
         // Edit only the SECOND paragraph - the first (with the hyperlink)
@@ -2303,7 +2497,7 @@ mod tests {
         let xml = rebuild_document_xml("<w:document>", "", &original);
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
         // matching what parse_document_xml expects to find.
-        let reparsed = parse_document_xml(&xml, &no_styles()).unwrap();
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(reparsed[0].runs[0].italic, true);
         assert_eq!(reparsed[0].runs[0].font, Some("Georgia".to_string()));
         assert_eq!(reparsed[0].runs[0].color, Some("00FF00".to_string()));
@@ -2332,5 +2526,77 @@ mod tests {
         std::fs::remove_file(&original).ok();
         std::fs::remove_file(&snapshot).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    // ── real Word list parsing (word/numbering.xml) ─────────────────────────
+
+    #[test]
+    fn test_parse_numbering_xml_extracts_numfmt_lvltext_font_per_numid() {
+        let xml = format!(
+            "<w:numbering>\
+             <w:abstractNum w:abstractNumId=\"4\">\
+             <w:lvl w:ilvl=\"0\">\
+             <w:numFmt w:val=\"bullet\"/>\
+             <w:lvlText w:val=\"{}\"/>\
+             <w:rPr><w:rFonts w:ascii=\"Symbol\" w:hAnsi=\"Symbol\"/></w:rPr>\
+             </w:lvl>\
+             </w:abstractNum>\
+             <w:abstractNum w:abstractNumId=\"8\">\
+             <w:lvl w:ilvl=\"0\">\
+             <w:numFmt w:val=\"decimal\"/>\
+             <w:lvlText w:val=\"%1.\"/>\
+             </w:lvl>\
+             </w:abstractNum>\
+             <w:num w:numId=\"1\"><w:abstractNumId w:val=\"4\"/></w:num>\
+             <w:num w:numId=\"2\"><w:abstractNumId w:val=\"8\"/></w:num>\
+             </w:numbering>",
+            "\u{f0b7}",
+        );
+        let map = parse_numbering_xml(&xml);
+        assert_eq!(map.get(&1), Some(&("bullet".to_string(), "\u{f0b7}".to_string(), Some("Symbol".to_string()))));
+        assert_eq!(map.get(&2), Some(&("decimal".to_string(), "%1.".to_string(), None)));
+    }
+
+    #[test]
+    fn test_list_kind_classify_exact_matches() {
+        assert_eq!(ListKind::classify("bullet", "\u{f0b7}", Some("Symbol")), ListKind::BulletSolid);
+        assert_eq!(ListKind::classify("bullet", "o", Some("Courier New")), ListKind::BulletHollow);
+        assert_eq!(ListKind::classify("decimal", "%1.", None), ListKind::NumberDecimalDot);
+        assert_eq!(ListKind::classify("lowerRoman", "%1.", None), ListKind::NumberLowerRoman);
+    }
+
+    #[test]
+    fn test_list_kind_classify_falls_back_for_unrecognized_bullet() {
+        assert_eq!(ListKind::classify("bullet", "\u{2013}", Some("Arial")), ListKind::BulletSolid);
+    }
+
+    #[test]
+    fn test_list_kind_classify_falls_back_for_unrecognized_number_punctuation() {
+        assert_eq!(ListKind::classify("decimal", "%1:", None), ListKind::NumberDecimalDot);
+        assert_eq!(ListKind::classify("lowerLetter", "%1:", None), ListKind::NumberLowerLetterDot);
+    }
+
+    #[test]
+    fn test_list_kind_classify_falls_back_for_unrecognized_numfmt() {
+        assert_eq!(ListKind::classify("cardinalText", "%1.", None), ListKind::NumberDecimalDot);
+    }
+
+    #[test]
+    fn test_parses_numpr_into_paragraph_list() {
+        let xml = "<w:document><w:body><w:p>\
+                   <w:pPr><w:pStyle w:val=\"ListParagraph\"/><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr>\
+                   <w:r><w:t>Item One</w:t></w:r>\
+                   </w:p></w:body></w:document>";
+        let mut numbering = HashMap::new();
+        numbering.insert(1u32, ("bullet".to_string(), "\u{f0b7}".to_string(), Some("Symbol".to_string())));
+        let paragraphs = parse_document_xml(xml, &no_styles(), &numbering).unwrap();
+        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+    }
+
+    #[test]
+    fn test_paragraph_without_numpr_has_no_list() {
+        let xml = wrap_run_xml("<w:rPr><w:b/></w:rPr>");
+        let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+        assert_eq!(paragraphs[0].list, None);
     }
 }
