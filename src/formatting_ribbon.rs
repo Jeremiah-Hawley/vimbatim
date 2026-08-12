@@ -654,15 +654,19 @@ impl FormattingRibbon {
                             });
                             cx.notify();
                         }
+                        // Applies the default style for now; Task 8 wires
+                        // this to the button's own "last picked" ListKind
+                        // (tracked by the split-button gallery) instead of
+                        // always the default.
                         FormatAction::BulletList => {
                             st.update(cx, |state, _cx| {
-                                state.apply_bullet_list();
+                                state.apply_list_style(crate::docx_parser::ListKind::BulletSolid);
                             });
                             cx.notify();
                         }
                         FormatAction::NumberedList => {
                             st.update(cx, |state, _cx| {
-                                state.apply_numbered_list();
+                                state.apply_list_style(crate::docx_parser::ListKind::NumberDecimalDot);
                             });
                             cx.notify();
                         }

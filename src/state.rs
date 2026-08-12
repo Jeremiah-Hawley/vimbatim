@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::case_converter;
-use crate::docx_parser::{Alignment, CardStyle, DocxOrigin, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
+use crate::docx_parser::{Alignment, CardStyle, DocxOrigin, ListItem, ListKind, Paragraph, Run, create_new_docx, paragraphs_to_plain_text, parse_docx};
 use crate::document_ops::{apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active, ranges_matching_format, reset_card_style_in_range, resolve_position, runs_in_range, sync_delete_range, sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp};
 use crate::recovery::RecoveryEntry;
 use crate::wikifi_export;
@@ -3690,87 +3690,69 @@ impl AppState {
         }
     }
 
-    pub fn apply_bullet_list(&mut self) {
-        /*
-         * Adds bullet prefixes to each line in the selection.
-         * Replaces existing bullets if lines already have them.
-         */
+    /// Applies `kind` to every paragraph the selection spans (or the
+    /// cursor's own paragraph when there's no selection) — setting `list =
+    /// Some(ListItem { kind, level: 0 })`. If every touched paragraph is
+    /// already exactly that style at level 0, clears it instead (Word's own
+    /// toggle-off convention, same as `apply_formatting_to_selection`'s
+    /// `toggled_off` for other formatting).
+    pub fn apply_list_style(&mut self, kind: ListKind) {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
-        let Some((a, f)) = tab.selection else { return };
+        let (start_para, end_para) = match tab.selection {
+            Some((a, f)) => {
+                let (start_para, ..) = resolve_position(&tab.paragraphs, a.min(f));
+                let (end_para, ..) = resolve_position(&tab.paragraphs, a.max(f));
+                (start_para, end_para)
+            }
+            None => {
+                let (para_idx, ..) = resolve_position(&tab.paragraphs, tab.cursor);
+                (para_idx, para_idx)
+            }
+        };
 
-        let (start, end) = (a.min(f), a.max(f));
-        if start >= end { return }
-
-        let selected_text = tab.content[start..end].to_string();
-        let lines: Vec<&str> = selected_text.lines().collect();
-        if lines.is_empty() { return }
-
-        let bulleted: Vec<String> = lines.into_iter()
-            .map(|line| {
-                let trimmed = line.trim_start();
-                if trimmed.starts_with("• ") || trimmed.starts_with("- ") {
-                    trimmed.to_string()
-                } else {
-                    format!("• {}", trimmed)
-                }
-            })
-            .collect();
-
-        let new_text = bulleted.join("\n");
-        if new_text == selected_text { return }
+        let already_this_style = (start_para..=end_para).all(|i| {
+            tab.paragraphs.get(i).map(|p| p.list) == Some(Some(ListItem { kind, level: 0 }))
+        });
 
         self.push_undo_snapshot();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            sync_delete_range(&mut tab.paragraphs, start, end);
-            tab.content.drain(start..end);
-            sync_insert_str(&mut tab.paragraphs, start, &new_text);
-            tab.content.insert_str(start, &new_text);
+            for i in start_para..=end_para {
+                if let Some(para) = tab.paragraphs.get_mut(i) {
+                    para.list = if already_this_style { None } else { Some(ListItem { kind, level: 0 }) };
+                }
+            }
             tab.is_modified = true;
         }
     }
 
-    pub fn apply_numbered_list(&mut self) {
-        /*
-         * Adds number prefixes to each line in the selection.
-         * Replaces existing numbers if lines already have them.
-         */
+    /// Clears `list` on every paragraph the selection spans (or the
+    /// cursor's own paragraph). Standalone entry point for the ribbon's
+    /// "remove list" affordance, and what `apply_list_style`'s toggle-off
+    /// branch does internally.
+    pub fn remove_list_formatting(&mut self) {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
-        let Some((a, f)) = tab.selection else { return };
+        let (start_para, end_para) = match tab.selection {
+            Some((a, f)) => {
+                let (start_para, ..) = resolve_position(&tab.paragraphs, a.min(f));
+                let (end_para, ..) = resolve_position(&tab.paragraphs, a.max(f));
+                (start_para, end_para)
+            }
+            None => {
+                let (para_idx, ..) = resolve_position(&tab.paragraphs, tab.cursor);
+                (para_idx, para_idx)
+            }
+        };
 
-        let (start, end) = (a.min(f), a.max(f));
-        if start >= end { return }
-
-        let selected_text = tab.content[start..end].to_string();
-        let lines: Vec<&str> = selected_text.lines().collect();
-        if lines.is_empty() { return }
-
-        let numbered: Vec<String> = lines.into_iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let trimmed = line.trim_start();
-                // Remove existing number prefix if present
-                let content = if let Some(pos) = trimmed.find(". ") {
-                    if pos < 4 && trimmed[..pos].chars().all(|c| c.is_numeric()) {
-                        trimmed[pos+2..].to_string()
-                    } else {
-                        trimmed.to_string()
-                    }
-                } else {
-                    trimmed.to_string()
-                };
-                format!("{}. {}", i + 1, content)
-            })
-            .collect();
-
-        let new_text = numbered.join("\n");
-        if new_text == selected_text { return }
+        let any = (start_para..=end_para).any(|i| tab.paragraphs.get(i).map(|p| p.list.is_some()).unwrap_or(false));
+        if !any { return; }
 
         self.push_undo_snapshot();
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            sync_delete_range(&mut tab.paragraphs, start, end);
-            tab.content.drain(start..end);
-            sync_insert_str(&mut tab.paragraphs, start, &new_text);
-            tab.content.insert_str(start, &new_text);
+            for i in start_para..=end_para {
+                if let Some(para) = tab.paragraphs.get_mut(i) {
+                    para.list = None;
+                }
+            }
             tab.is_modified = true;
         }
     }
@@ -11153,6 +11135,85 @@ mod tests {
         let mut state = make_state(&content, cursor, None);
         state.tabs[0].paragraphs = paragraphs;
         state
+    }
+
+    // ── Real Word lists (apply_list_style/remove_list_formatting) ───────────
+
+    #[test]
+    fn test_apply_list_style_sets_list_on_every_touched_paragraph() {
+        let mut state = make_state_with_paragraphs(
+            vec![
+                Paragraph { runs: vec![Run { text: "one".into(), ..Run::default() }], ..Paragraph::default() },
+                Paragraph { runs: vec![Run { text: "two".into(), ..Run::default() }], ..Paragraph::default() },
+                Paragraph { runs: vec![Run { text: "three".into(), ..Run::default() }], ..Paragraph::default() },
+            ],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 13)); // whole buffer ("one\ntwo\nthree")
+        state.apply_list_style(ListKind::BulletSolid);
+        for para in &state.tabs[0].paragraphs {
+            assert_eq!(para.list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        }
+    }
+
+    #[test]
+    fn test_apply_list_style_toggles_off_when_already_that_exact_style() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                ..Paragraph::default()
+            }],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 3));
+        state.apply_list_style(ListKind::BulletSolid);
+        assert_eq!(state.tabs[0].paragraphs[0].list, None);
+    }
+
+    #[test]
+    fn test_apply_list_style_switches_style_without_toggling_off() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+                ..Paragraph::default()
+            }],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 3));
+        state.apply_list_style(ListKind::NumberDecimalDot);
+        assert_eq!(state.tabs[0].paragraphs[0].list, Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }));
+    }
+
+    #[test]
+    fn test_apply_list_style_with_no_selection_applies_to_cursors_own_paragraph_only() {
+        let mut state = make_state_with_paragraphs(
+            vec![
+                Paragraph { runs: vec![Run { text: "one".into(), ..Run::default() }], ..Paragraph::default() },
+                Paragraph { runs: vec![Run { text: "two".into(), ..Run::default() }], ..Paragraph::default() },
+            ],
+            5, // inside "two"
+        );
+        state.tabs[0].selection = None;
+        state.apply_list_style(ListKind::BulletHollow);
+        assert_eq!(state.tabs[0].paragraphs[0].list, None);
+        assert_eq!(state.tabs[0].paragraphs[1].list, Some(ListItem { kind: ListKind::BulletHollow, level: 0 }));
+    }
+
+    #[test]
+    fn test_remove_list_formatting_clears_list_on_touched_paragraphs() {
+        let mut state = make_state_with_paragraphs(
+            vec![Paragraph {
+                runs: vec![Run { text: "one".into(), ..Run::default() }],
+                list: Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }),
+                ..Paragraph::default()
+            }],
+            0,
+        );
+        state.tabs[0].selection = Some((0, 3));
+        state.remove_list_formatting();
+        assert_eq!(state.tabs[0].paragraphs[0].list, None);
     }
 
     // ── Font size box (ribbon spinner) ──────────────────────────────────────

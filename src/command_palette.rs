@@ -108,8 +108,6 @@ pub fn registry() -> Vec<PaletteCommand> {
 
     // ── 3. Ribbon commands with no keybind of their own ────────────────────
     let ribbon: &[(&'static str, fn(&mut AppState))] = &[
-        ("Bullet List", AppState::apply_bullet_list),
-        ("Numbered List", AppState::apply_numbered_list),
         ("Italics", |s| s.apply_formatting_to_selection(FormatOp::Italic(true))),
         ("Strikethrough", AppState::toggle_strikethrough),
         ("Normal Size", |s| s.apply_formatting_to_selection(FormatOp::FontSize(24))),
