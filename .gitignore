@@ -13,6 +13,7 @@ graphify-out/
 *.docx
 !/tests/fixtures/verbatim_emphasis_reference.docx
 !/tests/fixtures/lists_reference.docx
+!/tests/fixtures/highlight_space_boundary.docx
 *.log
 
 # Added by cargo

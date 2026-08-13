@@ -1587,8 +1587,17 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 out.push_str(&run_props_xml(run));
                 out.push_str("</w:rPr>");
             }
-            // Emit xml:space="preserve" only when the run needs it.
-            let space_attr = if run.whitespace_preserve { " xml:space=\"preserve\"" } else { "" };
+            // Emit xml:space="preserve" whenever the run's own text has
+            // leading/trailing whitespace — derived from the text itself
+            // rather than trusting `run.whitespace_preserve` (a stale
+            // parse-time flag that a later split/edit, e.g. carving a
+            // highlighted word out of a longer run, never recomputes for
+            // the new boundary). Without this, Word silently trims an edge
+            // space that vimbatim's own renderer — which reads `run.text`
+            // directly — still showed.
+            let needs_preserve = run.text.starts_with(char::is_whitespace)
+                || run.text.ends_with(char::is_whitespace);
+            let space_attr = if needs_preserve { " xml:space=\"preserve\"" } else { "" };
             out.push_str(&format!("<w:t{}>", space_attr));
             out.push_str(&escape_xml_text(&run.text));
             out.push_str("</w:t></w:r>");
@@ -1956,6 +1965,38 @@ mod tests {
     }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:jc"));
+    }
+
+    #[test]
+    fn test_rebuild_preserves_leading_and_trailing_run_space_even_when_flag_unset() {
+        // Reproduces the Bug_Test.docx report: a run split at a highlight
+        // boundary (e.g. by `apply_formatting`) ends up with a leading or
+        // trailing space but its `whitespace_preserve` flag was never
+        // recomputed for the new boundary (it's only set at parse time from
+        // an existing file's own `xml:space="preserve"`). Without the
+        // attribute, Word trims that edge space on open even though
+        // vimbatim's own renderer — which reads `run.text` directly, not
+        // this XML-serialisation flag — still shows it.
+        let paragraphs = vec![Paragraph { list: None,
+            runs: vec![
+                Run { text: "written and ".into(), whitespace_preserve: false, ..Run::default() },
+                Run { text: "highlighted".into(), highlight: true,
+                      highlight_color: "yellow".into(), ..Run::default() },
+                Run { text: " in vimbatim".into(), whitespace_preserve: false, ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::Left,
+        unsupported_xml: None,
+    }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert!(
+            xml.contains(r#"<w:t xml:space="preserve">written and </w:t>"#),
+            "trailing space before a highlight boundary must be preserved: {xml}"
+        );
+        assert!(
+            xml.contains(r#"<w:t xml:space="preserve"> in vimbatim</w:t>"#),
+            "leading space after a highlight boundary must be preserved: {xml}"
+        );
     }
 
     #[test]
@@ -3175,6 +3216,55 @@ mod tests {
         assert_eq!(checkmark.list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
         let roman_lower = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Roman Numeral Lowercase one")).unwrap();
         assert_eq!(roman_lower.list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    // ── highlight/space-boundary regression (real Bug_Test.docx) ────────────
+
+    /// Real repro file for the reported bug: a run boundary falls right at a
+    /// space (a plain run, then a `w:highlight`ed word, then a plain run
+    /// starting with a space) and neither edge run carries
+    /// `xml:space="preserve"` — Word trims that space on open even though
+    /// vimbatim showed it, because the flag was never derived from the run's
+    /// actual text. Confirms the fix holds on parse→save, not just the
+    /// synthetic case above.
+    #[test]
+    fn test_real_bug_test_docx_gains_xml_space_preserve_around_highlight_boundary_on_save() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/highlight_space_boundary.docx");
+        let dir = std::env::temp_dir().join(format!("vimbatim_highlight_space_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+        std::fs::copy(&src, &path).unwrap();
+
+        let (paragraphs, origin) = parse_docx(&path).unwrap();
+        origin.save(&paragraphs, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut document_xml = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut document_xml).unwrap();
+
+        assert!(
+            document_xml.contains(r#"<w:t xml:space="preserve">this is written and </w:t>"#),
+            "got: {document_xml}"
+        );
+        assert!(
+            document_xml.contains(r#"<w:t xml:space="preserve"> in vimbatim</w:t>"#),
+            "got: {document_xml}"
+        );
+
+        // Idempotence: reparsing the now-correct file and saving it again
+        // must not drift — the newly-added `xml:space="preserve"` should
+        // round-trip stably rather than only surviving the first save.
+        let (reparsed, origin2) = parse_docx(&path).unwrap();
+        origin2.save(&reparsed, &path).unwrap();
+        let file2 = std::fs::File::open(&path).unwrap();
+        let mut archive2 = zip::ZipArchive::new(file2).unwrap();
+        let mut document_xml2 = String::new();
+        std::io::Read::read_to_string(&mut archive2.by_name("word/document.xml").unwrap(), &mut document_xml2).unwrap();
+        assert_eq!(document_xml, document_xml2, "second save must match the first byte-for-byte");
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
