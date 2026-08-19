@@ -2483,17 +2483,29 @@ fn render_context_menu(
     .into_any_element()
 }
 
-/// One-char-for-one-char substitution of `'\t'` -> `' '` for display only —
-/// `render_line`'s and `char_width_fn`'s shared reasoning for why a raw tab
-/// can't be handed to GPUI's shaper (no glyph in the bundled fonts) and why
-/// swapping it for a space here can't desync any offset-based computation
-/// downstream (cursor/selection/misspelled ranges all index by position, not
-/// content). Never touches the actual document model — callers pass in a
-/// line already read out of `tab.content`/`paragraphs`, which still holds
-/// the real `'\t'` for undo/.docx export/Verbatim round-trip fidelity.
+/// One-char-for-one-char substitution of any control character -> `' '` for
+/// display only — `render_line`'s and `char_width_fn`'s shared reasoning for
+/// why a raw control character can't be handed to GPUI's shaper (no glyph in
+/// the bundled fonts) and why swapping it for a space here can't desync any
+/// offset-based computation downstream (cursor/selection/misspelled ranges
+/// all index by position, not content). Never touches the actual document
+/// model — callers pass in a line already read out of `tab.content`/
+/// `paragraphs`, which still holds the real character for undo/.docx
+/// export/Verbatim round-trip fidelity.
+///
+/// Originally just `'\t'` (GPUI paints it with zero width — no on-screen gap,
+/// cursor doesn't visually advance). Widened to the whole control-character
+/// class after a `'\r'` embedded mid-paragraph (reachable via typing, paste,
+/// or a `.docx` whose `<w:t>` contains a literal CR instead of `<w:br/>`)
+/// was found to make GPUI drop the *entire* text fragment containing it —
+/// not just that one character — since `'\r'` never triggers this codebase's
+/// own paragraph-split logic (only `'\n'` does) and GPUI's `shape_line` only
+/// asserts against `'\n'` too, so it reaches the shaper unguarded. A `'\n'`
+/// itself can never reach here (every `line` this app ever builds is already
+/// split on it), but including it costs nothing.
 fn display_line(line: &str) -> std::borrow::Cow<'_, str> {
-    if line.contains('\t') {
-        std::borrow::Cow::Owned(line.replace('\t', " "))
+    if line.contains(char::is_control) {
+        std::borrow::Cow::Owned(line.replace(char::is_control, " "))
     } else {
         std::borrow::Cow::Borrowed(line)
     }
@@ -3457,12 +3469,13 @@ fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) ->
     let mut ascii_cache: [Option<f32>; 128] = [None; 128];
     let mut other_cache: std::collections::HashMap<char, f32> = std::collections::HashMap::new();
     move |c: char| {
-        // Matches render_line's tab->space substitution (see its comment):
-        // the bundled fonts have no glyph for '\t' at all, so measuring it
-        // directly would report ~0 width — wrap/scroll math needs the same
-        // width the renderer actually paints, or the cursor's visual
-        // column and the wrap point silently disagree.
-        let c = if c == '\t' { ' ' } else { c };
+        // Matches display_line's control-character->space substitution (see
+        // its comment): the bundled fonts have no glyph for a control
+        // character, so measuring it directly would report ~0 width —
+        // wrap/scroll math needs the same width the renderer actually
+        // paints, or the cursor's visual column and the wrap point silently
+        // disagree.
+        let c = if c.is_control() { ' ' } else { c };
         if (c as u32) < 128 {
             let idx = c as usize;
             if let Some(w) = ascii_cache[idx] {
@@ -4222,6 +4235,28 @@ mod tests {
         // No tab present: no allocation-worthy change, and (implementation
         // detail worth locking in) no unnecessary copy.
         assert!(matches!(display_line("plain text"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// Bug report: a line was entirely invisible unless the cursor sat on
+    /// it, and even then only the text left of the cursor painted. Root
+    /// cause: a `'\r'` embedded mid-paragraph (this fixture's came from a
+    /// `.docx` whose `<w:t>` held a literal CR instead of `<w:br/>`, but
+    /// typing/pasting one reaches the model the same way) — GPUI's own
+    /// `shape_line` only asserts against `'\n'`, so `'\r'` reached the
+    /// shaper unguarded and dropped the entire fragment containing it, not
+    /// just that one character. Splitting the row at the cursor happened to
+    /// separate the CR-free half (paints fine) from the CR-holding half
+    /// (doesn't) — hence the "left of cursor visible" symptom. Same fix and
+    /// same one-for-one contract as the tab case above, just widened from
+    /// `'\t'` to the whole control-character class.
+    #[test]
+    fn test_display_line_swaps_carriage_return_for_space_one_for_one() {
+        assert_eq!(display_line("a\rb"), "a b");
+        assert_eq!(
+            "a\rb".chars().count(),
+            display_line("a\rb").chars().count(),
+            "substitution must not change the char count offsets are computed against"
+        );
     }
 
     /// A size change partway along a row has to be respected mid-row, which is

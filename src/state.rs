@@ -5959,23 +5959,26 @@ impl AppState {
         Ok(())
     }
 
-    /// "Rename" — renames the file at `old` to `new_name` in the same
-    /// directory, then re-points any open tab that was showing it.
+    /// "Rename" — renames the file or folder at `old` to `new_name` in the
+    /// same parent directory, then re-points whatever open tabs it affects.
     ///
-    /// Re-pointing is the part that isn't optional: renaming the file you're
-    /// currently editing is the common case, and a tab left holding the old
-    /// path would write its next save to a file that no longer exists.
+    /// Re-pointing is the part that isn't optional: renaming something
+    /// currently open is the common case, and a tab left holding a stale
+    /// path would write its next save to a location that no longer exists.
     ///
     /// `with_docx_extension` is the same funnel-level guard "Save As" uses —
-    /// a user typing a bare name must not produce a file the tree
-    /// (`scan_directory`, .docx-only) can never show again.
+    /// a user typing a bare file name must not produce a file the tree
+    /// (`scan_directory`, .docx-only) can never show again. Folders take no
+    /// extension: `old.is_dir()` (checked before anything on disk has
+    /// moved) picks the branch.
     pub fn rename_path(&mut self, old: &std::path::Path, new_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
             return Err("name cannot be empty".into());
         }
-        let dir = old.parent().ok_or("file has no parent directory")?;
-        let new = with_docx_extension(&dir.join(trimmed));
+        let dir = old.parent().ok_or("path has no parent directory")?;
+        let is_dir = old.is_dir();
+        let new = if is_dir { dir.join(trimmed) } else { with_docx_extension(&dir.join(trimmed)) };
         if new == old {
             return Ok(());
         }
@@ -5983,12 +5986,32 @@ impl AppState {
             return Err(format!("{} already exists", new.display()).into());
         }
         std::fs::rename(old, &new)?;
-        let title = new.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled").to_string();
-        for tab in self.tabs.iter_mut().filter(|t| t.file_path.as_deref() == Some(old)) {
-            tab.file_path = Some(new.clone());
-            tab.title = title.clone();
+        if is_dir {
+            // Files nested inside the renamed folder didn't rename
+            // themselves — only prefix-swap `file_path`, never `title`.
+            for tab in self.tabs.iter_mut() {
+                if let Some(rest) = tab.file_path.as_deref().and_then(|p| p.strip_prefix(old).ok()) {
+                    tab.file_path = Some(new.join(rest));
+                }
+            }
+            // `refresh_file_tree` carries expansion across a rescan by
+            // matching absolute paths against the *old* tree — without this
+            // prefix swap, the renamed folder (and any expanded descendant)
+            // would silently collapse since its old path no longer exists.
+            let expanded: Vec<PathBuf> = crate::file_explorer::collect_expanded_dirs(&self.file_tree)
+                .into_iter()
+                .map(|p| p.strip_prefix(old).map(|rest| new.join(rest)).unwrap_or(p))
+                .collect();
+            self.file_tree = scan_directory(&self.working_directory);
+            crate::file_explorer::restore_expanded_dirs(&mut self.file_tree, &expanded);
+        } else {
+            let title = new.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled").to_string();
+            for tab in self.tabs.iter_mut().filter(|t| t.file_path.as_deref() == Some(old)) {
+                tab.file_path = Some(new.clone());
+                tab.title = title.clone();
+            }
+            self.refresh_file_tree();
         }
-        self.refresh_file_tree();
         Ok(())
     }
 
@@ -17790,6 +17813,43 @@ mod tests {
         assert!(state.rename_path(&old, "Taken").is_err());
         assert!(old.exists(), "a refused rename must leave the file alone");
         assert_eq!(std::fs::read(&taken).unwrap(), b"b", "must not overwrite");
+    }
+
+    #[test]
+    fn test_rename_path_on_a_dir_does_not_append_docx_extension() {
+        let dir = temp_test_dir("rename_dir_no_extension");
+        let old = dir.join("Old Folder");
+        std::fs::create_dir(&old).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.rename_path(&old, "New Folder").unwrap();
+
+        assert!(dir.join("New Folder").is_dir());
+        assert!(!dir.join("New Folder.docx").exists());
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn test_rename_path_on_a_dir_repoints_nested_open_tabs_without_touching_title() {
+        let dir = temp_test_dir("rename_dir_repoints_tab");
+        let old = dir.join("Old Folder");
+        std::fs::create_dir(&old).unwrap();
+        let nested = old.join("Card.docx");
+        std::fs::write(&nested, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.tabs[0].file_path = Some(nested.clone());
+        state.tabs[0].title = "Card.docx".into();
+
+        state.rename_path(&old, "New Folder").unwrap();
+
+        let new_nested = dir.join("New Folder").join("Card.docx");
+        assert!(new_nested.exists());
+        assert_eq!(state.tabs[0].file_path, Some(new_nested));
+        // The file itself didn't rename — only its parent folder did.
+        assert_eq!(state.tabs[0].title, "Card.docx");
     }
 
     #[test]

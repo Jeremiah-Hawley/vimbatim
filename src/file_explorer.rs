@@ -104,7 +104,7 @@ impl FileExplorer {
                     let new_name = std::mem::take(buffer);
                     let target = menu.target.clone();
                     s.close_file_context_menu();
-                    if let FileContextMenuTarget::File(old) = target {
+                    if let FileContextMenuTarget::File(old) | FileContextMenuTarget::Dir(old) = target {
                         if let Err(e) = s.rename_path(&old, &new_name) {
                             crate::state::log_line(&format!("[FileExplorer] rename failed: {e}"));
                         }
@@ -566,15 +566,31 @@ impl FileExplorer {
                     }))
                     .child(Self::menu_separator(p))
                 })
-                // ── Dir-only: open everything inside it ─────────────────────
+                // ── Dir-only: open everything inside it / rename it ─────────
                 .when_some(dir_path.clone(), |d, path| {
                     let open_all = state_handle.clone();
+                    let rename = state_handle.clone();
+                    let rename_focus_for_dir_click = rename_focus_for_click.clone();
+                    let (p1, p2) = (path.clone(), path);
+                    // Seed with the folder's full name — unlike a file, a
+                    // folder has no extension for `rename_path` to re-apply,
+                    // so there's nothing to strip off first.
+                    let dir_name = p2.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
                     d.child(Self::menu_item("ctx-open-all", "Open All Files in New Tabs", false, p, move |_, _, cx| {
                         open_all.update(cx, |s, cx| {
                             s.close_file_context_menu();
-                            s.open_all_files_in_dir(&path);
+                            s.open_all_files_in_dir(&p1);
                             cx.notify();
                         });
+                    }))
+                    .child(Self::menu_item("ctx-rename-dir", "Rename", false, p, move |_, window, cx| {
+                        rename.update(cx, |s, cx| {
+                            if let Some(menu) = s.file_context_menu.as_mut() {
+                                menu.rename_buffer = Some(dir_name.clone());
+                            }
+                            cx.notify();
+                        });
+                        rename_focus_for_dir_click.focus(window, cx);
                     }))
                     .child(Self::menu_separator(p))
                 })
