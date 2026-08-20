@@ -2961,8 +2961,10 @@ fn render_segment(
     }
 }
 
-/// Whether `run` paints a box-shaped visual (a background fill or a border)
-/// rather than just styling the glyphs themselves — `render_line`'s fast
+/// Whether `run` paints a box-shaped visual (a background fill, a real
+/// border, or an inset box-shadow standing in for one — see
+/// `apply_run_style`'s `emphasis_boxed` case) rather than just styling the
+/// glyphs themselves — `render_line`'s fast
 /// path has to skip any such run, since its bare-div return isn't wrapped in
 /// `line_div`'s per-span `flex_shrink(0.0)` and would otherwise stretch the
 /// paint to the full row width instead of hugging the text. `underline`/
@@ -2987,7 +2989,25 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     if run.double_underline { el = el.underline(); }
     if run.strikethrough { el = el.line_through(); }
     // Note: box_format is applied at the line level in render_line(), not here at the run level
-    if run.emphasis_boxed { el = el.border_1().border_color(rgb(pal.text)); }
+    //
+    // An inset box-shadow, not `border_1()`: a real border is part of
+    // Taffy's box model and adds to this span's layout height (confirmed
+    // against GPUI's own `taffy.rs`, which feeds `border` into the layout
+    // style but never touches `box_shadow`). A box-shadow is paint only —
+    // `inset: true` draws the ring just inside the span's existing bounds
+    // instead of growing them, so the emphasis box gets slightly smaller
+    // rather than the row around it getting taller (unverified visually —
+    // no display in this sandbox — but structurally this is the one option
+    // GPUI offers that can't touch layout at all).
+    if run.emphasis_boxed {
+        el = el.shadow(vec![BoxShadow {
+            color: rgb(pal.text).into(),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(1.0),
+            inset: true,
+        }]);
+    }
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
         let text_hex = run.color.as_deref()
@@ -3277,12 +3297,23 @@ pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
 /// through rather than cancelling out. `normal_size_px` is the floor a run
 /// with no explicit size falls back to — the actual configured default
 /// (`normal_text_size_half_points`), not the stale `FONT_SIZE_PX` reference.
+///
+/// `r.emphasis` runs are excluded from the max: unlike a card style (which
+/// applies its size to every run on the line via `apply_formatting_to_line`,
+/// so the whole line really is that size), Emphasis applies to just the
+/// selected span via `apply_formatting_to_selection` — one bigger word
+/// inside an otherwise-normal paragraph. Letting it into this max reserved
+/// a blank spacer row for the *entire* paragraph over one emphasized word
+/// (bug report: "applying emphasis to one word increases the line spacing
+/// of the entire paragraph"). Emphasis is meant to have no influence on
+/// line spacing at all — whatever it needs beyond the reserved slot just
+/// renders within the existing row instead of growing it.
 fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> usize {
     let Some(para) = para else { return 1 };
     let run_max_px = para
         .runs
         .iter()
-        .filter(|r| r.size > 0)
+        .filter(|r| r.size > 0 && !r.emphasis)
         .map(|r| r.size as f32 / 2.0 * zoom)
         .fold(0.0_f32, f32::max);
     // An explicit run-level size (card styles always set one, covering the
@@ -5750,6 +5781,44 @@ mod tests {
         // (24 * 20/14 == 34.3px > 20px, <= 40px).
         let para = Paragraph { list: None, runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
         assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 2);
+    }
+
+    #[test]
+    fn test_slot_count_emphasis_boxed_alone_does_not_reserve_extra_slots() {
+        // `has_box` (the `CARD_BOX_EXTRA_PX` gate) reads `run.box_format`,
+        // not `run.emphasis_boxed` — a plain-size emphasis box in an
+        // otherwise-normal paragraph must not reserve any spacer row.
+        let para = Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { text: "word".into(), emphasis: true, emphasis_boxed: true, ..Run::default() },
+                Run::default(),
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+    }
+
+    /// Bug report: applying Emphasis to one word increased the line spacing
+    /// of the entire paragraph. Root cause: unlike a card style (which sizes
+    /// every run on the line), `apply_emphasis_style`'s optional size bump
+    /// (`emphasis_change_size`) only touches the selected word, but this
+    /// function's max-run-size scan didn't know that and reserved a spacer
+    /// row for the whole paragraph over it. Real defaults:
+    /// `normal_text_size_half_points == 22` (11px), `emphasis_size_half_points
+    /// == 24` (12px) — mirrors one emphasized run in an otherwise-normal
+    /// paragraph.
+    #[test]
+    fn test_slot_count_emphasis_size_bump_does_not_inflate_paragraph_slots() {
+        let para = Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { text: "word".into(), emphasis: true, size: 24, ..Run::default() },
+                Run::default(),
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
     }
 
     #[test]

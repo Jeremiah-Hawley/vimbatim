@@ -1455,6 +1455,85 @@ fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
     assignment
 }
 
+/// Builds `word/styles.xml` for a brand-new (`create_new_docx`) file:
+/// `Normal`/`DefaultParagraphFont` (the base every other style needs to
+/// exist, per spec and per every real Word file) plus `Heading1`-`Heading4`
+/// carrying the `Pocket`/`Hat`/`Block`/`Tag` aliases Verbatim itself uses,
+/// each with the exact `sz`/`b`/`u`/`pBdr`/`jc` values `AppState::apply_card_
+/// style`'s current defaults already write directly onto a card-style
+/// paragraph's own runs (`CardStyleKind::font_size`, `is_centered`) —
+/// confirmed against `tests/fixtures/verbatim_emphasis_reference.docx`'s own
+/// `word/styles.xml`, with the theme-font references (`*Theme` attrs,
+/// `w:themeColor`), `w:rsid`, `w:link` (points at character styles this
+/// minimal file never defines), and `w:pageBreakBefore` (a real behavior
+/// change Verbatim's own reference file happens to carry, not something
+/// `apply_card_style` does) stripped — none of those affect whether Word
+/// resolves the style, and a dangling theme reference with no `theme1.xml`
+/// part is itself the kind of thing that triggers a repair prompt.
+///
+/// Bug report: applying a card style to a paragraph in a file created fresh
+/// in Vimbatim showed all the right direct formatting in Word but was
+/// missing its actual heading level (Navigation pane / Styles dropdown) —
+/// `create_new_docx` referenced `<w:pStyle w:val="Heading1"/>` but the
+/// package never had a `word/styles.xml` for that id to resolve against, so
+/// Word fell back to Normal for the *style association* while still
+/// painting the paragraph's own direct bold/size/box/underline. Always
+/// emitted (not conditional on whether a card style is used yet): the
+/// resave path (`write_docx`) has no equivalent of `build_numbering_xml`'s
+/// "wrote_numbering" on-demand fallback, so a style applied *after* file
+/// creation would have nowhere to ever gain this part otherwise.
+fn build_new_doc_styles_xml() -> String {
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+<w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>\
+<w:style w:type=\"character\" w:default=\"1\" w:styleId=\"DefaultParagraphFont\">\
+<w:name w:val=\"Default Paragraph Font\"/><w:semiHidden/><w:unhideWhenUsed/></w:style>",
+    );
+    // (alias, heading level, font size half-points, centered, underline) —
+    // mirrors `state.rs::CardStyleKind`'s own `font_size`/`is_centered`
+    // (Pocket/Hat/Block/Tag) exactly; duplicated here rather than shared
+    // since those are private to `state.rs` and this module doesn't
+    // otherwise depend on it.
+    let kinds: [(&str, u8, u16, bool, Option<&str>); 4] = [
+        ("Pocket", 1, 52, true, None),
+        ("Hat", 2, 44, true, Some("double")),
+        ("Block", 3, 32, true, Some("single")),
+        ("Tag", 4, 26, false, None),
+    ];
+    for (alias, level, size, centered, underline) in kinds {
+        let mut ppr = String::from("<w:keepNext/><w:keepLines/>");
+        if alias == "Pocket" {
+            ppr.push_str(
+                "<w:pBdr>\
+                <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                </w:pBdr>",
+            );
+        }
+        if centered {
+            ppr.push_str("<w:jc w:val=\"center\"/>");
+        }
+        ppr.push_str(&format!("<w:outlineLvl w:val=\"{}\"/>", level - 1));
+
+        let mut rpr = format!("<w:b/><w:sz w:val=\"{size}\"/>");
+        if let Some(u) = underline {
+            rpr.push_str(&format!("<w:u w:val=\"{u}\"/>"));
+        }
+
+        out.push_str(&format!(
+            "<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\">\
+            <w:name w:val=\"heading {level}\"/><w:aliases w:val=\"{alias}\"/>\
+            <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/>\
+            <w:pPr>{ppr}</w:pPr><w:rPr>{rpr}</w:rPr></w:style>",
+        ));
+    }
+    out.push_str("</w:styles>");
+    out
+}
+
 /// Builds `word/numbering.xml`, or `None` if `paragraphs` has no list at
 /// all (in which case the caller — the package-plumbing write path — omits
 /// the part entirely, unchanged from a non-list document today).
@@ -1556,15 +1635,24 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 </w:pBdr>",
             );
         }
-        if let Some(item) = para.list {
-            if let Some(num_id) = list_num_ids.get(&para_index) {
-                // Matches Lists.docx exactly, where every list-item
-                // paragraph carries both — not <w:numPr> alone.
-                ppr.push_str("<w:pStyle w:val=\"ListParagraph\"/>");
-                ppr.push_str(&format!(
-                    "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
-                    item.level, num_id,
-                ));
+        // `para.heading != 0` guard: defense in depth against a paragraph
+        // that (through some path other than `AppState::apply_card_style`,
+        // which now clears `.list` itself) still carries both a heading and
+        // a list — `<w:pStyle>` isn't repeatable per CT_PPrBase, and the
+        // heading one above already went out, so a second here would make
+        // this `<w:pPr>` invalid OOXML. Heading wins: a card-style line was
+        // never conceptually still a list item.
+        if para.heading == 0 {
+            if let Some(item) = para.list {
+                if let Some(num_id) = list_num_ids.get(&para_index) {
+                    // Matches Lists.docx exactly, where every list-item
+                    // paragraph carries both — not <w:numPr> alone.
+                    ppr.push_str("<w:pStyle w:val=\"ListParagraph\"/>");
+                    ppr.push_str(&format!(
+                        "<w:numPr><w:ilvl w:val=\"{}\"/><w:numId w:val=\"{}\"/></w:numPr>",
+                        item.level, num_id,
+                    ));
+                }
             }
         }
         if !ppr.is_empty() {
@@ -1665,6 +1753,12 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
     let preamble = fallback_preamble();
     let document_xml = rebuild_document_xml(&preamble, "", paragraphs);
     let numbering_xml = build_numbering_xml(paragraphs);
+    // Always built, unlike numbering_xml: `write_docx` (the resave path)
+    // has no on-demand fallback for a missing word/styles.xml the way it
+    // does for numbering (`wrote_numbering`), so a style applied *after*
+    // creation would have no part to ever land in if this were conditional
+    // — see `build_new_doc_styles_xml`'s own doc comment.
+    let styles_xml = build_new_doc_styles_xml();
 
     let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
@@ -1684,6 +1778,7 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
 <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
 <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
+<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
 {content_types_numbering_override}\
 </Types>"
     ).as_bytes())?;
@@ -1698,6 +1793,8 @@ Target=\"word/document.xml\"/>\
 </Relationships>"
     )?;
 
+    // rId2 is reserved for numbering (below, when present) — styles always
+    // gets rId3 regardless, so the two can never collide.
     let rels_numbering = if numbering_xml.is_some() {
         "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering\" Target=\"numbering.xml\"/>"
     } else {
@@ -1706,11 +1803,16 @@ Target=\"word/document.xml\"/>\
     writer.start_file("word/_rels/document.xml.rels", opts)?;
     writer.write_all(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
-<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{rels_numbering}</Relationships>"
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
+{rels_numbering}</Relationships>"
     ).as_bytes())?;
 
     writer.start_file("word/document.xml", opts)?;
     writer.write_all(document_xml.as_bytes())?;
+
+    writer.start_file("word/styles.xml", opts)?;
+    writer.write_all(styles_xml.as_bytes())?;
 
     if let Some(numbering_xml) = &numbering_xml {
         writer.start_file("word/numbering.xml", opts)?;
@@ -2025,6 +2127,30 @@ mod tests {
     }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pStyle"));
+    }
+
+    /// Bug report: applying a heading (Pocket/Hat/Block/Tag) to a line that
+    /// was already a list item made the heading's formatting disappear when
+    /// the saved file was opened in real Word. Root cause: `<w:pStyle>`
+    /// isn't repeatable per CT_PPrBase, but a paragraph carrying both
+    /// `heading` and `list` got one pStyle write from each source —
+    /// `rebuild_document_xml` now skips the list one whenever `heading != 0`
+    /// (defense in depth; `AppState::apply_card_style` is the primary fix,
+    /// clearing `.list` so this combination isn't created going forward).
+    #[test]
+    fn test_rebuild_heading_wins_over_list_emits_exactly_one_pstyle() {
+        let paragraphs = vec![Paragraph {
+            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Left,
+            unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
+        assert_eq!(xml.matches("<w:pStyle").count(), 1, "got: {xml}");
+        assert!(xml.contains(r#"<w:pStyle w:val="Heading1"/>"#), "got: {xml}");
+        assert!(!xml.contains("ListParagraph"), "got: {xml}");
+        assert!(!xml.contains("w:numPr"), "got: {xml}");
     }
 
     #[test]
@@ -3119,6 +3245,80 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
+    // ── styles.xml plumbing (bug report: heading level missing in Word) ─────
+
+    #[test]
+    fn test_create_new_docx_includes_styles_xml_with_all_four_card_style_headings() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_styles_plumbing_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "plain".into(), ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+        }];
+        create_new_docx(&paragraphs, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        let mut styles = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/styles.xml").unwrap(), &mut styles).unwrap();
+        for (level, alias) in [(1, "Pocket"), (2, "Hat"), (3, "Block"), (4, "Tag")] {
+            assert!(styles.contains(&format!("w:styleId=\"Heading{level}\"")), "got: {styles}");
+            assert!(styles.contains(&format!("w:val=\"{alias}\"")), "got: {styles}");
+        }
+        assert!(styles.contains("w:styleId=\"Normal\""), "got: {styles}");
+
+        let mut content_types = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("[Content_Types].xml").unwrap(), &mut content_types).unwrap();
+        assert!(content_types.contains("wordprocessingml.styles+xml"), "got: {content_types}");
+
+        let mut rels = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/_rels/document.xml.rels").unwrap(), &mut rels).unwrap();
+        assert!(rels.contains("relationships/styles"), "got: {rels}");
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn test_create_new_docx_pocket_paragraph_round_trips_without_double_applying_style_defaults() {
+        // Regression risk flagged during review: now that a real Heading1
+        // style (with its own pBdr/b/sz) resolves, `apply_paragraph_style_
+        // defaults` seeds those as defaults before the paragraph's own
+        // direct <w:jc>/<w:pBdr>/<w:b>/<w:sz> (always emitted by
+        // rebuild_document_xml for a card-style paragraph) overwrite them —
+        // the run/paragraph that comes back must match exactly what went in,
+        // not some doubled or drifted value.
+        let dir = std::env::temp_dir().join(format!("vimbatim_pocket_no_doubleapply_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+
+        let paragraphs = vec![Paragraph {
+            runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Center,
+            list: None,
+            unsupported_xml: None,
+        }];
+        create_new_docx(&paragraphs, &path).unwrap();
+
+        let (reparsed, _origin) = parse_docx(&path).unwrap();
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].heading, 1);
+        assert_eq!(reparsed[0].alignment, Alignment::Center);
+        assert_eq!(reparsed[0].runs.len(), 1, "got: {:?}", reparsed[0].runs);
+        let run = &reparsed[0].runs[0];
+        assert_eq!(run.text, "hello");
+        assert!(run.bold);
+        assert_eq!(run.size, 52);
+        assert!(run.box_format);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     #[test]
     fn test_real_file_round_trip_preserves_list_through_save() {
         let dir = std::env::temp_dir().join(format!("vimbatim_list_roundtrip_{}", std::process::id()));
@@ -3216,6 +3416,51 @@ mod tests {
         assert_eq!(checkmark.list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
         let roman_lower = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Roman Numeral Lowercase one")).unwrap();
         assert_eq!(roman_lower.list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// Same bug as `test_rebuild_heading_wins_over_list_emits_exactly_one_
+    /// pstyle`, but through the real save path (`DocxOrigin::save`, not a
+    /// direct `rebuild_document_xml` call) against a real Word-produced file
+    /// that already has lists — confirms the write-side guard holds even
+    /// when `.list` is still set on a heading paragraph (i.e. even without
+    /// `apply_card_style`'s own fix, which this test deliberately bypasses
+    /// by mutating `heading` directly on an existing list item).
+    #[test]
+    fn test_real_lists_docx_heading_applied_to_a_list_item_survives_resave_as_one_pstyle() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
+        let dir = std::env::temp_dir().join(format!("vimbatim_heading_over_list_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.docx");
+        std::fs::copy(&src, &path).unwrap();
+
+        let (mut paragraphs, origin) = parse_docx(&path).unwrap();
+        let idx = paragraphs.iter().position(|p| p.runs.iter().any(|r| r.text == "Checkmark")).unwrap();
+        assert!(paragraphs[idx].list.is_some(), "sanity: must actually be a list item");
+        paragraphs[idx].heading = 1;
+        origin.save(&paragraphs, &path).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+
+        // The rest of the package survives untouched — this bug was scoped
+        // to the one paragraph's own <w:pPr>, not the manifest.
+        let mut styles = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/styles.xml").unwrap(), &mut styles).unwrap();
+        assert!(styles.contains("styleId=\"Heading1\""));
+
+        let mut doc = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
+        let pos = doc.find("Checkmark").unwrap();
+        let start = doc[..pos].rfind("<w:p>").unwrap();
+        let end = doc[pos..].find("</w:p>").map(|e| pos + e + 6).unwrap();
+        let para_xml = &doc[start..end];
+        assert_eq!(para_xml.matches("<w:pStyle").count(), 1, "got: {para_xml}");
+        assert!(para_xml.contains(r#"<w:pStyle w:val="Heading1"/>"#), "got: {para_xml}");
+        assert!(!para_xml.contains("ListParagraph"), "got: {para_xml}");
+        assert!(!para_xml.contains("w:numPr"), "got: {para_xml}");
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();

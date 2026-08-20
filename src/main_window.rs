@@ -635,7 +635,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &EmphasisAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_selection(FormatOp::Bold(true));
+                st.apply_emphasis_style();
                 cx.notify();
             });
         });

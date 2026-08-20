@@ -4355,11 +4355,23 @@ impl AppState {
         // heading-level font sizing all read this field) — `content` and
         // `paragraphs` are always kept 1:1, one paragraph per line, so the
         // number of newlines before the cursor is that paragraph's index.
+        //
+        // Also clears any list marker the line was carrying: a card style
+        // and a list item are mutually exclusive in this codebase already
+        // (`split_paragraph_at` resets a heading line's list continuation on
+        // Enter for the same reason) — but applying a style directly to an
+        // *existing* list item left `.list` untouched, so the paragraph
+        // could carry both. `rebuild_document_xml` writes one `<w:pStyle>`
+        // per source (heading, then list), so that combination round-tripped
+        // as two `<w:pStyle>` children in one `<w:pPr>` — invalid per
+        // CT_PPrBase, and Word dropped the card style's own formatting on
+        // reopen (bug report: "headings... worked in Word, but no longer").
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let line_idx = tab.content[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 if let Some(para) = tab.paragraphs.get_mut(line_idx) {
                     para.heading = kind.heading_level();
+                    para.list = None;
                 }
             }
         }
@@ -16088,6 +16100,22 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 52));
         assert!(para.runs.iter().all(|r| r.box_format));
         assert_eq!(para.heading, 1);
+    }
+
+    /// Bug report: card-style headings that used to render correctly in
+    /// Word stopped working. Root cause: applying a card style to a line
+    /// that was already a list item left `.list` set alongside the new
+    /// `heading`, and `rebuild_document_xml` wrote a `<w:pStyle>` for each —
+    /// two children of one non-repeatable element, which Word silently
+    /// "repaired" by dropping the card style's own formatting on reopen.
+    /// `apply_card_style` must clear `.list` so the paragraph can't carry
+    /// both.
+    #[test]
+    fn test_apply_card_style_clears_a_preexisting_list_marker() {
+        let mut state = make_state("hello world", 0, None);
+        state.tabs[0].paragraphs[0].list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        state.apply_card_style(CardStyleKind::Pocket);
+        assert_eq!(state.tabs[0].paragraphs[0].list, None);
     }
 
     #[test]
