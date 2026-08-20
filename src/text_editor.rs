@@ -3308,12 +3308,34 @@ pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
 /// of the entire paragraph"). Emphasis is meant to have no influence on
 /// line spacing at all — whatever it needs beyond the reserved slot just
 /// renders within the existing row instead of growing it.
+///
+/// Tag and Cite are excluded from ever needing more than one slot — bug
+/// report: "Tags and Cites increase line spacing in vimbatim far more than
+/// they do in word". Confirmed against a real Verbatim reference file
+/// (`Verbatim_Formatting_To_Compare_To.docx`): Tag's own style
+/// (`Heading4`/"Tag" in `word/styles.xml`) carries only `w:spacing
+/// w:before="40" w:after="0"` (2pt, effectively nothing) with no `w:line`
+/// override of its own — it inherits Normal's, same as any body paragraph —
+/// and Cite (`Style13ptBold`/"Cite") is a *character* style with no
+/// paragraph-spacing properties at all. Real Word never gives either a
+/// visually reserved extra line; it just renders that one line's glyphs a
+/// little taller within its own continuous flow. At this app's real default
+/// settings (13px Tag/Cite vs. 11px normal text), the plain size-ratio math
+/// below rounds that modest, sub-single-line difference up to a *whole*
+/// extra reserved slot — doubling the line's height where Word shows next
+/// to nothing extra. Pocket/Hat/Block are unaffected: they're genuinely
+/// ~1.45-2.36x normal size (vs. Tag/Cite's ~1.18x) and Word's own reference
+/// styles give them real `w:spacing w:before` (12pt/2pt/2pt) on top of that,
+/// so their existing multi-slot reservation stays as-is.
 fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> usize {
     let Some(para) = para else { return 1 };
+    if para.heading == 4 {
+        return 1;
+    }
     let run_max_px = para
         .runs
         .iter()
-        .filter(|r| r.size > 0 && !r.emphasis)
+        .filter(|r| r.size > 0 && !r.emphasis && r.style != Some(crate::docx_parser::CardStyle::Cite))
         .map(|r| r.size as f32 / 2.0 * zoom)
         .fold(0.0_f32, f32::max);
     // An explicit run-level size (card styles always set one, covering the
@@ -5762,10 +5784,10 @@ mod tests {
     #[test]
     fn test_slot_count_tag_needs_only_one_slot() {
         // Mirrors AppState::apply_card_style(CardStyleKind::Tag): bold +
-        // FontSize(26 half-points = 13px), heading level 4. 13px is smaller
-        // than body text (14px), so despite heading level 4's generic 16px
-        // fallback, the actual rendered line fits comfortably in one slot —
-        // it must not reserve a spurious blank row underneath.
+        // FontSize(26 half-points = 13px), heading level 4. Unconditional
+        // now (`para.heading == 4` short-circuits before the size math runs)
+        // — see the function's own doc comment for why, confirmed against a
+        // real Verbatim reference file.
         let para = Paragraph { list: None,
             runs: vec![Run { size: 26, bold: true, ..Run::default() }],
             heading: 4,
@@ -5773,6 +5795,45 @@ mod tests {
             unsupported_xml: None,
         };
         assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 1);
+    }
+
+    /// Bug report: "Tags and Cites increase line spacing in vimbatim far
+    /// more than they do in word". This is the case that actually exercised
+    /// the bug — every other slot-count test here uses `normal_size_px:
+    /// 14.0` (this file's stale `FONT_SIZE_PX` reference, at which 14.0 *
+    /// `LINE_HEIGHT_RATIO` == `LINE_HEIGHT_PX` exactly), which coincidentally
+    /// never crosses the old ceiling threshold for a 13px Tag/Cite run and
+    /// masked this. The app's *real* default is 11px (22 half-points) —
+    /// before the fix, 13/11 = 1.18x rounded up to 2 slots here; Word's own
+    /// reference file shows Tag/Cite need no reserved room at all at their
+    /// real relative size.
+    #[test]
+    fn test_slot_count_tag_needs_only_one_slot_at_the_real_default_normal_size() {
+        let para = Paragraph { list: None,
+            runs: vec![Run { size: 26, bold: true, ..Run::default() }],
+            heading: 4,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+    }
+
+    #[test]
+    fn test_slot_count_cite_needs_only_one_slot_at_the_real_default_normal_size() {
+        // Mirrors AppState::apply_cite_style: bold + FontSize(26 half-points
+        // = 13px) + Style(Cite) on a selection — no `heading` set at all
+        // (Cite is inline, not a whole-line card style), so this exercises
+        // the `r.style != Some(CardStyle::Cite)` run filter specifically,
+        // not the heading==4 short-circuit Tag uses.
+        let para = Paragraph { list: None,
+            runs: vec![
+                Run { size: 26, bold: true, style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
     }
 
     #[test]
