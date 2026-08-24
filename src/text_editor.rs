@@ -1791,20 +1791,32 @@ impl Render for TextEditor {
                 let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 let click_count = ev.click_count;
+                let shift_click = ev.modifiers.shift && click_count == 1;
                 this.state.update(cx, |state, cx| {
                     state.editor_context_menu = None;
                     state.clear_similar_selection();
-                    // `set_cursor_from_line_col` does the line/col -> byte-offset
-                    // conversion (there's no standalone public helper for it) and
-                    // leaves the result in `tab.cursor`, so double/triple-click
-                    // reuse that single call instead of re-deriving the byte
-                    // position themselves.
-                    state.set_cursor_from_line_col(line, col);
-                    let byte_pos = pane_idx.and_then(|i| state.tabs.get(i)).map(|t| t.cursor).unwrap_or(0);
-                    match click_count {
-                        2 => state.select_word_at(byte_pos),
-                        3 => state.select_line_at(byte_pos),
-                        _ => {}
+                    if shift_click {
+                        // Shift+Click: extend the selection from wherever the
+                        // cursor already is to the click point — the same
+                        // `extend_selection_to_line_col` a click-drag calls on
+                        // every `on_mouse_move`, just driven by one click
+                        // instead of a series of move events. Anchors at the
+                        // current cursor position when there's no selection
+                        // yet (see that function's own doc comment).
+                        state.extend_selection_to_line_col(line, col);
+                    } else {
+                        // `set_cursor_from_line_col` does the line/col -> byte-offset
+                        // conversion (there's no standalone public helper for it) and
+                        // leaves the result in `tab.cursor`, so double/triple-click
+                        // reuse that single call instead of re-deriving the byte
+                        // position themselves.
+                        state.set_cursor_from_line_col(line, col);
+                        let byte_pos = pane_idx.and_then(|i| state.tabs.get(i)).map(|t| t.cursor).unwrap_or(0);
+                        match click_count {
+                            2 => state.select_word_at(byte_pos),
+                            3 => state.select_line_at(byte_pos),
+                            _ => {}
+                        }
                     }
                     cx.notify();
                 });
@@ -2658,7 +2670,7 @@ fn render_line(
     for (run_start, run_end, run_idx) in effective_spans {
         let run = para.and_then(|p| p.runs.get(run_idx));
         let sub_len = run_end - run_start;
-        let sub_cursor = cursor_col.filter(|&c| c >= run_start && c <= run_end).map(|c| c - run_start);
+        let sub_cursor = sub_cursor_for_run(cursor_col, run_start, run_end, chars.len());
         let sub_selections: Vec<(usize, usize)> = selections
             .iter()
             .filter_map(|&(s, e)| {
@@ -2867,7 +2879,25 @@ fn render_segment(
         // The theme's selection color at ~50% opacity (spec 6.4 fixed this at
         // #264F78; it now follows the palette so it stays visible on light
         // backgrounds). `<< 8 | 0x80` packs the RGB into RGBA's high bits.
-        SegmentStyle::Selection => el.bg(rgba((pal.selection << 8) | 0x80)),
+        //
+        // A GPUI div has one `bg` field, so a plain `.bg()` here would
+        // replace rather than blend with a run's own formatting-highlight
+        // background (`apply_run_style`'s `run.highlight` case a few lines
+        // up) — the highlight would vanish under the selection instead of
+        // showing through it. Same overlay technique as `CursorStyle::Line`
+        // just above: leave `el`'s own bg (the highlight, if any) as the
+        // base layer and paint the translucent selection tint as a
+        // full-size absolutely positioned child on top of it, added before
+        // the text child below so the glyphs still paint on top of both.
+        SegmentStyle::Selection => el.relative().child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .w_full()
+                .h_full()
+                .bg(rgba((pal.selection << 8) | 0x80)),
+        ),
         SegmentStyle::Plain => el,
     };
     /*
@@ -4115,6 +4145,27 @@ enum SegmentStyle {
     Selection,
 }
 
+/// Rebases a row-relative cursor column into one formatting run's own
+/// [0, run_len] coordinate space, or `None` if the cursor isn't on this run.
+///
+/// Runs are half-open and contiguous (`run_start..run_end`), so a cursor
+/// sitting exactly on the boundary between two runs must be claimed by
+/// exactly one of them — otherwise both draw a cursor segment and the caret
+/// appears twice, straddling the character at the boundary. It belongs to
+/// the *later* run (the caret sits before the character being typed into) —
+/// except when the boundary is the true end of the row (`run_end == row_len`
+/// *and* `c == row_len`), which the last run must still claim to produce the
+/// existing "cursor past end of line" segment. Checking `run_end == row_len`
+/// (not just `c == row_len`) matters: without it, a cursor sitting at the
+/// row's end column would wrongly also match every *earlier* run, since
+/// `c == row_len` alone says nothing about which run actually reaches that
+/// column.
+fn sub_cursor_for_run(cursor_col: Option<usize>, run_start: usize, run_end: usize, row_len: usize) -> Option<usize> {
+    cursor_col
+        .filter(|&c| c >= run_start && (c < run_end || (run_end == row_len && c == row_len)))
+        .map(|c| c - run_start)
+}
+
 fn line_segments(
     len: usize,
     cursor_col: Option<usize>,
@@ -4200,7 +4251,7 @@ mod tests {
         column_for_x_in_row, x_for_col_in_row, effective_char_size_px, effective_char_font,
         effective_char_advance_ratio, line_for_y, selection_span_for_line, row_edge_target_col, RowEdge,
         nearest_wrap_row_for_display_row,
-        line_segments, SegmentStyle, CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO,
+        line_segments, sub_cursor_for_run, SegmentStyle, CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO,
         FONT_FAMILY, CURATED_SERIF_FONT,
         usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
@@ -4810,6 +4861,60 @@ mod tests {
                 (4, 6, SegmentStyle::Plain, false),
             ]
         );
+    }
+
+    // ── sub_cursor_for_run / render_line's per-run cursor split ────────────────
+
+    /// Bug report: with vim mode off, the cursor appeared twice — once on
+    /// each side of a character. Root cause: a row is split into per-run
+    /// chunks (half-open, contiguous — one run's `end` is the next run's
+    /// `start`), but the old filter treated that shared boundary column as
+    /// belonging to *both* runs, so both emitted a `SegmentStyle::Cursor`
+    /// segment. Reproduces the actual failure shape (two runs, cursor on
+    /// their shared boundary) rather than just the predicate in isolation,
+    /// so a future edit to `line_segments`'s past-end branch can't
+    /// reintroduce the double-paint without this test catching it.
+    #[test]
+    fn test_cursor_on_run_boundary_claimed_by_exactly_one_run() {
+        // Row "foobar" (len 6) split into two runs: "foo" [0,3) and "bar" [3,6),
+        // cursor sitting exactly on their shared boundary (col 3).
+        let row_len = 6;
+        let runs = [(0usize, 3usize), (3usize, 6usize)];
+        let cursor_col = Some(3);
+
+        let mut cursor_segments = 0;
+        for &(run_start, run_end) in &runs {
+            let sub_cursor = sub_cursor_for_run(cursor_col, run_start, run_end, row_len);
+            let sub_len = run_end - run_start;
+            for (_, _, style, _) in line_segments(sub_len, sub_cursor, &[], &[]) {
+                if style == SegmentStyle::Cursor {
+                    cursor_segments += 1;
+                }
+            }
+        }
+        assert_eq!(cursor_segments, 1, "exactly one run must claim a boundary cursor, not both");
+    }
+
+    #[test]
+    fn test_cursor_at_end_of_row_still_claimed_by_last_run() {
+        // Cursor past the last character of the row (col 6 of a 6-char row)
+        // must still land on the last run, to keep the existing "cursor past
+        // end of line" segment.
+        let row_len = 6;
+        let runs = [(0usize, 3usize), (3usize, 6usize)];
+        let cursor_col = Some(6);
+
+        let mut cursor_segments = 0;
+        for &(run_start, run_end) in &runs {
+            let sub_cursor = sub_cursor_for_run(cursor_col, run_start, run_end, row_len);
+            let sub_len = run_end - run_start;
+            for (_, _, style, _) in line_segments(sub_len, sub_cursor, &[], &[]) {
+                if style == SegmentStyle::Cursor {
+                    cursor_segments += 1;
+                }
+            }
+        }
+        assert_eq!(cursor_segments, 1, "end-of-row cursor must still be claimed exactly once");
     }
 
     // ── usable_wrap_width ────────────────────────────────────────────────────
