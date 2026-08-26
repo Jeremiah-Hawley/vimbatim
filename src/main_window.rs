@@ -10,6 +10,7 @@ use crate::close_confirm::CloseConfirm;
 use crate::docx_parser::{DocxOrigin, Paragraph};
 use crate::document_ops::FormatOp;
 use crate::file_explorer::{FileExplorer, SidebarResizePayload};
+use crate::font_import_modal::FontImportModal;
 use crate::command_palette::CommandPaletteView;
 use crate::find_bar::FindBarView;
 use crate::formatting_ribbon::FormattingRibbon;
@@ -77,6 +78,7 @@ pub struct MainWindow {
     command_palette: Entity<CommandPaletteView>,
     settings_modal: Entity<SettingsModal>,
     close_confirm: Entity<CloseConfirm>,
+    font_import_modal: Entity<FontImportModal>,
     recovery_prompt: Entity<RecoveryPrompt>,
     word_count: Entity<WordCount>,
     timer: Entity<Timer>,
@@ -109,6 +111,7 @@ impl MainWindow {
         let command_palette   = cx.new(|cx|  CommandPaletteView::new(state.clone(), cx));
         let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
         let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
+        let font_import_modal = cx.new(|_cx| FontImportModal::new(state.clone()));
         let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
         let word_count        = cx.new(|_cx| WordCount::new(state.clone()));
         let timer             = cx.new(|cx|  Timer::new(state.clone(), cx));
@@ -250,6 +253,7 @@ impl MainWindow {
             command_palette,
             settings_modal,
             close_confirm,
+            font_import_modal,
             recovery_prompt,
             word_count,
             timer,
@@ -714,6 +718,7 @@ impl Render for MainWindow {
         let sidebar_visible  = self.state.read(cx).sidebar_visible;
         let settings_visible = self.state.read(cx).settings_visible;
         let pending_close    = self.state.read(cx).pending_close;
+        let font_import_modal_open = self.state.read(cx).font_import_modal_open;
         let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
         let word_count_visible = self.state.read(cx).word_count_visible;
         let timer_visible    = self.state.read(cx).timer.visible;
@@ -940,6 +945,11 @@ impl Render for MainWindow {
             // Save/Discard/Cancel answer; painted after the settings modal
             // so it's still on top even if somehow both were open at once.
             .when(pending_close.is_some(), |d| d.child(self.close_confirm.clone()))
+            // ── Add Font overlay ─────────────────────────────────────────────
+            // Mounted from the Font Family dropdown's "+ Add Font" row or the
+            // Fonts settings section; painted after close-confirm so it can
+            // still be opened from within Settings.
+            .when(font_import_modal_open, |d| d.child(self.font_import_modal.clone()))
             // ── Recovery prompt overlay ─────────────────────────────────────
             // Mounted at launch when a previous session left unsaved work
             // behind. Painted last so it sits above both other modals — it

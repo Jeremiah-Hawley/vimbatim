@@ -1,9 +1,12 @@
 use gpui::prelude::*;
 use gpui::*;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{OnceLock, RwLock};
 
 use crate::auto_scroll::AutoScroller;
 use crate::docx_parser::{ListKind, Paragraph, Run};
@@ -124,8 +127,75 @@ pub(crate) const CURATED_SERIF_FONT: &str = "DejaVu Serif";
 
 pub(crate) const CURATED_FONTS: &[&str] = &[FONT_FAMILY, CURATED_SERIF_FONT];
 
+/// A user-imported font family (`font_import.rs`), registered at runtime
+/// rather than baked into `CURATED_FONTS`. `ratio` is `char_advance_ratio`'s
+/// equivalent for this family — same "advance as a fraction of font size"
+/// idea as `SERIF_CHAR_ADVANCE_RATIO`, but measured automatically (via
+/// `measure_advance_ratio`, real glyph shaping) instead of hand-derived,
+/// since there's no fixed set of imported fonts to hand-tune for. `dir` is
+/// where its face files live under `recovery::app_data_dir()`, kept so
+/// removing the font can delete them.
+struct ImportedFontMeta {
+    ratio: f32,
+    dir: PathBuf,
+}
+
+/// Fonts the user has imported this run (or reloaded from disk at startup —
+/// see `font_import::load_persisted`), keyed by family name. Lives here
+/// rather than on `AppState`: every consumer (`is_curated_font`,
+/// `effective_char_font`, `effective_char_advance_ratio`,
+/// `visual_rows_for_viewport`) is a free function taking `Option<&Paragraph>`
+/// data, not an `AppState` handle, so threading it through as a parameter
+/// would touch every call site for no benefit over one process-wide table.
+static IMPORTED_FONTS: OnceLock<RwLock<HashMap<String, ImportedFontMeta>>> = OnceLock::new();
+
+fn imported_fonts() -> &'static RwLock<HashMap<String, ImportedFontMeta>> {
+    IMPORTED_FONTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn is_imported_font(name: &str) -> bool {
+    imported_fonts().read().unwrap().contains_key(name)
+}
+
+fn imported_font_ratio(name: &str) -> Option<f32> {
+    imported_fonts().read().unwrap().get(name).map(|m| m.ratio)
+}
+
+/// Names of every imported font, sorted for a stable picker order.
+pub(crate) fn imported_font_names() -> Vec<String> {
+    let mut names: Vec<String> = imported_fonts().read().unwrap().keys().cloned().collect();
+    names.sort();
+    names
+}
+
+/// `CURATED_FONTS` plus every imported font — what the Font Family picker
+/// (`formatting_ribbon.rs`) actually offers.
+pub(crate) fn all_curated_font_names() -> Vec<String> {
+    let mut names: Vec<String> = CURATED_FONTS.iter().map(|s| s.to_string()).collect();
+    names.extend(imported_font_names());
+    names
+}
+
+/// Registers a newly-imported (or freshly-reloaded) font family so it starts
+/// rendering and appears in the picker. Called by `font_import.rs` after the
+/// faces are already handed to `cx.text_system().add_fonts`.
+pub(crate) fn register_imported_font(name: String, ratio: f32, dir: PathBuf) {
+    imported_fonts().write().unwrap().insert(name, ImportedFontMeta { ratio, dir });
+}
+
+/// Drops a font from the picker/render path and returns where its face
+/// files live on disk, for the caller to delete. The face bytes already
+/// handed to `cx.text_system().add_fonts` have no unload API and stay
+/// resident until restart — harmless, since nothing can reach them by name
+/// once this returns, but a run still explicitly naming this font (e.g. a
+/// freshly-reopened `.docx`) falls back to `FONT_FAMILY` immediately, not
+/// just after restart.
+pub(crate) fn unregister_imported_font(name: &str) -> Option<PathBuf> {
+    imported_fonts().write().unwrap().remove(name).map(|m| m.dir)
+}
+
 fn is_curated_font(name: &str) -> bool {
-    CURATED_FONTS.contains(&name)
+    CURATED_FONTS.contains(&name) || is_imported_font(name)
 }
 
 /// `CURATED_SERIF_FONT`'s counterpart to `CHAR_ADVANCE_RATIO` below — same
@@ -3511,7 +3581,7 @@ fn usable_wrap_width(viewport_width_px: f32) -> f32 {
     if usable <= 0.0 { f32::MAX } else { usable }
 }
 
-fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) -> f32 {
+pub(crate) fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) -> f32 {
     /*
      * Builds a closure that returns a character's real, rendered pixel
      * width for `font` at `font_size_px` (the zoomed font size — see
@@ -3577,6 +3647,22 @@ fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) ->
     }
 }
 
+/// `SERIF_CHAR_ADVANCE_RATIO`'s automated equivalent for an imported font:
+/// real-measures (via `char_width_fn`, the same glyph shaping GPUI paints
+/// with) the mean advance of a-z/0-9 at `FONT_SIZE_PX`, then expresses it as
+/// a fraction of font size — same derivation `SERIF_CHAR_ADVANCE_RATIO`'s own
+/// doc comment describes doing by hand for one font, just computed at import
+/// time so it works for whatever family the user brings in. `family` must
+/// already be registered with `cx.text_system().add_fonts` (font_import.rs
+/// calls this immediately after doing so) or GPUI's fallback stack measures
+/// instead, giving a meaningless ratio.
+pub(crate) fn measure_advance_ratio(cx: &App, family: &str) -> f32 {
+    const SAMPLE: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut measure = char_width_fn(cx, font(family.to_string()), FONT_SIZE_PX);
+    let total: f32 = SAMPLE.chars().map(&mut measure).sum();
+    total / (SAMPLE.chars().count() as f32 * FONT_SIZE_PX)
+}
+
 pub(crate) fn visual_rows_for_viewport(
     cx: &App,
     lines: &[String],
@@ -3595,8 +3681,16 @@ pub(crate) fn visual_rows_for_viewport(
      * re-wraps at the same visual width it renders at.
      */
     let reference_px = FONT_SIZE_PX * zoom;
-    let mut mono_measure = char_width_fn(cx, font(FONT_FAMILY), reference_px);
-    let mut serif_measure = char_width_fn(cx, font(CURATED_SERIF_FONT), reference_px);
+    // Mono/serif are pre-seeded (as before this map existed) so the common
+    // case never pays a HashMap lookup to insert; an imported font's
+    // measurement closure is built lazily, the first time a run actually
+    // names it, and reused for the rest of this wrap pass.
+    let mut measures: HashMap<String, Box<dyn FnMut(char) -> f32>> = HashMap::new();
+    measures.insert(FONT_FAMILY.to_string(), Box::new(char_width_fn(cx, font(FONT_FAMILY), reference_px)));
+    measures.insert(
+        CURATED_SERIF_FONT.to_string(),
+        Box::new(char_width_fn(cx, font(CURATED_SERIF_FONT), reference_px)),
+    );
 
     // Wrapping has to measure each character at the size (and, since a run
     // can now pick a curated font — bug report: font selection didn't
@@ -3619,10 +3713,11 @@ pub(crate) fn visual_rows_for_viewport(
         let spans = cached_spans.as_ref().map(|(_, s)| s.as_slice()).unwrap_or(&[]);
         let para = paragraphs.get(line_idx);
         let size = effective_char_size_px(para, spans, char_idx, normal_size_px, zoom);
-        let measured = match effective_char_font(para, spans, char_idx) {
-            CURATED_SERIF_FONT => serif_measure(ch),
-            _ => mono_measure(ch),
-        };
+        let font_name = effective_char_font(para, spans, char_idx);
+        let measure = measures
+            .entry(font_name.to_string())
+            .or_insert_with(|| Box::new(char_width_fn(cx, font(font_name.into_owned()), reference_px)));
+        let measured = measure(ch);
         // A glyph's advance scales linearly with font size (true of any
         // font, not just a monospace one — vector outlines scale uniformly
         // with point size), so one real glyph measurement at the reference
@@ -3850,32 +3945,36 @@ fn effective_char_size_px(
 /// The font family one character actually paints at — mirrors
 /// `apply_run_style`'s own rule exactly (a curated `run.font` wins,
 /// anything else falls back to `FONT_FAMILY`), so wrap/click/scroll math
-/// always measures against the same font that's actually painted. `'static`
-/// since both possible results are the compile-time constants
-/// `FONT_FAMILY`/`CURATED_SERIF_FONT`.
-fn effective_char_font(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> &'static str {
+/// always measures against the same font that's actually painted.
+/// `Cow::Borrowed` for the two compile-time-known outcomes (no allocation on
+/// the hot path); `Cow::Owned` only when the run names an imported font,
+/// whose name isn't `'static`.
+fn effective_char_font(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> Cow<'static, str> {
     let run = spans
         .iter()
         .find(|(start, end, _)| char_idx >= *start && char_idx < *end)
         .and_then(|(_, _, run_idx)| para.and_then(|p| p.runs.get(*run_idx)));
     match run.and_then(|r| r.font.as_deref()) {
-        Some(CURATED_SERIF_FONT) => CURATED_SERIF_FONT,
-        _ => FONT_FAMILY,
+        Some(CURATED_SERIF_FONT) => Cow::Borrowed(CURATED_SERIF_FONT),
+        Some(name) if is_imported_font(name) => Cow::Owned(name.to_string()),
+        _ => Cow::Borrowed(FONT_FAMILY),
     }
 }
 
 /// `column_for_x_in_row`/`x_for_col_in_row`'s per-character advance-ratio
 /// lookup: `CHAR_ADVANCE_RATIO` for the monospace primary font,
-/// `SERIF_CHAR_ADVANCE_RATIO` for the curated serif font, mirroring
-/// `effective_char_font`'s own font selection exactly (so click-mapping and
-/// wrap agree on which font a character belongs to, even though wrap uses
-/// real glyph measurement and this stays the cheaper ratio approximation —
-/// see `SERIF_CHAR_ADVANCE_RATIO`'s doc comment for why that's an
-/// acceptable tradeoff here).
+/// `SERIF_CHAR_ADVANCE_RATIO` for the curated serif font, an imported font's
+/// own `measure_advance_ratio` result for anything registered via
+/// `font_import.rs`, mirroring `effective_char_font`'s own font selection
+/// exactly (so click-mapping and wrap agree on which font a character
+/// belongs to, even though wrap uses real glyph measurement and this stays
+/// the cheaper ratio approximation — see `SERIF_CHAR_ADVANCE_RATIO`'s doc
+/// comment for why that's an acceptable tradeoff here).
 fn effective_char_advance_ratio(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> f32 {
-    match effective_char_font(para, spans, char_idx) {
+    match effective_char_font(para, spans, char_idx).as_ref() {
         CURATED_SERIF_FONT => SERIF_CHAR_ADVANCE_RATIO,
-        _ => CHAR_ADVANCE_RATIO,
+        FONT_FAMILY => CHAR_ADVANCE_RATIO,
+        name => imported_font_ratio(name).unwrap_or(CHAR_ADVANCE_RATIO),
     }
 }
 

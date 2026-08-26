@@ -55,6 +55,7 @@ const SPELLCHECK_COLORS: [(&str, u32); 5] = [
 pub enum SettingsSection {
     Appearance,
     TextSettings,
+    Fonts,
     Keybindings,
     ToggleFeatures,
 }
@@ -62,10 +63,11 @@ pub enum SettingsSection {
 impl SettingsSection {
     /// Sidebar order, top to bottom. `ToggleFeatures` is deliberately last —
     /// the toggles belong at the bottom of the settings list.
-    fn all() -> [SettingsSection; 4] {
+    fn all() -> [SettingsSection; 5] {
         [
             SettingsSection::Appearance,
             SettingsSection::TextSettings,
+            SettingsSection::Fonts,
             SettingsSection::Keybindings,
             SettingsSection::ToggleFeatures,
         ]
@@ -75,6 +77,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::TextSettings => "Text Settings",
+            SettingsSection::Fonts => "Fonts",
             SettingsSection::Keybindings => "Keybindings",
             SettingsSection::ToggleFeatures => "Toggle Features",
         }
@@ -2141,6 +2144,75 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                     }),
             )
     }
+
+    /// Settings -> Fonts: lists every font imported via `font_import.rs`
+    /// (each previewed in its own face) with a remove button per entry, plus
+    /// an "Add Font" button that opens the same `font_import_modal.rs`
+    /// popup the Font Family dropdown's "+ Add Font" row does.
+    fn render_fonts(&self, p: crate::theme::Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let names = crate::text_editor::imported_font_names();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(p.text))
+                    .child("Imported Fonts"),
+            )
+            .child(Self::mode_pill(
+                "add-font".into(),
+                "Add Font",
+                false,
+                p,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.open_font_import_modal();
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            ))
+            .when(names.is_empty(), |d| {
+                d.child(div().text_xs().text_color(rgb(p.text_faint)).child("No fonts imported yet."))
+            })
+            .children(names.into_iter().enumerate().map(|(idx, name)| {
+                let remove_name = name.clone();
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .bg(rgb(p.chrome_active))
+                    .rounded(px(4.0))
+                    .child(div().text_sm().font_family(name.clone()).text_color(rgb(p.text)).child(name))
+                    .child(
+                        div()
+                            .id(ElementId::named_usize("imported-font-remove", idx))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(rgb(p.text_faint))
+                            .hover(move |s| s.text_color(rgb(p.text)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.remove_imported_font(&remove_name);
+                                        cx.notify();
+                                    });
+                                    cx.notify();
+                                }),
+                            )
+                            .child("×"),
+                    )
+                    .into_any_element()
+            }))
+    }
 }
 
 impl Render for SettingsModal {
@@ -2370,6 +2442,9 @@ impl Render for SettingsModal {
                                             p,
                                             cx,
                                         ))
+                                    })
+                                    .when(!theme_preview && section == SettingsSection::Fonts, |d| {
+                                        d.child(self.render_fonts(p, cx))
                                     })
                                     .when(!theme_preview && section == SettingsSection::Keybindings, |d| {
                                         d.children(KeybindCategory::all().iter().map(|category| {

@@ -16,6 +16,17 @@ graphify-out/
 !/tests/fixtures/highlight_space_boundary.docx
 *.log
 
+# Ignored by default, same spirit as *.docx/*.md above: anything dropped
+# into tests/ (scratch fixtures, one-off files) stays untracked unless
+# force-added, so `git add -A` can't sweep in something new by accident.
+# Unlike the *.docx/*.md patterns above, a directory-level ignore can't be
+# selectively un-ignored per file (git won't re-include a path whose parent
+# directory is excluded) — already-tracked files under tests/ (parse_testing.rs,
+# the *.docx fixtures and their exceptions above, fixtures/settings.conf) are
+# unaffected, since gitignore never hides an already-tracked file. A new
+# deliberate fixture needs `git add -f path/to/it` instead of a `!` exception.
+tests/
+
 # Added by cargo
 
 /target

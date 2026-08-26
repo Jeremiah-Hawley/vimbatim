@@ -816,6 +816,10 @@ pub struct AppState {
     /// Nav button, and a Files/Nav button pair in the sidebar's own header.
     pub sidebar_mode: SidebarMode,
     pub settings_visible: bool,
+    /// Mounts `font_import_modal.rs`'s "Add Font" popup — opened from the
+    /// Font Family dropdown's "+ Add Font" row (`formatting_ribbon.rs`) or
+    /// the Fonts settings section, closed by Cancel or a successful import.
+    pub font_import_modal_open: bool,
     /// Set while a tab-close or app-close is waiting on the user's
     /// save/discard/cancel answer (`close_confirm.rs`). See `PendingClose`.
     pub pending_close: Option<PendingClose>,
@@ -1820,6 +1824,7 @@ impl AppState {
             custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
+            font_import_modal_open: false,
             pending_close: None,
             pending_recovery: crate::recovery::scan_recovery_dir(&crate::recovery::recovery_dir()),
             working_directory,
@@ -2863,6 +2868,26 @@ impl AppState {
     /// backdrop click) — leaves everything untouched.
     pub fn cancel_close(&mut self) {
         self.pending_close = None;
+    }
+
+    /// Opens the "Add Font" popup (`font_import_modal.rs`) — the Font
+    /// Family dropdown's "+ Add Font" row and the Fonts settings section
+    /// both call this.
+    pub fn open_font_import_modal(&mut self) {
+        self.font_import_modal_open = true;
+    }
+
+    /// Cancel button, or backdrop click, on the "Add Font" popup.
+    pub fn close_font_import_modal(&mut self) {
+        self.font_import_modal_open = false;
+    }
+
+    /// Deletes a previously-imported font (Fonts settings section's remove
+    /// button). See `font_import::remove`'s doc comment for why this takes
+    /// effect on the picker/render path immediately but the GPUI-side face
+    /// bytes themselves only clear on restart.
+    pub fn remove_imported_font(&mut self, name: &str) {
+        let _ = crate::font_import::remove(name);
     }
 
     /// The dirty tabs, flattened for the panic hook.
@@ -9455,6 +9480,7 @@ mod tests {
             custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
             settings_visible: false,
+            font_import_modal_open: false,
             pending_close: None,
             pending_recovery: Vec::new(),
             working_directory: std::path::PathBuf::from("."),

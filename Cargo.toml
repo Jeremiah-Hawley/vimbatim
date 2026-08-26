@@ -15,10 +15,10 @@ regex         = "1"
 quick-xml     = "0.30"
 zip           = "2"
 spellbook = "0.4.2"
-
-[dev-dependencies]
-# Verifies the bundled font faces actually register under one consistent
-# family name with distinct weight/style — see main.rs's
+# Reads a font file's own name table to get the exact family name Word
+# itself would write into `<w:rFonts>` — used by `font_import.rs` to
+# identify an imported .ttf/.otf/.zip's family and weight/style, and (as a
+# dev-dependency before this) by main.rs's
 # test_bundled_fonts_register_as_one_family_with_four_distinct_faces.
 ttf-parser = "0.25"
 

@@ -27,6 +27,8 @@ mod wikifi_export;
 mod settings_modal;
 mod close_confirm;
 mod command_palette;
+mod font_import;
+mod font_import_modal;
 mod main_window;
 mod spellcheck;
 mod theme;
@@ -152,6 +154,12 @@ fn main() {
 
     application().run(|cx: &mut App| {
         load_bundled_fonts(cx);
+        // Re-registers any fonts the user imported in a previous session
+        // (font_import.rs) — must run after load_bundled_fonts so the text
+        // system already exists, and before the first frame so the Font
+        // Family picker and any document naming an imported font are
+        // correct from the start.
+        font_import::load_persisted(cx);
 
         // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
         // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
