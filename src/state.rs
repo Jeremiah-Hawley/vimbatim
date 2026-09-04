@@ -25,6 +25,17 @@ const UNDO_STACK_CAP: usize = 200;
 /// a hypothetical. Chosen so a ~5MB document (a large real debate case
 /// file) still keeps dozens of undo levels, not just `UNDO_STACK_MIN_CAP`.
 const UNDO_STACK_BYTE_BUDGET: usize = 100_000_000;
+
+/// Allocator bookkeeping attributable to one `Run`, on top of its struct size
+/// and the bytes its strings hold.
+///
+/// Every run owns several separately-allocated `String`s (`text`,
+/// `highlight_color`, and optionally `font`/`color`), and each carries its own
+/// header and size-class rounding. Measured at ~30 bytes per run against real
+/// RSS — see `snapshot_byte_estimate`'s table. A calibration figure, not a
+/// derivation: it is allocator-specific, and re-measuring it is what
+/// `bench_diagnostic_undo_memory_growth_per_tab` is for.
+const PER_RUN_ALLOCATION_OVERHEAD: usize = 30;
 /// Even a huge document keeps at least this many undo levels — a fixed
 /// memory budget alone would otherwise let one very large document shrink
 /// undo depth to an unusably small number.
@@ -44,13 +55,38 @@ fn uncondense_markers(text: &str) -> String {
     text.replace(CONDENSE_MARKER, "\n").replace('¶', "\n")
 }
 
-/// Rough byte-size estimate of one undo/redo snapshot. Only used to keep
-/// the stacks' total memory bounded on large documents, not for anything
-/// content-accuracy-sensitive, so an approximation (content plus every
-/// run's string fields) is enough — no need to walk anything not already
-/// owned by the snapshot itself.
+/// Heap bytes one undo/redo snapshot really costs, used to keep the stacks
+/// bounded (see `undo_stack_cap_for_snapshot_size`).
+///
+/// This used to count only string *payloads*, which made it wrong by 2.7x on
+/// a real document — and it was wrong in the direction that matters, letting
+/// the byte budget permit far more memory than it claimed. Measured on a
+/// 243KB debate file (`bench_diagnostic_undo_memory_growth_per_tab`, which
+/// reads RSS straight from `/proc/self/statm`):
+///
+/// ```text
+///   content                  249KB
+///   string payloads          254KB
+///   Run/Paragraph structs    683KB   <- ignored entirely by the old estimate
+///   allocator overhead       176KB   <- ~30 bytes per run
+///   ------------------------------
+///   total                   1.30MB   (old estimate said 0.48MB)
+/// ```
+///
+/// The struct term dominates, because debate documents are run-dense — that
+/// file carries 5864 runs across 476 paragraphs, so `Vec<Run>`'s own contents
+/// outweigh the text they hold. Under-counting it let a single tab's stacks
+/// reach ~512MB, and both the stacks and the budget are per tab, so a few
+/// case files open at once could reach several GB. That is what the beta
+/// report of "slows down after a while, fixed by restarting" actually was:
+/// not a leak, but a ceiling that never held. Freed pages are not returned to
+/// the OS either, so RSS never falls back within a session, which is why only
+/// a restart cured it.
 fn snapshot_byte_estimate(content: &str, paragraphs: &[Paragraph]) -> usize {
+    let runs: usize = paragraphs.iter().map(|p| p.runs.len()).sum();
     content.len()
+        + paragraphs.len() * std::mem::size_of::<Paragraph>()
+        + runs * (std::mem::size_of::<Run>() + PER_RUN_ALLOCATION_OVERHEAD)
         + paragraphs
             .iter()
             .flat_map(|p| &p.runs)
@@ -68,8 +104,54 @@ fn snapshot_byte_estimate(content: &str, paragraphs: &[Paragraph]) -> usize {
 /// documents, shrinking proportionally as `snapshot_bytes` grows so total
 /// stack memory stays within `UNDO_STACK_BYTE_BUDGET`, never below
 /// `UNDO_STACK_MIN_CAP`.
+/// Logs what one save actually cost, to `crash.log` via `log_line`.
+///
+/// Beta feedback reported the app degrading over a session — typing lagging,
+/// scrolling stuttering, and saves taking up to ten seconds — cured by a
+/// restart. Save is the most informative of those symptoms, because its cost
+/// should be a pure function of document size: if the *same* document saves
+/// quickly at launch and slowly an hour later, then what is being saved has
+/// changed, not the machine.
+///
+/// `runs` is the number worth watching. Editing splits runs
+/// (`split_run_at_position`) and merging fuses them back
+/// (`merge_adjacent_same_format_runs`); if any edit path misses the merge,
+/// run counts climb over a session while the text itself stays the same
+/// size. Everything that walks runs — word wrap, painting, spellcheck, the
+/// XML rebuild inside this very save — slows down together, which is exactly
+/// the reported cluster of symptoms. Reopening the file re-parses it, and
+/// parse merges adjacent identical runs, which would also explain why a
+/// restart cures it.
+///
+/// So: bytes flat while runs climb means fragmentation, and this line says
+/// where to look. Runs flat while `ms` climbs means the document model is
+/// innocent and the cost is elsewhere (allocator pressure from the repeated
+/// full-document clones, most likely).
+fn log_save_cost(paragraphs: &[Paragraph], elapsed: std::time::Duration) {
+    let runs: usize = paragraphs.iter().map(|p| p.runs.len()).sum();
+    let bytes: usize = paragraphs
+        .iter()
+        .flat_map(|p| &p.runs)
+        .map(|r| r.text.len())
+        .sum();
+    // Runs per KB is the actual signal — it holds steady on a healthy
+    // document however much text is added, and climbs on a fragmenting one.
+    let runs_per_kb = runs as f32 / (bytes as f32 / 1024.0).max(1.0);
+    log_line(&format!(
+        "[save] {:.1}ms  paragraphs={}  runs={}  bytes={}  runs/KB={:.1}",
+        elapsed.as_secs_f32() * 1000.0,
+        paragraphs.len(),
+        runs,
+        bytes,
+        runs_per_kb,
+    ));
+}
+
 fn undo_stack_cap_for_snapshot_size(snapshot_bytes: usize) -> usize {
-    let budget_based = UNDO_STACK_BYTE_BUDGET / snapshot_bytes.max(1);
+    // Halved because the cap is applied to the undo *and* redo stacks
+    // independently, and a tab can have both full at once. Without this the
+    // budget silently permitted twice what its name promises.
+    let budget_based = UNDO_STACK_BYTE_BUDGET / 2 / snapshot_bytes.max(1);
     budget_based.clamp(UNDO_STACK_MIN_CAP, UNDO_STACK_CAP)
 }
 
@@ -2730,12 +2812,14 @@ impl AppState {
         }
         let paragraphs = tab.paragraphs.clone();
         let origin = tab.docx_origin.clone();
+        let save_started = Instant::now();
         match origin {
             Some(origin) => origin.save(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
             None => create_new_docx(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
         }
+        log_save_cost(&paragraphs, save_started.elapsed());
         let tab_id = if let Some(tab) = self.tabs.get_mut(idx) {
             tab.is_modified = false;
             tab.last_snapshot_version = tab.content_version;
@@ -13165,7 +13249,39 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         }];
-        assert_eq!(snapshot_byte_estimate(content, &paragraphs), 11 + 11 + 6 + 5 + 6);
+        // Payload bytes, plus the structs holding them and their allocator
+        // overhead — the terms the estimate used to ignore, which is what let
+        // the byte budget permit ~2.7x what it claimed.
+        let payloads = 11 + 11 + 6 + 5 + 6;
+        let structs = std::mem::size_of::<Paragraph>()
+            + std::mem::size_of::<Run>()
+            + PER_RUN_ALLOCATION_OVERHEAD;
+        assert_eq!(snapshot_byte_estimate(content, &paragraphs), payloads + structs);
+    }
+
+    /// The estimate must never *under*-count, in any shape — under-counting is
+    /// the direction that breaks the memory ceiling.
+    #[test]
+    fn snapshot_byte_estimate_counts_at_least_the_bytes_it_can_see() {
+        let paragraphs: Vec<Paragraph> = (0..50)
+            .map(|i| Paragraph { list: None,
+                runs: (0..20)
+                    .map(|j| Run { text: format!("run {i}-{j} with some text"), ..Run::default() })
+                    .collect(),
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            })
+            .collect();
+        let content = paragraphs_to_plain_text(&paragraphs);
+        let payloads: usize = content.len()
+            + paragraphs.iter().flat_map(|p| &p.runs).map(|r| r.text.len()).sum::<usize>();
+        let estimate = snapshot_byte_estimate(&content, &paragraphs);
+        assert!(estimate > payloads,
+            "estimate {estimate} must exceed the {payloads} bytes of raw payload it holds");
+        // 1000 runs of ~20 bytes: the structs genuinely outweigh the text, which
+        // is the whole reason the old payload-only estimate was so far off.
+        assert!(estimate > 2 * payloads, "structs should dominate here, got {estimate} vs {payloads}");
     }
 
     #[test]
@@ -13173,10 +13289,28 @@ mod tests {
         assert_eq!(undo_stack_cap_for_snapshot_size(100), UNDO_STACK_CAP);
     }
 
+    /// The budget is shared between a tab's undo and redo stacks, which are
+    /// capped independently and can both be full at once. A tab must not be
+    /// able to hold more than the budget across the pair.
+    #[test]
+    fn undo_and_redo_together_stay_inside_the_byte_budget() {
+        for snapshot in [64_000usize, 500_000, 1_300_000, 4_000_000] {
+            let cap = undo_stack_cap_for_snapshot_size(snapshot);
+            let both_stacks_full = cap * snapshot * 2;
+            // The MIN_CAP floor deliberately wins for very large documents —
+            // a few undo levels matter more than the ceiling there.
+            if cap > UNDO_STACK_MIN_CAP {
+                assert!(both_stacks_full <= UNDO_STACK_BYTE_BUDGET,
+                    "{snapshot}-byte snapshots: {cap} entries per stack = {both_stacks_full} bytes");
+            }
+        }
+    }
+
     #[test]
     fn test_undo_stack_cap_shrinks_for_large_snapshots() {
-        // 1MB snapshot: 100_000_000 / 1_000_000 == 100, well under UNDO_STACK_CAP.
-        assert_eq!(undo_stack_cap_for_snapshot_size(1_000_000), 100);
+        // 1MB snapshot against half the budget (the other half is the redo
+        // stack's): 50_000_000 / 1_000_000 == 50, well under UNDO_STACK_CAP.
+        assert_eq!(undo_stack_cap_for_snapshot_size(1_000_000), 50);
     }
 
     #[test]
@@ -17249,6 +17383,255 @@ mod tests {
     /// mirrors `docx_parser.rs`'s own `test_real_file_round_trip_...`
     /// pattern, with `test_name` added so parallel test threads (cargo
     /// test's default) never collide on the same directory.
+    /// Beta feedback: the app degrades over a session — typing lags, scrolling
+    /// stutters, saves take up to ten seconds — and a restart cures it for a
+    /// while. The leading hypothesis was run fragmentation: edits split runs
+    /// (`split_run_at_position`), merging fuses them back
+    /// (`merge_adjacent_same_format_runs`), and any edit path that misses the
+    /// merge would let run counts climb over a session while the text stays
+    /// the same size. Everything that walks runs would then slow down
+    /// together, and reopening the file would cure it, because parse merges
+    /// adjacent identical runs.
+    ///
+    /// This drives a real debate document through a long editing session
+    /// headlessly and prints runs and save cost as it goes, so the hypothesis
+    /// can be settled with numbers rather than argued about. Prints only —
+    /// the assertions at the end guard the two things that would be outright
+    /// bugs, not a performance target.
+    #[test]
+    fn bench_diagnostic_editing_session_run_growth() {
+        use crate::docx_parser::parse_docx;
+
+        // A real card file if one is present, so the run/formatting mix is
+        // representative; skipped rather than failed when it is not, since
+        // *.docx is gitignored and a fresh clone will not have it.
+        let source = std::path::Path::new("SeptOct-Kankee-Jeremiah.docx");
+        let Ok((paragraphs, origin)) = parse_docx(source) else {
+            println!("bench_diagnostic_editing_session: {source:?} not present, skipped");
+            return;
+        };
+
+        let dir = temp_test_dir("editing_session");
+        let target = dir.join("session.docx");
+        std::fs::copy(source, &target).unwrap();
+
+        let runs_of = |st: &AppState| -> usize {
+            st.tabs[0].paragraphs.iter().map(|p| p.runs.len()).sum()
+        };
+        let bytes_of = |st: &AppState| -> usize {
+            st.tabs[0].paragraphs.iter().flat_map(|p| &p.runs).map(|r| r.text.len()).sum()
+        };
+
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.tabs[0].file_path = Some(target.clone());
+        state.tabs[0].docx_origin = Some(std::sync::Arc::new(origin));
+
+        println!(
+            "\nbench_diagnostic_editing_session: {} paragraphs, {} runs, {} bytes at open",
+            state.tabs[0].paragraphs.len(), runs_of(&state), bytes_of(&state),
+        );
+        println!("  round |    runs |   bytes | runs/KB | save ms");
+
+        // Each round is a burst of ordinary work: typing, then bolding and
+        // un-bolding a span (the split/merge cycle fragmentation would show
+        // up in), then a shrink, in the middle of the document.
+        for round in 0..=6 {
+            if round > 0 {
+                for _ in 0..200 {
+                    let mid = state.tabs[0].content.len() / 2;
+                    state.tabs[0].cursor = clamp_to_char_boundary(&state.tabs[0].content, mid);
+                    state.insert_char('x');
+                    // Defeat the undo coalescing window so every keystroke
+                    // takes the same path a real typing session does.
+                    state.tabs[0].last_edit_at = None;
+                }
+                for _ in 0..40 {
+                    let mid = state.tabs[0].content.len() / 2;
+                    let a = clamp_to_char_boundary(&state.tabs[0].content, mid);
+                    let b = clamp_to_char_boundary(&state.tabs[0].content, mid + 20);
+                    state.tabs[0].selection = Some((a, b));
+                    state.apply_formatting_to_selection(FormatOp::Bold(true));
+                    state.tabs[0].selection = Some((a, b));
+                    state.apply_formatting_to_selection(FormatOp::Bold(true)); // toggles off
+                    state.tabs[0].selection = Some((a, b));
+                    state.shrink_text();
+                }
+                state.tabs[0].selection = None;
+            }
+
+            state.tabs[0].is_modified = true;
+            let t = Instant::now();
+            state.save_tab(0).unwrap();
+            let save_ms = t.elapsed().as_secs_f32() * 1000.0;
+
+            let (runs, bytes) = (runs_of(&state), bytes_of(&state));
+            println!(
+                "  {round:5} | {runs:7} | {bytes:7} | {:7.1} | {save_ms:7.1}",
+                runs as f32 / (bytes as f32 / 1024.0).max(1.0),
+            );
+        }
+
+        // Not a perf target — these only catch the pathological cases: text
+        // must not be lost, and the document must still be loadable.
+        assert!(bytes_of(&state) > 0, "the document lost all its text");
+        assert!(parse_docx(&target).is_ok(), "the saved document no longer parses");
+    }
+
+    /// How save cost scales with document size — the other half of the
+    /// "ten seconds to save" report.
+    ///
+    /// The session bench above shows run counts are stable, so the document
+    /// model is not growing. That leaves size itself: real case files run far
+    /// larger than the test fixture, and debate documents are unusually
+    /// run-dense (the fixture is ~24 runs per KB). If save is linear, ten
+    /// seconds needs an implausibly huge file and the cost is elsewhere; if it
+    /// is superlinear, an ordinary large case file explains the report on its
+    /// own, with no leak involved.
+    #[test]
+    fn bench_diagnostic_save_cost_by_document_size() {
+        use crate::docx_parser::parse_docx;
+
+        let source = std::path::Path::new("SeptOct-Kankee-Jeremiah.docx");
+        let Ok((base, origin)) = parse_docx(source) else {
+            println!("bench_diagnostic_save_cost_by_size: {source:?} not present, skipped");
+            return;
+        };
+        let dir = temp_test_dir("save_scaling");
+        let origin = std::sync::Arc::new(origin);
+
+        println!("\nbench_diagnostic_save_cost_by_document_size:");
+        println!("  x |  paras |    runs |    bytes | save ms | ms per 100KB");
+        for factor in [1usize, 2, 4, 8, 16] {
+            let mut paragraphs = Vec::with_capacity(base.len() * factor);
+            for _ in 0..factor {
+                paragraphs.extend(base.iter().cloned());
+            }
+            let bytes: usize = paragraphs.iter().flat_map(|p| &p.runs).map(|r| r.text.len()).sum();
+            let runs: usize = paragraphs.iter().map(|p| p.runs.len()).sum();
+
+            let target = dir.join(format!("scaled_{factor}.docx"));
+            std::fs::copy(source, &target).unwrap();
+            let t = Instant::now();
+            origin.save(&paragraphs, &target).unwrap();
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+
+            println!(
+                "  {factor:2} | {:6} | {runs:7} | {bytes:8} | {ms:7.1} | {:12.1}",
+                paragraphs.len(),
+                ms / (bytes as f32 / 102_400.0),
+            );
+        }
+    }
+
+    /// Resident set size in MB, straight from `/proc/self/statm`. Linux-only;
+    /// the bench below reports 0 and says so elsewhere.
+    fn rss_mb() -> f64 {
+        std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1).and_then(|p| p.parse::<f64>().ok()))
+            .map(|pages| pages * 4096.0 / 1_048_576.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Does memory actually grow over a session, and where does it go?
+    ///
+    /// The two benches above rule out the document model: run counts are
+    /// stable under heavy editing, and save is linear in document size
+    /// (~7-10ms per 100KB), so neither fragmentation nor file size can
+    /// produce a ten-second save. That leaves whole-process slowdown, which
+    /// is also the only thing that explains typing, scrolling *and* saving
+    /// all degrading together.
+    ///
+    /// The undo/redo stacks are the obvious candidate. Every snapshot is a
+    /// full `(content, paragraphs)` clone, `UNDO_STACK_BYTE_BUDGET` is 100MB,
+    /// and both the stacks and that budget are **per tab** — so the ceiling
+    /// is roughly `tabs * 200MB` (undo plus redo), which a debate researcher
+    /// with several case files open can reach without doing anything unusual.
+    #[test]
+    fn bench_diagnostic_undo_memory_growth_per_tab() {
+        use crate::docx_parser::parse_docx;
+
+        let source = std::path::Path::new("SeptOct-Kankee-Jeremiah.docx");
+        let Ok((base, _)) = parse_docx(source) else {
+            println!("bench_diagnostic_undo_memory: {source:?} not present, skipped");
+            return;
+        };
+        if rss_mb() == 0.0 {
+            println!("bench_diagnostic_undo_memory: no /proc/self/statm, skipped");
+            return;
+        }
+
+        // A single realistic case file, four times the fixture (~250KB of
+        // text) — unremarkable for this document type.
+        let mut paragraphs = Vec::new();
+        for _ in 0..4 {
+            paragraphs.extend(base.iter().cloned());
+        }
+        let doc_kb = paragraphs.iter().flat_map(|p| &p.runs).map(|r| r.text.len()).sum::<usize>() as f64 / 1024.0;
+
+        let baseline = rss_mb();
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        // What the budget *thinks* one snapshot costs, versus what it really
+        // costs in RSS below. The estimate counts string payloads only; it
+        // cannot see per-`Run` struct overhead or per-allocation overhead,
+        // and every run carries several separate `String`s.
+        println!(
+            "  size_of::<Run>()={} size_of::<Paragraph>()={} runs={} paras={} content={}",
+            std::mem::size_of::<Run>(),
+            std::mem::size_of::<Paragraph>(),
+            state.tabs[0].paragraphs.iter().map(|p| p.runs.len()).sum::<usize>(),
+            state.tabs[0].paragraphs.len(),
+            state.tabs[0].content.len(),
+        );
+        let estimate = snapshot_byte_estimate(&state.tabs[0].content, &state.tabs[0].paragraphs);
+        println!(
+            "\n  snapshot_byte_estimate says {:.2}MB per snapshot -> cap {} entries",
+            estimate as f64 / 1_048_576.0,
+            undo_stack_cap_for_snapshot_size(estimate),
+        );
+        println!("\nbench_diagnostic_undo_memory_growth_per_tab:");
+        println!("  document {doc_kb:.0}KB of text, RSS {baseline:.0}MB at open");
+        println!("  edits | undo entries | RSS MB | MB per undo entry");
+
+        for round in 1..=6 {
+            for _ in 0..25 {
+                let mid = state.tabs[0].content.len() / 2;
+                state.tabs[0].cursor = clamp_to_char_boundary(&state.tabs[0].content, mid);
+                state.insert_char('x');
+                // Every keystroke its own undo step, as a real typing session
+                // spread over minutes produces.
+                state.tabs[0].last_edit_at = None;
+            }
+            let entries = state.tabs[0].undo_stack.len();
+            let rss = rss_mb();
+            println!(
+                "  {:5} | {entries:12} | {rss:6.0} | {:17.2}",
+                round * 25,
+                (rss - baseline) / entries.max(1) as f64,
+            );
+        }
+
+        let peak = rss_mb();
+        // Dropping the stacks is what a "close and reopen the app" does to
+        // this memory. If RSS falls back, the growth was undo history and
+        // nothing is leaking in the strict sense.
+        state.tabs[0].undo_stack.clear();
+        state.tabs[0].redo_stack.clear();
+        state.tabs[0].undo_stack.shrink_to_fit();
+        state.tabs[0].redo_stack.shrink_to_fit();
+        println!(
+            "  after clearing undo/redo: RSS {:.0}MB (peak {peak:.0}MB, baseline {baseline:.0}MB)",
+            rss_mb(),
+        );
+        let cap = undo_stack_cap_for_snapshot_size(estimate);
+        println!(
+            "  per-tab ceiling: {cap} entries x {:.2}MB x 2 stacks = {:.0}MB (budget {}MB)",
+            estimate as f64 / 1_048_576.0,
+            (cap * estimate * 2) as f64 / 1_048_576.0,
+            UNDO_STACK_BYTE_BUDGET / 1_000_000,
+        );
+    }
+
     fn temp_test_dir(test_name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("vimbatim_ctx_menu_test_{}_{}", std::process::id(), test_name));
         std::fs::create_dir_all(&dir).unwrap();
