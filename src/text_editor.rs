@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -411,6 +411,275 @@ fn row_cache_is_valid_for(
         && cache.fold_version == fold_version
 }
 
+/// Width of the document scrollbar's track, and the inset of the thumb inside
+/// it. Beta feedback asked for "the little thingy you click and drag to go up
+/// and down the doc".
+const SCROLLBAR_WIDTH_PX: f32 = 10.0;
+const SCROLLBAR_THUMB_INSET_PX: f32 = 2.0;
+/// Shortest the thumb is allowed to get. Without a floor, a long document
+/// shrinks it to a few unclickable pixels.
+const SCROLLBAR_MIN_THUMB_PX: f32 = 24.0;
+/// Horizontal space `usable_wrap_width` keeps clear on the right for the
+/// scrollbar, so text never wraps underneath it (bug report: "it covers
+/// text"). Wider than the track itself to leave a visible gap between the
+/// last character and the bar. Because wrap width also drives click
+/// hit-testing, reserving it in one place keeps both in agreement.
+const SCROLLBAR_GUTTER_PX: f32 = SCROLLBAR_WIDTH_PX + 6.0;
+/// How long the bar stays fully opaque after the last scroll, and how long it
+/// then takes to fade out. Set `SCROLLBAR_IDLE_OPACITY` above 0.0 to leave it
+/// faintly visible at rest instead of hiding completely.
+const SCROLLBAR_HOLD_MS: u64 = 900;
+const SCROLLBAR_FADE_MS: u64 = 400;
+const SCROLLBAR_IDLE_OPACITY: f32 = 0.0;
+
+/// Opacity of the scrollbar `delta` of the way through its hold-then-fade
+/// animation. Flat at full opacity for the hold, then eased down.
+///
+/// Split out so the curve is testable — `compute` needs a live GPUI frame.
+pub(crate) fn scrollbar_fade_opacity(delta: f32) -> f32 {
+    let total = (SCROLLBAR_HOLD_MS + SCROLLBAR_FADE_MS) as f32;
+    let hold = SCROLLBAR_HOLD_MS as f32 / total;
+    if delta <= hold {
+        return 1.0;
+    }
+    let t = ((delta - hold) / (1.0 - hold)).clamp(0.0, 1.0);
+    1.0 + t * (SCROLLBAR_IDLE_OPACITY - 1.0)
+}
+
+/// Geometry captured when a scrollbar drag begins, carried as the drag's
+/// payload so the move handler needs no live layout of its own.
+///
+/// The document cannot reflow mid-drag (no typing, no resize), so these stay
+/// valid for the life of the gesture.
+#[derive(Clone)]
+pub struct ScrollbarDragPayload {
+    /// Window-space Y of the top of the track.
+    track_top: f32,
+    /// Distance the thumb can travel: track height minus thumb height.
+    travel: f32,
+    /// Scrollable distance in content pixels: content height minus viewport.
+    max_scroll: f32,
+}
+
+impl Render for ScrollbarDragPayload {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // GPUI wants a drag preview; a scrollbar drag has none — the thumb
+        // itself is the feedback. Same empty-view trick `SidebarResizePayload`
+        // uses in `file_explorer.rs`.
+        div()
+    }
+}
+
+/// The document's scrollbar, drawn as a `uniform_list` decoration.
+///
+/// Built on `gpui::UniformListDecoration` rather than Zed's `ui::Scrollbar`.
+/// That component is not reachable here: `ui` is not a dependency (this crate
+/// takes only `gpui`/`gpui_platform`), and it resolves its colors through
+/// `theme::ActiveTheme`, which reads a `GlobalTheme` global this app never
+/// installs — it has its own `Palette`. The decoration trait is the same hook
+/// Zed's own scrollbar hangs off, and it lives in `gpui`, so this gets the
+/// same integration with none of that dependency weight.
+///
+/// `compute` runs during the list's prepaint and is handed the geometry that
+/// would otherwise have to be recovered by hand: the viewport `bounds`, the
+/// measured `item_height`, and the total `item_count`.
+struct ScrollbarDecoration {
+    /// The list's own scroll handle — the same one `track_scroll` was given,
+    /// so dragging and every other scroll path move the identical offset.
+    scroll_handle: ScrollHandle,
+    /// Where inside the thumb the pointer grabbed it, so the thumb doesn't
+    /// jump under the cursor on the first move. Written on mouse-down, read
+    /// by the drag-move handler in `render`; shared because the decoration is
+    /// rebuilt from scratch every frame and cannot hold state itself.
+    grab_offset: Rc<Cell<f32>>,
+    /// Set the moment the pointer goes down on the bar, cleared on release.
+    /// `cx.has_active_drag()` only becomes true once a drag has actually
+    /// begun, which leaves the first move after mouse-down unguarded; this
+    /// closes that window so not even a single character flashes selected.
+    pressed: Rc<Cell<bool>>,
+    /// Bumped by `render` whenever the scroll offset changes. It is only used
+    /// as part of the fade animation's element id: a new id restarts the
+    /// animation, which is how scrolling brings a faded-out bar back.
+    activity: usize,
+    track: u32,
+    thumb: u32,
+    thumb_hover: u32,
+}
+
+/// Thumb size and position for one frame of the scrollbar.
+pub(crate) struct ScrollbarGeometry {
+    pub thumb_h: f32,
+    /// How far the thumb can travel: track height minus thumb height.
+    pub travel: f32,
+    pub thumb_top: f32,
+}
+
+/// Where the scrollbar thumb sits, given the viewport, the total content
+/// height, and how far the document is currently scrolled (a positive
+/// distance, unlike gpui's negative scroll offset).
+///
+/// Split out of `ScrollbarDecoration::compute` because it is the only part
+/// with arithmetic worth checking, and `compute` needs a live GPUI frame.
+pub(crate) fn scrollbar_geometry(viewport_h: f32, content_h: f32, scrolled: f32) -> ScrollbarGeometry {
+    /*
+     * The thumb is as large a fraction of the track as the viewport is of the
+     * document, floored at SCROLLBAR_MIN_THUMB_PX so a long document leaves
+     * something clickable, and capped at the track so a short one cannot
+     * overflow it.
+     */
+    let thumb_h = (viewport_h * (viewport_h / content_h))
+        .max(SCROLLBAR_MIN_THUMB_PX)
+        .min(viewport_h);
+    let travel = viewport_h - thumb_h;
+    let max_scroll = content_h - viewport_h;
+    let thumb_top = if max_scroll > 0.0 {
+        (scrolled / max_scroll).clamp(0.0, 1.0) * travel
+    } else {
+        0.0
+    };
+    ScrollbarGeometry { thumb_h, travel, thumb_top }
+}
+
+impl UniformListDecoration for ScrollbarDecoration {
+    fn compute(
+        &self,
+        _visible_range: std::ops::Range<usize>,
+        bounds: Bounds<Pixels>,
+        scroll_offset: Point<Pixels>,
+        item_height: Pixels,
+        item_count: usize,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> AnyElement {
+        /*
+         * `item_count` is the *display-row* count (`display_to_wrap.len()`),
+         * not the number of logical lines — every line is ROW_SUBDIVISIONS
+         * rows, and most of them are blank spacers. Sizing the thumb off
+         * anything else would make it disagree with the real scroll extent.
+         * Using the measured `item_height` GPUI passes in (rather than
+         * recomputing `row_slot_px`) keeps it exact on hardware that snaps
+         * rows to device pixels — the same reason `real_row_height_px`
+         * exists.
+         */
+        let viewport_h = bounds.size.height.as_f32();
+        let content_h = item_height.as_f32() * item_count as f32;
+        let max_scroll = content_h - viewport_h;
+        if max_scroll <= 0.0 || viewport_h <= 0.0 {
+            return div().into_any_element(); // nothing to scroll
+        }
+
+        // `scroll_offset.y` grows more negative the further down the document
+        // is scrolled, which is why this negates before taking a fraction.
+        let scrolled = (-scroll_offset.y.as_f32()).clamp(0.0, max_scroll);
+        let ScrollbarGeometry { thumb_h, travel, thumb_top } =
+            scrollbar_geometry(viewport_h, content_h, scrolled);
+
+        // The decoration is prepainted at `padded_bounds.origin + scroll_offset`
+        // (gpui's `uniform_list`), i.e. in *scrolled content* space, so
+        // subtracting `scroll_offset` again is what pins the bar to the
+        // viewport. That compensation has to be applied to a child of this
+        // element, not to this element itself: the root is positioned by
+        // `prepaint_at(bounds.origin)` and laid out via `layout_as_root`,
+        // where its own `absolute` inset has no containing block to resolve
+        // against and is ignored — which left the bar sitting at a fixed spot
+        // in the document and scrolling away with the text (bug report: "it
+        // statically renders on one part of the page, if you scroll down far
+        // enough it will go away"). A plain relative root gives the track a
+        // containing block, and the inset resolves normally.
+        let pin_x = -scroll_offset.x.as_f32();
+        let pin_y = -scroll_offset.y.as_f32();
+        // Hug the editor's true right edge. `bounds` is the list's *padded*
+        // box, and the content mask is its *outer* bounds, so painting back
+        // out across the padding is visible rather than clipped.
+        let track_left = bounds.size.width.as_f32() + CONTENT_PADDING_PX - SCROLLBAR_WIDTH_PX + pin_x;
+        // ...and in window space, which is what the pointer is compared against.
+        let track_top_window = bounds.origin.y.as_f32() + pin_y;
+
+        let payload = ScrollbarDragPayload { track_top: track_top_window, travel, max_scroll };
+        let grab = self.grab_offset.clone();
+        let thumb_top_window = track_top_window + thumb_top;
+        let track_handle = self.scroll_handle.clone();
+        let (track_pressed, thumb_pressed) = (self.pressed.clone(), self.pressed.clone());
+        let (thumb_color, thumb_hover) = (self.thumb, self.thumb_hover);
+
+        let track = div()
+            .id("editor-scrollbar-track")
+            .absolute()
+            .left(px(track_left))
+            .top(px(pin_y))
+            .w(px(SCROLLBAR_WIDTH_PX))
+            .h(px(viewport_h))
+            .bg(rgb(self.track))
+            // Pointing at the bar cancels the fade for as long as the pointer
+            // stays there. Opacity is a paint property in gpui, so a
+            // fully-faded bar still hit-tests and can be picked back up.
+            .hover(|st| st.opacity(1.0))
+            // Clicking the track jumps there, centring the thumb on the
+            // click. The thumb's own handler stops propagation, so grabbing
+            // the thumb never also jumps.
+            .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _window, cx| {
+                // Same reason the thumb stops propagation: without this the
+                // click also reaches the editor underneath and moves the text
+                // cursor to wherever the pointer happened to be.
+                cx.stop_propagation();
+                track_pressed.set(true);
+                if travel <= 0.0 {
+                    return;
+                }
+                let want_top = ev.position.y.as_f32() - track_top_window - thumb_h / 2.0;
+                let fraction = (want_top / travel).clamp(0.0, 1.0);
+                let offset = track_handle.offset();
+                track_handle.set_offset(point(offset.x, px(-(fraction * max_scroll))));
+                cx.refresh_windows();
+            })
+            .child(
+                div()
+                    .id("editor-scrollbar-thumb")
+                    .absolute()
+                    .top(px(thumb_top))
+                    .left(px(SCROLLBAR_THUMB_INSET_PX))
+                    .w(px(SCROLLBAR_WIDTH_PX - 2.0 * SCROLLBAR_THUMB_INSET_PX))
+                    .h(px(thumb_h))
+                    .rounded(px((SCROLLBAR_WIDTH_PX - 2.0 * SCROLLBAR_THUMB_INSET_PX) / 2.0))
+                    .bg(rgb(thumb_color))
+                    .cursor_pointer()
+                    .hover(move |st| st.bg(rgb(thumb_hover)))
+                    // Records where in the thumb the grab landed. Mouse-down
+                    // always precedes the first drag-move, so the offset is
+                    // set before anything reads it.
+                    .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _window, cx| {
+                        // Grabbing the thumb must not also register as a
+                        // track click, which would teleport it to the cursor
+                        // before the drag even starts.
+                        cx.stop_propagation();
+                        thumb_pressed.set(true);
+                        grab.set(ev.position.y.as_f32() - thumb_top_window);
+                    })
+                    .on_drag(payload, |p: &ScrollbarDragPayload, _offset, _window, cx| {
+                        cx.new(|_| p.clone())
+                    }),
+            )
+            // Hold, then fade. The id carries `activity`, which `render`
+            // bumps on every scroll — a new id restarts the animation, so
+            // scrolling brings the bar back and re-arms the fade.
+            .with_animation(
+                ElementId::named_usize("editor-scrollbar-fade", self.activity),
+                Animation::new(std::time::Duration::from_millis(
+                    SCROLLBAR_HOLD_MS + SCROLLBAR_FADE_MS,
+                )),
+                |el, delta| el.opacity(scrollbar_fade_opacity(delta)),
+            );
+
+        // A plain relative root, sized to the viewport, purely so the track's
+        // absolute inset above has something to resolve against.
+        div()
+            .w(px(bounds.size.width.as_f32()))
+            .h(px(viewport_h))
+            .child(track)
+            .into_any_element()
+    }
+}
+
 /// The main document editing area.
 ///
 /// Renders the text content of the currently active tab inside a focused,
@@ -458,6 +727,18 @@ pub struct TextEditor {
     /// renders that don't change the document — see `RowCache`. `None`
     /// before the first render.
     row_cache: Option<RowCache>,
+    /// Where inside the scrollbar thumb the pointer grabbed it. Lives here,
+    /// not on the decoration, because the decoration is rebuilt every frame —
+    /// see `ScrollbarDecoration::grab_offset`.
+    scrollbar_grab: Rc<Cell<f32>>,
+    /// Whether the pointer is currently down on the scrollbar — see
+    /// `ScrollbarDecoration::pressed`.
+    scrollbar_pressed: Rc<Cell<bool>>,
+    /// Counts scroll movements, to re-arm the scrollbar's fade — see
+    /// `ScrollbarDecoration::activity`.
+    scrollbar_activity: usize,
+    /// Scroll offset as of the last render, for spotting that movement.
+    last_scrollbar_offset_y: Option<f32>,
     /// Per-tab scroll offsets, keyed by the tab's stable `id` (not its
     /// positional index — matches the convention `tab_bar.rs` already uses
     /// for keying GPUI element ids, so reordering/closing other tabs can't
@@ -657,6 +938,10 @@ impl TextEditor {
             auto_scroller,
             macro_at_pending: false,
             row_cache: None,
+            scrollbar_grab: Rc::new(Cell::new(0.0)),
+            scrollbar_pressed: Rc::new(Cell::new(false)),
+            scrollbar_activity: 0,
+            last_scrollbar_offset_y: None,
             tab_scroll_offsets: std::collections::HashMap::new(),
             last_seen_active_tab: None,
             spell_cache: Rc::new(RefCell::new(SpellCache::default())),
@@ -1171,6 +1456,28 @@ impl TextEditor {
                 });
                 cx.notify();
             }
+            // Ctrl+Up/Down jump a whole paragraph, the vertical counterpart
+            // to Ctrl+Left/Right's word jump (beta feedback). Reuses the
+            // paragraph motions vim's `{`/`}` already go through, so a
+            // "paragraph" means the same thing to both — a completely blank
+            // line. Lands here rather than in the configurable keybind system
+            // for the same reason as its neighbours: it only makes sense with
+            // editor focus, and plain Up/Down are handled as raw keys too
+            // (`process_key_plain`'s visual-row branch).
+            //
+            // These deliberately do not extend on Shift. `move_paragraph_*`
+            // clears the selection outright, and there is no
+            // `extend_paragraph_*` to pair with; wiring Shift to a
+            // selection-clearing move would read as a broken extend rather
+            // than an unimplemented one.
+            "up" => {
+                self.state.update(cx, |state, _cx| state.move_paragraph_backward());
+                cx.notify();
+            }
+            "down" => {
+                self.state.update(cx, |state, _cx| state.move_paragraph_forward());
+                cx.notify();
+            }
             "home" => {
                 self.state.update(cx, |state, _cx| {
                     if shift { state.extend_doc_start() } else { state.move_doc_start() }
@@ -1677,6 +1984,15 @@ impl Render for TextEditor {
         let line_spacing = state.line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let dragging = state.split_dragging;
+        // Scroll movement re-arms the scrollbar's fade. Compared with a small
+        // tolerance so sub-pixel jitter in the offset can't hold the bar
+        // permanently visible by restarting the animation every frame.
+        let scroll_y_now = self.scroll_handle.offset().y.as_f32();
+        if self.last_scrollbar_offset_y.is_none_or(|prev| (prev - scroll_y_now).abs() > 0.5) {
+            self.last_scrollbar_offset_y = Some(scroll_y_now);
+            self.scrollbar_activity = self.scrollbar_activity.wrapping_add(1);
+        }
+        let scrollbar_activity = self.scrollbar_activity;
         let invisibility = state.invisibility_mode;
         let cite_size = state.cite_size_half_points;
         let fold_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.fold_version).unwrap_or(0);
@@ -2087,7 +2403,24 @@ impl Render for TextEditor {
             // acceptable for a first pass, not spec-required to track drags
             // that leave the editor.
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, window, cx| {
-                if !ev.dragging() { return; }
+                if !ev.dragging() {
+                    // Self-heal. If a release ever escapes both mouse-up
+                    // handlers, a stuck flag would kill text selection for
+                    // the rest of the session; the first move with no button
+                    // held proves the pointer is up and clears it.
+                    this.scrollbar_pressed.set(false);
+                    return;
+                }
+                // A drag that belongs to something else is not a text
+                // selection. Dragging the scrollbar holds the left button
+                // down and moves the pointer across the document, which is
+                // indistinguishable from a click-drag at this level — so it
+                // selected everything it passed over, and fed the edge
+                // auto-scroller besides (bug report: "scrolling down
+                // highlights text because it requires LMB down"). The same
+                // guard covers the tab, sidebar-resize and split-resize
+                // drags, none of which should extend a selection either.
+                if cx.has_active_drag() || this.scrollbar_pressed.get() { return; }
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
@@ -2115,9 +2448,11 @@ impl Render for TextEditor {
             // to stop it.
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _ev, _window, _cx| {
                 this.auto_scroller.stop();
+                this.scrollbar_pressed.set(false);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _ev, _window, _cx| {
                 this.auto_scroller.stop();
+                this.scrollbar_pressed.set(false);
             }))
             .flex()
             .flex_col()
@@ -2500,6 +2835,15 @@ impl Render for TextEditor {
                 // sets vertical overflow internally); padding/border move
                 // here from the old outer div for the reason explained
                 // above this `.child(...)` block.
+                .with_decoration(ScrollbarDecoration {
+                    scroll_handle: self.scroll_handle.clone(),
+                    grab_offset: self.scrollbar_grab.clone(),
+                    pressed: self.scrollbar_pressed.clone(),
+                    activity: scrollbar_activity,
+                    track: p.editor_bg_raised,
+                    thumb: p.border,
+                    thumb_hover: p.text_muted,
+                })
                 .track_scroll(&self.uniform_list_scroll_handle)
                 .flex_1()
                 .min_w_0()
@@ -2511,6 +2855,32 @@ impl Render for TextEditor {
                 // `.overflow_y_scroll()` needed an explicit
                 // `.overflow_x_hidden()` alongside it.
                 .overflow_x_hidden()
+                // Scrollbar thumb drag. `on_drag_move` dispatches in the
+                // capture phase and checks only the drag's *type*, not the
+                // pointer's position (gpui's `Interactivity::on_drag_move`),
+                // so this keeps tracking after the cursor leaves the thumb —
+                // or the editor entirely — which is what dragging a scrollbar
+                // demands. Registered here rather than on the thumb because
+                // the thumb is rebuilt every frame by the decoration.
+                .on_drag_move({
+                    let scroll_handle = self.scroll_handle.clone();
+                    let grab = self.scrollbar_grab.clone();
+                    move |e: &DragMoveEvent<ScrollbarDragPayload>, _window, cx| {
+                        let d = e.drag(cx);
+                        if d.travel <= 0.0 {
+                            return;
+                        }
+                        // Where the thumb's *top* would sit if it followed the
+                        // pointer, keeping the grab point under the cursor.
+                        let thumb_top = e.event.position.y.as_f32() - grab.get() - d.track_top;
+                        let fraction = (thumb_top / d.travel).clamp(0.0, 1.0);
+                        let offset = scroll_handle.offset();
+                        // Negative Y scrolls down, matching every other scroll
+                        // path in this file.
+                        scroll_handle.set_offset(point(offset.x, px(-(fraction * d.max_scroll))));
+                        cx.refresh_windows();
+                    }
+                })
                 .p(px(16.0))
                 // Thin focus ring so the user can tell where key input lands
                 .border_1()
@@ -3766,7 +4136,11 @@ fn usable_wrap_width(viewport_width_px: f32) -> f32 {
      * `scroll_handle.bounds()` has real numbers) so lines render unwrapped
      * for that one frame instead of collapsing to almost nothing.
      */
-    let usable = viewport_width_px - 2.0 * CONTENT_PADDING_PX;
+    // The scrollbar's gutter comes off the top, unconditionally — including
+    // when the document is short enough that no bar is drawn. Reserving it
+    // only while the bar is visible would re-wrap the whole document (and
+    // invalidate the row cache) the moment a document grew past one screen.
+    let usable = viewport_width_px - 2.0 * CONTENT_PADDING_PX - SCROLLBAR_GUTTER_PX;
     if usable <= 0.0 { f32::MAX } else { usable }
 }
 
@@ -4547,7 +4921,8 @@ mod tests {
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
         spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, LINE_HEIGHT_RATIO,
         CARD_BOX_EXTRA_PX, EMPHASIS_BOX_EXTRA_PX, ROW_SUBDIVISIONS, row_slot_px,
-        text_line_box_px, line_font_px, display_line,
+        text_line_box_px, line_font_px, scrollbar_geometry, scrollbar_fade_opacity,
+        SCROLLBAR_MIN_THUMB_PX, SCROLLBAR_GUTTER_PX, SCROLLBAR_IDLE_OPACITY, display_line,
         line_col_from_mouse_position, real_row_height_px, paints_run_box,
         list_marker_text, to_roman, to_letter, list_item_ordinal, LIST_GUTTER_PX,
         list_marker_text_for_level,
@@ -4708,8 +5083,12 @@ mod tests {
         let paragraphs = vec![para];
         let rows = vec![(0usize, 0usize, 10usize)]; // one row, 10 chars
         let display_to_wrap = vec![Some(0usize)];
-        let content_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(232.0), px(100.0)));
-        // avail_width = 232 - 2*16 = 200; text_width = 10 * (11*CHAR_ADVANCE_RATIO) = 66;
+        // Sized so the usable width is 200px after both the padding and the
+        // scrollbar gutter come off, keeping the arithmetic below unchanged
+        // now that text no longer wraps under the bar.
+        let width = 232.0 + SCROLLBAR_GUTTER_PX;
+        let content_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(100.0)));
+        // avail_width = 200; text_width = 10 * (11*CHAR_ADVANCE_RATIO) = 66;
         // indent = (200 - 66) / 2 = 67.
         let indent = 67.0;
         // Clicking exactly at the text's real (indented) left edge must land on
@@ -5222,7 +5601,8 @@ mod tests {
 
     #[test]
     fn test_usable_wrap_width_basic() {
-        assert_eq!(usable_wrap_width(100.0), 68.0); // 100 - 2*16
+        // 100 - 2*16 padding - the scrollbar gutter.
+        assert_eq!(usable_wrap_width(100.0), 68.0 - SCROLLBAR_GUTTER_PX);
     }
 
     #[test]
@@ -6381,6 +6761,89 @@ mod tests {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
         assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0));
         assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.5, false, false, 0));
+    }
+
+    // ── document scrollbar ──────────────────────────────────────────────────
+
+    /// The thumb has to span the track exactly: flush at the top when the
+    /// document is at the top, flush at the bottom when fully scrolled.
+    /// Anything else and the bar lies about where you are.
+    #[test]
+    fn scrollbar_thumb_spans_the_whole_track() {
+        let (viewport, content) = (400.0f32, 2000.0f32);
+        let max_scroll = content - viewport;
+
+        let top = scrollbar_geometry(viewport, content, 0.0);
+        assert_eq!(top.thumb_top, 0.0);
+
+        let bottom = scrollbar_geometry(viewport, content, max_scroll);
+        assert!((bottom.thumb_top + bottom.thumb_h - viewport).abs() < 0.01,
+            "fully scrolled thumb must end at the track's bottom: {} + {} vs {viewport}",
+            bottom.thumb_top, bottom.thumb_h);
+
+        let middle = scrollbar_geometry(viewport, content, max_scroll / 2.0);
+        assert!((middle.thumb_top - bottom.thumb_top / 2.0).abs() < 0.01);
+    }
+
+    /// Thumb size tracks how much of the document is on screen.
+    #[test]
+    fn scrollbar_thumb_is_proportional_to_the_visible_fraction() {
+        let short = scrollbar_geometry(400.0, 800.0, 0.0);
+        let long = scrollbar_geometry(400.0, 8000.0, 0.0);
+        assert!(short.thumb_h > long.thumb_h);
+        // Half the document visible -> half the track.
+        assert!((short.thumb_h - 200.0).abs() < 0.01, "got {}", short.thumb_h);
+    }
+
+    /// A very long document must not shrink the thumb to something
+    /// unclickable, and a short one must not overflow the track.
+    #[test]
+    fn scrollbar_thumb_is_clamped_at_both_ends() {
+        let huge = scrollbar_geometry(400.0, 1_000_000.0, 0.0);
+        assert!(huge.thumb_h >= SCROLLBAR_MIN_THUMB_PX, "got {}", huge.thumb_h);
+        assert!(huge.travel > 0.0, "a floored thumb must still have room to move");
+
+        let barely = scrollbar_geometry(400.0, 401.0, 0.0);
+        assert!(barely.thumb_h <= 400.0, "thumb overflowed the track: {}", barely.thumb_h);
+    }
+
+    /// Guards the degenerate frames: an unmeasured viewport, and a document
+    /// that exactly fills the screen. Neither may divide by zero or produce
+    /// a NaN that would lay out as a zero-height thumb.
+    #[test]
+    fn scrollbar_geometry_survives_a_document_that_fits_on_screen() {
+        let exact = scrollbar_geometry(400.0, 400.0, 0.0);
+        assert_eq!(exact.thumb_top, 0.0);
+        assert!(exact.thumb_h.is_finite() && exact.travel.is_finite());
+    }
+
+    /// Bug report: the scrollbar "covers text". Wrapping has to stop short of
+    /// the bar, and because `usable_wrap_width` also feeds click hit-testing,
+    /// reserving it in that one place is what keeps the two in agreement.
+    #[test]
+    fn wrap_width_reserves_a_gutter_for_the_scrollbar() {
+        let laid_out = usable_wrap_width(500.0);
+        assert!((laid_out - (500.0 - 32.0 - SCROLLBAR_GUTTER_PX)).abs() < 0.01, "got {laid_out}");
+        // Still unbounded before first layout, and the gutter must not push a
+        // narrow-but-real viewport into the sentinel by accident.
+        assert_eq!(usable_wrap_width(0.0), f32::MAX);
+    }
+
+    /// The fade holds at full opacity, then eases down, and never leaves the
+    /// legal 0..=1 range at any point on the curve.
+    #[test]
+    fn scrollbar_fade_holds_then_fades() {
+        assert_eq!(scrollbar_fade_opacity(0.0), 1.0);
+        assert_eq!(scrollbar_fade_opacity(0.5), 1.0, "still inside the hold");
+        assert!((scrollbar_fade_opacity(1.0) - SCROLLBAR_IDLE_OPACITY).abs() < 0.001);
+
+        let mut prev = 1.0;
+        for i in 0..=100 {
+            let v = scrollbar_fade_opacity(i as f32 / 100.0);
+            assert!((0.0..=1.0).contains(&v), "opacity {v} out of range");
+            assert!(v <= prev + 0.001, "fade must not brighten: {v} after {prev}");
+            prev = v;
+        }
     }
 
     // ── painted line box vs reserved row pitch ──────────────────────────────

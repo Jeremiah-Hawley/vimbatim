@@ -196,6 +196,7 @@ pub enum KeybindAction {
     Redo,
     SelectAll,
     SelectSimilarFormatting,
+    ToggleSidebarMode,
     Bold,
     Underline,
     Shrink,
@@ -235,6 +236,7 @@ impl KeybindAction {
             ToggleSettings, ToggleSidebar, NewTab, CloseTab, ReopenClosedTab, Save, SaveAs, Find, FindReplace,
             Copy, Cut, Paste, PasteWithoutFormatting, Undo, Redo, SelectAll,
             SelectSimilarFormatting,
+            ToggleSidebarMode,
             Bold, Underline, Shrink, ClearFormatting,
             PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Analytic, Emphasis,
             Highlight,
@@ -267,6 +269,7 @@ impl KeybindAction {
             Redo => "Redo",
             SelectAll => "Select All",
             SelectSimilarFormatting => "Select Similar Formatting",
+            ToggleSidebarMode => "Toggle Files/Nav",
             Bold => "Bold",
             Underline => "Underline",
             Shrink => "Shrink",
@@ -314,6 +317,7 @@ impl KeybindAction {
                 | NewFile | RefreshFileTree => C::General,
             Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
                 | SelectSimilarFormatting => C::Editing,
+            ToggleSidebarMode => C::General,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
             PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Analytic | Emphasis => C::CardStyles,
             Highlight => C::Highlighting,
@@ -342,6 +346,7 @@ impl KeybindAction {
             Redo => "redo",
             SelectAll => "select_all",
             SelectSimilarFormatting => "select_similar_formatting",
+            ToggleSidebarMode => "toggle_files_nav",
             Bold => "bold",
             Underline => "underline",
             Shrink => "shrink",
@@ -403,6 +408,11 @@ impl KeybindAction {
             // Ships unbound, like Analytic: it is a rarely-reached Doc Menu
             // command, and every obvious Ctrl combination is already taken.
             SelectSimilarFormatting => KeyCombo::new(false, false, false, ""),
+            // Deliberately unbound out of the box — the request was for the
+            // action and its settings row, not a default chord. Rebindable
+            // like any other; `defaults()` maps an unbound default to no
+            // combos at all.
+            ToggleSidebarMode => KeyCombo::new(false, false, false, ""),
             Bold => KeyCombo::new(true, false, false, "b"),
             Underline => KeyCombo::new(true, false, false, "u"),
             Shrink => KeyCombo::new(false, false, true, "f3"),
@@ -717,6 +727,7 @@ actions!(
         SaveAsAction, FindAction, FindReplaceAction,
         CopyAction, CutAction, PasteAction, PasteWithoutFormattingAction, UndoAction, RedoAction, SelectAllAction,
         SelectSimilarFormattingAction,
+        ToggleSidebarModeAction,
         BoldAction, UnderlineAction, ShrinkAction, ClearFormattingAction,
         PasteSmartAction, CondenseAction, PocketAction, HatAction, BlockAction, TagAction,
         CiteAction, AnalyticAction, EmphasisAction,
@@ -774,6 +785,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     bindings.extend(bind_all(keybinds, Redo, RedoAction));
     bindings.extend(bind_all(keybinds, SelectAll, SelectAllAction));
     bindings.extend(bind_all(keybinds, SelectSimilarFormatting, SelectSimilarFormattingAction));
+    bindings.extend(bind_all(keybinds, ToggleSidebarMode, ToggleSidebarModeAction));
     bindings.extend(bind_all(keybinds, Bold, BoldAction));
     bindings.extend(bind_all(keybinds, Underline, UnderlineAction));
     bindings.extend(bind_all(keybinds, Shrink, ShrinkAction));
@@ -841,6 +853,7 @@ pub fn action_for(action: KeybindAction) -> Box<dyn Action> {
         Redo => Box::new(RedoAction),
         SelectAll => Box::new(SelectAllAction),
         SelectSimilarFormatting => Box::new(SelectSimilarFormattingAction),
+        ToggleSidebarMode => Box::new(ToggleSidebarModeAction),
         Bold => Box::new(BoldAction),
         Underline => Box::new(UnderlineAction),
         Shrink => Box::new(ShrinkAction),
@@ -882,6 +895,28 @@ mod tests {
     /// (Find/Find & Replace, Delete Tags, Start Timer, Open Stats, Save As)
     /// but the settings modal kept flagging them "(not yet implemented)".
     /// Cite From Link is the one action still a `println!` no-op.
+    /// Explicitly requested: the action and its Settings row exist, but it
+    /// ships with no chord assigned. If someone later gives it a default,
+    /// this fails and makes that a deliberate decision rather than a drive-by.
+    #[test]
+    fn toggle_files_nav_ships_unbound() {
+        assert!(KeybindAction::ToggleSidebarMode.default_combo().is_unbound());
+        assert!(Keybinds::defaults().get_all(KeybindAction::ToggleSidebarMode).is_empty());
+        // ...but it is a real, rebindable action, not a stub.
+        assert!(!KeybindAction::ToggleSidebarMode.is_stub());
+        assert!(KeybindAction::all().contains(&KeybindAction::ToggleSidebarMode));
+    }
+
+    /// A duplicated conf key would make two actions overwrite each other in
+    /// settings.conf — the loaders there are a flat, section-agnostic scan.
+    #[test]
+    fn conf_keys_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for action in KeybindAction::all() {
+            assert!(seen.insert(action.conf_key()), "duplicate conf key {}", action.conf_key());
+        }
+    }
+
     #[test]
     fn is_stub_only_flags_cite_from_link() {
         for action in KeybindAction::all() {

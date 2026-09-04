@@ -128,6 +128,40 @@ pub(crate) const HIGHLIGHT_COLORS: [(&str, &str, u32); 6] = [
 ];
 
 #[derive(Clone)]
+/// The little label that appears when the pointer rests on an icon button —
+/// "Invisibility" over the eye, and so on for every other glyph in the ribbon.
+///
+/// Beta feedback: an icon-only ribbon gives no way to learn what a button does
+/// short of pressing it. `RibbonBtn` already carries a `label` for every
+/// button, icon or not (it is what the click handler logs, and was already
+/// described as the accessible name), so the text here is the name the button
+/// already had rather than a second one to keep in sync.
+pub struct RibbonTooltip {
+    label: SharedString,
+    palette: Palette,
+}
+
+impl Render for RibbonTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        /*
+         * Deliberately plain: one opaque chip. It has to stay readable
+         * wherever it lands, so it carries its own background and border from
+         * the active palette rather than inheriting whatever it floats over.
+         */
+        let p = self.palette;
+        div()
+            .bg(rgb(p.chrome_elevated))
+            .text_color(rgb(p.text))
+            .border_1()
+            .border_color(rgb(p.border))
+            .rounded(px(radius::MD))
+            .px(px(space::SM))
+            .py(px(space::XS))
+            .text_sm()
+            .child(self.label.clone())
+    }
+}
+
 struct RibbonBtn {
     label: &'static str,
     action: FormatAction,
@@ -638,6 +672,15 @@ impl FormattingRibbon {
         };
         let button = div()
             .id(ElementId::named_usize("ribbon-btn", action_id))
+            // Icon buttons only: a text button already shows its own label,
+            // so a tooltip repeating it would be noise.
+            .when(is_icon, |d| {
+                let label: SharedString = label.into();
+                d.tooltip(move |_window, cx| {
+                    let label = label.clone();
+                    cx.new(|_| RibbonTooltip { label, palette: p }).into()
+                })
+            })
             .flex()
             .items_center()
             .justify_center()

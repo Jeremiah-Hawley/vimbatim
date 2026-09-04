@@ -970,6 +970,15 @@ impl FileExplorer {
 
         let entries = build_nav_entries(&headings, &self.nav_collapsed);
 
+        // Which row the cursor is currently "inside" — the last shown heading
+        // at or before the cursor's line. Because `entries` is already the
+        // filtered, non-collapsed set, scanning it (rather than the raw
+        // heading list) is what makes this land on "whichever the lowest level
+        // currently shown is": when a Tag is hidden by the level filter or by
+        // a collapsed parent, the nearest ancestor that *is* shown highlights
+        // instead of nothing at all.
+        let active_line_idx = current_nav_line_idx(&entries, state.cursor_line_col().0);
+
         div()
             .id("nav-scroll")
             .flex_1()
@@ -980,6 +989,7 @@ impl FileExplorer {
                 let indent = px((entry.depth as f32) * 16.0);
                 let line_idx = entry.line_idx;
                 let is_collapsed = self.nav_collapsed.contains(&line_idx);
+                let is_current = active_line_idx == Some(line_idx);
                 let state_clone = state_handle.clone();
                 let state_for_ctx = state_handle.clone();
 
@@ -989,7 +999,15 @@ impl FileExplorer {
                     .flex_row()
                     .items_center()
                     .h(px(24.0))
-                    .pl(indent + px(space::SM))
+                    // Same treatment the file list already gives the open
+                    // file — fill plus an accent bar on the leading edge —
+                    // so "where am I" reads the same way in both sidebar
+                    // modes. The indent is reduced by the bar's own width so
+                    // adding it doesn't shift the row's text sideways.
+                    .bg(if is_current { rgb(p.selection) } else { rgb(p.sidebar) })
+                    .border_l_2()
+                    .border_color(if is_current { rgb(p.accent) } else { rgb(p.sidebar) })
+                    .pl(indent + px(space::SM - 2.0))
                     .pr(px(space::SM))
                     // Right-click a heading: the Select/Copy/Cut/Delete
                     // "Heading and Contents" items, plus the level rows.
@@ -1035,6 +1053,7 @@ impl FileExplorer {
                             .cursor_pointer()
                             .text_sm()
                             .text_color(rgb(p.text))
+                            .when(is_current, |d| d.font_weight(FontWeight::BOLD))
                             .truncate()
                             .hover(move |s| s.bg(rgb(p.chrome_hover)))
                             .active(move |s| s.bg(rgb(p.chrome_active)))
@@ -1049,6 +1068,20 @@ impl FileExplorer {
             }))
             .into_any_element()
     }
+}
+
+/// Which Nav row the cursor is currently inside: the last shown heading at or
+/// before `cursor_line`, or `None` when the cursor sits above the first one.
+///
+/// Beta feedback: "highlight the tag which you are currently operating in on
+/// the nav pane, or whichever the lowest level currently shown is". Taking
+/// `entries` — the already filtered and un-collapsed rows — rather than the
+/// raw heading list is what delivers the second half of that: when the Tag the
+/// cursor is really in is hidden behind the "Show Heading Level" filter or a
+/// collapsed parent, the nearest *visible* ancestor highlights instead of
+/// nothing at all.
+fn current_nav_line_idx(entries: &[NavEntry], cursor_line: usize) -> Option<usize> {
+    entries.iter().rev().find(|e| e.line_idx <= cursor_line).map(|e| e.line_idx)
 }
 
 /// One row in the Nav tree, already resolved to its rendering position —
@@ -1450,7 +1483,7 @@ mod tests {
     // attribute macro (for async GPUI tests) that shadows std's `#[test]`
     // and sends the test-attribute expansion into infinite recursion if
     // it's in scope here (same fix as text_editor.rs's own test module).
-    use super::build_nav_entries;
+    use super::{build_nav_entries, current_nav_line_idx};
     use std::collections::HashSet;
 
     /// (line_idx, heading_level, text) shorthand matching build_nav_entries'
@@ -1568,5 +1601,39 @@ mod tests {
 
         assert!(entries[0].has_children); // Pocket has the Tag nested under it
         assert!(!entries[1].has_children); // Tag itself has nothing nested under it
+    }
+
+    // ── current nav row (beta feedback: highlight the tag you are in) ────────
+
+    #[test]
+    fn current_nav_row_is_the_last_heading_at_or_before_the_cursor() {
+        let headings = vec![h(0, 1, "Pocket"), h(4, 2, "Hat"), h(9, 4, "Tag")];
+        let entries = build_nav_entries(&headings, &HashSet::new());
+
+        // Cursor on a heading's own line selects that heading.
+        assert_eq!(current_nav_line_idx(&entries, 0), Some(0));
+        assert_eq!(current_nav_line_idx(&entries, 9), Some(9));
+        // Body text under a heading still belongs to it.
+        assert_eq!(current_nav_line_idx(&entries, 7), Some(4));
+        assert_eq!(current_nav_line_idx(&entries, 100), Some(9));
+    }
+
+    #[test]
+    fn current_nav_row_is_none_above_the_first_heading() {
+        let entries = build_nav_entries(&[h(3, 1, "Pocket")], &HashSet::new());
+        assert_eq!(current_nav_line_idx(&entries, 0), None);
+    }
+
+    /// The "or whichever the lowest level currently shown is" half of the
+    /// request: with the Tag's parent collapsed, the Tag has no row to
+    /// highlight, so the visible ancestor takes it rather than nothing.
+    #[test]
+    fn current_nav_row_falls_back_to_the_nearest_visible_ancestor() {
+        let headings = vec![h(0, 1, "Pocket"), h(4, 2, "Hat"), h(9, 4, "Tag")];
+        let collapsed: HashSet<usize> = [4usize].into_iter().collect();
+        let entries = build_nav_entries(&headings, &collapsed);
+
+        assert!(entries.iter().all(|e| e.line_idx != 9), "the Tag row is collapsed away");
+        assert_eq!(current_nav_line_idx(&entries, 9), Some(4));
     }
 }

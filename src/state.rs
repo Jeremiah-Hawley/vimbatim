@@ -3519,8 +3519,20 @@ impl AppState {
                     } else {
                         op.clone()
                     };
+                    let (small, normal) = (self.small_size_half_points, self.normal_text_size_half_points);
                     for &(start, end) in &ranges {
                         apply_formatting(&mut tab.paragraphs, start, end, effective_op.clone());
+                        // Beta feedback: "when underlining a shrinked word
+                        // with the F9 function, automatically reset word to
+                        // the default font". Shrink marks text as *not read*
+                        // and skips underlined runs for exactly that reason
+                        // (`shrink_text`); underlining is the other half of
+                        // that convention, so it puts a shrunk run back to
+                        // body size. Gated on `effective_op` rather than `op`
+                        // so toggling underline *off* doesn't also resize.
+                        if matches!(effective_op, FormatOp::Underline(true)) {
+                            Self::unshrink_range(&mut tab.paragraphs, start, end, small, normal);
+                        }
                         // Mirrors apply_formatting_to_line's own ClearAll special
                         // case (see its comment above `reset_card_style_in_range`):
                         // apply_formatting above only ever mutates run-level
@@ -3553,8 +3565,15 @@ impl AppState {
                         op.clone()
                     };
                     self.push_undo_snapshot();
+                    let (small, normal) = (self.small_size_half_points, self.normal_text_size_half_points);
                     if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        let unshrink = matches!(effective_op, FormatOp::Underline(true));
                         apply_formatting(&mut tab.paragraphs, cursor, next_char_boundary, effective_op);
+                        // Same rule as the selection path above, so underlining
+                        // with no selection behaves the same way.
+                        if unshrink {
+                            Self::unshrink_range(&mut tab.paragraphs, cursor, next_char_boundary, small, normal);
+                        }
                         tab.is_modified = true;
                     }
                 }
@@ -4015,6 +4034,33 @@ impl AppState {
         self.apply_formatting_to_selection(FormatOp::Strikethrough(true));
     }
 
+    /// Restores every run fully inside `[start, end)` that is sitting at
+    /// Shrink's `small` size back to `normal`, leaving every other size alone.
+    ///
+    /// The inverse of `shrink_text`, and deliberately as narrow as it is:
+    /// only runs at exactly the configured small size are touched, so
+    /// underlining a Pocket or a Cite cannot yank it down to body size. Uses
+    /// the same containment rule and byte-offset walk as `shrink_text`
+    /// (`+ 1` per paragraph for the newline between them), so the two agree
+    /// about which runs a range covers.
+    fn unshrink_range(paragraphs: &mut [Paragraph], start: usize, end: usize, small: u16, normal: u16) {
+        if small == normal {
+            return;
+        }
+        let mut cumulative = 0usize;
+        for para in paragraphs.iter_mut() {
+            for run in &mut para.runs {
+                let run_start = cumulative;
+                let run_end = cumulative + run.text.len();
+                if run_start >= start && run_end <= end && run.size == small {
+                    run.size = normal;
+                }
+                cumulative = run_end;
+            }
+            cumulative += 1;
+        }
+    }
+
     pub fn shrink_text(&mut self) {
         /*
          * Sets the font size of every non-underlined run in the selection to
@@ -4325,6 +4371,20 @@ impl AppState {
         if let Err(e) = crate::theme::save_setting_line(&self.settings_path, key, value) {
             log_line(&format!("[settings] couldn't save {key}: {e}"));
         }
+    }
+
+    /// Swaps the sidebar between its Files and Nav views.
+    ///
+    /// Beta feedback asked for a way to flip between them from the keyboard.
+    /// Also reveals the sidebar when it is hidden — asking for a view while
+    /// the panel is closed can only mean "show me that view", and toggling a
+    /// mode nobody can see would look like the key did nothing.
+    pub fn toggle_sidebar_mode(&mut self) {
+        self.sidebar_mode = match self.sidebar_mode {
+            SidebarMode::Files => SidebarMode::Nav,
+            SidebarMode::Nav => SidebarMode::Files,
+        };
+        self.sidebar_visible = true;
     }
 
     pub fn toggle_invisibility_mode(&mut self) {
@@ -17023,6 +17083,80 @@ mod tests {
         assert!(para.runs.iter().all(|r| r.size == 8));
     }
 
+    // ── underline un-shrinks (beta feedback, Formatting bullet 1) ─────────
+
+    /// "When underlining a shrinked word with the F9 function, automatically
+    /// reset word to the default font." Shrink marks text as unread and skips
+    /// underlined runs; underlining is the other half of that convention.
+    #[test]
+    fn underlining_a_shrunk_run_restores_it_to_body_size() {
+        let paragraphs = vec![para_plain("hello world")];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.small_size_half_points = 8;
+        state.normal_text_size_half_points = 22;
+
+        state.tabs[0].selection = Some((0, 11));
+        state.shrink_text();
+        assert!(state.tabs[0].paragraphs[0].runs.iter().all(|r| r.size == 8));
+
+        state.tabs[0].selection = Some((0, 11));
+        state.apply_formatting_to_selection(FormatOp::Underline(true));
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(runs.iter().all(|r| r.underline), "the run must actually be underlined");
+        assert!(runs.iter().all(|r| r.size == 22), "shrunk text must return to body size");
+    }
+
+    /// Only text at exactly the configured small size is restored. Underlining
+    /// a Cite or a Pocket must not yank it down to body size — that would make
+    /// F9 quietly destructive on every card style.
+    #[test]
+    fn underlining_leaves_sizes_that_are_not_the_shrink_size_alone() {
+        let paragraphs = vec![Paragraph { list: None,
+            runs: vec![
+                Run { text: "big".into(), size: 52, ..Run::default() },
+                Run { text: "small".into(), size: 8, ..Run::default() },
+            ],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.small_size_half_points = 8;
+        state.normal_text_size_half_points = 22;
+        state.tabs[0].selection = Some((0, 8)); // "bigsmall"
+
+        state.apply_formatting_to_selection(FormatOp::Underline(true));
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert_eq!(runs[0].size, 52, "a Pocket-sized run must keep its size");
+        assert_eq!(runs[1].size, 22, "the shrunk run returns to body size");
+    }
+
+    /// Toggling underline back *off* must not also resize. The un-shrink is
+    /// gated on the effective op, not the requested one, so a second F9 only
+    /// removes the underline.
+    #[test]
+    fn un_underlining_does_not_resize() {
+        let paragraphs = vec![Paragraph { list: None,
+            runs: vec![Run { text: "word".into(), underline: true, size: 8, ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let mut state = make_state_with_paragraphs(paragraphs, 0);
+        state.small_size_half_points = 8;
+        state.normal_text_size_half_points = 22;
+        state.tabs[0].selection = Some((0, 4));
+
+        // Already uniformly underlined, so this toggles off.
+        state.apply_formatting_to_selection(FormatOp::Underline(true));
+
+        let runs = &state.tabs[0].paragraphs[0].runs;
+        assert!(!runs[0].underline, "underline should have toggled off");
+        assert_eq!(runs[0].size, 8, "toggling off must not resize");
+    }
+
     #[test]
     fn test_shrink_text_leaves_underlined_runs_untouched() {
         // User-clarified spec: Shrink sets non-underlined selected text to
@@ -17242,6 +17376,29 @@ mod tests {
         state.set_line_spacing(99.0);
         assert_eq!(state.line_spacing, 3.0);
         assert_eq!(load_line_spacing(&conf_path), 3.0);
+    }
+
+    // ── sidebar mode toggle (beta feedback: toggle files/nav) ─────────────
+
+    #[test]
+    fn toggle_sidebar_mode_flips_between_files_and_nav() {
+        let mut state = make_state("", 0, None);
+        assert_eq!(state.sidebar_mode, SidebarMode::Files);
+        state.toggle_sidebar_mode();
+        assert_eq!(state.sidebar_mode, SidebarMode::Nav);
+        state.toggle_sidebar_mode();
+        assert_eq!(state.sidebar_mode, SidebarMode::Files);
+    }
+
+    /// Asking for a sidebar view while the panel is hidden can only mean
+    /// "show me that view" — silently switching a mode nobody can see would
+    /// look like the key did nothing at all.
+    #[test]
+    fn toggle_sidebar_mode_reveals_a_hidden_sidebar() {
+        let mut state = make_state("", 0, None);
+        state.sidebar_visible = false;
+        state.toggle_sidebar_mode();
+        assert!(state.sidebar_visible);
     }
 
     #[test]

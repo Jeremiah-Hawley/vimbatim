@@ -21,6 +21,7 @@ use crate::keybinds::{
     FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
     CommandPaletteAction, PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
     ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
+    ToggleSidebarModeAction,
     UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
     OpenFileAction, OpenFolderAction, SwitchActivePaneAction, NewFileAction, RefreshFileTreeAction,
 };
@@ -318,6 +319,17 @@ impl MainWindow {
         cx.on_action(move |_: &ToggleSidebarAction, cx| {
             s.update(cx, |st, cx| {
                 st.sidebar_visible = !st.sidebar_visible;
+                cx.notify();
+            });
+        });
+
+        // Flips the sidebar between Files and Nav. Ships unbound (see
+        // `keybinds.rs`) — the handler exists so the action does something
+        // the moment a user assigns it a key in Settings.
+        let s = state.clone();
+        cx.on_action(move |_: &ToggleSidebarModeAction, cx| {
+            s.update(cx, |st, cx| {
+                st.toggle_sidebar_mode();
                 cx.notify();
             });
         });
