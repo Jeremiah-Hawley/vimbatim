@@ -872,6 +872,13 @@ pub struct AppState {
     /// other plain-typed text), and the size "Clear Formatting" resets a
     /// line back to. See `load_normal_text_size_half_points`.
     pub normal_text_size_half_points: u16,
+    /// `line_spacing` from settings.conf — the multiplier applied to every
+    /// row's height, in Word's own unit (1.0 = single, 1.5, 2.0 = double).
+    /// Multiplies `text_editor::LINE_HEIGHT_RATIO` rather than replacing it,
+    /// so 1.0 keeps exactly the spacing this app already shipped and the
+    /// setting scales relative to whatever `normal_text_size` is set to.
+    /// See `load_line_spacing` and `set_line_spacing`.
+    pub line_spacing: f32,
     /// `pocket_size`/`block_size`/`tag_size`/`cite_size` from settings.conf,
     /// in half-points (`Run.size`'s unit) — the font sizes `apply_card_style`
     /// applies for those styles (Hat's stays fixed via
@@ -1351,6 +1358,47 @@ pub fn clamp_emphasis_size_points(points: u16) -> u16 {
 /// rate and only exists to keep the settings stepper from running away.
 pub fn clamp_spreading_wpm(wpm: u32) -> u32 {
     wpm.clamp(50, 1000)
+}
+
+/// Line spacing used when settings.conf has no `line_spacing`. 1.0 means
+/// "whatever `LINE_HEIGHT_RATIO` already produced", so an existing install
+/// that never sets the key renders exactly as it did before the setting
+/// existed.
+pub const DEFAULT_LINE_SPACING: f32 = 1.0;
+
+/// Clamps a line-spacing multiplier to a range a document can actually use.
+///
+/// The floor is below 1.0 on purpose — tightening past single spacing is a
+/// real thing debate docs do — but not so far that rows collapse into each
+/// other and click-to-position (which divides a click's Y by row height)
+/// loses the resolution to tell two rows apart. The ceiling covers Word's
+/// own double spacing with room above it.
+///
+/// A non-finite input (NaN from a malformed settings.conf value) falls back
+/// to the default rather than propagating: NaN survives `clamp` in Rust's
+/// f32 and would poison every row-height calculation downstream into NaN,
+/// which lays out as a zero-height row rather than failing loudly.
+pub fn clamp_line_spacing(spacing: f32) -> f32 {
+    if !spacing.is_finite() {
+        return DEFAULT_LINE_SPACING;
+    }
+    spacing.clamp(0.5, 3.0)
+}
+
+/// Reads `line_spacing` (`[FORMATTING]`) from settings.conf. Same tolerant
+/// flat key=value scan as every other loader in this file; falls back to
+/// `DEFAULT_LINE_SPACING` when the file or key is missing/unparseable.
+fn load_line_spacing(path: &std::path::Path) -> f32 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let (k, value) = line.split_once('=')?;
+                (k.trim() == "line_spacing").then(|| value.trim().parse::<f32>().ok()).flatten()
+            })
+        })
+        .map(clamp_line_spacing)
+        .unwrap_or(DEFAULT_LINE_SPACING)
 }
 
 fn load_spreading_wpm(path: &std::path::Path) -> u32 {
@@ -1838,6 +1886,7 @@ impl AppState {
             theme_color_mode,
             custom_theme,
             normal_text_size_half_points,
+            line_spacing: load_line_spacing(settings_path),
             pocket_size_half_points,
             block_size_half_points,
             tag_size_half_points,
@@ -4206,6 +4255,27 @@ impl AppState {
         let points = clamp_emphasis_size_points(points);
         self.emphasis_size_half_points = points * 2;
         self.save_setting("emphasis_size", &points.to_string());
+    }
+
+    /// Sets the document's line spacing and persists it, in Word's own
+    /// multiplier unit (1.0 single, 1.5, 2.0 double).
+    ///
+    /// The future line-spacing button calls exactly this — it is the whole
+    /// backing behaviour for that control, the same way
+    /// `set_shrink_size_points` backs the Shrink stepper. Rendering picks the
+    /// new value up on the next frame with no extra plumbing: every row-height
+    /// call site reads `line_spacing` through `text_editor::line_height_px`,
+    /// and `AppState` is a GPUI `Entity`, so the `update` that calls this
+    /// already notifies the editor to repaint.
+    ///
+    /// Written back with one decimal place rather than `to_string()`'s
+    /// shortest round-trip: `1.5f32.to_string()` is fine, but a value
+    /// arrived at by repeated stepping can print as `1.2000001`, and
+    /// settings.conf is a file users read and hand-edit.
+    pub fn set_line_spacing(&mut self, spacing: f32) {
+        let spacing = clamp_line_spacing(spacing);
+        self.line_spacing = spacing;
+        self.save_setting("line_spacing", &format!("{spacing:.1}"));
     }
 
     pub fn set_emphasis_change_size(&mut self, on: bool) {
@@ -9494,6 +9564,7 @@ mod tests {
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
             custom_theme: None,
             normal_text_size_half_points: 22,
+            line_spacing: DEFAULT_LINE_SPACING,
             pocket_size_half_points: 52,
             block_size_half_points: 32,
             tag_size_half_points: 26,
@@ -17111,6 +17182,66 @@ mod tests {
         let stats = DocumentStats { spoken_words: 100, ..DocumentStats::default() };
         let (m, s) = stats.estimated_time(0);
         assert!(m < 10 && s < 60, "expected a finite estimate, got {m}:{s}");
+    }
+
+    // ── line spacing ──────────────────────────────────────────────────────
+
+    #[test]
+    fn line_spacing_is_clamped_to_a_usable_range() {
+        assert_eq!(clamp_line_spacing(1.0), 1.0);
+        assert_eq!(clamp_line_spacing(0.0), 0.5);
+        assert_eq!(clamp_line_spacing(99.0), 3.0);
+    }
+
+    /// NaN survives `f32::clamp`, so without the explicit `is_finite` guard a
+    /// malformed settings.conf value would propagate into every row-height
+    /// calculation and lay rows out at zero height rather than failing loudly.
+    #[test]
+    fn line_spacing_rejects_a_non_finite_value_instead_of_propagating_it() {
+        assert_eq!(clamp_line_spacing(f32::NAN), DEFAULT_LINE_SPACING);
+        assert_eq!(clamp_line_spacing(f32::INFINITY), DEFAULT_LINE_SPACING);
+    }
+
+    #[test]
+    fn line_spacing_defaults_when_the_key_is_missing() {
+        let dir = temp_test_dir("line_spacing_missing_key");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "theme=dark\n").unwrap();
+        assert_eq!(load_line_spacing(&conf_path), DEFAULT_LINE_SPACING);
+    }
+
+    #[test]
+    fn line_spacing_loads_and_clamps_what_is_on_disk() {
+        let dir = temp_test_dir("line_spacing_load");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "line_spacing=1.5\n").unwrap();
+        assert_eq!(load_line_spacing(&conf_path), 1.5);
+        std::fs::write(&conf_path, "line_spacing=9.9\n").unwrap();
+        assert_eq!(load_line_spacing(&conf_path), 3.0);
+        // Garbage falls back rather than panicking, same as every other loader.
+        std::fs::write(&conf_path, "line_spacing=wide\n").unwrap();
+        assert_eq!(load_line_spacing(&conf_path), DEFAULT_LINE_SPACING);
+    }
+
+    /// What the future line-spacing button actually calls: sets the live value
+    /// and writes it back so it survives a restart.
+    #[test]
+    fn set_line_spacing_persists_and_round_trips() {
+        let dir = temp_test_dir("line_spacing_round_trip");
+        let conf_path = dir.join("settings.conf");
+        std::fs::write(&conf_path, "").unwrap();
+        let mut state = make_state("", 0, None);
+        state.settings_path = conf_path.clone();
+
+        state.set_line_spacing(1.5);
+        assert_eq!(state.line_spacing, 1.5);
+        assert_eq!(load_line_spacing(&conf_path), 1.5);
+
+        // Out-of-range input is clamped before it is stored *or* written, so
+        // the file can never hold a value the loader would have to fix up.
+        state.set_line_spacing(99.0);
+        assert_eq!(state.line_spacing, 3.0);
+        assert_eq!(load_line_spacing(&conf_path), 3.0);
     }
 
     #[test]

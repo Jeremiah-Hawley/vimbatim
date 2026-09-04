@@ -171,6 +171,7 @@ impl AutoScroller {
         let scroll_y = self.scroll_handle.offset().y.as_f32();
         let zoom = self.state.read(cx).zoom;
         let font_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+        let line_spacing = self.state.read(cx).line_spacing;
         let content = self.state.read(cx).active_content().to_string();
         let paragraphs = self.state.read(cx).tabs.get(self.state.read(cx).active_tab)
             .map(|t| t.paragraphs.clone()).unwrap_or_default();
@@ -190,8 +191,8 @@ impl AutoScroller {
         let hidden = crate::text_editor::hidden_wrap_rows(
             &rows, &paragraphs, invisibility, cite_size, &folded_paras,
         );
-        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, font_size_px);
-        let row_height_px = real_row_height_px(&self.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, font_size_px, line_spacing);
+        let row_height_px = real_row_height_px(&self.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
         let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);

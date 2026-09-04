@@ -82,8 +82,74 @@ const LINE_HEIGHT_RATIO: f32 = LINE_HEIGHT_PX / FONT_SIZE_PX;
 /// The real row height for one line of body text at `normal_size_px` — the
 /// zoom-scalable replacement for using `LINE_HEIGHT_PX` directly. See
 /// `LINE_HEIGHT_RATIO`.
-fn line_height_px(normal_size_px: f32) -> f32 {
-    normal_size_px * LINE_HEIGHT_RATIO
+///
+/// `spacing` is `AppState::line_spacing`, Word's own multiplier unit (1.0
+/// single, 1.5, 2.0 double) — the single point every row-height calculation
+/// in this file routes through, so the future line-spacing button changes
+/// row height, cursor pixel math, scroll paging and click hit-testing
+/// together rather than letting them drift apart. Multiplied on top of
+/// `LINE_HEIGHT_RATIO` rather than replacing it, so 1.0 reproduces the
+/// spacing that shipped before the setting existed.
+fn line_height_px(normal_size_px: f32, spacing: f32) -> f32 {
+    normal_size_px * LINE_HEIGHT_RATIO * spacing
+}
+
+/// How many `uniform_list` rows one line of body text is divided into.
+///
+/// `gpui::uniform_list` forces a single measured height onto every row, so a
+/// line taller than one row cannot grow — it can only reserve whole extra
+/// rows ahead of itself (`slot_count_for_paragraph`). That reservation is a
+/// `ceil`, so the *row* is the quantum of vertical space, and with one row
+/// per line every font size from 12pt to 22pt reserved exactly two lines: one
+/// abrupt doubling at 12pt, then nothing at all for the next ten points (bug
+/// report: "font size 12-22 both increase the distance between lines equally
+/// ... this is harsh").
+///
+/// Subdividing the grid shrinks that quantum without giving up the uniform
+/// height `uniform_list` requires: a plain line now occupies
+/// `ROW_SUBDIVISIONS` rows instead of one, and a taller line rounds up to the
+/// nearest *fraction* of a line. At 6, the step is ~2.6px at the 11px
+/// default — roughly one step per point of font size, which reads as
+/// continuous growth rather than a cliff.
+///
+/// This is the tuning knob for that trade: raising it makes spacing smoother
+/// and multiplies the display-row table (and the number of small empty divs
+/// `uniform_list` builds for the visible range) by the same factor; lowering
+/// it is cheaper and chunkier. It must stay >= 1.
+const ROW_SUBDIVISIONS: usize = 6;
+
+/// The pixel height GPUI must lay a line of `font_px` text out at, so that
+/// what it paints matches what `slot_count_for_paragraph` reserved.
+///
+/// GPUI's default text `line_height` is `phi()` — `relative(1.618034)`, the
+/// golden ratio (`gpui`'s `TextStyle::default`) — resolved as
+/// `(1.618034 * font_size).round()`. This file reserves row space at
+/// `LINE_HEIGHT_RATIO` (20/14 = 1.428571) instead, and nothing ever told GPUI
+/// about that, so every line was *painted* into a box ~13% taller than the
+/// row reserved for it. Glyphs alone did not make that obvious, but anything
+/// that fills the line box does: a highlight is a background on the run's
+/// span, so each highlighted line's colored rectangle reached ~2.3px (at the
+/// 11px default) into the line above and covered the bottom of the highlight
+/// there (bug report + `Highlight_Cover.docx`: teal TEAL covering yellow
+/// YELLOW).
+///
+/// Floored, not rounded: GPUI rounds the resolved line height to whole
+/// pixels, so asking for 15.71px would paint 16px and overflow the 15.71px
+/// row again by a fraction. Flooring guarantees the painted box is never
+/// taller than the space reserved for it. The lost sub-pixel is slack in the
+/// line box, not in the glyphs — it does not clip text.
+fn text_line_box_px(font_px: f32) -> f32 {
+    (font_px * LINE_HEIGHT_RATIO).floor().max(1.0)
+}
+
+/// The height of one `uniform_list` row — a `ROW_SUBDIVISIONS` fraction of a
+/// real line of body text. This is the pitch of the *display* grid, so it is
+/// what every display-row-indexed pixel calculation (cursor position, page
+/// scrolling, click hit-testing) must multiply by; `line_height_px` remains
+/// the height of an actual line of text and is what "one line" means to
+/// things like `SCROLL_MARGIN_LINES`.
+fn row_slot_px(normal_size_px: f32, spacing: f32, zoom: f32) -> f32 {
+    line_height_px(normal_size_px, spacing) * zoom / ROW_SUBDIVISIONS as f32
 }
 /// Matches the `.p(px(16.0))` set on the outer editor div in render().
 const CONTENT_PADDING_PX: f32 = 16.0;
@@ -236,6 +302,10 @@ struct RowCache {
     /// comparison that would need its own tuning.
     viewport_width_bits: u32,
     zoom_bits: u32,
+    /// Line spacing feeds `slot_count_for_paragraph`, so changing it changes
+    /// `display_to_wrap` — same reason `zoom_bits` is a key, and same
+    /// `to_bits()` treatment since `f32` isn't `Eq`.
+    line_spacing_bits: u32,
     /// Invisibility mode and fold both drop rows from `display_to_wrap`, so
     /// toggling either changes the tables and must invalidate — otherwise the
     /// editor keeps painting the previous mode's row list.
@@ -327,6 +397,7 @@ fn row_cache_is_valid_for(
     content_version: u64,
     viewport_width: f32,
     zoom: f32,
+    line_spacing: f32,
     ignore_width: bool,
     invisibility: bool,
     fold_version: u64,
@@ -335,6 +406,7 @@ fn row_cache_is_valid_for(
         && cache.content_version == content_version
         && (ignore_width || cache.viewport_width_bits == viewport_width.to_bits())
         && cache.zoom_bits == zoom.to_bits()
+        && cache.line_spacing_bits == line_spacing.to_bits()
         && cache.invisibility == invisibility
         && cache.fold_version == fold_version
 }
@@ -501,7 +573,32 @@ enum RowEdge {
 /// viewport, from assuming every row was the same pixel height instead of
 /// going through this same display-row translation).
 fn nearest_wrap_row_for_display_row(display_to_wrap: &[Option<usize>], display_row: usize) -> usize {
-    (0..=display_row).rev().find_map(|i| display_to_wrap[i]).unwrap_or(0)
+    /*
+     * Forwards, not backwards. `expand_rows_for_display` reserves a row's
+     * blank slots *before* its content (its own doc comment explains why:
+     * `row_div` bottom-aligns, so a too-tall line overflows upward), which
+     * means the blank slots at index `i` are the space the *next* content
+     * row's glyphs are painted into — they belong to the row after them, not
+     * the one before.
+     *
+     * This used to scan backwards, a leftover from the earlier
+     * fillers-after layout. That mapped a click in an oversized line's
+     * overflow area to the line above it. It went mostly unnoticed while
+     * only card-style and heading lines reserved spacers at all; once every
+     * line is subdivided (`ROW_SUBDIVISIONS`) most slots in the document are
+     * blank ones, and scanning the wrong way would put nearly every click a
+     * line off.
+     *
+     * The backward scan survives only as the fallback for a slot past the
+     * last content row (nothing follows it to claim it), so this is still
+     * total for any in-range index.
+     */
+    display_to_wrap
+        .iter()
+        .skip(display_row)
+        .find_map(|w| *w)
+        .or_else(|| (0..=display_row).rev().find_map(|i| display_to_wrap[i]))
+        .unwrap_or(0)
 }
 
 /// Pure resolution of `RowEdge` into a char column within `line_chars`,
@@ -608,8 +705,8 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
-        let line_height    = line_height_px(normal_size_px) * zoom;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
+        let line_height    = line_height_px(normal_size_px, line_spacing) * zoom;
         let cursor_bottom  = cursor_top + line_height;
         let margin         = SCROLL_MARGIN_LINES * line_height;
 
@@ -638,11 +735,12 @@ impl TextEditor {
     /// and max scroll offset needed to clamp any new offset. `None` when the
     /// scroll handle hasn't been laid out yet (viewport_h <= 0), which can
     /// happen on the very first frame.
-    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32, f32)> {
+    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32, f32, f32)> {
         let state = self.state.read(cx);
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let line_spacing = state.line_spacing;
         let _ = state;
 
         // `scroll_to_cursor` calls this on essentially every key event, so
@@ -659,13 +757,21 @@ impl TextEditor {
         // pushes this pixel position down by however many blank spacer
         // rows it reserved, matching what `render()` actually paints.
         let display_row = wrap_to_display[visual_row];
-        let cursor_top = display_row as f32 * line_height_px(normal_size_px) * zoom;
+        // `display_row` is the row's *content* slot, the last of the slots
+        // reserved for it — its glyphs are bottom-aligned there and painted
+        // upward through the blank slots before it. So the top of the line is
+        // one slot past that index, less a line's height. With a single slot
+        // per line (`ROW_SUBDIVISIONS == 1`) this reduces exactly to the old
+        // `display_row * line_height`.
+        let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
+        let cursor_top =
+            (display_row + 1) as f32 * slot_px - line_height_px(normal_size_px, line_spacing) * zoom;
 
         let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
         if viewport_h <= 0.0 { return None; }
 
         let max_y = self.scroll_handle.max_offset().y.as_f32();
-        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom, normal_size_px))
+        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom, normal_size_px, line_spacing))
     }
 
     /// Returns the row tables the most recent `render()` already computed
@@ -695,8 +801,9 @@ impl TextEditor {
         let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
         let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
         let zoom = state.zoom;
+        let line_spacing = state.line_spacing;
         if let Some(cache) = self.row_cache.as_ref() {
-            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, dragging, invisibility, fold_version) {
+            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, line_spacing, dragging, invisibility, fold_version) {
                 return (cache.rows.clone(), cache.display_to_wrap.clone(), cache.wrap_to_display.clone());
             }
         }
@@ -710,7 +817,7 @@ impl TextEditor {
         let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
         let (display_to_wrap, wrap_to_display) =
-            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px);
+            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px, line_spacing);
         (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
 
@@ -741,7 +848,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let zoom = state.zoom;
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
-        let row_height = line_height_px(normal_size_px) * zoom;
+        let row_height = row_slot_px(normal_size_px, state.line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
         }
@@ -760,8 +867,8 @@ impl TextEditor {
     }
 
     fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px) * zoom) / 2.0;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom) / 2.0;
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -772,7 +879,7 @@ impl TextEditor {
     /// for why this needs live GPUI viewport geometry rather than living in
     /// `AppState`.
     fn scroll_to_cursor_top(&self, cx: &Context<Self>) {
-        let Some((cursor_top, _viewport_h, max_y, offset_x, _zoom, _normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
+        let Some((cursor_top, _viewport_h, max_y, offset_x, _zoom, _normal_size_px, _line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
         let new_y = (-cursor_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -780,8 +887,8 @@ impl TextEditor {
     /// Real vim's `zb`: scrolls so the cursor's line sits at the bottom
     /// edge of the viewport.
     fn scroll_to_cursor_bottom(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px) * zoom);
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
+        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom);
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -1182,15 +1289,18 @@ impl TextEditor {
                 {
                     let zoom = self.state.read(cx).zoom;
                     let normal_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                    let line_spacing = self.state.read(cx).line_spacing;
                     let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
                     let (rows, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
                     if !rows.is_empty() && !display_to_wrap.is_empty() {
-                        let line_height = line_height_px(normal_size_px) * zoom;
+                        // Display-row indices, so this steps by the display
+                        // grid's own pitch, not by a full line of text.
+                        let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
                         let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
                         let last_display_row = display_to_wrap.len() - 1;
-                        let top_display = (((-offset.y.as_f32()) / line_height).floor().max(0.0) as usize).min(last_display_row);
-                        let visible_count = ((viewport_h / line_height).floor().max(1.0)) as usize;
+                        let top_display = (((-offset.y.as_f32()) / slot_px).floor().max(0.0) as usize).min(last_display_row);
+                        let visible_count = ((viewport_h / slot_px).floor().max(1.0)) as usize;
                         let bottom_display = (top_display + visible_count.saturating_sub(1)).min(last_display_row);
                         let top_row = nearest_wrap_row_for_display_row(&display_to_wrap, top_display);
                         let bottom_row = nearest_wrap_row_for_display_row(&display_to_wrap, bottom_display);
@@ -1564,6 +1674,7 @@ impl Render for TextEditor {
         let theme_mode = state.theme_mode;
         let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
         let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let line_spacing = state.line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let dragging = state.split_dragging;
         let invisibility = state.invisibility_mode;
@@ -1578,7 +1689,7 @@ impl Render for TextEditor {
         let cache_valid = self
             .row_cache
             .as_ref()
-            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, dragging, invisibility, fold_version));
+            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, line_spacing, dragging, invisibility, fold_version));
         // Only pay for the full content/paragraphs clone on a cache miss.
         // `document_lines`/word-wrap need `cx` free of `state`'s borrow (see
         // `let _ = state;` below), so the actual wrap happens further down —
@@ -1732,7 +1843,7 @@ impl Render for TextEditor {
             let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
             let (display_to_wrap, wrap_to_display) =
-                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px);
+                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px, line_spacing);
 
             self.row_cache = Some(RowCache {
                 tab_id,
@@ -1741,6 +1852,7 @@ impl Render for TextEditor {
                 fold_version,
                 viewport_width_bits: viewport_width.to_bits(),
                 zoom_bits: zoom.to_bits(),
+                line_spacing_bits: line_spacing.to_bits(),
                 lines: Rc::new(lines),
                 line_chars: Rc::new(line_chars),
                 line_byte_starts: Rc::new(line_byte_starts),
@@ -1853,12 +1965,13 @@ impl Render for TextEditor {
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 let click_count = ev.click_count;
                 let shift_click = ev.modifiers.shift && click_count == 1;
@@ -1918,12 +2031,13 @@ impl Render for TextEditor {
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 if !has_selection {
                     this.state.update(cx, |state, _cx| state.set_cursor_from_line_col(line, col));
@@ -1978,12 +2092,13 @@ impl Render for TextEditor {
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
                 let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
                     pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
                 };
                 let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom);
+                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
                 let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
                 this.state.update(cx, |state, cx| {
                     state.extend_selection_to_line_col(line, col);
@@ -2079,7 +2194,7 @@ impl Render for TextEditor {
                         // `uniform_list`'s single-measurement layout still
                         // sees a uniform row height everywhere.
                         let Some(visual_idx) = display_to_wrap[display_idx] else {
-                            return div().h(px(line_height_px(normal_size_px) * zoom)).into_any_element();
+                            return div().h(px(row_slot_px(normal_size_px, line_spacing, zoom))).into_any_element();
                         };
                             let (li, row_start, row_end) = rows[visual_idx];
                         let chars = &line_chars[li];
@@ -2274,9 +2389,25 @@ impl Render for TextEditor {
                         // documents' single default run, and any plain-typed
                         // text) — a run-level or heading-level override still
                         // wins underneath, same as before this was configurable.
+                        // The row's base font size, and the line box that
+                        // goes with it. `.line_height()` writes into the
+                        // cascading text style, so every span in this row —
+                        // including the ones carrying a highlight background
+                        // or an emphasis ring — is laid out in a box this
+                        // tall instead of GPUI's default golden-ratio one.
+                        // See `text_line_box_px` for why that default is
+                        // what made highlights cover each other.
+                        // The same size the row's space was reserved against
+                        // (`line_font_px`), not just the heading size — a
+                        // manually enlarged run in a plain paragraph grows the
+                        // reservation, so its line box has to grow with it or
+                        // its highlight would be painted shorter than its own
+                        // glyphs.
+                        let row_font_px = line_font_px(paragraphs.get(li), zoom, normal_size_px);
                         let row_div = div()
                             .font_family(FONT_FAMILY)
                             .text_size(px(normal_size_px * zoom))
+                            .line_height(px(text_line_box_px(row_font_px)))
                             .text_color(rgb(p.text));
                         let row_div = match heading_font_size_px(heading, zoom) {
                             Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
@@ -2317,7 +2448,7 @@ impl Render for TextEditor {
                             // overflow this box (unchanged from before this
                             // fix, still not clipped since overflow stays
                             // visible — see the comment on `heading` above).
-                            .h(px(line_height_px(normal_size_px) * zoom))
+                            .h(px(row_slot_px(normal_size_px, line_spacing, zoom)))
                             // Column direction + justify_end bottom-aligns
                             // `content_el` within this fixed-height slot when
                             // it's shorter (a Shrunk line next to normal-size
@@ -3243,6 +3374,24 @@ fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
 /// clipping/overlap bug already fixed once (see this const's own history).
 const CARD_BOX_EXTRA_PX: f32 = 20.0;
 
+/// Vertical clearance reserved for an `emphasis_boxed` run, on top of the
+/// font's own height.
+///
+/// The emphasis box is an inset box-shadow (`apply_run_style`), which is
+/// paint-only and adds nothing to layout — it is drawn at the span's exact
+/// bounds. Two consecutive lines carrying one therefore have boxes that are
+/// as tall as the rows are apart, and any rounding at all makes them touch
+/// or cross (bug report: "the Emphasis boxes on size 12 font overlap such
+/// that the top of a box on a lower line is above the bottom of a box from
+/// the line above it").
+///
+/// Relying on `slot_count_for_paragraph`'s own `ceil` to leave a gap is not
+/// enough: a font size whose height lands exactly on a slot boundary rounds
+/// to zero clearance. This reserves the gap explicitly — 1px above and 1px
+/// below the ring. Not scaled by `zoom`, matching the box-shadow's own fixed
+/// 1px spread.
+const EMPHASIS_BOX_EXTRA_PX: f32 = 2.0;
+
 /// Fixed pixel width reserved for a list paragraph's marker gutter — wide
 /// enough for the longest ordinal this app's practical list lengths need
 /// ("99." or "iii.") at the default zoom, scaled by `zoom` like every other
@@ -3427,15 +3576,33 @@ pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
 /// ~1.45-2.36x normal size (vs. Tag/Cite's ~1.18x) and Word's own reference
 /// styles give them real `w:spacing w:before` (12pt/2pt/2pt) on top of that,
 /// so their existing multi-slot reservation stays as-is.
-fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> usize {
-    let Some(para) = para else { return 1 };
+/// The font size a paragraph's row is sized against — the single answer both
+/// the space reserved for the row (`slot_count_for_paragraph`) and the box
+/// GPUI paints its text into (`text_line_box_px`, applied in `render`) are
+/// derived from.
+///
+/// They must agree: reserving against one size and painting against another
+/// is precisely how a highlight's background rectangle ended up taller than
+/// its own row and covered the line above it.
+///
+/// Returns the plain body size for the cases the reservation treats as one
+/// ordinary line — no paragraph data, and Tag (`heading == 4`).
+fn line_font_px(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> f32 {
+    let Some(para) = para else { return normal_size_px * zoom };
     if para.heading == 4 {
-        return 1;
+        return normal_size_px * zoom;
     }
+    // Emphasis runs are no longer excluded. They were, because the quantum
+    // used to be a whole line: one emphasized word in a plain paragraph cost
+    // the entire paragraph a full extra line of spacing (that bug report is
+    // what added the filter). With `ROW_SUBDIVISIONS` the same run now costs
+    // a fraction of a line, which is small enough to be the honest answer —
+    // and excluding it is what left an emphasis box painting outside the row
+    // reserved for it, overlapping the box on the line above.
     let run_max_px = para
         .runs
         .iter()
-        .filter(|r| r.size > 0 && !r.emphasis && r.style != Some(crate::docx_parser::CardStyle::Cite))
+        .filter(|r| r.size > 0 && r.style != Some(crate::docx_parser::CardStyle::Cite))
         .map(|r| r.size as f32 / 2.0 * zoom)
         .fold(0.0_f32, f32::max);
     // An explicit run-level size (card styles always set one, covering the
@@ -3447,11 +3614,32 @@ fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px:
     // only relevant when no run carries an explicit size — plain document
     // headings with no card-style override.
     let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-    let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }.max(normal_size_px * zoom);
+    if run_max_px > 0.0 { run_max_px } else { heading_px }.max(normal_size_px * zoom)
+}
+
+fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32, line_spacing: f32) -> usize {
+    // Both early returns mean "exactly one ordinary line", which is
+    // `ROW_SUBDIVISIONS` slots now rather than a single one.
+    let Some(para) = para else { return ROW_SUBDIVISIONS };
+    if para.heading == 4 {
+        return ROW_SUBDIVISIONS;
+    }
+    let font_px = line_font_px(Some(para), zoom, normal_size_px);
     let has_box = para.runs.iter().any(|r| r.box_format);
-    let line_height = line_height_px(normal_size_px) * zoom;
-    let needed_px = font_px * LINE_HEIGHT_RATIO + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 };
-    ((needed_px / line_height).ceil() as usize).max(1)
+    let has_emphasis_box = para.runs.iter().any(|r| r.emphasis_boxed);
+    let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
+    if slot_px <= 0.0 {
+        return ROW_SUBDIVISIONS;
+    }
+    let needed_px = font_px * LINE_HEIGHT_RATIO
+        + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 }
+        + if has_emphasis_box { EMPHASIS_BOX_EXTRA_PX } else { 0.0 };
+    // The epsilon keeps an exact fit from rounding up. A plain line's height
+    // is `ROW_SUBDIVISIONS` slots exactly, but that division is float math:
+    // a result of 6.0000001 would `ceil` to 7 and make every ordinary line in
+    // the document a slot taller than it needs to be. 1e-3 of a slot is far
+    // below a pixel and cannot hide a real overflow.
+    (((needed_px / slot_px) - 1e-3).ceil() as usize).max(ROW_SUBDIVISIONS)
 }
 
 /// Expands the word-wrapped `rows` table (one entry per visual row) into a
@@ -3532,6 +3720,7 @@ pub(crate) fn expand_rows_for_display(
     zoom: f32,
     hidden: &[bool],
     normal_size_px: f32,
+    line_spacing: f32,
 ) -> (Vec<Option<usize>>, Vec<usize>) {
     let mut display_to_wrap = Vec::with_capacity(rows.len());
     let mut wrap_to_display = Vec::with_capacity(rows.len());
@@ -3555,7 +3744,7 @@ pub(crate) fn expand_rows_for_display(
         // filler itself just added unused space below. `wrap_to_display`
         // still has to point at the content slot specifically (not the first
         // filler), since cursor/scroll pixel math is keyed off it.
-        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px);
+        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px, line_spacing);
         for _ in 1..slots {
             display_to_wrap.push(None);
         }
@@ -4083,9 +4272,9 @@ fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
 /// computed value before any layout has run yet (`last_item_size` is
 /// `None` until then) or when `item_count` is 0, same "not laid out yet"
 /// sentinel pattern `usable_wrap_width` already uses.
-pub(crate) fn real_row_height_px(handle: &UniformListScrollHandle, item_count: usize, font_size_px: f32, zoom: f32) -> f32 {
+pub(crate) fn real_row_height_px(handle: &UniformListScrollHandle, item_count: usize, font_size_px: f32, zoom: f32, line_spacing: f32) -> f32 {
     if item_count == 0 {
-        return line_height_px(font_size_px) * zoom;
+        return row_slot_px(font_size_px, line_spacing, zoom);
     }
     handle
         .0
@@ -4093,7 +4282,7 @@ pub(crate) fn real_row_height_px(handle: &UniformListScrollHandle, item_count: u
         .last_item_size
         .map(|s| s.contents.height.as_f32() / item_count as f32)
         .filter(|h| *h > 0.0)
-        .unwrap_or_else(|| line_height_px(font_size_px) * zoom)
+        .unwrap_or_else(|| row_slot_px(font_size_px, line_spacing, zoom))
 }
 
 pub(crate) fn line_col_from_mouse_position(
@@ -4356,7 +4545,9 @@ mod tests {
         visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
         relative_luminance, is_light_color, darken_for_light_text,
         hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
-        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, display_line,
+        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, LINE_HEIGHT_RATIO,
+        CARD_BOX_EXTRA_PX, EMPHASIS_BOX_EXTRA_PX, ROW_SUBDIVISIONS, row_slot_px,
+        text_line_box_px, line_font_px, display_line,
         line_col_from_mouse_position, real_row_height_px, paints_run_box,
         list_marker_text, to_roman, to_letter, list_item_ordinal, LIST_GUTTER_PX,
         list_marker_text_for_level,
@@ -4529,7 +4720,7 @@ mod tests {
         let position = point(px(16.0 + indent), px(0.0));
         let (line, col) = line_col_from_mouse_position(
             position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0, &paragraphs,
-            line_height_px(11.0),
+            line_height_px(11.0, 1.0),
         );
         assert_eq!((line, col), (0, 0));
     }
@@ -4547,7 +4738,8 @@ mod tests {
         let item_count = 100usize;
         // Before any layout has run, there's nothing measured yet — falls
         // back to the computed value.
-        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0), line_height_px(11.0));
+        // One `uniform_list` row is a subdivision of a line, not a whole one.
+        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0), row_slot_px(11.0, 1.0, 1.0));
 
         // `ItemSize.item` is the *viewport's* box (`padded_bounds.size` in
         // GPUI's own `prepaint`, confirmed against the vendored source), not
@@ -4562,7 +4754,7 @@ mod tests {
             item: gpui::size(gpui::px(999.0), gpui::px(524.5)), // a viewport-sized box
             contents: gpui::size(gpui::px(999.0), gpui::px(15.5 * item_count as f32)),
         });
-        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0), 15.5);
+        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0), 15.5);
     }
 
     #[test]
@@ -4662,14 +4854,24 @@ mod tests {
     /// content row — the same rule a mouse click landing on a spacer slot
     /// already used.
     #[test]
-    fn test_nearest_wrap_row_for_display_row_walks_back_over_spacer_slots() {
-        // Display rows: 0 = real row 0, 1/2 = spacer slots (an oversized
-        // row 0 reserved 3 display slots total), 3 = real row 1.
+    fn test_nearest_wrap_row_for_display_row_walks_forward_over_spacer_slots() {
+        // `expand_rows_for_display` puts a row's spacers *before* its
+        // content, so these are: row 0's content at 0, then two spacers
+        // reserved for row 1, then row 1's content at 3. The spacers are the
+        // space row 1 paints upward into, so they belong to row 1.
         let display_to_wrap = vec![Some(0), None, None, Some(1)];
         assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 0), 0);
-        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 1), 0, "spacer slot belongs to the row before it");
-        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 2), 0);
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 1), 1, "spacer slot belongs to the row after it");
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 2), 1);
         assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 3), 1);
+    }
+
+    /// A trailing spacer has no content row after it to belong to, so the
+    /// backward fallback still has to resolve it rather than panicking.
+    #[test]
+    fn test_nearest_wrap_row_for_display_row_falls_back_for_a_trailing_spacer() {
+        let display_to_wrap = vec![Some(0), None];
+        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 1), 0);
     }
 
     /// A row mixing sizes — a Cite-sized run after body text — has no single
@@ -5607,6 +5809,9 @@ mod tests {
             content_version,
             viewport_width_bits: viewport_width.to_bits(),
             zoom_bits: zoom.to_bits(),
+            // These helpers predate the setting; 1.0 is the "spacing never
+            // touched" case they were all written against.
+            line_spacing_bits: 1.0f32.to_bits(),
             lines: Rc::new(Vec::new()),
             line_chars: Rc::new(Vec::new()),
             line_byte_starts: Rc::new(Vec::new()),
@@ -5773,14 +5978,19 @@ mod tests {
         let rows = vec![(0usize, 0usize, 1usize), (1, 0, 1), (2, 0, 1)];
 
         let (display_to_wrap, wrap_to_display) =
-            expand_rows_for_display(&rows, &paragraphs, 1.0, &[false, true, false], 14.0);
+            expand_rows_for_display(&rows, &paragraphs, 1.0, &[false, true, false], 14.0, 1.0);
 
         // The middle row is gone from the paint list entirely — that is the
-        // vertical gap closing.
-        assert_eq!(display_to_wrap, vec![Some(0), Some(2)]);
+        // vertical gap closing. Each surviving row occupies ROW_SUBDIVISIONS
+        // slots (blanks first, content last).
+        let n = ROW_SUBDIVISIONS;
+        assert_eq!(display_to_wrap.len(), 2 * n);
+        assert_eq!(display_to_wrap.iter().flatten().copied().collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(display_to_wrap[n - 1], Some(0));
+        assert_eq!(display_to_wrap[2 * n - 1], Some(2));
         // ...and the hidden row points at where the next visible one landed,
         // so scroll-to-cursor still resolves.
-        assert_eq!(wrap_to_display, vec![0, 1, 1]);
+        assert_eq!(wrap_to_display, vec![n - 1, n, 2 * n - 1]);
     }
 
     // ── read mode paging ─────────────────────────────────────────────────────
@@ -5867,7 +6077,7 @@ mod tests {
     #[test]
     fn test_row_cache_is_valid_when_everything_matches() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, false, false, 0));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0));
     }
 
     #[test]
@@ -5876,13 +6086,13 @@ mod tests {
         // content_version/width/zoom — tab_id must be checked, or a tab
         // switch could serve another tab's stale wrapped rows.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, 1.0, false, false, 0));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_content_version_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, 1.0, false, false, 0));
     }
 
     /// The divider-drag freeze fix: a width change normally invalidates, but
@@ -5891,8 +6101,8 @@ mod tests {
     #[test]
     fn test_row_cache_survives_a_width_change_while_the_divider_is_dragging() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, false, false, 0));
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, true, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, 1.0, false, false, 0));
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, 1.0, true, false, 0));
     }
 
     /// Dragging must not make the cache accept a *different document* or a
@@ -5900,9 +6110,9 @@ mod tests {
     #[test]
     fn test_dragging_still_invalidates_on_content_or_tab_change() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, true, false, 0), "wrong tab accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, true, false, 0), "stale content accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, true, false, 0), "stale zoom accepted");
+        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, 1.0, true, false, 0), "wrong tab accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, 1.0, true, false, 0), "stale content accepted");
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, 1.0, true, false, 0), "stale zoom accepted");
     }
 
     #[test]
@@ -5910,13 +6120,13 @@ mod tests {
         // A window resize must invalidate the cache — the old wrap width no
         // longer matches where lines should actually break.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, 1.0, false, false, 0));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_zoom_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, false, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, 1.0, false, false, 0));
     }
 
     // ── slot_count_for_paragraph / expand_rows_for_display ────────────────────
@@ -5946,11 +6156,11 @@ mod tests {
     #[test]
     fn test_line_height_tracks_normal_size_not_the_stale_14px_reference() {
         let default_normal_size_px = 22.0 / 2.0; // AppState::new's normal_text_size_half_points
-        assert!(line_height_px(default_normal_size_px) < LINE_HEIGHT_PX);
+        assert!(line_height_px(default_normal_size_px, 1.0) < LINE_HEIGHT_PX);
         // And it keeps scaling in both directions with the configured size,
         // rather than flooring at the old hardcoded reference.
-        assert!(line_height_px(9.0) < line_height_px(default_normal_size_px));
-        assert!(line_height_px(default_normal_size_px) < line_height_px(18.0));
+        assert!(line_height_px(9.0, 1.0) < line_height_px(default_normal_size_px, 1.0));
+        assert!(line_height_px(default_normal_size_px, 1.0) < line_height_px(18.0, 1.0));
     }
 
     // `normal_size_px: 14.0` in these tests matches the pre-fix hardcoded
@@ -5958,30 +6168,30 @@ mod tests {
     // against — see `line_height_px`/`LINE_HEIGHT_RATIO`.
     #[test]
     fn test_slot_count_plain_paragraph_is_one_slot() {
-        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
     }
 
     #[test]
     fn test_slot_count_no_paragraph_data_is_one_slot() {
         // A brand-new tab has no parsed paragraphs yet — must not panic or
         // under/over-count when formatting data is simply absent.
-        assert_eq!(slot_count_for_paragraph(None, 1.0, 14.0), 1);
+        assert_eq!(slot_count_for_paragraph(None, 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
     }
 
     #[test]
     fn test_slot_count_pocket_needs_multiple_slots() {
         // 26px font (~1.86x LINE_HEIGHT_PX/FONT_SIZE_PX ratio) plus the box's
         // padding/border comfortably needs more than one 20px slot.
-        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
-        assert!(slots > 1, "expected Pocket line to need multiple slots, got {slots}");
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0, 1.0);
+        assert!(slots > ROW_SUBDIVISIONS, "expected Pocket line to need more than one line, got {slots}");
     }
 
     #[test]
     fn test_slot_count_scales_with_zoom() {
         // CARD_BOX_EXTRA_PX doesn't scale with zoom, so at very low zoom it
         // dominates and needs relatively more slots than at 1x.
-        let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
-        let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5, 14.0);
+        let at_1x = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0, 1.0);
+        let at_half = slot_count_for_paragraph(Some(&pocket_paragraph()), 0.5, 14.0, 1.0);
         assert!(at_half >= at_1x);
     }
 
@@ -5998,7 +6208,7 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
     }
 
     /// Bug report: "Tags and Cites increase line spacing in vimbatim far
@@ -6019,7 +6229,7 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0), ROW_SUBDIVISIONS);
     }
 
     #[test]
@@ -6037,22 +6247,25 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0), ROW_SUBDIVISIONS);
     }
 
     #[test]
     fn test_slot_count_heading_without_box_still_oversized() {
-        // heading_font_size_px(1, 1.0) == 24px, no box — still needs 2 slots
-        // (24 * 20/14 == 34.3px > 20px, <= 40px).
+        // heading_font_size_px(1, 1.0) == 24px, no box — 24 * 20/14 == 34.3px
+        // against a 20px line, so it still needs more than one line's worth
+        // of slots (and less than two full lines').
         let para = Paragraph { list: None, runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0), 2);
+        let slots = slot_count_for_paragraph(Some(&para), 1.0, 14.0, 1.0);
+        assert!(slots > ROW_SUBDIVISIONS && slots <= 2 * ROW_SUBDIVISIONS, "got {slots}");
     }
 
     #[test]
     fn test_slot_count_emphasis_boxed_alone_does_not_reserve_extra_slots() {
-        // `has_box` (the `CARD_BOX_EXTRA_PX` gate) reads `run.box_format`,
-        // not `run.emphasis_boxed` — a plain-size emphasis box in an
-        // otherwise-normal paragraph must not reserve any spacer row.
+        // A plain-size emphasis box now reserves `EMPHASIS_BOX_EXTRA_PX` of
+        // clearance so the ring cannot touch the one on the line above — but
+        // that is a fraction of a line, never a whole extra line the way the
+        // old whole-line quantum forced.
         let para = Paragraph { list: None,
             runs: vec![
                 Run::default(),
@@ -6061,7 +6274,9 @@ mod tests {
             ],
             heading: 0, alignment: Alignment::default(), unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+        let slots = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0);
+        assert!(slots > ROW_SUBDIVISIONS, "the box needs clearance, got {slots}");
+        assert!(slots < 2 * ROW_SUBDIVISIONS, "but never a whole extra line, got {slots}");
     }
 
     /// Bug report: applying Emphasis to one word increased the line spacing
@@ -6083,36 +6298,303 @@ mod tests {
             ],
             heading: 0, alignment: Alignment::default(), unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0), 1);
+        // The original report was that this cost the paragraph a *whole* extra
+        // line, which was true while a line was the smallest unit of
+        // reservation. The emphasis run is no longer excluded from the
+        // measurement — excluding it is what let its box overlap the line
+        // above — so it now costs the fraction of a line it actually needs,
+        // which is what the report was really objecting to.
+        let plain = slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 11.0, 1.0);
+        let slots = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0);
+        assert!(slots < plain + ROW_SUBDIVISIONS,
+            "one emphasized word must not cost a whole line: {slots} vs plain {plain}");
     }
 
     #[test]
     fn test_expand_rows_for_display_plain_rows_are_untouched() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![plain_paragraph(), plain_paragraph()];
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0);
-        assert_eq!(display_to_wrap, vec![Some(0), Some(1)]);
-        assert_eq!(wrap_to_display, vec![0, 1]);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
+        // Two ordinary lines, each one line tall — ROW_SUBDIVISIONS slots
+        // apiece, content in the last slot of its own group.
+        let n = ROW_SUBDIVISIONS;
+        assert_eq!(display_to_wrap.len(), 2 * n);
+        assert_eq!(display_to_wrap[n - 1], Some(0));
+        assert_eq!(display_to_wrap[2 * n - 1], Some(1));
+        assert_eq!(display_to_wrap.iter().flatten().count(), 2, "no extra content rows");
+        assert_eq!(wrap_to_display, vec![n - 1, 2 * n - 1]);
     }
 
     #[test]
     fn test_expand_rows_for_display_inserts_spacers_before_oversized_row() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![pocket_paragraph(), plain_paragraph()];
-        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0);
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0);
+        let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0, 1.0);
+        let plain = slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0, 1.0);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
 
         // Row 0 (Pocket) occupies `slots` display rows: blanks first, so the
         // box's real overflow direction (upward, out of a bottom-aligned
-        // row) has somewhere empty to land, then the content itself.
+        // row) has somewhere empty to land, then the content itself. Row 1
+        // (plain) follows with its own `plain` slots.
         let mut expected = std::iter::repeat(None).take(slots - 1).collect::<Vec<_>>();
         expected.push(Some(0));
+        expected.extend(std::iter::repeat(None).take(plain - 1));
         expected.push(Some(1));
         assert_eq!(display_to_wrap, expected);
+        assert!(slots > plain, "the Pocket line must reserve more than a plain one");
 
-        // Row 0's content now sits at display index `slots - 1`, after its
-        // own leading blanks; row 1 immediately follows at `slots`.
-        assert_eq!(wrap_to_display, vec![slots - 1, slots]);
+        // Each row's content sits in the last of its own reserved slots.
+        assert_eq!(wrap_to_display, vec![slots - 1, slots + plain - 1]);
+    }
+
+    // ── line spacing setting ─────────────────────────────────────────────────
+
+    /// The whole point of the setting: spacing multiplies row height, and 1.0
+    /// reproduces exactly what shipped before it existed.
+    #[test]
+    fn line_spacing_scales_row_height_and_one_is_the_old_behaviour() {
+        assert_eq!(line_height_px(11.0, 1.0), 11.0 * LINE_HEIGHT_RATIO);
+        assert_eq!(line_height_px(11.0, 2.0), line_height_px(11.0, 1.0) * 2.0);
+        assert!(line_height_px(11.0, 0.8) < line_height_px(11.0, 1.0));
+    }
+
+    /// Spacing has to reach the slot reservation too, not just the row's
+    /// `.h()` — otherwise tightening the spacing shrinks every row while
+    /// `slot_count_for_paragraph` keeps reserving against the old height and
+    /// card-style lines start overlapping again.
+    #[test]
+    fn tighter_line_spacing_reserves_more_slots_for_an_oversized_line() {
+        let single = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 1.0);
+        let tight  = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 0.5);
+        let loose  = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 2.0);
+        assert!(tight > single, "half spacing must need more slots, got {tight} vs {single}");
+        assert!(loose < single, "double spacing must need fewer slots, got {loose} vs {single}");
+    }
+
+    /// Spacing changes `display_to_wrap`, so it must be part of the row
+    /// cache's key — same reason `zoom` is. Without this the editor keeps
+    /// painting the previous spacing's row table until something else
+    /// (a keystroke, a resize) happens to invalidate it.
+    #[test]
+    fn row_cache_invalidates_when_line_spacing_changes() {
+        let cache = test_row_cache(1, 5, 800.0, 1.0);
+        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.5, false, false, 0));
+    }
+
+    // ── painted line box vs reserved row pitch ──────────────────────────────
+
+    /// The invariant the highlight-overlap bug broke: whatever GPUI paints a
+    /// line into must fit inside the space this file reserved for that line.
+    ///
+    /// GPUI's default line height is `phi()` (1.618034), this file reserves at
+    /// `LINE_HEIGHT_RATIO` (1.428571), and nothing bridged the two — so a
+    /// highlight's background rectangle, which fills the whole line box, spilled
+    /// into the line above. `Highlight_Cover.docx` is two plain default-size
+    /// lines with one highlighted run each, which is why no font-size or
+    /// emphasis fix could have addressed it.
+    #[test]
+    fn painted_line_box_never_exceeds_the_row_pitch_reserved_for_it() {
+        for &font_px in &[8.0f32, 9.0, 11.0, 12.0, 14.0, 16.0, 24.0, 26.0] {
+            let pitch = line_height_px(font_px, 1.0);
+            let painted = text_line_box_px(font_px);
+            assert!(painted <= pitch,
+                "{font_px}px: painted {painted}px must fit the {pitch}px row");
+            // GPUI rounds the resolved line height to whole pixels; the value
+            // we hand it must still fit after that rounding.
+            assert!(painted.round() <= pitch,
+                "{font_px}px: {painted}px rounds past the {pitch}px row");
+        }
+    }
+
+    /// The same invariant against whole paragraphs rather than bare sizes:
+    /// for every shape the editor renders, the box GPUI paints the line into
+    /// must fit inside the vertical space reserved for that line. This is
+    /// what stops one line's highlight rectangle reaching into the line
+    /// above, whatever the line contains.
+    #[test]
+    fn every_paragraph_shape_paints_inside_its_reserved_row() {
+        let highlighted = |size: u16| Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { text: "X".into(), size, highlight: true, ..Run::default() },
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+
+        let cases: Vec<(&str, Paragraph)> = vec![
+            // Highlight_Cover.docx itself: plain default-size text, one
+            // highlighted run, no sizes anywhere.
+            ("plain highlighted", highlighted(0)),
+            ("manually enlarged highlight", highlighted(52)),
+            ("emphasis box", Paragraph { list: None,
+                runs: vec![Run::default(), Run { emphasis: true, emphasis_boxed: true, size: 24, ..Run::default() }],
+                heading: 0, alignment: Alignment::default(), unsupported_xml: None }),
+            ("pocket", pocket_paragraph()),
+            ("tag", Paragraph { list: None,
+                runs: vec![Run { size: 26, bold: true, ..Run::default() }],
+                heading: 4, alignment: Alignment::default(), unsupported_xml: None }),
+            ("cite", Paragraph { list: None,
+                runs: vec![Run { size: 26, bold: true, highlight: true,
+                                 style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() }],
+                heading: 0, alignment: Alignment::default(), unsupported_xml: None }),
+            ("plain", plain_paragraph()),
+        ];
+
+        for (name, para) in cases {
+            let pitch = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0) as f32
+                * row_slot_px(11.0, 1.0, 1.0);
+            let painted = text_line_box_px(line_font_px(Some(&para), 1.0, 11.0));
+            assert!(painted <= pitch,
+                "{name}: paints {painted}px into a {pitch}px row");
+        }
+
+        // A row with no paragraph data must still resolve to one ordinary line.
+        assert!(text_line_box_px(line_font_px(None, 1.0, 11.0)) <= line_height_px(11.0, 1.0));
+    }
+
+    /// The specific regression: at the real default the golden-ratio line box
+    /// is materially taller than the row, which is the overlap the report
+    /// describes. Pins the size of the problem being solved.
+    #[test]
+    fn gpui_default_golden_ratio_line_box_would_overlap_the_row_above() {
+        const GPUI_DEFAULT_LINE_HEIGHT: f32 = 1.618_034; // gpui `phi()`
+        let pitch = line_height_px(11.0, 1.0);
+        let gpui_default = (11.0 * GPUI_DEFAULT_LINE_HEIGHT).round();
+        assert!(gpui_default > pitch + 2.0,
+            "expected the untamed default to overflow by >2px, got {gpui_default} vs {pitch}");
+        assert!(text_line_box_px(11.0) < gpui_default, "the fix must shrink it");
+    }
+
+    // ── line-spacing continuity and overlap ─────────────────────────────────
+    //
+    // These pin the measured relationship between the vertical space
+    // `slot_count_for_paragraph` reserves for a line and the space that
+    // line's runs actually paint. Where the two disagree, the surplus lands
+    // on the line above (`row_div` bottom-aligns and does not clip), which is
+    // what every reported overlap has in common.
+
+    /// Height a paragraph's tallest run really paints, by the same arithmetic
+    /// `slot_count_for_paragraph` uses internally — but with none of its
+    /// exclusions applied.
+    fn painted_height_px(para: &Paragraph, zoom: f32, normal_size_px: f32) -> f32 {
+        /*
+         * Mirrors slot_count_for_paragraph's `needed_px` with the `!= Cite`
+         * and `heading == 4` filters removed, so the difference between this
+         * and `reserved_height_px` is exactly the space a run can paint into
+         * but was never given.
+         */
+        let run_max_px = para.runs.iter()
+            .filter(|r| r.size > 0)
+            .map(|r| r.size as f32 / 2.0 * zoom)
+            .fold(0.0_f32, f32::max);
+        let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
+        let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }
+            .max(normal_size_px * zoom);
+        let has_box = para.runs.iter().any(|r| r.box_format);
+        font_px * LINE_HEIGHT_RATIO + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 }
+    }
+
+    /// Height `expand_rows_for_display` actually reserves for that paragraph:
+    /// its slot count times the height of one `uniform_list` row.
+    fn reserved_height_px(para: &Paragraph, zoom: f32, normal_size_px: f32) -> f32 {
+        slot_count_for_paragraph(Some(para), zoom, normal_size_px, 1.0) as f32
+            * row_slot_px(normal_size_px, 1.0, zoom)
+    }
+
+    /// Bug report: "font size 12-22 both increase the distance between lines
+    /// equally when changing sizes with the text size button, this is harsh."
+    ///
+    /// With one `uniform_list` row per line, every size from 12pt to 22pt
+    /// reserved exactly two lines — a single doubling at 12pt and then no
+    /// change at all across the next ten points. Subdividing the row grid has
+    /// to turn that one cliff into a staircase.
+    #[test]
+    fn font_sizes_twelve_to_twentytwo_no_longer_all_get_the_same_line_height() {
+        let heights: Vec<usize> = (12..=22)
+            .map(|pt| {
+                let para = Paragraph { list: None,
+                    runs: vec![Run { size: pt * 2, ..Run::default() }],
+                    heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+                slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0)
+            })
+            .collect();
+
+        let distinct: std::collections::BTreeSet<_> = heights.iter().copied().collect();
+        assert!(distinct.len() >= 4,
+            "12-22pt must span several row heights, got {distinct:?} from {heights:?}");
+        // Monotonic: a bigger font never reserves less room than a smaller one.
+        assert!(heights.windows(2).all(|w| w[0] <= w[1]), "not monotonic: {heights:?}");
+        // And no single step may be a whole line — that is the "harsh" jump.
+        assert!(heights.windows(2).all(|w| w[1] - w[0] < ROW_SUBDIVISIONS),
+            "a step of a full line remains: {heights:?}");
+    }
+
+    /// Bug report: "the Emphasis boxes on size 12 font overlap such that the
+    /// top of a box on a lower line is above the bottom of a box from the
+    /// line above it."
+    ///
+    /// Real defaults: `normal_text_size_half_points == 22` (11px) and
+    /// `emphasis_size_half_points == 24` (12px). The emphasis box is an inset
+    /// box-shadow — paint only, drawn at the span's exact bounds — so the row
+    /// pitch has to exceed the painted height or consecutive boxes touch.
+    #[test]
+    fn emphasis_box_at_size_twelve_has_clearance_from_the_line_above() {
+        let para = Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { text: "word".into(), emphasis: true, emphasis_boxed: true, size: 24, ..Run::default() },
+                Run::default(),
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        let pitch = reserved_height_px(&para, 1.0, 11.0);
+        let painted = painted_height_px(&para, 1.0, 11.0);
+        assert!(pitch >= painted + EMPHASIS_BOX_EXTRA_PX,
+            "box needs {EMPHASIS_BOX_EXTRA_PX}px clearance: pitch {pitch}px vs painted {painted}px");
+    }
+
+    /// The same run without a box: no longer excluded from the reservation,
+    /// so its glyphs stay inside the row reserved for them.
+    #[test]
+    fn emphasis_run_no_longer_paints_past_the_row_reserved_for_it() {
+        let para = Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { size: 52, emphasis: true, highlight: true, ..Run::default() },
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        assert!(reserved_height_px(&para, 1.0, 11.0) >= painted_height_px(&para, 1.0, 11.0));
+    }
+
+    /// Still broken, deliberately: Cite is excluded from the reservation, and
+    /// `heading == 4` (Tag) returns before `box_format` is ever read. Both
+    /// exclusions were added to stop Tag/Cite reserving a *whole* extra line
+    /// the way the old one-row-per-line quantum forced. Subdividing the grid
+    /// removes that reason — the cost would now be a fraction of a line — but
+    /// dropping them changes how every existing Tag and Cite lays out, so it
+    /// stays a deliberate decision rather than a side effect of this fix.
+    #[test]
+    fn cite_and_boxed_tag_still_paint_past_their_reservation() {
+        let cite = Paragraph { list: None,
+            runs: vec![
+                Run::default(),
+                Run { size: 26, bold: true, highlight: true,
+                      style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() },
+            ],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        assert!(painted_height_px(&cite, 1.0, 11.0) > reserved_height_px(&cite, 1.0, 11.0),
+            "Cite exclusion still lets the run overflow");
+
+        let boxed_tag = Paragraph { list: None,
+            runs: vec![Run { size: 26, bold: true, box_format: true, ..Run::default() }],
+            heading: 4, alignment: Alignment::default(), unsupported_xml: None,
+        };
+        let overflow = painted_height_px(&boxed_tag, 1.0, 11.0) - reserved_height_px(&boxed_tag, 1.0, 11.0);
+        assert!(overflow > CARD_BOX_EXTRA_PX - 1.0,
+            "the whole box inset is still unreserved, got {overflow}px");
     }
 
     // ── list marker rendering (non-GPUI pure logic only) ─────────────────────
@@ -6252,11 +6734,11 @@ mod tests {
 
         let (_line, col_list) = line_col_from_mouse_position(
             position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
-            &[list_para], line_height_px(11.0),
+            &[list_para], line_height_px(11.0, 1.0),
         );
         let (_line, col_plain) = line_col_from_mouse_position(
             position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
-            &[plain_para], line_height_px(11.0),
+            &[plain_para], line_height_px(11.0, 1.0),
         );
         assert!(col_list < col_plain, "list col {col_list} should be earlier than plain col {col_plain}");
     }
