@@ -372,6 +372,7 @@ impl FileExplorer {
     fn render_context_menu(
         menu: FileContextMenu,
         has_copied_file: bool,
+        pending_cut: bool,
         rename_focus: &FocusHandle,
         p: Palette,
         state_handle: &Entity<AppState>,
@@ -566,12 +567,13 @@ impl FileExplorer {
                     }))
                     .child(Self::menu_separator(p))
                 })
-                // ── Dir-only: open everything inside it / rename it ─────────
+                // ── Dir-only: open everything inside it / cut / rename it ───
                 .when_some(dir_path.clone(), |d, path| {
                     let open_all = state_handle.clone();
                     let rename = state_handle.clone();
+                    let cut = state_handle.clone();
                     let rename_focus_for_dir_click = rename_focus_for_click.clone();
-                    let (p1, p2) = (path.clone(), path);
+                    let (p1, p2, p3) = (path.clone(), path.clone(), path);
                     // Seed with the folder's full name — unlike a file, a
                     // folder has no extension for `rename_path` to re-apply,
                     // so there's nothing to strip off first.
@@ -580,6 +582,13 @@ impl FileExplorer {
                         open_all.update(cx, |s, cx| {
                             s.close_file_context_menu();
                             s.open_all_files_in_dir(&p1);
+                            cx.notify();
+                        });
+                    }))
+                    .child(Self::menu_item("ctx-cut-dir", "Cut Folder", false, p, move |_, _, cx| {
+                        cut.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.cut_file(p3.clone());
                             cx.notify();
                         });
                     }))
@@ -594,11 +603,13 @@ impl FileExplorer {
                     }))
                     .child(Self::menu_separator(p))
                 })
-                // ── File-only: duplicate / copy / rename ───────────────────
+                // ── File-only: duplicate / copy / cut / rename ─────────────
                 .when_some(file_path, |d, path| {
-                    let (dup, copy, rename) =
-                        (state_handle.clone(), state_handle.clone(), state_handle.clone());
-                    let (p1, p2) = (path.clone(), path.clone());
+                    let (dup, copy, cut, rename) = (
+                        state_handle.clone(), state_handle.clone(),
+                        state_handle.clone(), state_handle.clone(),
+                    );
+                    let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
                     // Seed the rename buffer with the stem, not the full file
                     // name — `rename_path` re-applies `.docx` via
                     // `with_docx_extension`, so the extension is never the
@@ -620,6 +631,13 @@ impl FileExplorer {
                             cx.notify();
                         });
                     }))
+                    .child(Self::menu_item("ctx-cut-file", "Cut File", false, p, move |_, _, cx| {
+                        cut.update(cx, |s, cx| {
+                            s.close_file_context_menu();
+                            s.cut_file(p3.clone());
+                            cx.notify();
+                        });
+                    }))
                     .child(Self::menu_item("ctx-rename", "Rename", false, p, move |_, window, cx| {
                         rename.update(cx, |s, cx| {
                             if let Some(menu) = s.file_context_menu.as_mut() {
@@ -631,10 +649,14 @@ impl FileExplorer {
                     }))
                     .child(Self::menu_separator(p))
                 })
-                // ── Paste (folders only, and only with something copied) ────
+                // ── Paste (folders only, and only with something on the
+                // file clipboard). Labelled for what the pending entry
+                // actually is: a cut moves the original, a copy duplicates
+                // it, and the two are easy to mistake once the menu is open.
                 .when_some(dir_path.filter(|_| can_paste), |d, path| {
                     let paste = state_handle.clone();
-                    d.child(Self::menu_item("ctx-paste-file", "Paste File", false, p, move |_, _, cx| {
+                    let label = if pending_cut { "Move Here" } else { "Paste File" };
+                    d.child(Self::menu_item("ctx-paste-file", label, false, p, move |_, _, cx| {
                         paste.update(cx, |s, cx| {
                             s.close_file_context_menu();
                             if let Err(e) = s.paste_file_into(&path) {
@@ -1167,6 +1189,7 @@ impl Render for FileExplorer {
             .and_then(|tab| tab.file_path.clone());
         let sidebar_width = state.sidebar_width;
         let has_copied_file = state.copied_file.is_some();
+        let pending_cut = state.copied_file.as_ref().is_some_and(|(_, cut)| *cut);
         let nav_fold_buttons = state.nav_fold_buttons;
         let _ = state;
 
@@ -1388,7 +1411,7 @@ impl Render for FileExplorer {
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
             .when_some(self.state.read(cx).file_context_menu.clone(), |el, menu| {
-                el.child(Self::render_context_menu(menu, has_copied_file, &rename_focus, p, &state_handle, cx))
+                el.child(Self::render_context_menu(menu, has_copied_file, pending_cut, &rename_focus, p, &state_handle, cx))
             })
             .when_some(self.state.read(cx).nav_context_menu.clone(), |el, menu| {
                 el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx))

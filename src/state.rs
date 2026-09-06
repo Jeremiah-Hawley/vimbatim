@@ -455,6 +455,11 @@ pub struct TabSnapshot {
     pub origin: Option<Arc<DocxOrigin>>,
     pub file_path: Option<PathBuf>,
     pub title: String,
+    /// Carried so a snapshot written from the panic hook — which runs on the
+    /// dying thread with no `AppState` to read — still bakes the user's own
+    /// sizes and spacing into the recovered document, exactly as a normal save
+    /// would. See `AppState::new_doc_style`.
+    pub doc_style: crate::docx_parser::NewDocStyle,
 }
 
 /// A single empty paragraph containing one default (unformatted) run — the
@@ -840,7 +845,10 @@ pub struct AppState {
     /// a copy is a within-session gesture, and a stale path would only make
     /// `fs::copy` fail. Only one file at a time, matching the single-select
     /// tree.
-    pub copied_file: Option<PathBuf>,
+    /// The pending file-tree paste: what was picked, and whether it was
+    /// *cut* rather than copied. One field rather than a path plus a
+    /// separate flag, so the two can't drift out of sync.
+    pub copied_file: Option<(PathBuf, bool)>,
     /// Settings → Toggle Features "Navigation Menu Heading Fold Buttons":
     /// shows a 1/2/3/4 row under the sidebar's folder name that applies the
     /// same "Show Heading Level N" filter the Nav right-click menu offers.
@@ -961,12 +969,19 @@ pub struct AppState {
     /// setting scales relative to whatever `normal_text_size` is set to.
     /// See `load_line_spacing` and `set_line_spacing`.
     pub line_spacing: f32,
-    /// `pocket_size`/`block_size`/`tag_size`/`cite_size` from settings.conf,
-    /// in half-points (`Run.size`'s unit) — the font sizes `apply_card_style`
-    /// applies for those styles (Hat's stays fixed via
-    /// `CardStyleKind::font_size`; not requested as configurable). See
-    /// `load_font_size_half_points`.
+    /// `pocket_size`/`hat_size`/`block_size`/`tag_size`/`cite_size` from
+    /// settings.conf, in half-points (`Run.size`'s unit) — the font sizes
+    /// `apply_card_style` applies for those styles. See
+    /// `load_font_size_half_points`, and `set_card_size_points` for the
+    /// Text Settings steppers that write them back.
+    ///
+    /// These also drive the `Heading1`-`Heading4` definitions a new document's
+    /// `word/styles.xml` carries (`build_new_doc_styles_xml`), which used to
+    /// hardcode `CardStyleKind::font_size`'s constants — invisible while direct
+    /// run formatting wins in Word, but two sources of truth for the same
+    /// number.
     pub pocket_size_half_points: u16,
+    pub hat_size_half_points: u16,
     pub block_size_half_points: u16,
     pub tag_size_half_points: u16,
     /// The size Cite applies alongside bold (`main_window.rs`'s `CiteAction`
@@ -1004,11 +1019,25 @@ pub struct AppState {
     /// clipboard around dispatch, since that needs a GPUI `cx` this file
     /// doesn't have.
     pub registers: HashMap<char, String>,
-    /// Mailbox for the `'+'` register: set to the text just written to it
-    /// (by a `"+y`/`"+d`/`"+c`), drained by `text_editor.rs` right after
-    /// dispatch to push it onto the real OS clipboard. `None` means no
-    /// pending clipboard write.
-    pub pending_clipboard_sync: Option<String>,
+    /// The formatting for each entry in `registers`, in exactly the encoding
+    /// `rich_clipboard` writes for Ctrl+C — so a yanked card puts its
+    /// fonts, sizes, underlines, boxes *and* its paragraph headings and
+    /// alignment back on `p`, instead of inheriting whatever run the cursor
+    /// happened to be sitting in.
+    ///
+    /// Kept beside `registers` rather than folded into it: every register is
+    /// still fundamentally text (a macro replay, a `+` register filled by
+    /// another app, and every existing caller read it as such), and a
+    /// register with no entry here simply pastes plain — which is exactly
+    /// what an external clipboard's contents should do.
+    pub register_formats: HashMap<char, String>,
+    /// Mailbox for the `'+'` register: set to the `(text, formatting)` just
+    /// written to it (by a `"+y`/`"+d`/`"+c`), drained by `text_editor.rs`
+    /// right after dispatch to push it onto the real OS clipboard. `None`
+    /// means no pending clipboard write. The formatting rides along as
+    /// clipboard *metadata*, the same way `CopyAction` sends it, so `"+y`
+    /// then Ctrl+V keeps its formatting.
+    pub pending_clipboard_sync: Option<(String, String)>,
     /// The last `/`/`?` search dispatched, or the last `*`/`#` word-search
     /// (spec 5.5) — (pattern, is_forward). Not per-tab: real vim shares
     /// the search register across buffers, same reasoning `registers`/
@@ -1432,6 +1461,13 @@ pub fn clamp_shrink_size_points(points: u16) -> u16 {
 /// same rationale: wide enough for any real convention, narrow enough that
 /// the stepper can't walk it somewhere unreadable.
 pub fn clamp_emphasis_size_points(points: u16) -> u16 {
+    points.clamp(4, 48)
+}
+
+/// Clamps a card style's size (points) to the same bounds as Shrink and
+/// Emphasis — wide enough for any real convention (a Pocket runs 26pt), narrow
+/// enough that the stepper can't walk it somewhere unreadable.
+pub fn clamp_card_size_points(points: u16) -> u16 {
     points.clamp(4, 48)
 }
 
@@ -1917,9 +1953,16 @@ impl AppState {
             .ok()
             .and_then(|s| crate::theme::parse_custom_theme_toml(&s));
         let normal_text_size_half_points = load_normal_text_size_half_points(settings_path);
-        let pocket_size_half_points = load_font_size_half_points(settings_path, "pocket_size", 52);
-        let block_size_half_points = load_font_size_half_points(settings_path, "block_size", 32);
-        let tag_size_half_points = load_font_size_half_points(settings_path, "tag_size", 26);
+        // `CardStyleKind::font_size` is the one place these defaults live, so
+        // an absent settings key and the enum can't disagree.
+        let pocket_size_half_points =
+            load_font_size_half_points(settings_path, "pocket_size", CardStyleKind::Pocket.font_size());
+        let hat_size_half_points =
+            load_font_size_half_points(settings_path, "hat_size", CardStyleKind::Hat.font_size());
+        let block_size_half_points =
+            load_font_size_half_points(settings_path, "block_size", CardStyleKind::Block.font_size());
+        let tag_size_half_points =
+            load_font_size_half_points(settings_path, "tag_size", CardStyleKind::Tag.font_size());
         let cite_size_half_points = load_font_size_half_points(settings_path, "cite_size", 26);
         let small_size_half_points =
             clamp_shrink_size_points(load_font_size_half_points(settings_path, "small_size", 12) / 2) * 2;
@@ -1970,6 +2013,7 @@ impl AppState {
             normal_text_size_half_points,
             line_spacing: load_line_spacing(settings_path),
             pocket_size_half_points,
+            hat_size_half_points,
             block_size_half_points,
             tag_size_half_points,
             cite_size_half_points,
@@ -1980,6 +2024,7 @@ impl AppState {
             vim_macro_record_pending: false,
             vim_last_macro_register: None,
             registers: HashMap::new(),
+            register_formats: HashMap::new(),
             pending_clipboard_sync: None,
             last_search: None,
             last_change: None,
@@ -2670,9 +2715,9 @@ impl AppState {
          * Opens a file in a new tab, parsing its docx content immediately.
          * If the file is already open, switches to the existing tab instead.
          *
-         * When `parse_docx` fails (e.g., the file is corrupt or a 0-byte placeholder),
-         * the tab still opens with empty content and `docx_origin = None`
-         * (`paragraphs` stays at its default single empty paragraph/run).
+         * When `parse_docx` fails (e.g., the file is corrupt or a 0-byte
+         * placeholder), the tab still opens — empty, still titled after the
+         * file — but *detached* from it; see `tab_from_docx`.
          *
          * Anything that isn't a .docx is refused outright. The guard lives here
          * rather than at the toolbar's file picker because that isn't the only
@@ -2699,13 +2744,7 @@ impl AppState {
             }
             return;
         }
-        let mut tab = Tab::from_path(self.next_tab_id, path.clone());
-        if let Ok((paragraphs, origin)) = parse_docx(&path) {
-            tab.content = paragraphs_to_plain_text(&paragraphs);
-            tab.paragraphs = paragraphs;
-            tab.has_unsupported_blocks = origin.has_unsupported_blocks;
-            tab.docx_origin = Some(Arc::new(origin));
-        }
+        let tab = tab_from_docx(self.next_tab_id, &path);
         self.next_tab_id += 1;
 
         // An untouched "New Tab" is a placeholder, not work — opening a file
@@ -2812,11 +2851,12 @@ impl AppState {
         }
         let paragraphs = tab.paragraphs.clone();
         let origin = tab.docx_origin.clone();
+        let doc_style = self.new_doc_style();
         let save_started = Instant::now();
         match origin {
             Some(origin) => origin.save(&paragraphs, &path)
                 .map_err(|e| format!("Save failed: {}", e))?,
-            None => create_new_docx(&paragraphs, &path)
+            None => create_new_docx(&paragraphs, &path, doc_style)
                 .map_err(|e| format!("Save failed: {}", e))?,
         }
         log_save_cost(&paragraphs, save_started.elapsed());
@@ -3025,6 +3065,7 @@ impl AppState {
 
     /// The dirty tabs, flattened for the panic hook.
     pub fn dirty_tab_snapshots(&self) -> Vec<TabSnapshot> {
+        let doc_style = self.new_doc_style();
         self.tabs
             .iter()
             .filter(|t| t.is_modified)
@@ -3034,6 +3075,7 @@ impl AppState {
                 origin: t.docx_origin.clone(),
                 file_path: t.file_path.clone(),
                 title: t.title.clone(),
+                doc_style,
             })
             .collect()
     }
@@ -4378,6 +4420,104 @@ impl AppState {
         self.save_setting("small_size", &points.to_string());
     }
 
+    /// The body text size to render at, half-points: the active document's own
+    /// `<w:docDefaults>` when it declares one, otherwise the `normal_text_size`
+    /// setting.
+    ///
+    /// A document written in Word or Verbatim carries its own default size, and
+    /// rendering it at this app's setting instead is what made an imported file
+    /// look wrong before a single run had been touched. Rendering only — the
+    /// setting still governs what *this* app applies (`ClearAll`'s
+    /// `default_size`, a new document's own `docDefaults`), because that is a
+    /// user preference rather than a property of the file being read.
+    pub fn effective_normal_size_half_points(&self) -> u16 {
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|t| t.docx_origin.as_ref())
+            .map(|o| o.doc_defaults.size)
+            .filter(|&size| size > 0)
+            .unwrap_or(self.normal_text_size_half_points)
+    }
+
+    /// The active document's own default body font, if it declares one — the
+    /// `<w:rFonts>` half of the same fallback. Returned raw; the caller decides
+    /// whether the app can actually render it (`text_editor`'s
+    /// `is_curated_font`, which also covers imported families, so a Word
+    /// document's Calibri renders once Calibri has been imported).
+    pub fn effective_body_font(&self) -> Option<&str> {
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|t| t.docx_origin.as_ref())
+            .and_then(|o| o.doc_defaults.font.as_deref())
+    }
+
+    /// The settings a freshly created `.docx` bakes into its `word/styles.xml`
+    /// — body size and line spacing for `<w:docDefaults>`, the four card sizes
+    /// for the `Heading1`-`Heading4` definitions, and what Emphasis means here.
+    ///
+    /// Collected in one place so `docx_parser` never has to reach back into
+    /// settings, and so the crash-snapshot path can carry the same values as a
+    /// normal save instead of quietly writing the defaults.
+    pub fn new_doc_style(&self) -> crate::docx_parser::NewDocStyle {
+        crate::docx_parser::NewDocStyle {
+            normal_size: self.normal_text_size_half_points,
+            line_spacing: self.line_spacing,
+            pocket_size: self.pocket_size_half_points,
+            hat_size: self.hat_size_half_points,
+            block_size: self.block_size_half_points,
+            tag_size: self.tag_size_half_points,
+            cite_size: self.cite_size_half_points,
+            emphasis_bold: self.emphasis_bold,
+            emphasis_underline: self.emphasis_underline,
+            emphasis_box: self.emphasis_box,
+            emphasis_size: self
+                .emphasis_change_size
+                .then_some(self.emphasis_size_half_points),
+        }
+    }
+
+    /// The configured size for one card style, in half-points — the single
+    /// place `apply_card_style` and `build_new_doc_styles_xml` both read, so
+    /// the style definition written into a new `.docx` can't drift from the
+    /// size actually applied to the runs.
+    pub fn card_size_half_points(&self, kind: CardStyleKind) -> u16 {
+        match kind {
+            CardStyleKind::Pocket => self.pocket_size_half_points,
+            CardStyleKind::Hat => self.hat_size_half_points,
+            CardStyleKind::Block => self.block_size_half_points,
+            CardStyleKind::Tag => self.tag_size_half_points,
+        }
+    }
+
+    /// Sets one card style's font size, in points, and persists it — the
+    /// backing for the Text Settings steppers. Same
+    /// half-points-internally/points-on-disk shape as
+    /// `set_shrink_size_points`.
+    pub fn set_card_size_points(&mut self, kind: CardStyleKind, points: u16) {
+        let points = clamp_card_size_points(points);
+        match kind {
+            CardStyleKind::Pocket => self.pocket_size_half_points = points * 2,
+            CardStyleKind::Hat => self.hat_size_half_points = points * 2,
+            CardStyleKind::Block => self.block_size_half_points = points * 2,
+            CardStyleKind::Tag => self.tag_size_half_points = points * 2,
+        }
+        let key = match kind {
+            CardStyleKind::Pocket => "pocket_size",
+            CardStyleKind::Hat => "hat_size",
+            CardStyleKind::Block => "block_size",
+            CardStyleKind::Tag => "tag_size",
+        };
+        self.save_setting(key, &points.to_string());
+    }
+
+    /// Cite's size, which isn't a `CardStyleKind` (it targets the selection,
+    /// not the whole line) and so keeps its own setter.
+    pub fn set_cite_size_points(&mut self, points: u16) {
+        let points = clamp_card_size_points(points);
+        self.cite_size_half_points = points * 2;
+        self.save_setting("cite_size", &points.to_string());
+    }
+
     /// The size Emphasis resizes text to when `emphasis_change_size` is on,
     /// in points. Same half-points-internally/points-on-disk shape as
     /// `set_shrink_size_points`.
@@ -4570,15 +4710,10 @@ impl AppState {
     /// an earlier explicit fix; Emphasis was never line-based), so they
     /// keep going through `apply_formatting_to_selection` at each call site.
     pub fn apply_card_style(&mut self, kind: CardStyleKind) {
-        // Pocket/Block/Tag read their configured size from settings.conf;
-        // Hat isn't user-configurable (not requested), so it keeps
-        // `CardStyleKind::font_size`'s fixed value.
-        let size = match kind {
-            CardStyleKind::Pocket => self.pocket_size_half_points,
-            CardStyleKind::Hat => kind.font_size(),
-            CardStyleKind::Block => self.block_size_half_points,
-            CardStyleKind::Tag => self.tag_size_half_points,
-        };
+        // All four read their configured size from settings.conf;
+        // `CardStyleKind::font_size` remains the default those settings fall
+        // back to when the key is absent, not a second live value.
+        let size = self.card_size_half_points(kind);
 
         self.apply_formatting_to_line(FormatOp::Bold(true));
         self.apply_formatting_to_line(FormatOp::FontSize(size));
@@ -4950,27 +5085,14 @@ impl AppState {
     /// *plus* these two paragraph fields (`apply_card_style`). Copying only the
     /// runs is what made a pasted card come back correctly sized but
     /// structurally plain.
+    ///
+    /// Shares `document_ops::paragraph_attrs_in_range` with vim's yank
+    /// registers, so the two can't drift on what a range's paragraphs are.
     pub fn copy_selection_paragraph_attrs(&self) -> Option<Vec<crate::rich_clipboard::ParagraphAttrs>> {
         let tab = self.tabs.get(self.active_tab)?;
         let (a, f) = tab.selection?;
         let (start, end) = (a.min(f), a.max(f));
-
-        // Walk paragraphs by their byte spans in `content`, +1 per separating
-        // '\n', and keep every one the selection overlaps. A zero-width
-        // selection is already ruled out by the callers, but an end-exclusive
-        // touch (selection stopping exactly at a paragraph's first byte) must
-        // not pull that paragraph in.
-        let mut attrs = Vec::new();
-        let mut para_start = 0usize;
-        for para in &tab.paragraphs {
-            let text_len: usize = para.runs.iter().map(|r| r.text.len()).sum();
-            let para_end = para_start + text_len;
-            if start <= para_end && end > para_start || (start == end && start == para_start) {
-                attrs.push((para.heading, para.alignment));
-            }
-            para_start = para_end + 1; // the '\n' between paragraphs
-        }
-        Some(attrs)
+        Some(crate::document_ops::paragraph_attrs_in_range(&tab.paragraphs, start, end))
     }
 
     pub fn cut_selection(&mut self) -> Option<String> {
@@ -4996,6 +5118,15 @@ impl AppState {
          * paste produces. An empty string is a true no-op (returns before
          * pushing an undo snapshot) — otherwise pasting empty clipboard
          * content would create an undo step that changes nothing.
+         *
+         * Typing-shaped, deliberately: a `'\n'` in `text` splits the
+         * paragraph exactly as pressing Enter does, new line reverting to
+         * body style and all. That is what `.`-repeating an insert session
+         * (`VimChange::Insertion`) needs, and what a same-line replacement
+         * (find/replace, a spelling fix) is indifferent to. A *paste* wants
+         * the opposite — the line it lands in keeps its own card style — so
+         * paste goes through `insert_str_with_runs` even when it has no
+         * formatting to restore.
          */
         if text.is_empty() { return; }
         self.push_undo_snapshot();
@@ -5053,29 +5184,24 @@ impl AppState {
         }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.cursor = clamp_to_char_boundary(&tab.content, tab.cursor);
-            // Which paragraph the paste starts in, resolved *before* the
-            // insert — afterwards the offsets have all moved.
+            // Which paragraph the paste starts in, and what that paragraph's
+            // own attributes are — both resolved *before* the insert, which
+            // moves every offset and clears the attributes off the tail it
+            // splits away.
             let first_para = crate::document_ops::resolve_position(&tab.paragraphs, tab.cursor).0;
+            let dest_attrs = tab.paragraphs.get(first_para).map(|p| (p.heading, p.alignment));
             crate::document_ops::sync_insert_str_with_runs(&mut tab.paragraphs, tab.cursor, text, runs);
             tab.content.insert_str(tab.cursor, text);
             tab.cursor += text.len();
             tab.is_modified = true;
 
-            // Only apply when the attribute list actually describes the text
-            // being inserted, one entry per paragraph it spans. A mismatch
-            // means the caller composed text and attributes from different
-            // places, and applying them positionally anyway would stamp each
-            // paragraph with its neighbour's card style — silent, and worse
-            // than leaving the split's defaults alone.
-            let spanned = text.matches('\n').count() + 1;
-            if spanned == paragraph_attrs.len() {
-                for (i, (heading, alignment)) in paragraph_attrs.iter().enumerate() {
-                    if let Some(para) = tab.paragraphs.get_mut(first_para + i) {
-                        para.heading = *heading;
-                        para.alignment = *alignment;
-                    }
-                }
-            }
+            crate::document_ops::apply_pasted_paragraph_attrs(
+                &mut tab.paragraphs,
+                first_para,
+                text.matches('\n').count() + 1,
+                paragraph_attrs,
+                dest_attrs,
+            );
         }
         if let Some(rec) = self.vim_insertion_recording.as_mut() {
             rec.push_str(text);
@@ -6082,7 +6208,7 @@ impl AppState {
          * (dir = wherever was clicked).
          */
         let path = unique_path_in(dir, "Untitled", "docx");
-        create_new_docx(&default_paragraphs(), &path)?;
+        create_new_docx(&default_paragraphs(), &path, self.new_doc_style())?;
         self.refresh_file_tree();
         self.open_file(path);
         Ok(())
@@ -6133,13 +6259,7 @@ impl AppState {
             log_line(&format!("[open] not a .docx, refusing to open: {}", path.display()));
             return;
         }
-        let mut tab = Tab::from_path(self.next_tab_id, path.clone());
-        if let Ok((paragraphs, origin)) = parse_docx(&path) {
-            tab.content = paragraphs_to_plain_text(&paragraphs);
-            tab.paragraphs = paragraphs;
-            tab.has_unsupported_blocks = origin.has_unsupported_blocks;
-            tab.docx_origin = Some(Arc::new(origin));
-        }
+        let tab = tab_from_docx(self.next_tab_id, &path);
         self.next_tab_id += 1;
         // The outgoing tab's recovery snapshot goes with it — it was clean,
         // so there is nothing left to recover. Its path still goes on the
@@ -6179,20 +6299,53 @@ impl AppState {
     /// "Copy file" — remembers `path` for a later "Paste file". Nothing
     /// touches the filesystem until the paste.
     pub fn copy_file(&mut self, path: PathBuf) {
-        self.copied_file = Some(path);
+        self.copied_file = Some((path, false));
     }
 
-    /// "Paste file" — copies whatever "Copy file" remembered into `dir`,
-    /// under a name that can't collide (so pasting back into the source
-    /// folder produces a copy rather than overwriting the original).
-    /// `copied_file` is left set, so one copy can be pasted into several
-    /// folders.
+    /// "Cut file" — same mailbox as `copy_file`, marked as a move, so the
+    /// next "Paste file" relocates the original instead of duplicating it.
+    ///
+    /// This is what `rename_path` used to do by accident when a path was
+    /// typed into the rename box, only discoverable, able to move folders,
+    /// and unable to drop something outside the project.
+    pub fn cut_file(&mut self, path: PathBuf) {
+        self.copied_file = Some((path, true));
+    }
+
+    /// "Paste file" — puts whatever "Copy file"/"Cut file" remembered into
+    /// `dir`, under a name that can't collide (so pasting back into the
+    /// source folder produces a copy rather than overwriting the original).
+    ///
+    /// A copy leaves `copied_file` set, so one copy can be pasted into
+    /// several folders. A cut clears it: the original has moved, and pasting
+    /// it a second time would only fail on a path that no longer exists.
     pub fn paste_file_into(&mut self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-        let src = self.copied_file.clone().ok_or("nothing copied")?;
+        let (src, is_cut) = self.copied_file.clone().ok_or("nothing copied")?;
+        let is_dir = src.is_dir();
+        // A folder can't be moved inside itself: `fs::rename` would either
+        // fail obscurely or, worse, succeed and strand the subtree.
+        if is_cut && is_dir && dir.starts_with(&src) {
+            return Err("can't move a folder into itself".into());
+        }
         let stem = src.file_stem().and_then(|s| s.to_str()).ok_or("file has no name")?;
-        let dest = unique_path_in(dir, stem, "docx");
-        std::fs::copy(&src, dest)?;
-        self.refresh_file_tree();
+        let dest = if is_dir {
+            let mut candidate = dir.join(stem);
+            let mut counter = 1;
+            while candidate.exists() {
+                candidate = dir.join(format!("{stem} {counter}"));
+                counter += 1;
+            }
+            candidate
+        } else {
+            unique_path_in(dir, stem, "docx")
+        };
+        if is_cut {
+            self.relocate_path(&src, dest, is_dir)?;
+            self.copied_file = None;
+        } else {
+            std::fs::copy(&src, dest)?;
+            self.refresh_file_tree();
+        }
         Ok(())
     }
 
@@ -6227,12 +6380,45 @@ impl AppState {
         if trimmed.is_empty() {
             return Err("name cannot be empty".into());
         }
+        // A rename changes the basename, nothing else. `dir.join(trimmed)`
+        // will happily accept `../elsewhere` — and an *absolute* name throws
+        // the parent away entirely, so typing `/tmp/x` moved the file clean
+        // out of the project. Requiring exactly one `Normal` component rules
+        // out `..`, `.`, both platforms' separators, and root/prefix
+        // components in a single check, without an ad-hoc character
+        // blocklist that would miss one of them. Moving is a real thing to
+        // want, so it has its own gesture now: Cut File / Paste File.
+        let mut components = std::path::Path::new(trimmed).components();
+        let single_segment = matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None),
+        );
+        if !single_segment {
+            return Err("name can't contain a path — use Cut File and Paste File to move it".into());
+        }
         let dir = old.parent().ok_or("path has no parent directory")?;
         let is_dir = old.is_dir();
         let new = if is_dir { dir.join(trimmed) } else { with_docx_extension(&dir.join(trimmed)) };
         if new == old {
             return Ok(());
         }
+        self.relocate_path(old, new, is_dir)
+    }
+
+    /// Moves `old` to `new` on disk and re-points everything that referred to
+    /// it — shared by `rename_path` and by a cut/paste move, which differ
+    /// only in how they arrive at `new`.
+    ///
+    /// Re-pointing is the part that isn't optional: renaming or moving
+    /// something currently open is the common case, and a tab left holding a
+    /// stale path would write its next save to a location that no longer
+    /// exists.
+    ///
+    /// ponytail: `fs::rename` only, so a move across filesystems fails
+    /// instead of falling back to copy-then-delete. Everything here lives
+    /// under one working directory; add the fallback if that stops being
+    /// true.
+    fn relocate_path(&mut self, old: &std::path::Path, new: PathBuf, is_dir: bool) -> Result<(), Box<dyn std::error::Error>> {
         if new.exists() {
             return Err(format!("{} already exists", new.display()).into());
         }
@@ -6559,17 +6745,26 @@ impl AppState {
         self.tabs.get(self.active_tab).and_then(|t| t.vim_selected_register)
     }
 
-    pub fn set_register(&mut self, register: char, text: String) {
+    pub fn set_register(&mut self, register: char, text: String, metadata: Option<String>) {
         /*
          * Public setter so `text_editor.rs` can stage the OS clipboard's
          * text into register `'+'` right before dispatching a `"+p`/`"+P`
          * paste — the ordinary (GPUI-unaware) paste path then reads it
          * back out via `registers.get` exactly like any other register.
+         *
+         * `metadata` is the clipboard item's own rich-formatting metadata
+         * when there is any — present when the copy came from this app,
+         * absent when another app wrote the clipboard, in which case the
+         * register pastes plain.
          */
         self.registers.insert(register, text);
+        match metadata {
+            Some(meta) => { self.register_formats.insert(register, meta); }
+            None => { self.register_formats.remove(&register); }
+        }
     }
 
-    pub fn take_pending_clipboard_sync(&mut self) -> Option<String> {
+    pub fn take_pending_clipboard_sync(&mut self) -> Option<(String, String)> {
         /*
          * Drains the `'+'`-register write mailbox. `text_editor.rs` calls
          * this right after dispatching every vim keystroke and, if it
@@ -7381,7 +7576,22 @@ impl AppState {
         self.tabs.get_mut(self.active_tab).and_then(|t| t.vim_selected_register.take()).unwrap_or('"')
     }
 
-    fn write_vim_register(&mut self, text: String, also_yank: bool) {
+    /// The rich-clipboard metadata for `content[start..end)` — the same
+    /// encoding `rich_clipboard` writes for Ctrl+C, so a vim register and the
+    /// system clipboard carry formatting identically and a `"+y` can hand its
+    /// formatting straight to a Ctrl+V.
+    ///
+    /// Must be read *before* the operator mutates anything: `d`/`c`/`x`/`s`
+    /// are about to delete the very runs this describes.
+    fn vim_range_metadata(&self, start: usize, end: usize) -> String {
+        let Some(tab) = self.tabs.get(self.active_tab) else { return String::new() };
+        crate::rich_clipboard::encode_with_lengths(
+            &crate::document_ops::runs_in_range(&tab.paragraphs, start, end),
+            &crate::document_ops::paragraph_attrs_in_range(&tab.paragraphs, start, end),
+        )
+    }
+
+    fn write_vim_register(&mut self, text: String, metadata: String, also_yank: bool) {
         /*
          * The single place any operator's removed/copied text lands in
          * `registers`: always the default (`'"'`) and, for `y`, also the
@@ -7390,16 +7600,23 @@ impl AppState {
          * register was `'+'`, stages `pending_clipboard_sync` so
          * `text_editor.rs` can push it onto the real OS clipboard (needs
          * `cx`, which this file doesn't have).
+         *
+         * `metadata` (from `vim_range_metadata`) shadows every one of those
+         * writes in `register_formats`, so `p` can put the formatting back
+         * rather than letting the pasted text inherit the run it lands in.
          */
         let selected = self.take_vim_selected_register();
         self.registers.insert('"', text.clone());
+        self.register_formats.insert('"', metadata.clone());
         if also_yank {
             self.registers.insert('0', text.clone());
+            self.register_formats.insert('0', metadata.clone());
         }
         if selected != '"' {
             self.registers.insert(selected, text.clone());
+            self.register_formats.insert(selected, metadata.clone());
             if selected == '+' {
-                self.pending_clipboard_sync = Some(text);
+                self.pending_clipboard_sync = Some((text, metadata));
             }
         }
     }
@@ -7420,6 +7637,16 @@ impl AppState {
         let register = self.take_vim_selected_register();
         let Some(text) = self.registers.get(&register).cloned() else { return };
         if text.is_empty() { return; }
+        // The formatting yanked alongside the text (`write_vim_register`), in
+        // the same encoding Ctrl+C uses. Absent — or unreadable, for a `+`
+        // register another app filled — pastes plain, exactly as before:
+        // empty runs make `sync_insert_str_with_runs` fall back to
+        // `sync_insert_str`, and empty attrs leave paragraphs as the split
+        // left them.
+        let (runs, attrs) = self.register_formats.get(&register)
+            .and_then(|meta| crate::rich_clipboard::decode(meta, &text))
+            .unwrap_or_default();
+        let spanned = text.matches('\n').count() + 1;
         self.push_undo_snapshot();
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         if text.ends_with('\n') {
@@ -7430,15 +7657,39 @@ impl AppState {
                 if end < tab.content.len() { end + 1 } else { tab.content.len() }
             };
             let needs_leading_newline = insert_at == tab.content.len() && !tab.content.is_empty() && !tab.content.ends_with('\n');
+            let first_para = crate::document_ops::resolve_position(&tab.paragraphs, insert_at).0;
+            // With a leading newline the paste appends a line instead of
+            // splitting `first_para`, so that paragraph keeps its own
+            // attributes and the new blank line at the end must not inherit
+            // them; the pasted paragraphs also start one further along.
+            let dest_attrs = (!needs_leading_newline)
+                .then(|| tab.paragraphs.get(first_para).map(|p| (p.heading, p.alignment)))
+                .flatten();
             let insertion = if needs_leading_newline { format!("\n{}", text) } else { text };
-            sync_insert_str(&mut tab.paragraphs, insert_at, &insertion);
+            let mut runs = runs;
+            if needs_leading_newline && !runs.is_empty() {
+                runs.insert(0, Run { text: "\n".to_string(), ..Run::default() });
+            }
+            crate::document_ops::sync_insert_str_with_runs(&mut tab.paragraphs, insert_at, &insertion, &runs);
             tab.content.insert_str(insert_at, &insertion);
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
+            crate::document_ops::apply_pasted_paragraph_attrs(
+                &mut tab.paragraphs,
+                first_para + usize::from(needs_leading_newline),
+                spanned,
+                &attrs,
+                dest_attrs,
+            );
             tab.cursor = first_nonblank(&tab.content, landing_start);
         } else {
             let at = if before { tab.cursor } else { char_right(&tab.content, tab.cursor) };
-            sync_insert_str(&mut tab.paragraphs, at, &text);
+            let first_para = crate::document_ops::resolve_position(&tab.paragraphs, at).0;
+            let dest_attrs = tab.paragraphs.get(first_para).map(|p| (p.heading, p.alignment));
+            crate::document_ops::sync_insert_str_with_runs(&mut tab.paragraphs, at, &text, &runs);
             tab.content.insert_str(at, &text);
+            crate::document_ops::apply_pasted_paragraph_attrs(
+                &mut tab.paragraphs, first_para, spanned, &attrs, dest_attrs,
+            );
             let last_char_start = text.char_indices().last().map(|(i, _)| i).unwrap_or(0);
             tab.cursor = at + last_char_start;
         }
@@ -7457,8 +7708,9 @@ impl AppState {
         let end = char_right(&tab.content, tab.cursor).min(line_end(&tab.content, tab.cursor));
         if end == tab.cursor { return; }
         let start = tab.cursor;
+        let meta = self.vim_range_metadata(start, end);
         let text = self.delete_vim_range(start, end);
-        self.write_vim_register(text, false);
+        self.write_vim_register(text, meta, false);
     }
 
     fn vim_delete_char_backward(&mut self) {
@@ -7469,8 +7721,10 @@ impl AppState {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let start = char_left(&tab.content, tab.cursor).max(line_start(&tab.content, tab.cursor));
         if start == tab.cursor { return; }
-        let text = self.delete_vim_range(start, tab.cursor);
-        self.write_vim_register(text, false);
+        let end = tab.cursor;
+        let meta = self.vim_range_metadata(start, end);
+        let text = self.delete_vim_range(start, end);
+        self.write_vim_register(text, meta, false);
     }
 
     fn vim_substitute_char(&mut self) {
@@ -7481,8 +7735,10 @@ impl AppState {
          */
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let end = char_right(&tab.content, tab.cursor).min(line_end(&tab.content, tab.cursor));
-        let text = self.delete_vim_range(tab.cursor, end);
-        self.write_vim_register(text, false);
+        let start = tab.cursor;
+        let meta = self.vim_range_metadata(start, end);
+        let text = self.delete_vim_range(start, end);
+        self.write_vim_register(text, meta, false);
         self.vim_enter_insert_before_cursor();
     }
 
@@ -7494,8 +7750,9 @@ impl AppState {
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         let start = line_start(&tab.content, tab.cursor);
         let end = line_end(&tab.content, tab.cursor);
+        let meta = self.vim_range_metadata(start, end);
         let text = self.delete_vim_range(start, end);
-        self.write_vim_register(text, false);
+        self.write_vim_register(text, meta, false);
         self.vim_enter_insert_before_cursor();
     }
 
@@ -7705,10 +7962,15 @@ impl AppState {
          * they're two-keystroke commands, not single operator chars)
          * upper/lowercase the range's text in place.
          */
+        // The range's formatting, read before `d`/`c` delete the runs it
+        // describes. Only the three register-writing operators pay for it.
+        let meta = matches!(operator, 'd' | 'y' | 'c')
+            .then(|| self.vim_range_metadata(start, end))
+            .unwrap_or_default();
         match operator {
             'd' => {
                 let text = self.delete_vim_range(start, end);
-                self.write_vim_register(text, false);
+                self.write_vim_register(text, meta, false);
             }
             'y' => {
                 let Some(tab) = self.tabs.get(self.active_tab) else { return };
@@ -7718,11 +7980,11 @@ impl AppState {
                     tab.cursor = landing;
                     tab.selection = None;
                 }
-                self.write_vim_register(text, true);
+                self.write_vim_register(text, meta, true);
             }
             'c' => {
                 let text = self.delete_vim_range(start, end);
-                self.write_vim_register(text, false);
+                self.write_vim_register(text, meta, false);
                 self.vim_enter_insert_before_cursor();
             }
             '>' => self.indent_vim_range(start, end, true),
@@ -8438,6 +8700,60 @@ impl AppState {
 /// and the write), which is fine here: every caller's own `fs` call reports
 /// the failure, and the alternative is exclusive-create plumbing no
 /// single-user desktop editor needs.
+/// Builds the tab for `path`, parsing its docx content — the one place both
+/// `open_file` and `open_file_in_current_tab` do it, so they cannot drift on
+/// what a failed parse means.
+///
+/// When the parse fails on a file that *holds bytes*, the tab still opens,
+/// still titled after the file, but *detached* from it: `file_path` is
+/// cleared. That detachment is the whole point. With the path still attached
+/// and `docx_origin` left at `None`, the first Ctrl+S took `save_tab`'s
+/// `create_new_docx` branch and replaced the unreadable original with a blank
+/// minimal document — silently, with no error and nothing to undo, on exactly
+/// the files least likely to have a backup. Detached, Ctrl+S is the no-op
+/// every path-less tab already is, and Save As still writes the content
+/// anywhere the user picks, including back over the original when that is
+/// genuinely what the user wants.
+///
+/// Deliberately *not* a refusal to open, and deliberately not applied to a
+/// missing or empty file: a `touch`ed 0-byte placeholder is a real way to
+/// start a document here, and a tab reopened after its file was deleted
+/// should still be able to write itself back. Neither can lose content that
+/// isn't there. Only the silent overwrite of real bytes goes away.
+fn tab_from_docx(id: usize, path: &std::path::Path) -> Tab {
+    let mut tab = Tab::from_path(id, path.to_path_buf());
+    match parse_docx(path) {
+        Ok((paragraphs, origin)) => {
+            tab.content = paragraphs_to_plain_text(&paragraphs);
+            tab.paragraphs = paragraphs;
+            tab.has_unsupported_blocks = origin.has_unsupported_blocks;
+            tab.docx_origin = Some(Arc::new(origin));
+        }
+        Err(e) => {
+            // Bytes we couldn't read are bytes we must not destroy — but only
+            // if there are any. A missing or zero-length file has nothing to
+            // lose, so it stays attached and the first save creates it: that
+            // is how a `touch`ed placeholder, and a tab reopened after its
+            // file was deleted, are meant to work. Anything else is a file
+            // holding content this build can't parse, and *that* is the case
+            // where staying attached let `save_tab`'s `create_new_docx`
+            // branch replace the original with a blank document.
+            let holds_content = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
+            if holds_content {
+                tab.file_path = None;
+            }
+            // stderr, matching how every other non-fatal file error in this
+            // file reports itself — there's no in-app notification surface.
+            log_line(&format!(
+                "[open] couldn't read {}: {e}{}",
+                path.display(),
+                if holds_content { " — opened detached from the file, use Save As to write it" } else { "" },
+            ));
+        }
+    }
+    tab
+}
+
 pub fn unique_path_in(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
     let mut candidate = dir.join(format!("{stem}.{ext}"));
     let mut counter = 1;
@@ -9710,6 +10026,7 @@ mod tests {
             normal_text_size_half_points: 22,
             line_spacing: DEFAULT_LINE_SPACING,
             pocket_size_half_points: 52,
+            hat_size_half_points: 44,
             block_size_half_points: 32,
             tag_size_half_points: 26,
             cite_size_half_points: 26,
@@ -9720,6 +10037,7 @@ mod tests {
             vim_macro_record_pending: false,
             vim_last_macro_register: None,
             registers: HashMap::new(),
+            register_formats: HashMap::new(),
             pending_clipboard_sync: None,
             last_search: None,
             last_change: None,
@@ -9796,7 +10114,7 @@ mod tests {
             .join(format!("vimbatim_reuse_{}_{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("card.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
         (dir, path)
     }
 
@@ -10986,7 +11304,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vimbatim_split_open_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("card.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("primary", 0, None);
         state.open_split();
@@ -11104,7 +11422,7 @@ mod tests {
 
         // Case-insensitive: Windows hands back .DOCX from the native picker.
         let upper = dir.join("doc.DOCX");
-        create_new_docx(&default_paragraphs(), &upper).unwrap();
+        create_new_docx(&default_paragraphs(), &upper, Default::default()).unwrap();
         state.open_file(upper);
         assert_eq!(state.tabs.len(), tabs_before + 1, ".DOCX must still open");
 
@@ -11154,7 +11472,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("doc.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("hello", 0, None);
         state.pending_focus_editor = None;
@@ -11172,7 +11490,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("doc.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("hello", 0, None);
         state.open_file(path.clone());
@@ -11214,6 +11532,158 @@ mod tests {
         state.close_tab(1);
 
         assert!(state.closed_tabs.is_empty());
+    }
+
+    /// A `.docx` this build can't parse must never be silently replaced by a
+    /// blank document. Before the fix, the tab kept `file_path` with
+    /// `docx_origin: None`, so the first edit + Ctrl+S took `save_tab`'s
+    /// `create_new_docx` branch and overwrote the original in place.
+    #[test]
+    fn opening_an_unparseable_docx_detaches_the_tab_so_a_save_cannot_overwrite_it() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_unparseable_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.docx");
+        std::fs::write(&path, b"this is not a zip, let alone a docx").unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path.clone());
+
+        let tab = state.tabs.iter().find(|t| t.title == "corrupt.docx").expect("tab still opens");
+        assert_eq!(tab.file_path, None, "an unreadable file must not stay attached to its tab");
+
+        // Edit and save the way a user would; the original must be untouched.
+        let idx = state.tabs.iter().position(|t| t.title == "corrupt.docx").unwrap();
+        state.active_tab = idx;
+        state.insert_str("typed over it");
+        state.save_active_tab().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the unreadable original was overwritten");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the rule: a missing or zero-length file has no
+    /// content to lose, so it stays attached and saving creates it — how a
+    /// `touch`ed placeholder and a reopened-after-deletion tab are meant to
+    /// work.
+    #[test]
+    fn opening_an_empty_placeholder_docx_stays_attached_so_it_can_be_written() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_placeholder_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("placeholder.docx");
+        std::fs::write(&path, b"").unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path.clone());
+
+        let idx = state.tabs.iter().position(|t| t.title == "placeholder.docx").unwrap();
+        assert_eq!(state.tabs[idx].file_path.as_ref(), Some(&path));
+        state.active_tab = idx;
+        state.insert_str("real content now");
+        state.save_active_tab().unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > 0, "saving a placeholder must write it");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A document created here has to be a package Word accepts: every part
+    /// declared in `[Content_Types].xml`, every relationship resolving, and
+    /// every `<w:rStyle>` naming a style the same file defines. Goes through
+    /// the real save path with real settings rather than the defaults.
+    #[test]
+    fn a_new_document_is_a_complete_package_with_no_dangling_references() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_pkg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("New.docx");
+
+        let mut state = make_state("", 0, None);
+        state.normal_text_size_half_points = 26;
+        state.set_card_size_points(CardStyleKind::Hat, 19);
+        crate::docx_parser::create_new_docx(&default_paragraphs(), &path, state.new_doc_style()).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        for required in [
+            "[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels",
+            "word/document.xml", "word/styles.xml", "word/settings.xml",
+            "docProps/core.xml", "docProps/app.xml",
+        ] {
+            assert!(names.contains(&required.to_string()), "missing {required}: {names:?}");
+        }
+
+        let read = |archive: &mut zip::ZipArchive<std::fs::File>, name: &str| {
+            let mut out = String::new();
+            std::io::Read::read_to_string(&mut archive.by_name(name).unwrap(), &mut out).unwrap();
+            out
+        };
+        let content_types = read(&mut archive, "[Content_Types].xml");
+        for part in &names {
+            // Every part except the two `Default`-covered extensions needs an
+            // Override, or Word refuses the package.
+            if part.ends_with(".rels") || part == "[Content_Types].xml" { continue }
+            assert!(
+                content_types.contains(&format!("PartName=\"/{part}\"")),
+                "{part} has no content-type override: {content_types}",
+            );
+        }
+
+        // Relationship targets resolve to parts that are actually present.
+        for rels in ["_rels/.rels", "word/_rels/document.xml.rels"] {
+            let xml = read(&mut archive, rels);
+            let base = if rels.starts_with("word/") { "word/" } else { "" };
+            for target in xml.split("Target=\"").skip(1).map(|t| &t[..t.find('"').unwrap()]) {
+                let full = format!("{base}{target}");
+                assert!(names.contains(&full), "{rels} points at missing {full}: {names:?}");
+            }
+        }
+
+        // The settings actually reached the file.
+        let styles = read(&mut archive, "word/styles.xml");
+        assert!(styles.contains("<w:sz w:val=\"26\"/><w:szCs w:val=\"26\"/>"), "got: {styles}");
+        assert!(styles.contains("w:styleId=\"Heading2\""));
+        assert!(
+            styles[styles.find("w:styleId=\"Heading2\"").unwrap()..].contains("<w:sz w:val=\"38\"/>"),
+            "the configured 19pt Hat: {styles}",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blank document created in Verbatim used to parse to *zero*
+    /// paragraphs, and the first keystroke then panicked
+    /// (`index out of bounds: the len is 0 but the index is 0`,
+    /// `document_ops.rs`'s `sync_insert_char`). Guards the whole path, not
+    /// just the parser: create in Verbatim, open here, type.
+    #[test]
+    fn a_document_of_only_empty_paragraphs_opens_and_accepts_typing() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_blank_ext_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Blank.docx");
+        // A body with no paragraph this parser recognises — the same end state
+        // Verbatim's own blank document reached, whose single self-closing
+        // `<w:p/>` used to be dropped. Built through the real writer so the
+        // whole open path is exercised, not just the parser.
+        crate::docx_parser::create_new_docx(&[], &path, Default::default()).unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path.clone());
+        let idx = state.tabs.iter().position(|t| t.title == "Blank.docx").expect("opens");
+        state.active_tab = idx;
+        assert_eq!(state.tabs[idx].paragraphs.len(), 1, "the blank paragraph must survive");
+
+        state.insert_str("typed");
+        assert_eq!(state.tabs[idx].content, "typed");
+        state.save_active_tab().unwrap();
+
+        let (reloaded, _) = crate::docx_parser::parse_docx(&path).unwrap();
+        assert_eq!(
+            reloaded.iter().map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>()).collect::<Vec<_>>(),
+            vec!["typed"],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -11358,7 +11828,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("doc.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("hello", 0, None);
         state.tabs[0].file_path = Some(path);
@@ -12060,6 +12530,148 @@ mod tests {
         }
     }
 
+    /// The reported bug, from the user's own `Untitled.docx`: a selection
+    /// that swallows the trailing newline — a drag, Shift+Down, `V`, or any
+    /// vim linewise range, i.e. how a card actually gets copied — yields one
+    /// *fewer* paragraph attribute than the pasted text spans, because
+    /// nothing of the paragraph past that newline was copied.
+    ///
+    /// The old exact-match guard therefore never fired and dropped every
+    /// heading and alignment. Run-level formatting survived regardless, which
+    /// is why the symptom read as "size, bold, single underline and boxes are
+    /// fine, but alignment, heading and a Hat's double underline are ignored"
+    /// rather than as total loss: a Hat that loses `heading: 2` stops being a
+    /// Hat (font size, fold marker and `run_is_hidden` all key off it) even
+    /// though its `double_underline` run flag is still there.
+    #[test]
+    fn copy_paste_keeps_paragraph_attrs_when_the_selection_swallows_the_newline() {
+        let card = |text: &str, heading: u8, size: u16, u: bool, du: bool, boxed: bool| Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: text.into(), bold: true, size, underline: u,
+                double_underline: du, box_format: boxed, ..Run::default()
+            }],
+            heading,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut source = make_state_with_paragraphs(
+            vec![
+                card("Pocket", 1, 52, false, false, true),
+                card("Hat", 2, 44, false, true, false),
+                card("Block", 3, 32, true, false, false),
+                card("Tag", 4, 26, false, false, false),
+                para_plain("normal text"),
+                para_plain(""),
+            ],
+            0,
+        );
+        // Through the newline that ends "normal text", stopping at the blank
+        // line's first byte — the selection a drag down the card produces.
+        let end = source.tabs[0].content.find("normal text").unwrap() + "normal text".len() + 1;
+        source.tabs[0].selection = Some((0, end));
+
+        let plain = source.copy_selection().unwrap();
+        let runs = source.copy_selection_runs().unwrap();
+        let attrs = source.copy_selection_paragraph_attrs().unwrap();
+        // One short of the five paragraphs the text spans — the case the old
+        // guard treated as "malformed" and silently ignored.
+        assert_eq!(attrs.len(), plain.matches('\n').count());
+        let meta = crate::rich_clipboard::encode_with_lengths(&runs, &attrs);
+        let (runs, attrs) = crate::rich_clipboard::decode(&meta, &plain).unwrap();
+
+        let mut dest = make_state_with_paragraphs(vec![para_plain("")], 0);
+        dest.insert_str_with_runs_and_paragraphs(&plain, &runs, &attrs);
+
+        let paras = &dest.tabs[0].paragraphs;
+        assert_eq!(
+            paras.iter().map(|p| p.heading).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 0, 0],
+            "card-style headings lost on a trailing-newline selection"
+        );
+        for (i, para) in paras[..4].iter().enumerate() {
+            assert_eq!(para.alignment, Alignment::Center, "alignment lost on pasted paragraph {i}");
+        }
+        assert!(paras[1].runs[0].double_underline, "the Hat's double underline must survive too");
+        assert!(paras[0].runs[0].box_format, "the Pocket's box must survive too");
+    }
+
+    /// Pasting *above* an existing card used to strip it: the paste splits
+    /// the destination paragraph, and `split_paragraph_at` hands the new tail
+    /// `heading: 0` and default alignment (right for pressing Enter, wrong
+    /// for paste). The tail is the same line the user was standing on, so it
+    /// has to keep what it had.
+    ///
+    /// Goes through the no-formatting case of the paste path — a paste with
+    /// no clipboard metadata, or Paste Without Formatting, must not flatten
+    /// the line it lands in either.
+    #[test]
+    fn pasting_above_a_card_line_leaves_that_cards_paragraph_attrs_intact() {
+        let pocket = Paragraph {
+            list: None,
+            runs: vec![Run { text: "keep".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+            heading: 1,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut state = make_state_with_paragraphs(vec![pocket], 0);
+        state.tabs[0].cursor = 0;
+        state.insert_str_with_runs("new\n", &[]);
+
+        let paras = &state.tabs[0].paragraphs;
+        assert_eq!(paras.len(), 2);
+        assert_eq!(paras[1].runs[0].text, "keep");
+        assert_eq!(paras[1].heading, 1, "the line pasted above lost its Pocket heading");
+        assert_eq!(paras[1].alignment, Alignment::Center, "the line pasted above lost its alignment");
+    }
+
+    /// Vim's registers held plain text only, so `yy`/`p` (and `dd`, `cc`,
+    /// visual `y` — they all funnel through `write_vim_register`) pasted text
+    /// that simply inherited whatever run the cursor was sitting in. They now
+    /// carry the same `rich_clipboard` payload Ctrl+C does.
+    #[test]
+    fn vim_yank_and_put_preserves_run_and_paragraph_formatting() {
+        let hat = Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "Hat".into(), bold: true, size: 44, double_underline: true, ..Run::default()
+            }],
+            heading: 2,
+            alignment: Alignment::Center,
+            unsupported_xml: None,
+        };
+        let mut state = make_state_with_paragraphs(vec![hat, para_plain("body")], 0);
+
+        state.handle_vim_key("y", false, None);
+        state.handle_vim_key("y", false, None); // yy: linewise yank of the Hat
+        // Down to the plain body line, set directly rather than with `j`:
+        // vertical motion is resolved against visual rows in `text_editor.rs`,
+        // which has no place in a state-level test.
+        state.tabs[0].cursor = state.tabs[0].content.find("body").unwrap();
+        state.handle_vim_key("p", false, None); // put below it
+
+        let paras = &state.tabs[0].paragraphs;
+        let pasted = &paras[2];
+        assert_eq!(pasted.runs[0].text, "Hat");
+        assert_eq!(pasted.heading, 2, "yy/p lost the Hat's heading");
+        assert_eq!(pasted.alignment, Alignment::Center, "yy/p lost the Hat's alignment");
+        assert!(pasted.runs[0].double_underline, "yy/p lost the double underline");
+        assert!(pasted.runs[0].bold, "yy/p lost bold");
+        assert_eq!(pasted.runs[0].size, 44, "yy/p lost the font size");
+        // The body line it was pasted after is untouched.
+        assert_eq!(paras[1].runs[0].text, "body");
+        assert_eq!(paras[1].heading, 0);
+    }
+
+    /// A `+` register filled from another app's clipboard has no formatting
+    /// metadata; `p` must still paste it, plain, exactly as before.
+    #[test]
+    fn vim_put_from_a_register_with_no_formatting_pastes_plain() {
+        let mut state = make_state("abc", 0, None);
+        state.set_register('"', "XY".to_string(), None);
+        state.handle_vim_key("p", false, None);
+        assert_eq!(state.tabs[0].content, "aXYbc");
+    }
     #[test]
     fn test_multi_paragraph_copy_paste_round_trip_preserves_per_line_formatting() {
         // Regression test: runs_in_range never emitted a run for the
@@ -13977,7 +14589,12 @@ mod tests {
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("y", false, None);
         assert_eq!(state.registers.get(&'+'), Some(&"hello\n".to_string()));
-        assert_eq!(state.pending_clipboard_sync, Some("hello\n".to_string()));
+        // The formatting rides along so `text_editor.rs` can put it on the
+        // clipboard as metadata; only the text half is asserted here — the
+        // encoding itself is `rich_clipboard`'s own round-trip tests.
+        let (text, metadata) = state.pending_clipboard_sync.clone().unwrap();
+        assert_eq!(text, "hello\n");
+        assert_eq!(Some(&metadata), state.register_formats.get(&'+'));
     }
 
     // ── Task H.5: p/P paste ──────────────────────────────────────────────────
@@ -18477,8 +19094,9 @@ mod tests {
 
         assert!(src.exists());
         assert!(dir.join("Card 1.docx").exists());
-        // The copy stays on the clipboard so it can be pasted again elsewhere.
-        assert_eq!(state.copied_file, Some(src));
+        // The copy stays on the clipboard so it can be pasted again elsewhere,
+        // and is still flagged as a copy rather than a cut.
+        assert_eq!(state.copied_file, Some((src, false)));
     }
 
     #[test]
@@ -18540,6 +19158,112 @@ mod tests {
         assert_eq!(std::fs::read(&taken).unwrap(), b"b", "must not overwrite");
     }
 
+    /// Rename changes the basename and nothing else. `dir.join(trimmed)`
+    /// used to accept `../elsewhere`, and an *absolute* name discarded the
+    /// parent entirely — so typing `/tmp/x` moved the file clean out of the
+    /// project, from a box that only claims to rename it.
+    #[test]
+    fn test_rename_path_refuses_anything_that_is_not_a_bare_name() {
+        let dir = temp_test_dir("rename_refuses_paths");
+        let sub = dir.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let old = sub.join("Case.docx");
+        std::fs::write(&old, b"a").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        for name in ["../escaped", "..", ".", "a/b", "sub/../../escaped"] {
+            assert!(state.rename_path(&old, name).is_err(), "{name} must be refused");
+        }
+        assert!(state.rename_path(&old, "/tmp/vimbatim_rename_escape").is_err());
+        assert!(old.exists(), "a refused rename must leave the file where it was");
+        assert!(!dir.join("escaped.docx").exists());
+
+        // An ordinary rename still works.
+        state.rename_path(&old, "Renamed").unwrap();
+        assert!(sub.join("Renamed.docx").exists());
+    }
+
+    /// Cut/Paste is where moving lives now: discoverable, folder-capable, and
+    /// unable to drop something outside the project the way the rename box
+    /// could.
+    #[test]
+    fn test_cut_then_paste_moves_a_file_and_repoints_its_open_tab() {
+        let dir = temp_test_dir("cut_paste_moves_file");
+        let target = dir.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let src = dir.join("Case.docx");
+        std::fs::write(&src, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.tabs[0].file_path = Some(src.clone());
+
+        state.cut_file(src.clone());
+        state.paste_file_into(&target).unwrap();
+
+        let moved = target.join("Case.docx");
+        assert!(moved.exists(), "the file must be at the destination");
+        assert!(!src.exists(), "a cut moves, it does not copy");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"contents");
+        assert_eq!(state.tabs[0].file_path, Some(moved), "the open tab must follow the file");
+        assert!(state.copied_file.is_none(), "a cut pastes once");
+    }
+
+    /// A copy is unchanged by the cut work: original stays, and the clipboard
+    /// stays loaded so it can be pasted into several folders.
+    #[test]
+    fn test_copy_then_paste_still_duplicates_and_keeps_the_clipboard() {
+        let dir = temp_test_dir("copy_paste_still_copies");
+        let target = dir.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let src = dir.join("Case.docx");
+        std::fs::write(&src, b"contents").unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        state.copy_file(src.clone());
+        state.paste_file_into(&target).unwrap();
+
+        assert!(src.exists(), "a copy leaves the original alone");
+        assert!(target.join("Case.docx").exists());
+        assert!(state.copied_file.is_some(), "a copy can be pasted again");
+    }
+
+    #[test]
+    fn test_cut_then_paste_moves_a_folder_but_never_into_itself() {
+        let dir = temp_test_dir("cut_paste_moves_folder");
+        let src = dir.join("Round 3");
+        let nested = src.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("Case.docx"), b"c").unwrap();
+        let target = dir.join("Archive");
+        std::fs::create_dir(&target).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.tabs[0].file_path = Some(nested.join("Case.docx"));
+
+        // Into itself, or into its own descendant, is refused rather than
+        // stranding the subtree.
+        state.cut_file(src.clone());
+        assert!(state.paste_file_into(&src).is_err());
+        assert!(state.paste_file_into(&nested).is_err());
+        assert!(src.is_dir(), "a refused move must leave the folder in place");
+
+        state.paste_file_into(&target).unwrap();
+        let moved = target.join("Round 3");
+        assert!(moved.is_dir());
+        assert!(!src.exists());
+        assert_eq!(
+            state.tabs[0].file_path,
+            Some(moved.join("nested").join("Case.docx")),
+            "a tab open inside the moved folder must follow it",
+        );
+    }
+
     #[test]
     fn test_rename_path_on_a_dir_does_not_append_docx_extension() {
         let dir = temp_test_dir("rename_dir_no_extension");
@@ -18581,7 +19305,7 @@ mod tests {
     fn test_open_file_in_current_tab_refuses_to_replace_a_modified_tab() {
         let dir = temp_test_dir("open_current_dirty");
         let path = dir.join("Card.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("unsaved work", 0, None);
         state.working_directory = dir.clone();
@@ -18600,7 +19324,7 @@ mod tests {
     fn test_open_file_in_current_tab_replaces_a_clean_tab_in_place() {
         let dir = temp_test_dir("open_current_clean");
         let path = dir.join("Card.docx");
-        create_new_docx(&default_paragraphs(), &path).unwrap();
+        create_new_docx(&default_paragraphs(), &path, Default::default()).unwrap();
 
         let mut state = make_state("scratch", 0, None);
         state.working_directory = dir.clone();
@@ -18803,7 +19527,7 @@ mod tests {
 
         let mut para = crate::docx_parser::Paragraph::default();
         para.runs.push(crate::docx_parser::Run { text: "recovered text".into(), ..Default::default() });
-        crate::docx_parser::create_new_docx(&[para], &snapshot).unwrap();
+        crate::docx_parser::create_new_docx(&[para], &snapshot, Default::default()).unwrap();
         std::fs::write(&meta, crate::recovery::format_meta(Some(&original), "case.docx", 1)).unwrap();
 
         let mut state = make_state("", 0, None);

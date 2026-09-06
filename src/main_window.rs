@@ -142,9 +142,12 @@ impl MainWindow {
                 // can close while an earlier entry in this same batch is
                 // being written (each write below is awaited in turn), which
                 // would shift every later index — the id is immune to that.
-                let due: Vec<(usize, u64, Vec<Paragraph>, Option<Arc<DocxOrigin>>, Option<PathBuf>, String)> =
+                let due: Vec<(usize, u64, Vec<Paragraph>, Option<Arc<DocxOrigin>>, Option<PathBuf>, String, crate::docx_parser::NewDocStyle)> =
                     match snapshot_state.read_with(cx, |s, _| {
                         let now = Instant::now();
+                        // Read once per tick, not per tab: it is the same
+                        // for every tab in the document.
+                        let doc_style = s.new_doc_style();
                         s.tabs
                             .iter()
                             .filter(|t| {
@@ -165,6 +168,7 @@ impl MainWindow {
                                     t.docx_origin.clone(),
                                     t.file_path.clone(),
                                     t.title.clone(),
+                                    doc_style,
                                 )
                             })
                             .collect()
@@ -186,7 +190,7 @@ impl MainWindow {
                     }
                 }
 
-                for (tab_id, version, paragraphs, origin, path, title) in due {
+                for (tab_id, version, paragraphs, origin, path, title, doc_style) in due {
                     // `version` is the content_version captured above, before
                     // the write — not re-read afterwards, or an edit landing
                     // mid-write would be silently marked as snapshotted.
@@ -199,6 +203,7 @@ impl MainWindow {
                                 origin.as_deref(),
                                 path.as_deref(),
                                 &title,
+                                doc_style,
                             )
                         })
                         .await;
@@ -504,7 +509,10 @@ impl MainWindow {
                     Some((runs, paras)) => {
                         st.insert_str_with_runs_and_paragraphs(&text, &runs, &paras)
                     }
-                    None => st.insert_str(&text),
+                    // Foreign clipboard content: no formatting to restore, but
+                    // still a paste — the paste path is what leaves the line
+                    // it lands in with its own card style.
+                    None => st.insert_str_with_runs(&text, &[]),
                 }
                 cx.notify();
             });
@@ -514,7 +522,9 @@ impl MainWindow {
         cx.on_action(move |_: &PasteWithoutFormattingAction, cx| {
             if let Some(item) = cx.read_from_clipboard() {
                 if let Some(text) = item.text() {
-                    s.update(cx, |st, cx| { st.insert_str(&text); cx.notify(); });
+                    // Plain text by request — but "without formatting" is
+                    // about the pasted text, not about the line it lands in.
+                    s.update(cx, |st, cx| { st.insert_str_with_runs(&text, &[]); cx.notify(); });
                 }
             }
         });

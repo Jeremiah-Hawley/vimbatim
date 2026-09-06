@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::keybinds::{rebuild_keymap, KeyCombo, KeybindAction, KeybindCategory, Keybinds};
-use crate::state::{bundled_default_settings_path, settings_conf_path, AppState};
+use crate::state::{bundled_default_settings_path, settings_conf_path, AppState, CardStyleKind};
 use crate::theme::{palette, save_theme, save_theme_color_mode, save_theme_mode, ThemeColorMode, ThemeKind, ThemeMode};
 
 /// Where this modal *writes* every setting it changes.
@@ -594,6 +594,25 @@ impl SettingsModal {
         self.state.update(cx, |s, cx| {
             let current = (s.small_size_half_points / 2) as i32;
             s.set_shrink_size_points((current + delta).max(0) as u16);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// One stepper click on a card style's size. `None` means Cite, which
+    /// isn't a `CardStyleKind` (it targets the selection, not the whole line)
+    /// and so has its own setter — see `AppState::set_cite_size_points`.
+    fn adjust_card_size(&mut self, kind: Option<CardStyleKind>, delta: i32, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            let current = match kind {
+                Some(kind) => s.card_size_half_points(kind),
+                None => s.cite_size_half_points,
+            } as i32 / 2;
+            let points = (current + delta).max(0) as u16;
+            match kind {
+                Some(kind) => s.set_card_size_points(kind, points),
+                None => s.set_cite_size_points(points),
+            }
             cx.notify();
         });
         cx.notify();
@@ -1639,6 +1658,8 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
         emphasis_change_size: bool,
         emphasis_size_points: u16,
         shrink_points: u16,
+        // Pocket, Hat, Block, Tag, Cite — in points, in that order.
+        card_size_points: [u16; 5],
         exception: String,
         custom_highlights: Vec<u32>,
         analytic_color: String,
@@ -1659,10 +1680,75 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
             div().text_xs().text_color(rgb(p.text_muted)).max_w(px(420.0)).child(text)
         };
 
+        // One stepper row per card style. Built as a loop rather than five
+        // copy-pasted blocks: the only thing that varies is the label, the
+        // element ids, and which size it writes.
+        let card_rows: [(&'static str, &'static str, &'static str, Option<CardStyleKind>); 5] = [
+            ("card-size-pocket-down", "card-size-pocket-up", "Pocket", Some(CardStyleKind::Pocket)),
+            ("card-size-hat-down", "card-size-hat-up", "Hat", Some(CardStyleKind::Hat)),
+            ("card-size-block-down", "card-size-block-up", "Block", Some(CardStyleKind::Block)),
+            ("card-size-tag-down", "card-size-tag-up", "Tag", Some(CardStyleKind::Tag)),
+            ("card-size-cite-down", "card-size-cite-up", "Cite", None),
+        ];
+
         div()
             .flex()
             .flex_col()
             .gap(px(16.0))
+            // ── Card style sizes ──────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .pb(px(12.0))
+                    .border_b_1()
+                    .border_color(rgb(p.border_subtle))
+                    .child(heading("Card style sizes"))
+                    .child(note(
+                        "The point size each card style applies. These also go into the \
+                         Heading 1-4 style definitions of documents created here, so Word \
+                         and Verbatim show the same sizes.",
+                    ))
+                    .children(card_rows.into_iter().zip(card_size_points).map(
+                        |((id_down, id_up, label, kind), points)| {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .w(px(64.0))
+                                        .text_sm()
+                                        .text_color(rgb(p.text))
+                                        .child(label),
+                                )
+                                .child(Self::stepper_btn(id_down, "−", p).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        this.adjust_card_size(kind, -1, cx)
+                                    }),
+                                ))
+                                .child(
+                                    div()
+                                        .w(px(48.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_sm()
+                                        .text_color(rgb(p.text))
+                                        .child(format!("{points} pt")),
+                                )
+                                .child(Self::stepper_btn(id_up, "+", p).on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        this.adjust_card_size(kind, 1, cx)
+                                    }),
+                                ))
+                        },
+                    )),
+            )
             // ── Shrink size ───────────────────────────────────────────────
             .child(
                 div()
@@ -2260,6 +2346,16 @@ impl Render for SettingsModal {
             .read(cx)
             .custom_colors(crate::state::CustomColorTarget::Highlight)
             .to_vec();
+        let card_size_points: [u16; 5] = {
+            let st = self.state.read(cx);
+            [
+                st.card_size_half_points(CardStyleKind::Pocket) / 2,
+                st.card_size_half_points(CardStyleKind::Hat) / 2,
+                st.card_size_half_points(CardStyleKind::Block) / 2,
+                st.card_size_half_points(CardStyleKind::Tag) / 2,
+                st.cite_size_half_points / 2,
+            ]
+        };
         let (emphasis, emphasis_change_size, emphasis_size_points, paste_condense, paste_condense_pilcrow) = {
             let st = self.state.read(cx);
             (
@@ -2434,6 +2530,7 @@ impl Render for SettingsModal {
                                             emphasis_change_size,
                                             emphasis_size_points,
                                             shrink_points,
+                                            card_size_points,
                                             exception.clone(),
                                             custom_highlights.clone(),
                                             analytic_color.clone(),

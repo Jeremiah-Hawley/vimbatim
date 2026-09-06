@@ -505,6 +505,84 @@ pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<
     out
 }
 
+/// The `(heading, alignment)` of every paragraph byte range `[start, end)`
+/// overlaps, in document order — the paragraph-level half of a copy, paired
+/// with `runs_in_range`'s run-level half. Runs alone cannot express a card
+/// style: Pocket/Hat/Block/Tag are run-level bold/size/box *plus* these two
+/// paragraph fields (`AppState::apply_card_style`).
+///
+/// A range ending exactly on a paragraph boundary — any selection that
+/// swallowed a trailing `'\n'`, and every vim linewise range — deliberately
+/// does *not* pull in the paragraph after it: none of that paragraph was
+/// copied. So the result is one entry per copied paragraph, which is one
+/// *fewer* than the pasted text spans in exactly that case. See
+/// `apply_pasted_paragraph_attrs`, which treats it as a prefix for this
+/// reason.
+pub fn paragraph_attrs_in_range(
+    paragraphs: &[Paragraph],
+    start: usize,
+    end: usize,
+) -> Vec<(u8, Alignment)> {
+    let mut attrs = Vec::new();
+    let mut para_start = 0usize;
+    for para in paragraphs {
+        let para_end = para_start + para.runs.iter().map(|r| r.text.len()).sum::<usize>();
+        if (start <= para_end && end > para_start) || (start == end && start == para_start) {
+            attrs.push((para.heading, para.alignment));
+        }
+        para_start = para_end + 1; // the '\n' between paragraphs
+    }
+    attrs
+}
+
+/// Restores paragraph-level formatting over the `spanned` paragraphs a paste
+/// just wrote, starting at `first_para`.
+///
+/// Needed because the insertion itself goes through `split_paragraph_at`,
+/// which is written for pressing Enter: it deliberately gives the new
+/// paragraph `heading: 0` and default alignment, matching how Word reverts to
+/// body style after Enter inside a heading. Correct for typing, wrong for
+/// paste — it flattens every card style the paste crosses. Rather than teach
+/// that primitive about paste (it is shared with the typing path), the copied
+/// attributes are re-applied over the affected paragraphs afterwards.
+///
+/// `attrs` describes a *prefix* of those paragraphs, not necessarily all of
+/// them (see `paragraph_attrs_in_range`). Requiring an exact match instead is
+/// what silently dropped heading and alignment for the commonest copy there
+/// is: any selection — a drag, Shift+Down, or a vim linewise yank — that
+/// swallowed the trailing newline carries one fewer entry than the text
+/// spans, so the guard never fired and every card style pasted back as body
+/// text.
+///
+/// The paragraph left over past that prefix is the destination line's own
+/// tail, carved off by that same `split_paragraph_at`; `dest_attrs` (read
+/// *before* the insert) gives it back what the line had, so pasting above an
+/// existing card no longer strips it. `None` when the paste appended a line
+/// rather than splitting one — a fresh blank line must not inherit the
+/// previous line's card style.
+pub fn apply_pasted_paragraph_attrs(
+    paragraphs: &mut [Paragraph],
+    first_para: usize,
+    spanned: usize,
+    attrs: &[(u8, Alignment)],
+    dest_attrs: Option<(u8, Alignment)>,
+) {
+    for (i, &(heading, alignment)) in attrs.iter().take(spanned).enumerate() {
+        if let Some(para) = paragraphs.get_mut(first_para + i) {
+            para.heading = heading;
+            para.alignment = alignment;
+        }
+    }
+    if attrs.len() < spanned {
+        if let (Some((heading, alignment)), Some(para)) =
+            (dest_attrs, paragraphs.get_mut(first_para + spanned - 1))
+        {
+            para.heading = heading;
+            para.alignment = alignment;
+        }
+    }
+}
+
 /// Everything a `Run` carries *except* its text — the thing "same formatting"
 /// compares. Built by blanking the text on a clone rather than by listing the
 /// fields, so a new `Run` field is automatically part of the comparison

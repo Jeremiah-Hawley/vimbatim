@@ -61,14 +61,49 @@ impl CardStyle {
         }
     }
 
+    /// The `<w:rStyle>` id to write into a `.docx` for this style, or `None`
+    /// when nothing should be written.
+    ///
+    /// Pocket/Hat/Block/Tag write nothing: real Verbatim puts no run-level
+    /// style on them at all (verified against
+    /// `Verbatim_Formatting_To_Compare_To.docx` — their identity is entirely
+    /// `<w:pStyle w:val="HeadingN">`), and `from_heading` re-derives the marker
+    /// from the heading level at parse. Emitting `VimbatimPocket` and friends
+    /// only ever produced four `<w:rStyle>` references to styles that existed
+    /// in no stylesheet.
+    ///
+    /// Cite and Emphasis take Verbatim's own ids, so a card written here is the
+    /// same thing to Verbatim that one written there is. Analytic has no
+    /// Verbatim equivalent and keeps this app's id — defined in
+    /// `build_new_doc_styles_xml` so it resolves.
+    pub fn docx_rstyle_id(&self) -> Option<&'static str> {
+        match self {
+            CardStyle::Pocket | CardStyle::Hat | CardStyle::Block | CardStyle::Tag => None,
+            CardStyle::Cite => Some("Style13ptBold"),
+            CardStyle::Analytic => Some("VimbatimAnalytic"),
+        }
+    }
+
     pub fn from_style_id(id: &str) -> Option<CardStyle> {
         match id {
+            // Verbatim's own ids, and this app's for Analytic — what
+            // `docx_rstyle_id` writes today.
+            "Style13ptBold" => Some(CardStyle::Cite),
+            "VimbatimAnalytic" => Some(CardStyle::Analytic),
+
+            // LEGACY (remove once no file in circulation predates the switch
+            // to Verbatim's style ids — see `docx_rstyle_id`). Read-only: none
+            // of these four are written any more, and `VimbatimCite` is
+            // superseded by `Style13ptBold`, so every file converts on its next
+            // save. Dropping this arm early would silently strip the Cite
+            // marker from every document this app has already written — the
+            // direct bold and size would still look right, so nothing would
+            // announce it.
             "VimbatimPocket" => Some(CardStyle::Pocket),
             "VimbatimHat" => Some(CardStyle::Hat),
             "VimbatimBlock" => Some(CardStyle::Block),
             "VimbatimTag" => Some(CardStyle::Tag),
             "VimbatimCite" => Some(CardStyle::Cite),
-            "VimbatimAnalytic" => Some(CardStyle::Analytic),
             _ => None,
         }
     }
@@ -268,6 +303,10 @@ pub struct DocxOrigin {
     /// silently discarding them on the next save (see
     /// `Tab.has_unsupported_blocks`).
     pub(crate) has_unsupported_blocks: bool,
+    /// This document's own `<w:docDefaults>`, so a file written in Word or
+    /// Verbatim renders with the body font and size *it* declares rather than
+    /// this app's settings. Empty for a document that declares none.
+    pub doc_defaults: DocDefaults,
 }
 
 impl DocxOrigin {
@@ -349,13 +388,13 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
     // word/styles.xml doesn't exist for every .docx (e.g. ones this app
     // itself writes via create_new_docx) — treat that as "no named styles",
     // not a parse failure.
-    let styles = match archive.by_name("word/styles.xml") {
+    let (styles, doc_defaults) = match archive.by_name("word/styles.xml") {
         Ok(mut file) => {
             let mut xml = String::new();
             file.read_to_string(&mut xml)?;
-            parse_styles_xml(&xml)
+            (parse_styles_xml(&xml), parse_doc_defaults(&xml))
         }
-        Err(_) => HashMap::new(),
+        Err(_) => (HashMap::new(), DocDefaults::default()),
     };
 
     // word/numbering.xml doesn't exist for every .docx either (no lists) —
@@ -377,7 +416,7 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
     let sect_pr = extract_sect_pr(&document_xml).unwrap_or("").to_string();
     let has_unsupported_blocks = document_xml.contains("<w:tbl");
 
-    Ok((paragraphs, DocxOrigin { raw_zip, preamble, sect_pr, has_unsupported_blocks }))
+    Ok((paragraphs, DocxOrigin { raw_zip, preamble, sect_pr, has_unsupported_blocks, doc_defaults }))
 }
 
 /// Writes `new_xml` into the .docx at `path`, replacing `word/document.xml`
@@ -550,6 +589,49 @@ struct StyleDefaults {
 /// style's `StyleDefaults` at its all-`false`/`None` default — same
 /// "leave it alone" fallback `apply_para_alignment`/`apply_run_prop` already
 /// use for a single paragraph's own properties.
+/// `<w:docDefaults><w:rPrDefault><w:rPr>`'s font and size, if the document
+/// declares any. A separate streaming pass rather than a branch inside
+/// `parse_styles_xml`: that function is a per-`<w:style>` state machine, and
+/// `docDefaults` sits outside every `<w:style>`, so folding it in would mean
+/// threading an "am I inside docDefaults" flag through all of it to answer one
+/// question asked once per file.
+pub fn parse_doc_defaults(xml: &str) -> DocDefaults {
+    let mut reader = Reader::from_str(xml);
+    reader.trim_text(true);
+    let mut buf = Vec::new();
+    let mut out = DocDefaults::default();
+    let mut in_defaults = false;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"w:rPrDefault" => in_defaults = true,
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"w:rPrDefault" => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) if in_defaults => {
+                match e.name().as_ref() {
+                    b"w:rFonts" => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w:ascii" {
+                                out.font = Some(attr_value(&attr));
+                            }
+                        }
+                    }
+                    b"w:sz" => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w:val" {
+                                out.size = attr_value(&attr).parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
 fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
     let mut styles = HashMap::new();
     let mut reader = Reader::from_str(xml);
@@ -889,6 +971,22 @@ fn parse_document_xml(
                 // Self-closing property tags — same logic as the Start arm for
                 // pStyle and run properties; no end event follows.
                 match e.name().as_ref() {
+                    // `<w:p/>` — how Word writes a blank line that carries no
+                    // paragraph properties and no runs. There is no `End` event
+                    // to close it, so without this arm the paragraph was never
+                    // pushed at all and every blank line in a Word- or
+                    // Verbatim-authored document silently vanished on open —
+                    // and, since saving rewrites `document.xml` from this list,
+                    // vanished from their file too on the next save.
+                    b"w:p" => {
+                        paragraphs.push(Paragraph {
+                            list: None,
+                            runs: vec![Run::default()],
+                            heading: 0,
+                            alignment: Alignment::default(),
+                            unsupported_xml: None,
+                        });
+                    }
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
@@ -993,6 +1091,17 @@ fn parse_document_xml(
                                 }
                             }
                             crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+                            // A blank line that *does* carry paragraph
+                            // properties — `<w:p><w:pPr><w:jc .../></w:pPr></w:p>`,
+                            // which Word writes constantly — closes with no runs
+                            // at all. Every rich-text-aware function in this
+                            // codebase assumes a paragraph holds at least one
+                            // run (`default_paragraphs`), so leaving it empty
+                            // panicked `sync_insert_char` on the first keystroke
+                            // rather than misrendering.
+                            if para.runs.is_empty() {
+                                para.runs.push(Run::default());
+                            }
                             paragraphs.push(para);
                         }
                         in_ppr = false;
@@ -1016,6 +1125,20 @@ fn parse_document_xml(
             _ => {}
         }
         buf.clear();
+    }
+
+    // Same invariant one level up: a body with no `<w:p>` this parser
+    // recognised must still yield the one empty paragraph every caller
+    // assumes, not an empty document that indexes out of bounds the moment
+    // it is edited.
+    if paragraphs.is_empty() {
+        paragraphs.push(Paragraph {
+            list: None,
+            runs: vec![Run::default()],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        });
     }
 
     Ok(paragraphs)
@@ -1148,6 +1271,14 @@ fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<Str
         run.emphasis_boxed = true;
         run.emphasis = true;
     }
+    // Verbatim names its Emphasis card type with this exact style id, and so
+    // does this app now. Read off the id rather than inferred from the style's
+    // `<w:bdr>` (which is all `emphasis_boxed` above can see), because whether
+    // Emphasis draws a box is a per-user setting here — an unboxed Emphasis is
+    // still an Emphasis.
+    if style_id == "Emphasis" {
+        run.emphasis = true;
+    }
 }
 
 /// Applies a run-property element to `run` based on the element's tag name.
@@ -1166,8 +1297,18 @@ fn run_props_xml(run: &Run) -> String {
     let mut out = String::new();
     // `<w:rStyle>` must lead `<w:rPr>` per the OOXML schema, so it is written
     // before any direct formatting.
-    if let Some(style) = run.style {
-        out.push_str(&format!("<w:rStyle w:val=\"{}\"/>", style.style_id()));
+    // `<w:rStyle>` is not repeatable in CT_RPr — a run gets exactly one
+    // character style — so a run that is both a Cite/Analytic *and* emphasized
+    // can only name one. The card marker wins: it is the structural identity,
+    // and Emphasis's appearance is fully carried by the direct `<w:b>`/`<w:u>`/
+    // `<w:bdr>` written below either way. `<w:vimbatimEmphasis/>` still records
+    // the flag for this app's own round trip in that case.
+    let rstyle = run
+        .style
+        .and_then(|s| s.docx_rstyle_id())
+        .or(run.emphasis.then_some("Emphasis"));
+    if let Some(style) = rstyle {
+        out.push_str(&format!("<w:rStyle w:val=\"{style}\"/>", ));
     }
     if run.bold { out.push_str("<w:b/>"); }
     if run.italic { out.push_str("<w:i/>"); }
@@ -1188,11 +1329,11 @@ fn run_props_xml(run: &Run) -> String {
         // anything else. A custom hex color goes out as shading, which Word
         // does honor.
         if WORD_HIGHLIGHT_NAMES.contains(&run.highlight_color.as_str()) {
-            out.push_str(&format!("<w:highlight w:val=\"{}\"/>", run.highlight_color));
+            out.push_str(&format!("<w:highlight w:val=\"{}\"/>", escape_xml_attr(&run.highlight_color)));
         } else {
             out.push_str(&format!(
                 "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
-                run.highlight_color,
+                escape_xml_attr(&run.highlight_color),
             ));
         }
     }
@@ -1200,13 +1341,17 @@ fn run_props_xml(run: &Run) -> String {
         out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
     }
     if let Some(font) = &run.font {
-        out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", font));
+        out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", escape_xml_attr(font)));
     }
     if let Some(color) = &run.color {
-        out.push_str(&format!("<w:color w:val=\"{}\"/>", color));
+        out.push_str(&format!("<w:color w:val=\"{}\"/>", escape_xml_attr(color)));
     }
     // Custom markers, namespaced like `CardStyle::style_id` so they're
     // harmless to any other editor (Word ignores elements it doesn't know).
+    // Kept alongside the `Emphasis` rStyle above: these two carry the flags
+    // through this app's own round trip even when the rStyle slot was taken by
+    // a card marker, and they distinguish "emphasized" from "emphasized and
+    // boxed", which one character style cannot.
     if run.emphasis { out.push_str("<w:vimbatimEmphasis/>"); }
     if run.emphasis_boxed { out.push_str("<w:vimbatimEmphasisBox/>"); }
     out
@@ -1216,6 +1361,26 @@ fn run_props_xml(run: &Run) -> String {
 /// `w:shd` (custom hex highlight, written as shading), `w:sz` (font size in
 /// half-points), and `w:bdr` (border, i.e. the Emphasis box).  Unknown tags
 /// are silently ignored.
+/// One attribute's value, with XML entities resolved.
+///
+/// quick-xml hands back the *raw* source text between the quotes, so
+/// `w:ascii="Foo &amp; Bar"` arrives as the literal seven-character string
+/// `&amp;` embedded in the name. Every value that gets written straight back
+/// into an attribute by `run_props_xml` has to come through here, because
+/// that side now escapes what it emits: leaving the raw form in place would
+/// re-escape it to `&amp;amp;` and grow the corruption by one round trip per
+/// save. Decoding on the way in and encoding on the way out is the only
+/// pairing that round-trips — and it is also what makes such a font name
+/// display correctly in the picker instead of showing its own entity.
+///
+/// Falls back to the raw bytes when the value isn't decodable (a malformed
+/// entity), which is what the parser did for every value before this.
+fn attr_value(attr: &quick_xml::events::attributes::Attribute) -> String {
+    attr.unescape_value()
+        .map(|v| v.into_owned())
+        .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).into_owned())
+}
+
 fn apply_run_prop(e: &BytesStart, run: &mut Run) {
     /*
      * This function is called for both `Event::Start` and `Event::Empty`
@@ -1246,7 +1411,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
             run.highlight = true;
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:val" {
-                    run.highlight_color = String::from_utf8_lossy(&attr.value).into_owned();
+                    run.highlight_color = attr_value(&attr);
                 }
             }
         }
@@ -1257,7 +1422,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
         b"w:shd" => {
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:fill" {
-                    let fill = String::from_utf8_lossy(&attr.value).into_owned();
+                    let fill = attr_value(&attr);
                     if fill.len() == 6 && fill.chars().all(|c| c.is_ascii_hexdigit()) {
                         run.highlight = true;
                         run.highlight_color = fill.to_lowercase();
@@ -1280,7 +1445,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
         b"w:rFonts" => {
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:ascii" {
-                    run.font = Some(String::from_utf8_lossy(&attr.value).into_owned());
+                    run.font = Some(attr_value(&attr));
                 }
             }
         }
@@ -1289,7 +1454,7 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
         b"w:color" => {
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"w:val" {
-                    let val = String::from_utf8_lossy(&attr.value).into_owned();
+                    let val = attr_value(&attr);
                     if val != "auto" {
                         run.color = Some(val);
                     }
@@ -1355,7 +1520,10 @@ fn abstract_num_id_for(kind: ListKind) -> u32 {
 /// numbered cascade specifically — see `cascade_level_xml`).
 fn build_lvl_xml(ilvl: u8, num_fmt: &str, lvl_text: &str, font: Option<&str>, ind_left: u32, ind_hanging: u32) -> String {
     let font_xml = match font {
-        Some(f) => format!("<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\"/>"),
+        Some(f) => {
+            let f = escape_xml_attr(f);
+            format!("<w:rFonts w:ascii=\"{f}\" w:hAnsi=\"{f}\"/>")
+        }
         None => String::new(),
     };
     format!(
@@ -1469,6 +1637,102 @@ fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
 /// change Verbatim's own reference file happens to carry, not something
 /// `apply_card_style` does) stripped — none of those affect whether Word
 /// resolves the style, and a dangling theme reference with no `theme1.xml`
+/// A document's own `<w:docDefaults>` — the body font and size it declares
+/// for everything that doesn't override them.
+///
+/// Read so a document written in Word or Verbatim renders here with *its*
+/// defaults rather than this app's settings. It is deliberately kept as a
+/// document-level fallback and never folded into `Run`s: `run.size == 0` and
+/// `run.font == None` mean "inherit", and that is what keeps a saved file free
+/// of a redundant `<w:sz>` and `<w:rFonts>` on every single run. Baking these
+/// in would write them back out and freeze the document's default at whatever
+/// it happened to be the first time it was opened.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocDefaults {
+    /// `<w:rPrDefault>`'s `<w:rFonts w:ascii>`, when the document names one.
+    pub font: Option<String>,
+    /// `<w:rPrDefault>`'s `<w:sz>`, half-points. `0` means the document
+    /// declares no default size.
+    pub size: u16,
+}
+
+/// The settings-derived numbers a freshly created `.docx` bakes into its
+/// `word/styles.xml`: the document-wide defaults, each card style's size, and
+/// what Emphasis means here.
+///
+/// Passed in rather than read from `AppState`, because this module
+/// deliberately doesn't depend on `state`. `Default` holds the same constants
+/// `CardStyleKind::font_size` falls back to, so a caller with no settings to
+/// hand — a test, or a crash snapshot — still writes a conventional document.
+///
+/// The point of routing these through here at all is that Word had no idea
+/// what a Vimbatim document's defaults were: with no `<w:docDefaults>` it
+/// applied its own, which differ by Word version, so a blank document created
+/// here and one created in Verbatim didn't agree on body size or line spacing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NewDocStyle {
+    /// Body text size, half-points (`normal_text_size`).
+    pub normal_size: u16,
+    /// Line spacing multiplier (`line_spacing`): 1.0 single, 2.0 double.
+    pub line_spacing: f32,
+    /// Card style sizes, half-points.
+    pub pocket_size: u16,
+    pub hat_size: u16,
+    pub block_size: u16,
+    pub tag_size: u16,
+    pub cite_size: u16,
+    /// What Emphasis applies, so the `Emphasis` character style written into
+    /// the document matches what this app actually does rather than copying
+    /// Verbatim's fixed definition.
+    pub emphasis_bold: bool,
+    pub emphasis_underline: bool,
+    pub emphasis_box: bool,
+    /// `Some(half_points)` when Emphasis also resizes, `None` when it leaves
+    /// size alone (`emphasis_change_size`).
+    pub emphasis_size: Option<u16>,
+}
+
+impl Default for NewDocStyle {
+    fn default() -> Self {
+        Self {
+            normal_size: 22,
+            line_spacing: 1.0,
+            pocket_size: 52,
+            hat_size: 44,
+            block_size: 32,
+            tag_size: 26,
+            cite_size: 26,
+            emphasis_bold: true,
+            emphasis_underline: false,
+            emphasis_box: false,
+            emphasis_size: None,
+        }
+    }
+}
+
+impl NewDocStyle {
+    /// `<w:docDefaults>` built from the user's own settings, not Verbatim's
+    /// numbers. Verbatim hardcodes 11pt with 1.15 line spacing and 8pt
+    /// paragraph spacing; copying that would make Word render spacing the
+    /// Vimbatim editor never shows, and would ignore anyone who changed either
+    /// setting. Deliberately carries no `<w:rFonts>`: this app has no
+    /// default-font setting, so it has no opinion to record and Word's own
+    /// default font is the honest answer.
+    ///
+    /// `w:line` is in 240ths (Word's "auto" line rule), `w:after="0"` because
+    /// this app has no paragraph-spacing concept to express.
+    fn doc_defaults_xml(&self) -> String {
+        let line = (self.line_spacing * 240.0).round().max(1.0) as u32;
+        format!(
+            "<w:docDefaults>\
+<w:rPrDefault><w:rPr><w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/></w:rPr></w:rPrDefault>\
+<w:pPrDefault><w:pPr><w:spacing w:after=\"0\" w:line=\"{line}\" w:lineRule=\"auto\"/></w:pPr></w:pPrDefault>\
+</w:docDefaults>",
+            sz = self.normal_size,
+        )
+    }
+}
+
 /// part is itself the kind of thing that triggers a repair prompt.
 ///
 /// Bug report: applying a card style to a paragraph in a file created fresh
@@ -1482,37 +1746,61 @@ fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
 /// resave path (`write_docx`) has no equivalent of `build_numbering_xml`'s
 /// "wrote_numbering" on-demand fallback, so a style applied *after* file
 /// creation would have nowhere to ever gain this part otherwise.
-fn build_new_doc_styles_xml() -> String {
-    let mut out = String::from(
+fn build_new_doc_styles_xml(style: NewDocStyle) -> String {
+    // `<w:docDefaults>` leads `<w:styles>` per CT_Styles' declared sequence
+    // (docDefaults, latentStyles, style*). `Normal` itself stays bare — this
+    // app has no default-font setting to put in it, and the document-wide
+    // defaults above already carry the size and spacing it would otherwise
+    // duplicate.
+    let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+{doc_defaults}\
 <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/></w:style>\
 <w:style w:type=\"character\" w:default=\"1\" w:styleId=\"DefaultParagraphFont\">\
 <w:name w:val=\"Default Paragraph Font\"/><w:semiHidden/><w:unhideWhenUsed/></w:style>",
+        doc_defaults = style.doc_defaults_xml(),
     );
-    // (alias, heading level, font size half-points, centered, underline) —
-    // mirrors `state.rs::CardStyleKind`'s own `font_size`/`is_centered`
-    // (Pocket/Hat/Block/Tag) exactly; duplicated here rather than shared
-    // since those are private to `state.rs` and this module doesn't
-    // otherwise depend on it.
-    let kinds: [(&str, u8, u16, bool, Option<&str>); 4] = [
-        ("Pocket", 1, 52, true, None),
-        ("Hat", 2, 44, true, Some("double")),
-        ("Block", 3, 32, true, Some("single")),
-        ("Tag", 4, 26, false, None),
+    // (alias, heading level, font size half-points, centered, underline).
+    // The sizes come from the caller's settings rather than being restated
+    // here: they used to be hardcoded copies of `CardStyleKind::font_size`
+    // while `apply_card_style` applied the configurable values, so the style
+    // definition and the runs it described could disagree.
+    //
+    // `page_break` mirrors Verbatim exactly: Pocket, Hat and Block each start a
+    // new page in Word, Tag does not. Vimbatim's own editor is continuous and
+    // never reads `<w:pageBreakBefore/>`, so this changes nothing here and
+    // makes a card file paginate in Word the way a Verbatim-authored one does.
+    let kinds: [(&str, u8, u16, bool, Option<&str>, bool, u16); 4] = [
+        ("Pocket", 1, style.pocket_size, true, None, true, 240),
+        ("Hat", 2, style.hat_size, true, Some("double"), true, 40),
+        ("Block", 3, style.block_size, true, Some("single"), true, 40),
+        ("Tag", 4, style.tag_size, false, None, false, 40),
     ];
-    for (alias, level, size, centered, underline) in kinds {
+    for (alias, level, size, centered, underline, page_break, space_before) in kinds {
         let mut ppr = String::from("<w:keepNext/><w:keepLines/>");
+        if page_break {
+            ppr.push_str("<w:pageBreakBefore/>");
+        }
         if alias == "Pocket" {
             ppr.push_str(
+                // CT_PBdr's declared sequence is top, left, bottom, right,
+                // between, bar — not the top/bottom/left/right this used to
+                // emit. Word has already been observed in this codebase to
+                // silently drop an out-of-order border child (see
+                // `run_props_xml`'s `<w:bdr>` note), and real Verbatim writes
+                // the schema order, so there is nothing to gain by deviating.
                 "<w:pBdr>\
                 <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
-                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
                 <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
                 <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
                 </w:pBdr>",
             );
         }
+        // `w:after="0"` with a small `w:before`, as Verbatim has it: card
+        // styles sit tight against the text they head.
+        ppr.push_str(&format!("<w:spacing w:before=\"{space_before}\" w:after=\"0\"/>"));
         if centered {
             ppr.push_str("<w:jc w:val=\"center\"/>");
         }
@@ -1523,13 +1811,74 @@ fn build_new_doc_styles_xml() -> String {
             rpr.push_str(&format!("<w:u w:val=\"{u}\"/>"));
         }
 
+        // `<w:link>` pairs the paragraph style with a character style of the
+        // same formatting, which is how Word's Styles pane offers a card style
+        // for a run selection rather than a whole paragraph. It has to name a
+        // style that exists — a dangling `<w:link>` is the same defect as the
+        // dangling `<w:rStyle>` markers this app used to write — so each
+        // `HeadingNChar` is emitted right alongside.
         out.push_str(&format!(
             "<w:style w:type=\"paragraph\" w:styleId=\"Heading{level}\">\
             <w:name w:val=\"heading {level}\"/><w:aliases w:val=\"{alias}\"/>\
-            <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:qFormat/>\
-            <w:pPr>{ppr}</w:pPr><w:rPr>{rpr}</w:rPr></w:style>",
+            <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/>\
+            <w:link w:val=\"Heading{level}Char\"/><w:qFormat/>\
+            <w:pPr>{ppr}</w:pPr><w:rPr>{rpr}</w:rPr></w:style>\
+            <w:style w:type=\"character\" w:styleId=\"Heading{level}Char\">\
+            <w:name w:val=\"Heading {level} Char\"/><w:aliases w:val=\"{alias} Char\"/>\
+            <w:basedOn w:val=\"DefaultParagraphFont\"/><w:link w:val=\"Heading{level}\"/>\
+            <w:rPr>{rpr}</w:rPr></w:style>",
         ));
     }
+
+    // Cite — Verbatim's own id and alias. `<w:u w:val="none"/>` matches
+    // Verbatim's definition: a Cite is bold at its size and explicitly *not*
+    // underlined, so it does not inherit an underline from anything around it.
+    out.push_str(&format!(
+        "<w:style w:type=\"character\" w:styleId=\"Style13ptBold\">\
+        <w:name w:val=\"Style 13 pt Bold\"/><w:aliases w:val=\"Cite\"/>\
+        <w:basedOn w:val=\"DefaultParagraphFont\"/><w:qFormat/>\
+        <w:rPr><w:b/><w:bCs/><w:sz w:val=\"{cite}\"/><w:u w:val=\"none\"/></w:rPr></w:style>",
+        cite = style.cite_size,
+    ));
+
+    // Emphasis — Verbatim's id, but defined from *this* app's Emphasis
+    // settings rather than copying Verbatim's fixed bold+underline+box. What
+    // Emphasis means is a user preference here (Settings -> Text Settings), and
+    // a style that disagreed with the direct formatting on the run would show
+    // one thing in Word's Styles pane and another on the page.
+    let mut emphasis_rpr = String::new();
+    if style.emphasis_bold {
+        emphasis_rpr.push_str("<w:b/>");
+    }
+    if style.emphasis_underline {
+        emphasis_rpr.push_str("<w:u w:val=\"single\"/>");
+    }
+    if let Some(size) = style.emphasis_size {
+        emphasis_rpr.push_str(&format!("<w:sz w:val=\"{size}\"/>"));
+    }
+    if style.emphasis_box {
+        // Same run border Verbatim's own Emphasis style carries, and the same
+        // one `run_props_xml` writes directly onto the run.
+        emphasis_rpr.push_str("<w:bdr w:val=\"single\" w:sz=\"12\" w:space=\"0\" w:color=\"auto\"/>");
+    }
+    out.push_str(&format!(
+        "<w:style w:type=\"character\" w:styleId=\"Emphasis\">\
+        <w:name w:val=\"Emphasis\"/><w:basedOn w:val=\"DefaultParagraphFont\"/><w:qFormat/>\
+        <w:rPr>{emphasis_rpr}</w:rPr></w:style>",
+    ));
+
+    // Analytic has no Verbatim equivalent, so it keeps this app's own id — and
+    // therefore has to be defined here, or it is the one remaining `<w:rStyle>`
+    // pointing at nothing. Colour is left to the direct formatting on the run:
+    // it is a per-document choice (`analytic_color`), not part of what the
+    // style *is*.
+    out.push_str(&format!(
+        "<w:style w:type=\"character\" w:styleId=\"VimbatimAnalytic\">\
+        <w:name w:val=\"Analytic\"/><w:basedOn w:val=\"DefaultParagraphFont\"/><w:qFormat/>\
+        <w:rPr><w:b/><w:sz w:val=\"{tag}\"/></w:rPr></w:style>",
+        tag = style.tag_size,
+    ));
+
     out.push_str("</w:styles>");
     out
 }
@@ -1626,12 +1975,17 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
             // left/right — a uniform 1 on all four sides (the previous
             // value here) rendered a visibly narrower box on the left/right
             // than Verbatim's native one, even with sz already matching.
+            //
+            // Children in CT_PBdr's declared order (top, left, bottom, right)
+            // and `w:color="auto"` rather than a hard `000000`: `auto` follows
+            // the text colour the way Verbatim's own style does, so the box
+            // stays visible against a dark document theme or coloured text.
             ppr.push_str(
                 "<w:pBdr>\
-                <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
-                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>\
-                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>\
-                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>\
+                <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
                 </w:pBdr>",
             );
         }
@@ -1667,8 +2021,10 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
                 || run.color.is_some()
                 // A style marker alone is enough to need a `<w:rPr>` — an
                 // Analytic that happens to carry no direct formatting still
-                // has to say what it is.
-                || run.style.is_some()
+                // has to say what it is. Only the markers that actually emit
+                // an `<w:rStyle>` count, or a Pocket run with no direct
+                // formatting would open an empty `<w:rPr>` for nothing.
+                || run.style.and_then(|s| s.docx_rstyle_id()).is_some()
                 || run.emphasis || run.emphasis_boxed;
             if has_props {
                 out.push_str("<w:rPr>");
@@ -1741,7 +2097,11 @@ fn fallback_preamble() -> String {
 /// Word requires at minimum four entries in the ZIP:
 ///   `[Content_Types].xml`, `_rels/.rels`,
 ///   `word/document.xml`, `word/_rels/document.xml.rels`
-pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create_new_docx(
+    paragraphs: &[Paragraph],
+    path: &Path,
+    style: NewDocStyle,
+) -> Result<(), Box<dyn std::error::Error>> {
     /*
      * Build a minimal but fully spec-compliant .docx:
      *  1. Encode `paragraphs` (with whatever formatting they carry — rich-
@@ -1758,7 +2118,7 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
     // does for numbering (`wrote_numbering`), so a style applied *after*
     // creation would have no part to ever land in if this were conditional
     // — see `build_new_doc_styles_xml`'s own doc comment.
-    let styles_xml = build_new_doc_styles_xml();
+    let styles_xml = build_new_doc_styles_xml(style);
 
     let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
@@ -1779,6 +2139,9 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
 <Default Extension=\"xml\" ContentType=\"application/xml\"/>\
 <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\
 <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\
+<Override PartName=\"/word/settings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml\"/>\
+<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\
+<Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>\
 {content_types_numbering_override}\
 </Types>"
     ).as_bytes())?;
@@ -1790,6 +2153,12 @@ pub fn create_new_docx(paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<
 <Relationship Id=\"rId1\" \
 Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" \
 Target=\"word/document.xml\"/>\
+<Relationship Id=\"rIdCore\" \
+Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" \
+Target=\"docProps/core.xml\"/>\
+<Relationship Id=\"rIdApp\" \
+Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" \
+Target=\"docProps/app.xml\"/>\
 </Relationships>"
     )?;
 
@@ -1805,8 +2174,56 @@ Target=\"word/document.xml\"/>\
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
 <Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
+<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings\" Target=\"settings.xml\"/>\
 {rels_numbering}</Relationships>"
     ).as_bytes())?;
+
+    // The optional parts Word supplies defaults for, but which every real
+    // document carries — a Vimbatim file used to have five parts where a
+    // Verbatim one has eighteen. `settings.xml` gives Word an explicit
+    // `defaultTabStop` instead of an implied one; `docProps` is where a title
+    // and timestamps live, and without it every tool that reads document
+    // metadata showed blanks.
+    //
+    // Deliberately still absent: `fontTable.xml`, `webSettings.xml`,
+    // `theme1.xml`, `footnotes.xml`, `endnotes.xml`. Nothing here references
+    // them (no style uses a theme colour or font), so they would be parts that
+    // exist only to look complete.
+    writer.start_file("word/settings.xml", opts)?;
+    writer.write_all(
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
+<w:defaultTabStop w:val=\"720\"/>\
+</w:settings>"
+    )?;
+
+    writer.start_file("docProps/core.xml", opts)?;
+    writer.write_all(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<cp:coreProperties \
+xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+xmlns:dcterms=\"http://purl.org/dc/terms/\" \
+xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
+<dc:title>{title}</dc:title>\
+<cp:revision>1</cp:revision>\
+</cp:coreProperties>",
+        // The file's own name, escaped: it is the only title this app knows,
+        // and an unescaped `&` in a filename would produce a part Word rejects.
+        title = escape_xml_text(
+            path.file_stem().and_then(|n| n.to_str()).unwrap_or("Untitled"),
+        ),
+    ).as_bytes())?;
+
+    writer.start_file("docProps/app.xml", opts)?;
+    writer.write_all(
+        b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Properties \
+xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" \
+xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">\
+<Application>Vimbatim</Application>\
+</Properties>"
+    )?;
 
     writer.start_file("word/document.xml", opts)?;
     writer.write_all(document_xml.as_bytes())?;
@@ -1826,6 +2243,24 @@ Target=\"word/document.xml\"/>\
 
 /// Escapes the three XML-significant characters in text content:
 /// `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`.
+/// The attribute-value counterpart to `escape_xml_text`.
+///
+/// Text nodes only have to hide `&`, `<` and `>`; an attribute value sits
+/// inside quotes and must hide those too, or the attribute simply ends early.
+/// Without this, a font family carrying a `"` — `font_import` takes the name
+/// verbatim from the TTF `name` table, and a hand-edited `settings.conf`
+/// colour reaches `w:color` the same way — produced
+/// `<w:rFonts w:ascii="Ev"il"/>`, a document Word refuses to open. Paired
+/// with `attr_value` on the read side; see the note there for why neither
+/// half works alone.
+fn escape_xml_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn escape_xml_text(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -2337,6 +2772,316 @@ mod tests {
         assert!(!reparsed[0].runs[0].underline);
     }
 
+    // ── Emphasis carries Verbatim's own style id ────────────────────────────
+
+    /// An emphasized run names Verbatim's `Emphasis` character style, so
+    /// Verbatim recognises it as its own Emphasis card type rather than as
+    /// anonymous bold-and-underline.
+    #[test]
+    fn an_emphasized_run_writes_verbatims_emphasis_style() {
+        let paragraphs = vec![Paragraph { list: None,
+            runs: vec![Run { text: "read this".into(), emphasis: true, ..Run::default() }],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+        assert!(xml.contains(r#"<w:rStyle w:val="Emphasis"/>"#), "got: {xml}");
+    }
+
+    /// `<w:rStyle>` is not repeatable in CT_RPr, so a run that is both a Cite
+    /// and emphasized can only name one style. The card marker wins — it is the
+    /// structural identity — and the emphasis still round-trips through
+    /// `<w:vimbatimEmphasis/>` and its own direct formatting.
+    #[test]
+    fn a_card_marker_wins_the_single_rstyle_slot_over_emphasis() {
+        let paragraphs = vec![Paragraph { list: None,
+            runs: vec![Run {
+                text: "cited and read".into(),
+                emphasis: true,
+                style: Some(CardStyle::Cite),
+                ..Run::default()
+            }],
+            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+        assert_eq!(xml.matches("<w:rStyle").count(), 1, "one rStyle only: {xml}");
+        assert!(xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#), "got: {xml}");
+
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+        assert_eq!(reparsed[0].runs[0].style, Some(CardStyle::Cite));
+        assert!(reparsed[0].runs[0].emphasis, "the emphasis flag still round-trips");
+    }
+
+    /// Verbatim's Emphasis is read as emphasis whether or not the style draws a
+    /// box — whether it does is a per-user setting here, and an unboxed
+    /// Emphasis is still an Emphasis.
+    #[test]
+    fn verbatims_emphasis_style_is_read_as_emphasis_even_unboxed() {
+        let styles = parse_styles_xml(
+            "<w:styles><w:style w:type=\"character\" w:styleId=\"Emphasis\">\
+             <w:rPr><w:b/><w:sz w:val=\"24\"/></w:rPr></w:style></w:styles>",
+        );
+        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/></w:rPr>"#);
+        let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
+        assert!(paragraphs[0].runs[0].emphasis, "unboxed Emphasis is still Emphasis");
+        assert!(!paragraphs[0].runs[0].emphasis_boxed);
+    }
+
+    // ── new-document parity with Verbatim ───────────────────────────────────
+
+    /// `<w:docDefaults>` comes from the user's own settings, not Verbatim's
+    /// hardcoded 11pt/1.15. With no `docDefaults` at all, Word applied its own
+    /// built-in defaults — which differ by Word version — so a blank document
+    /// created here and one created in Verbatim didn't agree on body size or
+    /// line spacing.
+    #[test]
+    fn doc_defaults_are_generated_from_the_callers_settings() {
+        let style = NewDocStyle { normal_size: 24, line_spacing: 2.0, ..Default::default() };
+        let xml = build_new_doc_styles_xml(style);
+        assert!(xml.contains("<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>"), "got: {xml}");
+        assert!(xml.contains("w:line=\"480\""), "2.0 spacing is 480 twentieths: {xml}");
+        // No `<w:rFonts>`: this app has no default-font setting, so it has no
+        // opinion to record and Word's own default is the honest answer.
+        let defaults = &xml[..xml.find("</w:docDefaults>").unwrap()];
+        assert!(!defaults.contains("w:rFonts"), "got: {defaults}");
+    }
+
+    /// The `Heading1`-`Heading4` definitions carry the configured card sizes.
+    /// They used to hardcode `CardStyleKind::font_size`'s constants while
+    /// `apply_card_style` applied the configurable values — two sources of
+    /// truth for one number.
+    #[test]
+    fn heading_styles_carry_the_configured_card_sizes() {
+        let style = NewDocStyle {
+            pocket_size: 60, hat_size: 50, block_size: 40, tag_size: 30, ..Default::default()
+        };
+        let xml = build_new_doc_styles_xml(style);
+        for (level, size) in [(1, 60), (2, 50), (3, 40), (4, 30)] {
+            let head = xml.find(&format!("w:styleId=\"Heading{level}\"")).expect("style present");
+            let tail = &xml[head..];
+            assert!(
+                tail[..tail.find("</w:style>").unwrap()].contains(&format!("<w:sz w:val=\"{size}\"/>")),
+                "Heading{level} should carry {size}: {xml}",
+            );
+        }
+    }
+
+    /// Verbatim page-breaks before Pocket, Hat and Block, but deliberately not
+    /// before Tag. Vimbatim never reads `<w:pageBreakBefore/>` and its editor
+    /// is continuous, so this changes nothing here and makes a card file
+    /// paginate in Word the way a Verbatim-authored one does.
+    #[test]
+    fn page_breaks_match_verbatim_exactly() {
+        let xml = build_new_doc_styles_xml(Default::default());
+        let style_body = |level: u8| {
+            let head = xml.find(&format!("w:styleId=\"Heading{level}\"")).unwrap();
+            let tail = &xml[head..];
+            tail[..tail.find("</w:style>").unwrap()].to_string()
+        };
+        for level in [1, 2, 3] {
+            assert!(style_body(level).contains("<w:pageBreakBefore/>"), "Heading{level}");
+        }
+        assert!(!style_body(4).contains("<w:pageBreakBefore/>"), "Tag must not page-break");
+    }
+
+    /// The `Emphasis` character style is generated from *this* app's Emphasis
+    /// settings, not copied from Verbatim's fixed bold+underline+box — what
+    /// Emphasis means here is a user preference, and a style that disagreed
+    /// with the direct formatting on the run would show one thing in Word's
+    /// Styles pane and another on the page.
+    #[test]
+    fn the_emphasis_style_reflects_the_users_emphasis_settings() {
+        let body = |style: NewDocStyle| {
+            let xml = build_new_doc_styles_xml(style);
+            let head = xml.find("w:styleId=\"Emphasis\"").unwrap();
+            let tail = &xml[head..];
+            tail[..tail.find("</w:style>").unwrap()].to_string()
+        };
+
+        let plain = body(NewDocStyle {
+            emphasis_bold: true, emphasis_underline: false,
+            emphasis_box: false, emphasis_size: None, ..Default::default()
+        });
+        assert!(plain.contains("<w:b/>"));
+        assert!(!plain.contains("<w:u "));
+        assert!(!plain.contains("<w:bdr "));
+        assert!(!plain.contains("<w:sz "));
+
+        let everything = body(NewDocStyle {
+            emphasis_bold: true, emphasis_underline: true,
+            emphasis_box: true, emphasis_size: Some(24), ..Default::default()
+        });
+        assert!(everything.contains("<w:b/>"));
+        assert!(everything.contains("<w:u w:val=\"single\"/>"));
+        assert!(everything.contains("<w:bdr "));
+        assert!(everything.contains("<w:sz w:val=\"24\"/>"));
+    }
+
+    /// Every `<w:link>` names a style that exists. A dangling `<w:link>` is the
+    /// same defect as the dangling `<w:rStyle>` markers this app used to write.
+    #[test]
+    fn heading_char_styles_exist_for_every_link() {
+        let xml = build_new_doc_styles_xml(Default::default());
+        for level in 1..=4 {
+            assert!(xml.contains(&format!("<w:link w:val=\"Heading{level}Char\"/>")), "link {level}");
+            assert!(xml.contains(&format!("w:styleId=\"Heading{level}Char\"")), "style {level}");
+        }
+    }
+
+    // ── docDefaults, read direction ─────────────────────────────────────────
+
+    /// A document that declares its body font and size only in
+    /// `<w:docDefaults>` — which is where Word puts them — must have them read,
+    /// or an imported file renders at this app's settings instead of its own.
+    #[test]
+    fn doc_defaults_are_read_back() {
+        let xml = "<w:styles><w:docDefaults><w:rPrDefault><w:rPr>\
+                   <w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\"/>\
+                   <w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>\
+                   </w:rPr></w:rPrDefault></w:docDefaults></w:styles>";
+        let defaults = parse_doc_defaults(xml);
+        assert_eq!(defaults.font.as_deref(), Some("Calibri"));
+        assert_eq!(defaults.size, 24);
+    }
+
+    /// A stylesheet with no `docDefaults`, and a run-level `<w:sz>` inside an
+    /// ordinary style, must not be mistaken for one.
+    #[test]
+    fn doc_defaults_are_empty_when_the_document_declares_none() {
+        let xml = "<w:styles><w:style w:type=\"character\" w:styleId=\"X\">\
+                   <w:rPr><w:sz w:val=\"96\"/></w:rPr></w:style></w:styles>";
+        assert_eq!(parse_doc_defaults(xml), DocDefaults::default());
+    }
+
+    /// What a new document declares is what reading it back reports — the two
+    /// halves of `docDefaults` have to agree.
+    #[test]
+    fn generated_doc_defaults_round_trip() {
+        let style = NewDocStyle { normal_size: 26, line_spacing: 1.5, ..Default::default() };
+        let defaults = parse_doc_defaults(&build_new_doc_styles_xml(style));
+        assert_eq!(defaults.size, 26);
+        assert_eq!(defaults.font, None);
+    }
+
+    // ── empty paragraphs ────────────────────────────────────────────────────
+
+    /// Every shape of blank line Word writes must survive as exactly one
+    /// paragraph holding at least one run.
+    ///
+    /// `<w:p/>` used to yield *no* paragraph, and the two `<w:pPr>`-only forms
+    /// yielded a paragraph with *no runs*. Both broke the "at least one
+    /// paragraph, at least one run" invariant every rich-text-aware function
+    /// here assumes, so a blank line either vanished from the document (and,
+    /// since saving rewrites `document.xml` from this list, from the user's
+    /// file) or panicked `sync_insert_char` on the first keystroke.
+    #[test]
+    fn every_shape_of_empty_paragraph_yields_one_paragraph_with_one_run() {
+        for (label, body) in [
+            ("self-closing", "<w:p/>"),
+            ("self-closing with attrs", "<w:p w:rsidR=\"005D388F\"/>"),
+            ("empty start+end", "<w:p></w:p>"),
+            ("pPr but no runs", "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>"),
+            ("empty run", "<w:p><w:r><w:t></w:t></w:r></w:p>"),
+        ] {
+            let xml = format!("<w:document><w:body>{body}</w:body></w:document>");
+            let paras = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+            assert_eq!(paras.len(), 1, "{label}: expected one paragraph");
+            assert_eq!(paras[0].runs.len(), 1, "{label}: expected one run");
+            assert!(paras[0].runs[0].text.is_empty(), "{label}: the run is blank");
+        }
+    }
+
+    /// A body with nothing this parser recognises still has to produce the one
+    /// paragraph every caller assumes, rather than an empty document that
+    /// indexes out of bounds the moment it is edited.
+    #[test]
+    fn a_document_with_no_paragraphs_still_yields_one() {
+        let paras = parse_document_xml(
+            "<w:document><w:body></w:body></w:document>", &no_styles(), &no_numbering(),
+        ).unwrap();
+        assert_eq!(paras.len(), 1);
+        assert_eq!(paras[0].runs.len(), 1);
+    }
+
+    /// Blank lines are content: they must survive the full parse -> save ->
+    /// parse round trip, not be quietly dropped on the way through.
+    #[test]
+    fn blank_lines_between_cards_survive_a_round_trip() {
+        let xml = "<w:document><w:body>\
+            <w:p><w:r><w:t>Tag</w:t></w:r></w:p>\
+            <w:p/>\
+            <w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>\
+            <w:p><w:r><w:t>Body</w:t></w:r></w:p>\
+            </w:body></w:document>";
+        let once = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
+        assert_eq!(once.len(), 4, "two blank lines between the two text lines");
+
+        let twice = parse_document_xml(
+            &rebuild_document_xml("<w:document>", "", &once), &no_styles(), &no_numbering(),
+        ).unwrap();
+        assert_eq!(twice.len(), 4, "a resave must not drop the blank lines");
+        assert_eq!(
+            twice.iter().map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>()).collect::<Vec<_>>(),
+            vec!["Tag", "", "", "Body"],
+        );
+    }
+
+    // ── XML attribute escaping (escape_xml_attr / attr_value) ───────────────
+
+    /// A font family carrying XML metacharacters used to end the attribute
+    /// early — `<w:rFonts w:ascii="Ev"il<&>"/>` — producing a `.docx` Word
+    /// refuses to open. `font_import` takes the family name verbatim from the
+    /// TTF `name` table, so any font can do this; a hand-edited
+    /// `settings.conf` colour reaches `w:color` the same way.
+    #[test]
+    fn attribute_values_with_xml_metacharacters_survive_a_round_trip() {
+        let original = vec![Paragraph { list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                font: Some("Ev\"il<&>'s Sans".into()),
+                color: Some("aa\"bb".into()),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let xml = rebuild_document_xml("<w:document>", "", &original);
+        assert!(!xml.contains("w:ascii=\"Ev\"il"), "unescaped quote closed the attribute: {xml}");
+
+        let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+        assert_eq!(reparsed[0].runs[0].font.as_deref(), Some("Ev\"il<&>'s Sans"));
+        assert_eq!(reparsed[0].runs[0].color.as_deref(), Some("aa\"bb"));
+        // `highlight_color` deliberately isn't exercised here: `w:shd`'s own
+        // parse already refuses anything that isn't 6 hex digits (so ordinary
+        // Word documents don't gain phantom highlights), which is a filter,
+        // not an escaping bug.
+    }
+
+    /// The escape and the unescape only work as a pair: escaping output while
+    /// still reading raw source text back in would re-escape a legitimate
+    /// `Foo &amp; Bar` one level deeper on every save. Two round trips must
+    /// be identical to one.
+    #[test]
+    fn an_ampersand_in_a_font_name_does_not_grow_on_repeated_saves() {
+        let paras = |font: &str| vec![Paragraph { list: None,
+            runs: vec![Run { text: "hi".into(), font: Some(font.into()), ..Run::default() }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }];
+        let once = parse_document_xml(
+            &rebuild_document_xml("<w:document>", "", &paras("Foo & Bar")),
+            &no_styles(), &no_numbering(),
+        ).unwrap();
+        assert_eq!(once[0].runs[0].font.as_deref(), Some("Foo & Bar"));
+
+        let twice = parse_document_xml(
+            &rebuild_document_xml("<w:document>", "", &once),
+            &no_styles(), &no_numbering(),
+        ).unwrap();
+        assert_eq!(twice[0].runs[0].font.as_deref(), Some("Foo & Bar"));
+    }
+
     // ── strikethrough parsing/emission ──────────────────────────────────────
 
     #[test]
@@ -2390,6 +3135,25 @@ mod tests {
         assert!(!paragraphs[0].runs[0].box_format);
     }
 
+    /// The Pocket heading style's own border has to satisfy the same CT_PBdr
+    /// ordering as the direct one — a style Word repairs is a style that stops
+    /// applying.
+    #[test]
+    fn new_doc_styles_emit_pbdr_in_schema_order() {
+        let styles = build_new_doc_styles_xml(Default::default());
+        assert!(
+            styles.contains(
+                "<w:pBdr>\
+                <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                </w:pBdr>"
+            ),
+            "got: {styles}",
+        );
+    }
+
     #[test]
     fn test_rebuild_emits_four_sided_pbdr_when_box_format_set() {
         let paragraphs = vec![Paragraph { list: None,
@@ -2404,10 +3168,23 @@ mod tests {
         // own Heading1/"Pocket" style exactly (Verbatim_Formatting_To_Compare_To.docx),
         // not a uniform value. A uniform space="1" is what made Vimbatim's pocket
         // box render visibly narrower than Verbatim's when opened in Verbatim.
-        assert!(xml.contains("<w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
-        assert!(xml.contains("<w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"000000\"/>"));
-        assert!(xml.contains("<w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>"));
-        assert!(xml.contains("<w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"000000\"/>"));
+        //
+        // Asserted as one contiguous string, not four independent `contains`
+        // calls, because CT_PBdr's child *order* is part of being valid: top,
+        // left, bottom, right. `w:color="auto"` follows the text colour the way
+        // Verbatim's own style does, instead of a hard black that disappears on
+        // a dark document theme.
+        assert!(
+            xml.contains(
+                "<w:pBdr>\
+                <w:top w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:left w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                <w:bottom w:val=\"single\" w:sz=\"24\" w:space=\"1\" w:color=\"auto\"/>\
+                <w:right w:val=\"single\" w:sz=\"24\" w:space=\"4\" w:color=\"auto\"/>\
+                </w:pBdr>"
+            ),
+            "got: {xml}",
+        );
     }
 
     #[test]
@@ -2426,14 +3203,38 @@ mod tests {
     /// Cite instead of being re-guessed from bold + font size.
     #[test]
     fn test_style_marker_round_trips_through_parse_and_rebuild() {
-        for style in [
-            CardStyle::Pocket,
-            CardStyle::Hat,
-            CardStyle::Block,
-            CardStyle::Tag,
-            CardStyle::Cite,
-            CardStyle::Analytic,
-        ] {
+        // The four card styles ride on their paragraph's heading level, which
+        // is where Verbatim keeps them too — `from_heading` restores the run
+        // marker at parse, so nothing is written at run level and nothing is
+        // lost. Cite and Analytic have no heading to ride on and keep an
+        // explicit `<w:rStyle>`.
+        let by_heading = [
+            (CardStyle::Pocket, 1u8),
+            (CardStyle::Hat, 2),
+            (CardStyle::Block, 3),
+            (CardStyle::Tag, 4),
+        ];
+        for (style, heading) in by_heading {
+            let paragraphs = vec![Paragraph { list: None,
+                runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
+                heading,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            }];
+            let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+            assert!(
+                !xml.contains("<w:rStyle"),
+                "{style:?} must ride on its pStyle, as Verbatim's own do: {xml}",
+            );
+            let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+            assert_eq!(
+                reparsed[0].runs[0].style,
+                Some(style),
+                "{style:?} did not survive the round trip"
+            );
+        }
+
+        for style in [CardStyle::Cite, CardStyle::Analytic] {
             let paragraphs = vec![Paragraph { list: None,
                 runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
                 heading: 0,
@@ -2450,6 +3251,43 @@ mod tests {
         }
     }
 
+    /// Every `<w:rStyle>` this app writes must be a style a new document
+    /// actually defines. The four card markers it used to emit
+    /// (`VimbatimPocket` and friends) were in no stylesheet anywhere.
+    #[test]
+    fn every_emitted_rstyle_id_is_defined_in_a_new_documents_styles() {
+        let styles = build_new_doc_styles_xml(Default::default());
+        for style in [
+            CardStyle::Pocket, CardStyle::Hat, CardStyle::Block,
+            CardStyle::Tag, CardStyle::Cite, CardStyle::Analytic,
+        ] {
+            let Some(id) = style.docx_rstyle_id() else { continue };
+            assert!(
+                styles.contains(&format!("w:styleId=\"{id}\"")),
+                "{style:?} writes <w:rStyle w:val=\"{id}\"/> but no style defines it",
+            );
+        }
+    }
+
+    /// Files written before the switch to Verbatim's ids still resolve their
+    /// markers — the legacy arm in `from_style_id`. Dropping it early would
+    /// silently strip the Cite marker from every document already saved, with
+    /// the direct bold and size still making it look correct.
+    #[test]
+    fn legacy_vimbatim_style_ids_are_still_read() {
+        for (id, expected) in [
+            ("VimbatimPocket", CardStyle::Pocket),
+            ("VimbatimHat", CardStyle::Hat),
+            ("VimbatimBlock", CardStyle::Block),
+            ("VimbatimTag", CardStyle::Tag),
+            ("VimbatimCite", CardStyle::Cite),
+        ] {
+            let xml = wrap_run_xml(&format!(r#"<w:rPr><w:rStyle w:val="{id}"/></w:rPr>"#));
+            let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
+            assert_eq!(paragraphs[0].runs[0].style, Some(expected), "{id}");
+        }
+    }
+
     /// The id is written as a `<w:rStyle>` reference, which Word ignores when
     /// the style isn't defined — so a marked document opens cleanly elsewhere.
     #[test]
@@ -2461,7 +3299,9 @@ mod tests {
             unsupported_xml: None,
         }];
         let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
-        assert!(xml.contains(r#"<w:rStyle w:val="VimbatimCite"/>"#), "got: {xml}");
+        // Verbatim's own id for a Cite, so a card written here is the same
+        // thing to Verbatim that one written there is.
+        assert!(xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#), "got: {xml}");
     }
 
     /// The Emphasis markers round-trip through save/load, and independently
@@ -2481,7 +3321,10 @@ mod tests {
                     ..Run::default()
                 },
             ],
-            heading: 0,
+            // A Block-marked run lives on a Block paragraph — that is where
+            // the marker round-trips from now that the four card styles ride
+            // on `pStyle` rather than an `<w:rStyle>` of their own.
+            heading: 3,
             alignment: Alignment::default(),
             unsupported_xml: None,
         }];
@@ -2555,7 +3398,7 @@ mod tests {
             alignment: Alignment::default(),
         unsupported_xml: None,
     }];
-        create_new_docx(&initial, &path).unwrap();
+        create_new_docx(&initial, &path, Default::default()).unwrap();
 
         // 2. Open it through the real parse_docx path (ZIP + XML), not the
         //    XML-string helpers the rest of this file's tests use.
@@ -2695,7 +3538,7 @@ mod tests {
             alignment: Alignment::default(),
             unsupported_xml: None,
         }];
-        create_new_docx(&paragraphs, &path).unwrap();
+        create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
         // create_new_docx has no table support itself, so this only confirms
         // the negative case end-to-end through a real file — splicing a real
@@ -2939,7 +3782,7 @@ mod tests {
         // Build a real docx, then reload it to get a genuine DocxOrigin.
         let mut para = Paragraph::default();
         para.runs.push(Run { text: "hello world".into(), ..Default::default() });
-        create_new_docx(&[para.clone()], &original).unwrap();
+        create_new_docx(&[para.clone()], &original, Default::default()).unwrap();
         let (paragraphs, origin) = parse_docx(&original).unwrap();
 
         origin.save_snapshot(&paragraphs, &snapshot).unwrap();
@@ -3204,7 +4047,7 @@ mod tests {
             list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
             unsupported_xml: None,
         }];
-        create_new_docx(&paragraphs, &path).unwrap();
+        create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -3235,7 +4078,7 @@ mod tests {
             runs: vec![Run { text: "plain".into(), ..Run::default() }],
             heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
         }];
-        create_new_docx(&paragraphs, &path).unwrap();
+        create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -3257,7 +4100,7 @@ mod tests {
             runs: vec![Run { text: "plain".into(), ..Run::default() }],
             heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
         }];
-        create_new_docx(&paragraphs, &path).unwrap();
+        create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
@@ -3302,7 +4145,7 @@ mod tests {
             list: None,
             unsupported_xml: None,
         }];
-        create_new_docx(&paragraphs, &path).unwrap();
+        create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
         let (reparsed, _origin) = parse_docx(&path).unwrap();
         assert_eq!(reparsed.len(), 1);
@@ -3329,7 +4172,7 @@ mod tests {
             runs: vec![Run { text: "hello".into(), ..Run::default() }],
             heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
         }];
-        create_new_docx(&initial, &path).unwrap();
+        create_new_docx(&initial, &path, Default::default()).unwrap();
 
         let (mut paragraphs, origin) = parse_docx(&path).unwrap();
         paragraphs[0].list = Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 });
@@ -3371,8 +4214,20 @@ mod tests {
         for i in 1..=3 {
             assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::BulletSolid), "index {i}");
         }
-        // Plain numbered list (example 2): three items, indices 5-7.
-        for i in 5..=7 {
+        // Index 4 is a genuinely blank line in the source file, written as a
+        // self-closing `<w:p/>`. The parser used to drop those entirely, which
+        // is why the numbered list below sat at 5-7 here — and why every blank
+        // line between cards disappeared from any Word-authored document this
+        // app opened and resaved.
+        assert!(
+            paragraphs[4].runs.iter().all(|r| r.text.is_empty()),
+            "index 4 is the file's blank line: {:?}",
+            paragraphs[4].runs,
+        );
+        assert!(!paragraphs[4].runs.is_empty(), "a blank paragraph still holds one run");
+
+        // Plain numbered list (example 2): three items, indices 6-8.
+        for i in 6..=8 {
             assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::NumberDecimalDot), "index {i}");
         }
 

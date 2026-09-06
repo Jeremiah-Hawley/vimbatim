@@ -1024,7 +1024,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let line_spacing = state.line_spacing;
         let _ = state;
 
@@ -1094,7 +1094,7 @@ impl TextEditor {
         }
         let content = state.pane_content(self.pane).to_string();
         let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let lines = document_lines(&content);
         let rows = Rc::new(visual_rows_for_viewport(
             cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
@@ -1132,7 +1132,7 @@ impl TextEditor {
     fn page_scroll(&self, forward: bool, cx: &Context<Self>) -> bool {
         let state = self.state.read(cx);
         let zoom = state.zoom;
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let row_height = row_slot_px(normal_size_px, state.line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
@@ -1196,7 +1196,7 @@ impl TextEditor {
         let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let _ = state;
 
@@ -1249,7 +1249,7 @@ impl TextEditor {
         let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
         let _ = state;
 
@@ -1595,7 +1595,7 @@ impl TextEditor {
                     && shift && matches!(key, "h" | "m" | "l")
                 {
                     let zoom = self.state.read(cx).zoom;
-                    let normal_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                    let normal_size_px = self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                     let line_spacing = self.state.read(cx).line_spacing;
                     let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
                     let (rows, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
@@ -1768,7 +1768,14 @@ impl TextEditor {
                 if (key == "p") && self.state.read(cx).vim_selected_register() == Some('+') {
                     if let Some(item) = cx.read_from_clipboard() {
                         if let Some(text) = item.text() {
-                            self.state.update(cx, |state, _cx| state.set_register('+', text.to_string()));
+                            // The clipboard's rich metadata rides along when
+                            // this app wrote it, so `"+p` restores formatting
+                            // the same way Ctrl+V does; another app's
+                            // clipboard has none and pastes plain.
+                            let metadata = item.metadata().map(|m| m.to_string());
+                            self.state.update(cx, |state, _cx| {
+                                state.set_register('+', text.to_string(), metadata)
+                            });
                         }
                     }
                 }
@@ -1783,8 +1790,11 @@ impl TextEditor {
                 // text in `pending_clipboard_sync` when the `+` register
                 // was targeted; this is the only place with `cx` to
                 // actually push it onto the OS clipboard.
-                if let Some(text) = clipboard_sync {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                if let Some((text, metadata)) = clipboard_sync {
+                    // Carries the formatting as clipboard metadata, exactly as
+                    // `CopyAction` does, so `"+y` then Ctrl+V pastes a styled
+                    // card rather than bare text.
+                    cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
                 }
                 // Checklist: Settings -> Vim Mode. Same mailbox pattern as
                 // `clipboard_sync` above — `state.rs` staged the resolved
@@ -1980,7 +1990,18 @@ impl Render for TextEditor {
         let p = state.current_palette();
         let theme_mode = state.theme_mode;
         let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
-        let normal_size_px = state.normal_text_size_half_points as f32 / 2.0;
+        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
+        // The document's own `<w:docDefaults>` font, when it names one this app
+        // can actually render. `is_curated_font` is the same gate `run.font`
+        // already passes through — it covers the bundled families and any the
+        // user has imported, and everything else keeps falling back to
+        // `FONT_FAMILY` for the reason `apply_run_style` documents (GPUI can't
+        // match bold/italic within a family whose faces aren't all loaded).
+        let body_font: SharedString = state
+            .effective_body_font()
+            .filter(|name| is_curated_font(name))
+            .map(|name| SharedString::from(name.to_string()))
+            .unwrap_or_else(|| SharedString::from(FONT_FAMILY));
         let line_spacing = state.line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let dragging = state.split_dragging;
@@ -2280,7 +2301,7 @@ impl Render for TextEditor {
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                 let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
@@ -2346,7 +2367,7 @@ impl Render for TextEditor {
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                 let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
@@ -2424,7 +2445,7 @@ impl Render for TextEditor {
                 let bounds = this.scroll_handle.bounds();
                 let scroll_y = this.scroll_handle.offset().y.as_f32();
                 let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).normal_text_size_half_points as f32 / 2.0;
+                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                 let line_spacing = this.state.read(cx).line_spacing;
                 let paragraphs = {
                     let st = this.state.read(cx);
@@ -2740,7 +2761,7 @@ impl Render for TextEditor {
                         // glyphs.
                         let row_font_px = line_font_px(paragraphs.get(li), zoom, normal_size_px);
                         let row_div = div()
-                            .font_family(FONT_FAMILY)
+                            .font_family(body_font.clone())
                             .text_size(px(normal_size_px * zoom))
                             .line_height(px(text_line_box_px(row_font_px)))
                             .text_color(rgb(p.text));

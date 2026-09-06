@@ -303,6 +303,10 @@ pub fn write_snapshot(
     origin: Option<&crate::docx_parser::DocxOrigin>,
     original_path: Option<&Path>,
     title: &str,
+    // Only consulted on the no-origin branch below, but threaded through
+    // regardless: a recovered document should carry the same styles a normal
+    // save would, not silently fall back to the built-in defaults.
+    doc_style: crate::docx_parser::NewDocStyle,
 ) -> std::io::Result<Duration> {
     let started = Instant::now();
     let (docx, meta) = snapshot_paths(tab_id);
@@ -312,7 +316,7 @@ pub fn write_snapshot(
         Some(origin) => origin.save_snapshot(paragraphs, &docx),
         // No origin: the tab was never a real docx, so build a minimal one
         // from scratch — the same branch `AppState::save_tab` takes.
-        None => crate::docx_parser::create_new_docx(paragraphs, &docx),
+        None => crate::docx_parser::create_new_docx(paragraphs, &docx, doc_style),
     };
     if let Err(e) = written {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
@@ -359,6 +363,7 @@ pub fn write_all_snapshots(tabs: &[crate::state::TabSnapshot]) {
             tab.origin.as_deref(),
             tab.file_path.as_deref(),
             &tab.title,
+            tab.doc_style,
         );
     }
 }
@@ -624,12 +629,12 @@ mod tests {
                     p
                 })
                 .collect();
-            create_new_docx(&paragraphs, &source).unwrap();
+            create_new_docx(&paragraphs, &source, Default::default()).unwrap();
             let (paragraphs, origin) = parse_docx(&source).unwrap();
 
             // Warm once so the timing is not dominated by first-touch page faults.
-            let _ = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx");
-            let cost = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx").unwrap();
+            let _ = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx", Default::default());
+            let cost = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx", Default::default()).unwrap();
 
             let bytes = std::fs::metadata(snapshot_paths(9999).0).map(|m| m.len()).unwrap_or(0);
             println!(
@@ -757,6 +762,7 @@ mod tests {
         let mut para = Paragraph::default();
         para.runs.push(Run { text: "panic content".into(), ..Default::default() });
         let mirror = vec![crate::state::TabSnapshot {
+            doc_style: Default::default(),
             id: 4242,
             paragraphs: vec![para],
             origin: None,
