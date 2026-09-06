@@ -1,3 +1,4 @@
+use crate::document::TabId;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -10,9 +11,13 @@ use std::time::{Duration, Instant};
 /// duplicating the per-OS branch.
 pub fn app_data_dir() -> PathBuf {
     let base = if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA").map(PathBuf::from).map(|dir| dir.join("vimbatim"))
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|dir| dir.join("vimbatim"))
     } else {
-        std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".vimbatim"))
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".vimbatim"))
     };
     base.unwrap_or_else(std::env::temp_dir)
 }
@@ -48,8 +53,9 @@ fn launch_secs() -> u64 {
 /// Takes its parts as arguments rather than reading the process globals so
 /// the format and its inverse, `parse_stem`, can be tested against runs other
 /// than the current one.
-fn stem_for(pid: u32, launch_secs: u64, tab_id: usize) -> String {
-    format!("{pid}-{launch_secs}-{tab_id}")
+fn stem_for(pid: u32, launch_secs: u64, tab_id: impl Into<TabId>) -> String {
+    let tab_id = tab_id.into();
+    format!("{pid}-{launch_secs}-{}", tab_id.0)
 }
 
 /// Reads the pid and launch time back out of a filename stem produced by
@@ -73,7 +79,9 @@ fn parse_stem(stem: &str) -> Option<(u32, u64)> {
 /// Windows a second running instance can therefore still consume the first
 /// one's snapshots, as it always could.
 fn stem_is_live(stem: &str) -> bool {
-    let Some((pid, launch)) = parse_stem(stem) else { return false };
+    let Some((pid, launch)) = parse_stem(stem) else {
+        return false;
+    };
     if pid == std::process::id() {
         // Our own pid proves nothing on its own — we may have inherited it
         // from the very instance whose snapshot this is. Only a matching
@@ -85,10 +93,14 @@ fn stem_is_live(stem: &str) -> bool {
 
 /// The `.docx` and `.meta` pair for one tab, as
 /// `<recovery_dir>/<pid>-<launch_secs>-<tab_id>.{docx,meta}`.
-pub fn snapshot_paths(tab_id: usize) -> (PathBuf, PathBuf) {
+pub fn snapshot_paths(tab_id: impl Into<TabId>) -> (PathBuf, PathBuf) {
+    let tab_id = tab_id.into();
     let dir = recovery_dir();
     let stem = stem_for(std::process::id(), launch_secs(), tab_id);
-    (dir.join(format!("{stem}.docx")), dir.join(format!("{stem}.meta")))
+    (
+        dir.join(format!("{stem}.docx")),
+        dir.join(format!("{stem}.meta")),
+    )
 }
 
 /// One recoverable document found in `recovery_dir()` at launch.
@@ -133,7 +145,9 @@ pub fn parse_meta(contents: &str) -> Option<(Option<PathBuf>, String, u64)> {
     let mut saved_at = None;
     for line in contents.lines() {
         // split_once splits on the FIRST '=', so a path containing '=' survives.
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         match key.trim() {
             "original_path" => original_path = Some(PathBuf::from(value.trim())),
             "title" => title = Some(value.trim().to_string()),
@@ -166,8 +180,9 @@ pub fn snapshot_interval(last_cost: Option<Duration>) -> Duration {
     match last_cost {
         // Nothing measured yet: assume cheap. One write corrects it.
         None => MIN_SNAPSHOT_INTERVAL,
-        Some(cost) => (cost * SNAPSHOT_TIME_BUDGET)
-            .clamp(MIN_SNAPSHOT_INTERVAL, MAX_SNAPSHOT_INTERVAL),
+        Some(cost) => {
+            (cost * SNAPSHOT_TIME_BUDGET).clamp(MIN_SNAPSHOT_INTERVAL, MAX_SNAPSHOT_INTERVAL)
+        }
     }
 }
 
@@ -198,7 +213,9 @@ pub fn needs_snapshot(
      * for that tab permanently — one Ctrl+Z and nothing was ever written
      * again, so a later crash restored the pre-undo content.
      */
-    last_edit_at.map(|t| now.duration_since(t) >= interval).unwrap_or(true)
+    last_edit_at
+        .map(|t| now.duration_since(t) >= interval)
+        .unwrap_or(true)
 }
 
 /// Enumerates every recoverable document in `dir`, newest first.
@@ -234,7 +251,9 @@ pub fn scan_recovery_dir(dir: &Path) -> Vec<RecoveryEntry> {
         if !matches!(extension, Some("docx") | Some("meta") | Some("tmp")) {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         if stem_is_live(stem) {
             continue; // another instance is using this — hands off
         }
@@ -256,10 +275,18 @@ pub fn scan_recovery_dir(dir: &Path) -> Vec<RecoveryEntry> {
         let snapshot = dir.join(format!("{stem}.docx"));
         let meta = dir.join(format!("{stem}.meta"));
 
-        let parsed = std::fs::read_to_string(&meta).ok().and_then(|c| parse_meta(&c));
+        let parsed = std::fs::read_to_string(&meta)
+            .ok()
+            .and_then(|c| parse_meta(&c));
         match parsed {
             Some((original_path, title, saved_at)) if snapshot.exists() => {
-                entries.push(RecoveryEntry { snapshot, meta, original_path, title, saved_at });
+                entries.push(RecoveryEntry {
+                    snapshot,
+                    meta,
+                    original_path,
+                    title,
+                    saved_at,
+                });
             }
             // Orphan or corrupt: clean it up so it never reappears.
             _ => {
@@ -276,7 +303,8 @@ pub fn scan_recovery_dir(dir: &Path) -> Vec<RecoveryEntry> {
 /// Removes both files of a snapshot pair. Missing files are not an error —
 /// this is called on every clean-exit path, most of which have no snapshot
 /// to remove.
-pub fn delete_snapshot(tab_id: usize) {
+pub fn delete_snapshot(tab_id: impl Into<TabId>) {
+    let tab_id = tab_id.into();
     let (docx, meta) = snapshot_paths(tab_id);
     let _ = std::fs::remove_file(docx);
     let _ = std::fs::remove_file(meta);
@@ -298,7 +326,7 @@ pub fn delete_entry(entry: &RecoveryEntry) {
 /// Errors are the caller's to swallow: snapshotting is best-effort and must
 /// never interrupt editing.
 pub fn write_snapshot(
-    tab_id: usize,
+    tab_id: impl Into<TabId>,
     paragraphs: &[crate::docx_parser::Paragraph],
     origin: Option<&crate::docx_parser::DocxOrigin>,
     original_path: Option<&Path>,
@@ -319,7 +347,10 @@ pub fn write_snapshot(
         None => crate::docx_parser::create_new_docx(paragraphs, &docx, doc_style),
     };
     if let Err(e) = written {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ));
     }
 
     let saved_at = std::time::SystemTime::now()
@@ -406,7 +437,10 @@ mod tests {
     fn two_launches_of_one_pid_and_tab_get_different_stems() {
         // The whole point of the launch stamp: a relaunch handed a dead
         // instance's pid must not write to that instance's snapshot path.
-        assert_ne!(stem_for(4211, 1_750_000_000, 0), stem_for(4211, 1_750_086_400, 0));
+        assert_ne!(
+            stem_for(4211, 1_750_000_000, 0),
+            stem_for(4211, 1_750_086_400, 0)
+        );
     }
 
     #[test]
@@ -414,7 +448,13 @@ mod tests {
         // Counterpart to the live-owner test: the liveness check must not be
         // so broad that real crash leftovers stop being offered.
         let dir = temp_dir("dead-owner");
-        write_pair(&dir, &stem_for(DEAD_PID, 1_750_000_000, 0), None, "crashed", 1);
+        write_pair(
+            &dir,
+            &stem_for(DEAD_PID, 1_750_000_000, 0),
+            None,
+            "crashed",
+            1,
+        );
 
         let entries = scan_recovery_dir(&dir);
         assert_eq!(entries.len(), 1);
@@ -426,7 +466,13 @@ mod tests {
         // Same pid as us, different launch: the pid was recycled. Treating it
         // as live would hide the crashed document forever.
         let dir = temp_dir("recycled-pid");
-        write_pair(&dir, &stem_for(std::process::id(), 1, 0), None, "predecessor", 1);
+        write_pair(
+            &dir,
+            &stem_for(std::process::id(), 1, 0),
+            None,
+            "predecessor",
+            1,
+        );
 
         let entries = scan_recovery_dir(&dir);
         assert_eq!(entries.len(), 1);
@@ -440,7 +486,11 @@ mod tests {
 
     #[test]
     fn meta_round_trips_a_tab_with_a_file_path() {
-        let text = format_meta(Some(Path::new("/home/j/case.docx")), "case.docx", 1750000000);
+        let text = format_meta(
+            Some(Path::new("/home/j/case.docx")),
+            "case.docx",
+            1750000000,
+        );
         let (path, title, saved_at) = parse_meta(&text).unwrap();
         assert_eq!(path, Some(PathBuf::from("/home/j/case.docx")));
         assert_eq!(title, "case.docx");
@@ -493,48 +543,88 @@ mod tests {
     #[test]
     fn snapshot_interval_clamps_a_cheap_write_up_to_the_floor() {
         // 10ms * 20 = 200ms, well below the 3s floor.
-        assert_eq!(snapshot_interval(Some(Duration::from_millis(10))), MIN_SNAPSHOT_INTERVAL);
+        assert_eq!(
+            snapshot_interval(Some(Duration::from_millis(10))),
+            MIN_SNAPSHOT_INTERVAL
+        );
     }
 
     #[test]
     fn snapshot_interval_scales_linearly_between_the_floor_and_the_cap() {
         // 400ms * 20 = 8s, inside [3s, 60s].
-        assert_eq!(snapshot_interval(Some(Duration::from_millis(400))), Duration::from_secs(8));
+        assert_eq!(
+            snapshot_interval(Some(Duration::from_millis(400))),
+            Duration::from_secs(8)
+        );
     }
 
     #[test]
     fn snapshot_interval_clamps_an_expensive_write_down_to_the_cap() {
         // 3s * 20 = 60s exactly; 10s * 20 = 200s, both cap at 60s.
-        assert_eq!(snapshot_interval(Some(Duration::from_secs(3))), MAX_SNAPSHOT_INTERVAL);
-        assert_eq!(snapshot_interval(Some(Duration::from_secs(10))), MAX_SNAPSHOT_INTERVAL);
+        assert_eq!(
+            snapshot_interval(Some(Duration::from_secs(3))),
+            MAX_SNAPSHOT_INTERVAL
+        );
+        assert_eq!(
+            snapshot_interval(Some(Duration::from_secs(10))),
+            MAX_SNAPSHOT_INTERVAL
+        );
     }
 
     #[test]
     fn needs_snapshot_is_false_for_a_clean_tab() {
         let now = Instant::now();
         let idle = now - Duration::from_secs(30);
-        assert!(!needs_snapshot(false, 5, 0, Some(idle), now, MIN_SNAPSHOT_INTERVAL));
+        assert!(!needs_snapshot(
+            false,
+            5,
+            0,
+            Some(idle),
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
     }
 
     #[test]
     fn needs_snapshot_is_false_while_the_user_is_still_typing() {
         let now = Instant::now();
         let just_typed = now - Duration::from_millis(200);
-        assert!(!needs_snapshot(true, 5, 0, Some(just_typed), now, MIN_SNAPSHOT_INTERVAL));
+        assert!(!needs_snapshot(
+            true,
+            5,
+            0,
+            Some(just_typed),
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
     }
 
     #[test]
     fn needs_snapshot_is_true_for_a_dirty_tab_that_has_gone_idle() {
         let now = Instant::now();
         let idle = now - Duration::from_secs(5);
-        assert!(needs_snapshot(true, 5, 0, Some(idle), now, MIN_SNAPSHOT_INTERVAL));
+        assert!(needs_snapshot(
+            true,
+            5,
+            0,
+            Some(idle),
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
     }
 
     #[test]
     fn needs_snapshot_is_false_when_this_version_was_already_written() {
         let now = Instant::now();
         let idle = now - Duration::from_secs(30);
-        assert!(!needs_snapshot(true, 5, 5, Some(idle), now, MIN_SNAPSHOT_INTERVAL));
+        assert!(!needs_snapshot(
+            true,
+            5,
+            5,
+            Some(idle),
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
     }
 
     #[test]
@@ -543,7 +633,14 @@ mod tests {
         // clean — `is_modified` is what excludes it, not the missing edit
         // stamp. Nothing here is worth writing.
         let now = Instant::now();
-        assert!(!needs_snapshot(false, 0, 0, None, now, MIN_SNAPSHOT_INTERVAL));
+        assert!(!needs_snapshot(
+            false,
+            0,
+            0,
+            None,
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
     }
 
     #[test]
@@ -570,11 +667,23 @@ mod tests {
     #[test]
     fn scan_skips_and_keeps_an_entry_owned_by_a_live_process() {
         let dir = temp_dir("live-owner");
-        let stem = snapshot_paths(0).0.file_stem().unwrap().to_str().unwrap().to_string();
+        let stem = snapshot_paths(0)
+            .0
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         write_pair(&dir, &stem, None, "live", 1);
 
-        assert!(scan_recovery_dir(&dir).is_empty(), "a live instance's snapshot must not be offered");
-        assert!(dir.join(format!("{stem}.docx")).exists(), "and must not be deleted");
+        assert!(
+            scan_recovery_dir(&dir).is_empty(),
+            "a live instance's snapshot must not be offered"
+        );
+        assert!(
+            dir.join(format!("{stem}.docx")).exists(),
+            "and must not be deleted"
+        );
         assert!(dir.join(format!("{stem}.meta")).exists());
     }
 
@@ -585,18 +694,30 @@ mod tests {
         std::fs::write(&stale, b"half a zip").unwrap();
 
         assert!(scan_recovery_dir(&dir).is_empty());
-        assert!(!stale.exists(), "a dead process's .tmp leftover should be swept");
+        assert!(
+            !stale.exists(),
+            "a dead process's .tmp leftover should be swept"
+        );
     }
 
     #[test]
     fn scan_keeps_a_live_processes_tmp_file() {
         let dir = temp_dir("live-tmp");
-        let stem = snapshot_paths(0).0.file_stem().unwrap().to_str().unwrap().to_string();
+        let stem = snapshot_paths(0)
+            .0
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         let in_flight = dir.join(format!("{stem}.docx.tmp"));
         std::fs::write(&in_flight, b"half a zip").unwrap();
 
         let _ = scan_recovery_dir(&dir);
-        assert!(in_flight.exists(), "must not delete a running instance's in-progress write");
+        assert!(
+            in_flight.exists(),
+            "must not delete a running instance's in-progress write"
+        );
     }
 
     #[test]
@@ -604,8 +725,22 @@ mod tests {
         let now = Instant::now();
         let idle = now - Duration::from_secs(10);
         // Idle 10s: due under the 3s floor, not yet due under a 30s interval.
-        assert!(needs_snapshot(true, 5, 0, Some(idle), now, MIN_SNAPSHOT_INTERVAL));
-        assert!(!needs_snapshot(true, 5, 0, Some(idle), now, Duration::from_secs(30)));
+        assert!(needs_snapshot(
+            true,
+            5,
+            0,
+            Some(idle),
+            now,
+            MIN_SNAPSHOT_INTERVAL
+        ));
+        assert!(!needs_snapshot(
+            true,
+            5,
+            0,
+            Some(idle),
+            now,
+            Duration::from_secs(30)
+        ));
     }
 
     /// Not a pass/fail test — prints measured snapshot cost so the recovery
@@ -623,7 +758,9 @@ mod tests {
                 .map(|i| {
                     let mut p = Paragraph::default();
                     p.runs.push(Run {
-                        text: format!("Paragraph {i}: the quick brown fox jumps over the lazy dog. "),
+                        text: format!(
+                            "Paragraph {i}: the quick brown fox jumps over the lazy dog. "
+                        ),
                         ..Run::default()
                     });
                     p
@@ -633,10 +770,27 @@ mod tests {
             let (paragraphs, origin) = parse_docx(&source).unwrap();
 
             // Warm once so the timing is not dominated by first-touch page faults.
-            let _ = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx", Default::default());
-            let cost = write_snapshot(9999, &paragraphs, Some(&origin), Some(&source), "bench.docx", Default::default()).unwrap();
+            let _ = write_snapshot(
+                9999,
+                &paragraphs,
+                Some(&origin),
+                Some(&source),
+                "bench.docx",
+                Default::default(),
+            );
+            let cost = write_snapshot(
+                9999,
+                &paragraphs,
+                Some(&origin),
+                Some(&source),
+                "bench.docx",
+                Default::default(),
+            )
+            .unwrap();
 
-            let bytes = std::fs::metadata(snapshot_paths(9999).0).map(|m| m.len()).unwrap_or(0);
+            let bytes = std::fs::metadata(snapshot_paths(9999).0)
+                .map(|m| m.len())
+                .unwrap_or(0);
             println!(
                 "{para_count:>5} paragraphs: snapshot {:>7.1}ms, {:>8} bytes, interval {:?}",
                 cost.as_secs_f64() * 1000.0,
@@ -653,7 +807,8 @@ mod tests {
     /// the process id plus the test-supplied tag is enough to keep concurrent
     /// tests from colliding.
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("vimbatim-rec-test-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim-rec-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -667,18 +822,28 @@ mod tests {
         std::fs::write(
             dir.join(format!("{stem}.meta")),
             format_meta(original.map(Path::new), title, saved_at),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
     fn scan_returns_a_well_formed_pair() {
         let dir = temp_dir("well-formed");
-        write_pair(&dir, &format!("{DEAD_PID}-0"), Some("/home/j/case.docx"), "case.docx", 100);
+        write_pair(
+            &dir,
+            &format!("{DEAD_PID}-0"),
+            Some("/home/j/case.docx"),
+            "case.docx",
+            100,
+        );
 
         let entries = scan_recovery_dir(&dir);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "case.docx");
-        assert_eq!(entries[0].original_path, Some(PathBuf::from("/home/j/case.docx")));
+        assert_eq!(
+            entries[0].original_path,
+            Some(PathBuf::from("/home/j/case.docx"))
+        );
         assert_eq!(entries[0].saved_at, 100);
         assert_eq!(entries[0].snapshot, dir.join(format!("{DEAD_PID}-0.docx")));
         assert_eq!(entries[0].meta, dir.join(format!("{DEAD_PID}-0.meta")));
@@ -690,7 +855,10 @@ mod tests {
         write_pair(&dir, &format!("{DEAD_PID}-0"), None, "older", 100);
         write_pair(&dir, &format!("{DEAD_PID}-1"), None, "newer", 200);
 
-        let titles: Vec<_> = scan_recovery_dir(&dir).into_iter().map(|e| e.title).collect();
+        let titles: Vec<_> = scan_recovery_dir(&dir)
+            .into_iter()
+            .map(|e| e.title)
+            .collect();
         assert_eq!(titles, vec!["newer", "older"]);
     }
 
@@ -700,23 +868,37 @@ mod tests {
         std::fs::write(dir.join(format!("{DEAD_PID}-0.docx")), b"x").unwrap();
 
         assert!(scan_recovery_dir(&dir).is_empty());
-        assert!(!dir.join(format!("{DEAD_PID}-0.docx")).exists(), "orphaned .docx should be cleaned up");
+        assert!(
+            !dir.join(format!("{DEAD_PID}-0.docx")).exists(),
+            "orphaned .docx should be cleaned up"
+        );
     }
 
     #[test]
     fn scan_deletes_and_skips_a_meta_with_no_docx() {
         let dir = temp_dir("orphan-meta");
-        std::fs::write(dir.join(format!("{DEAD_PID}-0.meta")), format_meta(None, "x", 1)).unwrap();
+        std::fs::write(
+            dir.join(format!("{DEAD_PID}-0.meta")),
+            format_meta(None, "x", 1),
+        )
+        .unwrap();
 
         assert!(scan_recovery_dir(&dir).is_empty());
-        assert!(!dir.join(format!("{DEAD_PID}-0.meta")).exists(), "orphaned .meta should be cleaned up");
+        assert!(
+            !dir.join(format!("{DEAD_PID}-0.meta")).exists(),
+            "orphaned .meta should be cleaned up"
+        );
     }
 
     #[test]
     fn scan_deletes_and_skips_a_pair_whose_meta_is_corrupt() {
         let dir = temp_dir("corrupt-meta");
         std::fs::write(dir.join(format!("{DEAD_PID}-0.docx")), b"x").unwrap();
-        std::fs::write(dir.join(format!("{DEAD_PID}-0.meta")), "this is not key=value data at all").unwrap();
+        std::fs::write(
+            dir.join(format!("{DEAD_PID}-0.meta")),
+            "this is not key=value data at all",
+        )
+        .unwrap();
 
         assert!(scan_recovery_dir(&dir).is_empty());
         assert!(!dir.join(format!("{DEAD_PID}-0.docx")).exists());
@@ -732,7 +914,10 @@ mod tests {
         let entries = scan_recovery_dir(&dir);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "real");
-        assert!(dir.join("notes.txt").exists(), "unrelated files must not be deleted");
+        assert!(
+            dir.join("notes.txt").exists(),
+            "unrelated files must not be deleted"
+        );
     }
 
     #[test]
@@ -760,10 +945,13 @@ mod tests {
         use crate::docx_parser::{Paragraph, Run};
 
         let mut para = Paragraph::default();
-        para.runs.push(Run { text: "panic content".into(), ..Default::default() });
+        para.runs.push(Run {
+            text: "panic content".into(),
+            ..Default::default()
+        });
         let mirror = vec![crate::state::TabSnapshot {
             doc_style: Default::default(),
-            id: 4242,
+            id: TabId(4242),
             paragraphs: vec![para],
             origin: None,
             file_path: None,

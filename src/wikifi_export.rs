@@ -49,12 +49,16 @@ mod tests {
     /// `make_state_with_paragraphs` test helper already exists.
     #[test]
     fn export_to_markdown_maps_heading_1_through_4_and_leaves_body_text_alone() {
-        let para = |heading: u8, text: &str| Paragraph { list: None,
-            runs: vec![Run { text: text.to_string(), ..Default::default() }],
+        let para = |heading: u8, text: &str| Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: text.to_string(),
+                ..Default::default()
+            }],
             heading,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    };
+            unsupported_xml: None,
+        };
         let paragraphs = vec![
             para(1, "Case Title"),
             para(2, "Off-case Subtitle"),

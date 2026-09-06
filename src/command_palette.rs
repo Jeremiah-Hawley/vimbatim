@@ -84,33 +84,55 @@ pub fn registry() -> Vec<PaletteCommand> {
         if action.is_stub() || *action == KeybindAction::CommandPalette {
             continue;
         }
-        out.push(PaletteCommand { label: action.label(), action: PaletteAction::Keybind(*action) });
+        out.push(PaletteCommand {
+            label: action.label(),
+            action: PaletteAction::Keybind(*action),
+        });
     }
 
     // ── 2. Doc Menu / Card Menu rows ───────────────────────────────────────
     // Same labels and same `fn(&mut AppState)` the ribbon's own menus use.
     let menu_rows: &[(&'static str, fn(&mut AppState))] = &[
         ("Delete analytics", AppState::delete_analytics),
-        ("Convert analytics to tags", AppState::convert_analytics_to_tags),
+        (
+            "Convert analytics to tags",
+            AppState::convert_analytics_to_tags,
+        ),
         ("Remove emphasis", AppState::remove_emphasis),
-        ("Remove non highlighted underlining", AppState::remove_non_highlighted_underlining),
+        (
+            "Remove non highlighted underlining",
+            AppState::remove_non_highlighted_underlining,
+        ),
         ("Remove blank lines", AppState::remove_blank_lines),
         ("Remove pilcrows", AppState::remove_pilcrows),
         ("Condense, no pilcrows", AppState::condense_selection),
         ("Condense, pilcrows", AppState::condense_with_pilcrows),
         ("Uncondensed", AppState::uncondense_selection),
-        ("Standardize highlighting", AppState::standardize_highlighting),
-        ("Standardize highlighting with exception", AppState::standardize_highlighting_with_exception),
+        (
+            "Standardize highlighting",
+            AppState::standardize_highlighting,
+        ),
+        (
+            "Standardize highlighting with exception",
+            AppState::standardize_highlighting_with_exception,
+        ),
     ];
     for (label, run) in menu_rows {
-        out.push(PaletteCommand { label, action: PaletteAction::State(*run) });
+        out.push(PaletteCommand {
+            label,
+            action: PaletteAction::State(*run),
+        });
     }
 
     // ── 3. Ribbon commands with no keybind of their own ────────────────────
     let ribbon: &[(&'static str, fn(&mut AppState))] = &[
-        ("Italics", |s| s.apply_formatting_to_selection(FormatOp::Italic(true))),
+        ("Italics", |s| {
+            s.apply_formatting_to_selection(FormatOp::Italic(true))
+        }),
         ("Strikethrough", AppState::toggle_strikethrough),
-        ("Normal Size", |s| s.apply_formatting_to_selection(FormatOp::FontSize(24))),
+        ("Normal Size", |s| {
+            s.apply_formatting_to_selection(FormatOp::FontSize(24))
+        }),
         ("Change Case: Sentence", |s| {
             s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
         }),
@@ -127,7 +149,9 @@ pub fn registry() -> Vec<PaletteCommand> {
             s.apply_case_to_selection(crate::case_converter::CaseType::Toggle)
         }),
         ("Align Left", |s| s.apply_line_alignment(Alignment::Left)),
-        ("Align Center", |s| s.apply_line_alignment(Alignment::Center)),
+        ("Align Center", |s| {
+            s.apply_line_alignment(Alignment::Center)
+        }),
         ("Align Right", |s| s.apply_line_alignment(Alignment::Right)),
         ("Highlight Yellow", |s| {
             s.apply_formatting_to_selection(FormatOp::Highlight(Some("yellow".to_string())))
@@ -135,9 +159,14 @@ pub fn registry() -> Vec<PaletteCommand> {
         ("Highlight Green", |s| {
             s.apply_formatting_to_selection(FormatOp::Highlight(Some("green".to_string())))
         }),
-        ("Remove Highlight", |s| s.apply_formatting_to_selection(FormatOp::Highlight(None))),
+        ("Remove Highlight", |s| {
+            s.apply_formatting_to_selection(FormatOp::Highlight(None))
+        }),
         ("Fold / Unfold All", AppState::toggle_fold),
-        ("Toggle Invisibility Mode", AppState::toggle_invisibility_mode),
+        (
+            "Toggle Invisibility Mode",
+            AppState::toggle_invisibility_mode,
+        ),
         // Matches the ribbon's Nav button: switches the sidebar's mode *and*
         // makes sure the sidebar is actually showing.
         ("Toggle Navigation Sidebar", |s| {
@@ -148,7 +177,7 @@ pub fn registry() -> Vec<PaletteCommand> {
             s.sidebar_visible = true;
         }),
         ("Toggle Split View", |s| {
-            if s.split_view {
+            if s.workspace.split_view {
                 s.close_split();
             } else {
                 s.open_split();
@@ -157,7 +186,10 @@ pub fn registry() -> Vec<PaletteCommand> {
         ("Search From List", AppState::open_search_from_list),
     ];
     for (label, run) in ribbon {
-        out.push(PaletteCommand { label, action: PaletteAction::State(*run) });
+        out.push(PaletteCommand {
+            label,
+            action: PaletteAction::State(*run),
+        });
     }
 
     // ── 4. Settings toggles ────────────────────────────────────────────────
@@ -167,18 +199,36 @@ pub fn registry() -> Vec<PaletteCommand> {
     let toggles: &[(&'static str, fn(&mut AppState))] = &[
         ("Toggle Vim Mode", AppState::toggle_vim),
         ("Toggle Spellcheck", AppState::toggle_spellcheck),
-        ("Toggle Search From List Feature", AppState::toggle_search_from_list),
-        ("Toggle Whole-Word List Search", AppState::toggle_search_list_whole_words),
-        ("Toggle Navigation Heading Fold Buttons", AppState::toggle_nav_fold_buttons),
-        ("Toggle Paragraph Integrity", AppState::toggle_paragraph_integrity),
+        (
+            "Toggle Search From List Feature",
+            AppState::toggle_search_from_list,
+        ),
+        (
+            "Toggle Whole-Word List Search",
+            AppState::toggle_search_list_whole_words,
+        ),
+        (
+            "Toggle Navigation Heading Fold Buttons",
+            AppState::toggle_nav_fold_buttons,
+        ),
+        (
+            "Toggle Paragraph Integrity",
+            AppState::toggle_paragraph_integrity,
+        ),
         ("Toggle Pilcrows", AppState::toggle_pilcrows),
     ];
     for (label, run) in toggles {
-        out.push(PaletteCommand { label, action: PaletteAction::State(*run) });
+        out.push(PaletteCommand {
+            label,
+            action: PaletteAction::State(*run),
+        });
     }
 
     // ── 5. Links ───────────────────────────────────────────────────────────
-    out.push(PaletteCommand { label: "Open opencaselist", action: PaletteAction::Url("https://opencaselist.com/") });
+    out.push(PaletteCommand {
+        label: "Open opencaselist",
+        action: PaletteAction::Url("https://opencaselist.com/"),
+    });
     out.push(PaletteCommand {
         label: "Open Tabroom",
         action: PaletteAction::Url("https://www.tabroom.com/index/index.mhtml"),
@@ -212,7 +262,11 @@ pub fn registry() -> Vec<PaletteCommand> {
 /// the whole registry is a few dozen short labels, so the ranking only has to
 /// be *sensible*, and a dependency for that is not a trade worth making.
 pub fn fuzzy_score(query: &str, label: &str) -> Option<i32> {
-    let q: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect();
+    let q: Vec<char> = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
     if q.is_empty() {
         return Some(0);
     }
@@ -222,7 +276,10 @@ pub fn fuzzy_score(query: &str, label: &str) -> Option<i32> {
     // labels here are ASCII, and this guard keeps the index pairing honest
     // rather than silently misaligning if that ever changes.
     if lower.len() != l.len() {
-        return label.to_lowercase().contains(&query.to_lowercase()).then_some(0);
+        return label
+            .to_lowercase()
+            .contains(&query.to_lowercase())
+            .then_some(0);
     }
 
     let mut score = 0;
@@ -299,7 +356,10 @@ pub struct CommandPaletteView {
 
 impl CommandPaletteView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        CommandPaletteView { state, focus_handle: cx.focus_handle() }
+        CommandPaletteView {
+            state,
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     /// Runs `command` and closes the palette.
@@ -326,7 +386,12 @@ impl CommandPaletteView {
         cx.notify();
     }
 
-    fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         let key = ks.key.as_str();
 
@@ -361,8 +426,11 @@ impl CommandPaletteView {
                 });
             }
             _ => {
-                let Some(ch) = crate::state::vim_find_target_char(key, ks.modifiers.shift, ks.key_char.as_deref())
-                else {
+                let Some(ch) = crate::state::vim_find_target_char(
+                    key,
+                    ks.modifiers.shift,
+                    ks.key_char.as_deref(),
+                ) else {
                     return;
                 };
                 self.state.update(cx, |s, cx| {
@@ -378,7 +446,12 @@ impl CommandPaletteView {
     }
 
     fn query(&self, cx: &App) -> String {
-        self.state.read(cx).command_palette.as_ref().map(|p| p.query.clone()).unwrap_or_default()
+        self.state
+            .read(cx)
+            .command_palette
+            .as_ref()
+            .map(|p| p.query.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -434,7 +507,10 @@ impl Render for CommandPaletteView {
                     .text_sm()
                     .text_color(rgb(p.text))
                     .child(if palette.query.is_empty() {
-                        div().text_color(rgb(p.text_faint)).child("Search commands…").into_any_element()
+                        div()
+                            .text_color(rgb(p.text_faint))
+                            .child("Search commands…")
+                            .into_any_element()
                     } else {
                         div().child(palette.query.clone()).into_any_element()
                     })
@@ -452,44 +528,57 @@ impl Render for CommandPaletteView {
                 )
             })
             // ── Results ────────────────────────────────────────────────────
-            .children(results.into_iter().take(MAX_ROWS).enumerate().map(|(i, command)| {
-                // The top row is what Enter runs, so it reads as selected.
-                let is_top = i == 0;
-                let action = command.action;
-                // Only a bindable action has a combo to show.
-                let combo = match action {
-                    PaletteAction::Keybind(a) => {
-                        let c = keybinds.get(a);
-                        (!c.is_unbound()).then(|| c.display_string())
-                    }
-                    _ => None,
-                };
+            .children(
+                results
+                    .into_iter()
+                    .take(MAX_ROWS)
+                    .enumerate()
+                    .map(|(i, command)| {
+                        // The top row is what Enter runs, so it reads as selected.
+                        let is_top = i == 0;
+                        let action = command.action;
+                        // Only a bindable action has a combo to show.
+                        let combo = match action {
+                            PaletteAction::Keybind(a) => {
+                                let c = keybinds.get(a);
+                                (!c.is_unbound()).then(|| c.display_string())
+                            }
+                            _ => None,
+                        };
 
-                div()
-                    .id(ElementId::named_usize("palette-row", i))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(space::SM))
-                    .h(px(24.0))
-                    .px(px(space::SM))
-                    .rounded(px(radius::SM))
-                    .cursor_pointer()
-                    .text_sm()
-                    .when(is_top, |d| d.bg(rgb(p.accent_wash)).text_color(rgb(p.text)))
-                    .when(!is_top, |d| {
-                        d.text_color(rgb(p.text_muted))
-                            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
-                    })
-                    .on_click(cx.listener(move |this, _ev, window, cx| {
-                        this.activate(action, window, cx);
-                    }))
-                    .child(div().flex_1().min_w_0().truncate().child(command.label))
-                    .when_some(combo, |d, combo| {
-                        d.child(div().flex_none().text_xs().text_color(rgb(p.text_faint)).child(combo))
-                    })
-            }))
+                        div()
+                            .id(ElementId::named_usize("palette-row", i))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(space::SM))
+                            .h(px(24.0))
+                            .px(px(space::SM))
+                            .rounded(px(radius::SM))
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(is_top, |d| d.bg(rgb(p.accent_wash)).text_color(rgb(p.text)))
+                            .when(!is_top, |d| {
+                                d.text_color(rgb(p.text_muted)).hover(move |s| {
+                                    s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
+                                })
+                            })
+                            .on_click(cx.listener(move |this, _ev, window, cx| {
+                                this.activate(action, window, cx);
+                            }))
+                            .child(div().flex_1().min_w_0().truncate().child(command.label))
+                            .when_some(combo, |d, combo| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_xs()
+                                        .text_color(rgb(p.text_faint))
+                                        .child(combo),
+                                )
+                            })
+                    }),
+            )
             .when(total > MAX_ROWS, |d| {
                 d.child(
                     div()
@@ -521,18 +610,32 @@ mod tests {
         labels.sort_unstable();
         let mut deduped = labels.clone();
         deduped.dedup();
-        assert_eq!(labels, deduped, "the palette registry lists a command twice");
+        assert_eq!(
+            labels, deduped,
+            "the palette registry lists a command twice"
+        );
     }
 
     #[test]
     fn registry_is_populated_and_every_keybind_entry_is_real() {
         let commands = registry();
-        assert!(commands.len() > 40, "registry looks truncated: {}", commands.len());
+        assert!(
+            commands.len() > 40,
+            "registry looks truncated: {}",
+            commands.len()
+        );
         for c in &commands {
             if let PaletteAction::Keybind(a) = c.action {
-                assert!(KeybindAction::all().contains(&a), "{a:?} is not a real action");
+                assert!(
+                    KeybindAction::all().contains(&a),
+                    "{a:?} is not a real action"
+                );
                 assert!(!a.is_stub(), "{a:?} is a stub and must not be listed");
-                assert_ne!(a, KeybindAction::CommandPalette, "the palette must not list itself");
+                assert_ne!(
+                    a,
+                    KeybindAction::CommandPalette,
+                    "the palette must not list itself"
+                );
             }
             assert!(!c.label.is_empty());
         }
@@ -557,9 +660,15 @@ mod tests {
         // already surfaces automatically — this pins that down.
         assert!(has("Open File"), "Open File missing from the palette");
         assert!(has("Open Folder"), "Open Folder missing from the palette");
-        assert!(has("Switch Active Pane"), "Switch Active Pane missing from the palette");
+        assert!(
+            has("Switch Active Pane"),
+            "Switch Active Pane missing from the palette"
+        );
         assert!(has("New File"), "New File missing from the palette");
-        assert!(has("Refresh File Tree"), "Refresh File Tree missing from the palette");
+        assert!(
+            has("Refresh File Tree"),
+            "Refresh File Tree missing from the palette"
+        );
     }
 
     #[test]

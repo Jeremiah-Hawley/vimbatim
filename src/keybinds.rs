@@ -30,7 +30,12 @@ pub struct KeyCombo {
 
 impl KeyCombo {
     pub fn new(ctrl: bool, shift: bool, alt: bool, key: &str) -> Self {
-        KeyCombo { ctrl, shift, alt, key: key.to_lowercase() }
+        KeyCombo {
+            ctrl,
+            shift,
+            alt,
+            key: key.to_lowercase(),
+        }
     }
 
     /// Parses settings.conf's space-separated format: modifier tokens
@@ -53,15 +58,26 @@ impl KeyCombo {
             }
         }
 
-        key.map(|key| KeyCombo { ctrl, shift, alt, key })
+        key.map(|key| KeyCombo {
+            ctrl,
+            shift,
+            alt,
+            key,
+        })
     }
 
     /// Canonical serialization written back to settings.conf.
     pub fn to_conf_string(&self) -> String {
         let mut parts = Vec::new();
-        if self.ctrl { parts.push("CTRL".to_string()); }
-        if self.shift { parts.push("SHFT".to_string()); }
-        if self.alt { parts.push("ALT".to_string()); }
+        if self.ctrl {
+            parts.push("CTRL".to_string());
+        }
+        if self.shift {
+            parts.push("SHFT".to_string());
+        }
+        if self.alt {
+            parts.push("ALT".to_string());
+        }
         parts.push(self.key.clone());
         parts.join(" ")
     }
@@ -71,10 +87,20 @@ impl KeyCombo {
     /// users there expect.
     pub fn to_gpui_keystroke(&self) -> String {
         let mut parts = Vec::new();
-        let primary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
-        if self.ctrl { parts.push(primary.to_string()); }
-        if self.alt { parts.push("alt".to_string()); }
-        if self.shift { parts.push("shift".to_string()); }
+        let primary = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        if self.ctrl {
+            parts.push(primary.to_string());
+        }
+        if self.alt {
+            parts.push("alt".to_string());
+        }
+        if self.shift {
+            parts.push("shift".to_string());
+        }
         parts.push(gpui_key_name(&self.key));
         parts.join("-")
     }
@@ -92,11 +118,21 @@ impl KeyCombo {
         if self.is_unbound() {
             return "Unbound".to_string();
         }
-        let primary = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let primary = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
         let mut parts = Vec::new();
-        if self.ctrl { parts.push(primary.to_string()); }
-        if self.alt { parts.push("Alt".to_string()); }
-        if self.shift { parts.push("Shift".to_string()); }
+        if self.ctrl {
+            parts.push(primary.to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
         parts.push(display_key_name(&self.key));
         parts.join("+")
     }
@@ -120,7 +156,12 @@ impl KeyCombo {
         } else {
             modifiers.control
         };
-        Some(KeyCombo { ctrl, shift: modifiers.shift, alt: modifiers.alt, key: key.to_lowercase() })
+        Some(KeyCombo {
+            ctrl,
+            shift: modifiers.shift,
+            alt: modifiers.alt,
+            key: key.to_lowercase(),
+        })
     }
 }
 
@@ -233,19 +274,54 @@ impl KeybindAction {
     pub fn all() -> &'static [KeybindAction] {
         use KeybindAction::*;
         &[
-            ToggleSettings, ToggleSidebar, NewTab, CloseTab, ReopenClosedTab, Save, SaveAs, Find, FindReplace,
-            Copy, Cut, Paste, PasteWithoutFormatting, Undo, Redo, SelectAll,
+            ToggleSettings,
+            ToggleSidebar,
+            NewTab,
+            CloseTab,
+            ReopenClosedTab,
+            Save,
+            SaveAs,
+            Find,
+            FindReplace,
+            Copy,
+            Cut,
+            Paste,
+            PasteWithoutFormatting,
+            Undo,
+            Redo,
+            SelectAll,
             SelectSimilarFormatting,
             ToggleSidebarMode,
-            Bold, Underline, Shrink, ClearFormatting,
-            PasteSmart, Condense, Pocket, Hat, Block, Tag, Cite, Analytic, Emphasis,
+            Bold,
+            Underline,
+            Shrink,
+            ClearFormatting,
+            PasteSmart,
+            Condense,
+            Pocket,
+            Hat,
+            Block,
+            Tag,
+            Cite,
+            Analytic,
+            Emphasis,
             Highlight,
-            DeleteTags, StartTimer, OpenStats, CiteFromLink, Wikifi,
-            ZoomIn, ZoomOut, ZoomReset,
-            NextTab, PrevTab,
+            DeleteTags,
+            StartTimer,
+            OpenStats,
+            CiteFromLink,
+            Wikifi,
+            ZoomIn,
+            ZoomOut,
+            ZoomReset,
+            NextTab,
+            PrevTab,
             CommandPalette,
-            OpenFile, OpenFolder, SwitchActivePane,
-            NewFile, RefreshFileTree,
+            OpenFile,
+            OpenFolder,
+            SwitchActivePane,
+            NewFile,
+            RefreshFileTree,
         ]
     }
 
@@ -311,15 +387,23 @@ impl KeybindAction {
         use KeybindAction::*;
         use KeybindCategory as C;
         match self {
-            ToggleSettings | ToggleSidebar | NewTab | CloseTab | ReopenClosedTab | Save | SaveAs
-                | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab
-                | CommandPalette | OpenFile | OpenFolder | SwitchActivePane
-                | NewFile | RefreshFileTree => C::General,
-            Copy | Cut | Paste | PasteWithoutFormatting | Undo | Redo | SelectAll
-                | SelectSimilarFormatting => C::Editing,
+            ToggleSettings | ToggleSidebar | NewTab | CloseTab | ReopenClosedTab | Save
+            | SaveAs | Find | FindReplace | ZoomIn | ZoomOut | ZoomReset | NextTab | PrevTab
+            | CommandPalette | OpenFile | OpenFolder | SwitchActivePane | NewFile
+            | RefreshFileTree => C::General,
+            Copy
+            | Cut
+            | Paste
+            | PasteWithoutFormatting
+            | Undo
+            | Redo
+            | SelectAll
+            | SelectSimilarFormatting => C::Editing,
             ToggleSidebarMode => C::General,
             Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
-            PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Analytic | Emphasis => C::CardStyles,
+            PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Analytic | Emphasis => {
+                C::CardStyles
+            }
             Highlight => C::Highlighting,
             DeleteTags | StartTimer | OpenStats | CiteFromLink | Wikifi => C::CaselistTools,
         }
@@ -521,19 +605,28 @@ impl Keybinds {
     /// default — so this avoids that instead of picking one and hoping).
     pub fn load(path: &Path) -> Keybinds {
         let mut keybinds = Keybinds::defaults();
-        let Ok(content) = fs::read_to_string(path) else { return keybinds };
+        let Ok(content) = fs::read_to_string(path) else {
+            return keybinds;
+        };
 
         let mut values: HashMap<&str, Vec<String>> = HashMap::new();
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('[') { continue; }
+            if line.is_empty() || line.starts_with('[') {
+                continue;
+            }
             if let Some((key, value)) = line.split_once('=') {
-                values.entry(key.trim()).or_default().push(value.trim().to_string());
+                values
+                    .entry(key.trim())
+                    .or_default()
+                    .push(value.trim().to_string());
             }
         }
 
         for action in KeybindAction::all() {
-            let Some(raws) = values.get(action.conf_key()) else { continue };
+            let Some(raws) = values.get(action.conf_key()) else {
+                continue;
+            };
             // The key being present at all is authoritative, even if every
             // line for it is blank/unparseable — that (an empty Vec) is how
             // a user's deliberate "no keybinds" persists across a restart,
@@ -556,7 +649,10 @@ impl Keybinds {
     /// (which keeps its own dedicated settings.conf line, never the general
     /// multi-combo list) and display code that only shows one at a time.
     pub fn get(&self, action: KeybindAction) -> KeyCombo {
-        self.get_all(action).into_iter().next().unwrap_or_else(|| KeyCombo::new(false, false, false, ""))
+        self.get_all(action)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| KeyCombo::new(false, false, false, ""))
     }
 
     /// The settings modal's "+" button: appends `combo` as an additional
@@ -624,7 +720,12 @@ impl Keybinds {
     /// under a labeled sub-header per category, leaving everything else
     /// (e.g. `[FORMATTING]`, and the standalone `vim`/`vim_lines` flags)
     /// byte-for-byte untouched.
-    pub fn save_to(&self, path: &Path, vim_enabled: bool, extra_keybind_lines: &[String]) -> std::io::Result<()> {
+    pub fn save_to(
+        &self,
+        path: &Path,
+        vim_enabled: bool,
+        extra_keybind_lines: &[String],
+    ) -> std::io::Result<()> {
         let existing = fs::read_to_string(path).unwrap_or_default();
         let preserved = extract_non_keybind_sections(&existing);
 
@@ -633,7 +734,10 @@ impl Keybinds {
             out.push('\n');
         }
         out.push_str("[KEYBINDS]\n");
-        out.push_str(&format!("settings={}\n", self.get(KeybindAction::ToggleSettings).to_conf_string()));
+        out.push_str(&format!(
+            "settings={}\n",
+            self.get(KeybindAction::ToggleSettings).to_conf_string()
+        ));
         out.push_str(&format!("vim={}\n", vim_enabled));
         for line in extra_keybind_lines {
             out.push_str(line);
@@ -642,7 +746,10 @@ impl Keybinds {
         out.push('\n');
 
         for category in KeybindCategory::all() {
-            out.push_str(&format!("[KEYBINDS: {}]\n", category.label().to_uppercase()));
+            out.push_str(&format!(
+                "[KEYBINDS: {}]\n",
+                category.label().to_uppercase()
+            ));
             for action in KeybindAction::all() {
                 if action.category() != *category || *action == KeybindAction::ToggleSettings {
                     continue;
@@ -657,7 +764,11 @@ impl Keybinds {
                     out.push_str(&format!("{}=\n", action.conf_key()));
                 } else {
                     for combo in &combos {
-                        out.push_str(&format!("{}={}\n", action.conf_key(), combo.to_conf_string()));
+                        out.push_str(&format!(
+                            "{}={}\n",
+                            action.conf_key(),
+                            combo.to_conf_string()
+                        ));
                     }
                 }
             }
@@ -679,7 +790,9 @@ fn extract_non_keybind_sections(content: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             in_keybinds_section = trimmed.to_uppercase().starts_with("[KEYBINDS");
-            if in_keybinds_section { continue; }
+            if in_keybinds_section {
+                continue;
+            }
         }
         if in_keybinds_section {
             // Skip the flag lines re-emitted explicitly by save_to, but keep
@@ -704,7 +817,9 @@ fn extract_non_keybind_sections(content: &str) -> String {
 /// `false` when the file or key is missing, matching this app's "vim off
 /// by default" preference for a from-scratch environment.
 pub fn load_vim_enabled(path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(path) else { return false };
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
     for line in content.lines() {
         let line = line.trim();
         if let Some((key, value)) = line.split_once('=') {
@@ -723,20 +838,54 @@ pub fn load_vim_enabled(path: &Path) -> bool {
 actions!(
     keybinds,
     [
-        ToggleSettingsAction, ToggleSidebarAction, NewTabAction, CloseTabAction, ReopenClosedTabAction, SaveAction,
-        SaveAsAction, FindAction, FindReplaceAction,
-        CopyAction, CutAction, PasteAction, PasteWithoutFormattingAction, UndoAction, RedoAction, SelectAllAction,
+        ToggleSettingsAction,
+        ToggleSidebarAction,
+        NewTabAction,
+        CloseTabAction,
+        ReopenClosedTabAction,
+        SaveAction,
+        SaveAsAction,
+        FindAction,
+        FindReplaceAction,
+        CopyAction,
+        CutAction,
+        PasteAction,
+        PasteWithoutFormattingAction,
+        UndoAction,
+        RedoAction,
+        SelectAllAction,
         SelectSimilarFormattingAction,
         ToggleSidebarModeAction,
-        BoldAction, UnderlineAction, ShrinkAction, ClearFormattingAction,
-        PasteSmartAction, CondenseAction, PocketAction, HatAction, BlockAction, TagAction,
-        CiteAction, AnalyticAction, EmphasisAction,
+        BoldAction,
+        UnderlineAction,
+        ShrinkAction,
+        ClearFormattingAction,
+        PasteSmartAction,
+        CondenseAction,
+        PocketAction,
+        HatAction,
+        BlockAction,
+        TagAction,
+        CiteAction,
+        AnalyticAction,
+        EmphasisAction,
         HighlightAction,
-        DeleteTagsAction, StartTimerAction, OpenStatsAction, CiteFromLinkAction, WikifiAction,
-        ZoomInAction, ZoomOutAction, ZoomResetAction,
-        NextTabAction, PrevTabAction, CommandPaletteAction,
-        OpenFileAction, OpenFolderAction, SwitchActivePaneAction,
-        NewFileAction, RefreshFileTreeAction,
+        DeleteTagsAction,
+        StartTimerAction,
+        OpenStatsAction,
+        CiteFromLinkAction,
+        WikifiAction,
+        ZoomInAction,
+        ZoomOutAction,
+        ZoomResetAction,
+        NextTabAction,
+        PrevTabAction,
+        CommandPaletteAction,
+        OpenFileAction,
+        OpenFolderAction,
+        SwitchActivePaneAction,
+        NewFileAction,
+        RefreshFileTreeAction,
     ]
 );
 
@@ -759,7 +908,11 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     // isn't always length 1 anymore). `A: Clone` because `actions!` already
     // derives it for every zero-sized action struct, so one `make` value
     // covers every combo without needing a constructor per binding.
-    fn bind_all<A: Action + Clone>(keybinds: &Keybinds, action: KeybindAction, make: A) -> Vec<KeyBinding> {
+    fn bind_all<A: Action + Clone>(
+        keybinds: &Keybinds,
+        action: KeybindAction,
+        make: A,
+    ) -> Vec<KeyBinding> {
         keybinds
             .get_all(action)
             .iter()
@@ -780,12 +933,24 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
     bindings.extend(bind_all(keybinds, Copy, CopyAction));
     bindings.extend(bind_all(keybinds, Cut, CutAction));
     bindings.extend(bind_all(keybinds, Paste, PasteAction));
-    bindings.extend(bind_all(keybinds, PasteWithoutFormatting, PasteWithoutFormattingAction));
+    bindings.extend(bind_all(
+        keybinds,
+        PasteWithoutFormatting,
+        PasteWithoutFormattingAction,
+    ));
     bindings.extend(bind_all(keybinds, Undo, UndoAction));
     bindings.extend(bind_all(keybinds, Redo, RedoAction));
     bindings.extend(bind_all(keybinds, SelectAll, SelectAllAction));
-    bindings.extend(bind_all(keybinds, SelectSimilarFormatting, SelectSimilarFormattingAction));
-    bindings.extend(bind_all(keybinds, ToggleSidebarMode, ToggleSidebarModeAction));
+    bindings.extend(bind_all(
+        keybinds,
+        SelectSimilarFormatting,
+        SelectSimilarFormattingAction,
+    ));
+    bindings.extend(bind_all(
+        keybinds,
+        ToggleSidebarMode,
+        ToggleSidebarModeAction,
+    ));
     bindings.extend(bind_all(keybinds, Bold, BoldAction));
     bindings.extend(bind_all(keybinds, Underline, UnderlineAction));
     bindings.extend(bind_all(keybinds, Shrink, ShrinkAction));
@@ -900,8 +1065,12 @@ mod tests {
     /// this fails and makes that a deliberate decision rather than a drive-by.
     #[test]
     fn toggle_files_nav_ships_unbound() {
-        assert!(KeybindAction::ToggleSidebarMode.default_combo().is_unbound());
-        assert!(Keybinds::defaults().get_all(KeybindAction::ToggleSidebarMode).is_empty());
+        assert!(KeybindAction::ToggleSidebarMode
+            .default_combo()
+            .is_unbound());
+        assert!(Keybinds::defaults()
+            .get_all(KeybindAction::ToggleSidebarMode)
+            .is_empty());
         // ...but it is a real, rebindable action, not a stub.
         assert!(!KeybindAction::ToggleSidebarMode.is_stub());
         assert!(KeybindAction::all().contains(&KeybindAction::ToggleSidebarMode));
@@ -913,7 +1082,11 @@ mod tests {
     fn conf_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for action in KeybindAction::all() {
-            assert!(seen.insert(action.conf_key()), "duplicate conf key {}", action.conf_key());
+            assert!(
+                seen.insert(action.conf_key()),
+                "duplicate conf key {}",
+                action.conf_key()
+            );
         }
     }
 
@@ -930,17 +1103,26 @@ mod tests {
 
     #[test]
     fn parses_simple_key() {
-        assert_eq!(KeyCombo::parse("f2"), Some(KeyCombo::new(false, false, false, "f2")));
+        assert_eq!(
+            KeyCombo::parse("f2"),
+            Some(KeyCombo::new(false, false, false, "f2"))
+        );
     }
 
     #[test]
     fn parses_multi_modifier() {
-        assert_eq!(KeyCombo::parse("CTRL SHFT b"), Some(KeyCombo::new(true, true, false, "b")));
+        assert_eq!(
+            KeyCombo::parse("CTRL SHFT b"),
+            Some(KeyCombo::new(true, true, false, "b"))
+        );
     }
 
     #[test]
     fn parses_alt_combo_case_insensitive() {
-        assert_eq!(KeyCombo::parse("alt f7"), Some(KeyCombo::new(false, false, true, "f7")));
+        assert_eq!(
+            KeyCombo::parse("alt f7"),
+            Some(KeyCombo::new(false, false, true, "f7"))
+        );
     }
 
     #[test]
@@ -980,7 +1162,13 @@ mod tests {
 
     #[test]
     fn from_capture_builds_combo() {
-        let mods = Modifiers { control: true, shift: true, alt: false, platform: false, function: false };
+        let mods = Modifiers {
+            control: true,
+            shift: true,
+            alt: false,
+            platform: false,
+            function: false,
+        };
         let combo = KeyCombo::from_capture(&mods, "b").unwrap();
         assert_eq!(combo, KeyCombo::new(true, true, false, "b"));
     }
@@ -1027,14 +1215,20 @@ mod tests {
     fn find_conflict_ignores_self() {
         let keybinds = Keybinds::defaults();
         let combo = keybinds.get(KeybindAction::Bold);
-        assert_eq!(keybinds.find_conflict(&combo, (KeybindAction::Bold, Some(0))), None);
+        assert_eq!(
+            keybinds.find_conflict(&combo, (KeybindAction::Bold, Some(0))),
+            None
+        );
     }
 
     #[test]
     fn add_appends_a_second_combo_without_disturbing_the_first() {
         let mut keybinds = Keybinds::defaults();
         let first = keybinds.get(KeybindAction::Bold);
-        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        keybinds.add(
+            KeybindAction::Bold,
+            KeyCombo::new(false, false, false, "f2"),
+        );
         assert_eq!(
             keybinds.get_all(KeybindAction::Bold),
             vec![first, KeyCombo::new(false, false, false, "f2")]
@@ -1045,9 +1239,15 @@ mod tests {
     fn remove_at_drops_only_that_slot() {
         let mut keybinds = Keybinds::defaults();
         let first = keybinds.get(KeybindAction::Bold);
-        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        keybinds.add(
+            KeybindAction::Bold,
+            KeyCombo::new(false, false, false, "f2"),
+        );
         keybinds.remove_at(KeybindAction::Bold, 0);
-        assert_eq!(keybinds.get_all(KeybindAction::Bold), vec![KeyCombo::new(false, false, false, "f2")]);
+        assert_eq!(
+            keybinds.get_all(KeybindAction::Bold),
+            vec![KeyCombo::new(false, false, false, "f2")]
+        );
         let _ = first;
     }
 
@@ -1056,7 +1256,10 @@ mod tests {
         let mut keybinds = Keybinds::defaults();
         keybinds.remove_at(KeybindAction::Bold, 0);
         assert!(keybinds.get_all(KeybindAction::Bold).is_empty());
-        assert_eq!(keybinds.get(KeybindAction::Bold), KeyCombo::new(false, false, false, ""));
+        assert_eq!(
+            keybinds.get(KeybindAction::Bold),
+            KeyCombo::new(false, false, false, "")
+        );
     }
 
     /// The bug a naive `key=value1, value2` single-line format would hit:
@@ -1067,17 +1270,26 @@ mod tests {
     /// two, since each line is parsed independently.
     #[test]
     fn add_survives_round_trip_even_when_another_actions_key_is_a_comma() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_keybind_comma_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_keybind_comma_test_{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.conf");
 
         let mut keybinds = Keybinds::defaults();
-        keybinds.add(KeybindAction::Bold, KeyCombo::new(false, false, false, "f2"));
+        keybinds.add(
+            KeybindAction::Bold,
+            KeyCombo::new(false, false, false, "f2"),
+        );
         keybinds.save_to(&path, false, &[]).unwrap();
 
         let reloaded = Keybinds::load(&path);
         assert_eq!(reloaded.get_all(KeybindAction::Bold).len(), 2);
-        assert_eq!(reloaded.get(KeybindAction::ToggleSettings), KeyCombo::new(true, false, false, ","));
+        assert_eq!(
+            reloaded.get(KeybindAction::ToggleSettings),
+            KeyCombo::new(true, false, false, ",")
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1085,7 +1297,10 @@ mod tests {
 
     #[test]
     fn cleared_keybind_stays_cleared_across_a_reload() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_keybind_clear_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_keybind_clear_test_{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.conf");
 
@@ -1105,19 +1320,33 @@ mod tests {
     #[test]
     fn load_missing_file_uses_defaults() {
         let keybinds = Keybinds::load(Path::new("/nonexistent/path/settings.conf"));
-        assert_eq!(keybinds.get(KeybindAction::Bold), KeybindAction::Bold.default_combo());
+        assert_eq!(
+            keybinds.get(KeybindAction::Bold),
+            KeybindAction::Bold.default_combo()
+        );
     }
 
     #[test]
     fn load_parses_flat_keys_across_headers() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_keybind_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_keybind_test_{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.conf");
-        fs::write(&path, "[KEYBINDS: GENERAL]\nsave=ALT s\n\n[KEYBINDS: EDITING]\ncopy=ALT c\n").unwrap();
+        fs::write(
+            &path,
+            "[KEYBINDS: GENERAL]\nsave=ALT s\n\n[KEYBINDS: EDITING]\ncopy=ALT c\n",
+        )
+        .unwrap();
 
         let keybinds = Keybinds::load(&path);
-        assert_eq!(keybinds.get(KeybindAction::Save), KeyCombo::new(false, false, true, "s"));
-        assert_eq!(keybinds.get(KeybindAction::Copy), KeyCombo::new(false, false, true, "c"));
+        assert_eq!(
+            keybinds.get(KeybindAction::Save),
+            KeyCombo::new(false, false, true, "s")
+        );
+        assert_eq!(
+            keybinds.get(KeybindAction::Copy),
+            KeyCombo::new(false, false, true, "c")
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1140,8 +1369,11 @@ mod tests {
             // slot is just as real as one on its first.
             for (i, combo) in keybinds.get_all(*action).iter().enumerate() {
                 assert_eq!(
-                    keybinds.find_conflict(combo, (*action, Some(i))), None,
-                    "{:?}'s combo {:?} in settings.conf collides with another action", action, combo,
+                    keybinds.find_conflict(combo, (*action, Some(i))),
+                    None,
+                    "{:?}'s combo {:?} in settings.conf collides with another action",
+                    action,
+                    combo,
                 );
             }
         }
@@ -1170,6 +1402,8 @@ mod tests {
 
     #[test]
     fn load_vim_enabled_missing_file_defaults_false() {
-        assert!(!load_vim_enabled(Path::new("/nonexistent/path/settings.conf")));
+        assert!(!load_vim_enabled(Path::new(
+            "/nonexistent/path/settings.conf"
+        )));
     }
 }

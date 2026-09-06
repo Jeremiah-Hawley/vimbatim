@@ -1,8 +1,8 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::state::AppState;
-use crate::theme::{color, palette, radius, space};
+use crate::theme::{color, radius, space};
+use crate::{document::TabId, state::AppState};
 
 /// Drag payload for tab reordering. Carries the source tab index and title.
 /// Implements `Render` because GPUI uses the payload value as the ghost view
@@ -45,7 +45,7 @@ pub struct TabBar {
     state: Entity<AppState>,
     /// Id of the tab currently being renamed via double-click, if any.
     /// `None` means every tab renders its plain (non-editable) title.
-    renaming_tab_id: Option<usize>,
+    renaming_tab_id: Option<TabId>,
     /// The in-progress new title while `renaming_tab_id` is `Some` — not
     /// written back to `AppState` until Enter commits it (`Escape` discards
     /// it instead).
@@ -71,7 +71,7 @@ enum TabContextTarget {
     /// A tab, held by its stable `Tab.id` rather than an index: the "Save As"
     /// item awaits a native file dialog, during which tabs can be reordered
     /// or closed out from under a stored index.
-    Tab(usize),
+    Tab(TabId),
     /// The "+" button — only "Open Last Closed Tab" applies.
     NewTabButton,
 }
@@ -170,18 +170,25 @@ impl TabBar {
                 )),
                 TabContextTarget::Tab(tab_id) => {
                     let save_as_state = state.clone();
-                    d.child(Self::menu_item("tab-ctx-save", "Save", p, cx.listener(move |this, _ev, _window, cx| {
-                        this.context_menu = None;
-                        this.state.update(cx, |s, cx| {
-                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
-                                if let Err(e) = s.save_tab(idx) {
-                                    crate::state::log_line(&format!("[save] {e}"));
+                    d.child(Self::menu_item(
+                        "tab-ctx-save",
+                        "Save",
+                        p,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.context_menu = None;
+                            this.state.update(cx, |s, cx| {
+                                if let Some(idx) =
+                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                {
+                                    if let Err(e) = s.save_tab(idx) {
+                                        crate::state::log_line(&format!("[save] {e}"));
+                                    }
                                 }
-                            }
+                                cx.notify();
+                            });
                             cx.notify();
-                        });
-                        cx.notify();
-                    })))
+                        }),
+                    ))
                     .child(Self::menu_item("tab-ctx-save-as", "Save As", p, {
                         let s = save_as_state.clone();
                         cx.listener(move |this, _ev, _window, cx| {
@@ -192,11 +199,11 @@ impl TabBar {
                             // from the active one.
                             let (dir, suggested) = {
                                 let st = s.read(cx);
-                                let tab = st.tabs.iter().find(|t| t.id == tab_id);
+                                let tab = st.workspace.tabs.iter().find(|t| t.id == tab_id);
                                 let dir = tab
                                     .and_then(|t| t.file_path.as_ref())
                                     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                                    .unwrap_or_else(|| st.working_directory.clone());
+                                    .unwrap_or_else(|| st.workspace.working_directory.clone());
                                 let suggested = tab
                                     .map(|t| t.title.clone())
                                     .filter(|t| t.ends_with(".docx"))
@@ -212,7 +219,9 @@ impl TabBar {
                                 let _ = s.update(cx, |st, cx| {
                                     // Resolved *after* the await: tabs can be
                                     // reordered or closed while the dialog is up.
-                                    if let Some(idx) = st.tabs.iter().position(|t| t.id == tab_id) {
+                                    if let Some(idx) =
+                                        st.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                    {
                                         if let Err(e) = st.save_tab_as(idx, path) {
                                             crate::state::log_line(&format!("[save as] {e}"));
                                         }
@@ -224,53 +233,79 @@ impl TabBar {
                         })
                     }))
                     .child(div().h(px(1.0)).my(px(space::XXS)).bg(rgb(p.border_subtle)))
-                    .child(Self::menu_item("tab-ctx-close", "Close", p, cx.listener(move |this, _ev, _window, cx| {
-                        this.context_menu = None;
-                        this.state.update(cx, |s, cx| {
-                            // Through `request_close_tab`, so a dirty tab gets
-                            // the same Save/Discard/Cancel dialog the × does.
-                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
-                                s.request_close_tab(idx);
-                            }
+                    .child(Self::menu_item(
+                        "tab-ctx-close",
+                        "Close",
+                        p,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.context_menu = None;
+                            this.state.update(cx, |s, cx| {
+                                // Through `request_close_tab`, so a dirty tab gets
+                                // the same Save/Discard/Cancel dialog the × does.
+                                if let Some(idx) =
+                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                {
+                                    s.request_close_tab(idx);
+                                }
+                                cx.notify();
+                            });
                             cx.notify();
-                        });
-                        cx.notify();
-                    })))
-                    .child(Self::menu_item("tab-ctx-close-left", "Close Tabs to the Left", p, cx.listener(move |this, _ev, _window, cx| {
-                        this.context_menu = None;
-                        this.state.update(cx, |s, cx| {
-                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
-                                s.close_tabs_to_left(idx);
-                            }
+                        }),
+                    ))
+                    .child(Self::menu_item(
+                        "tab-ctx-close-left",
+                        "Close Tabs to the Left",
+                        p,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.context_menu = None;
+                            this.state.update(cx, |s, cx| {
+                                if let Some(idx) =
+                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                {
+                                    s.close_tabs_to_left(idx);
+                                }
+                                cx.notify();
+                            });
                             cx.notify();
-                        });
-                        cx.notify();
-                    })))
-                    .child(Self::menu_item("tab-ctx-close-right", "Close Tabs to the Right", p, cx.listener(move |this, _ev, _window, cx| {
-                        this.context_menu = None;
-                        this.state.update(cx, |s, cx| {
-                            if let Some(idx) = s.tabs.iter().position(|t| t.id == tab_id) {
-                                s.close_tabs_to_right(idx);
-                            }
+                        }),
+                    ))
+                    .child(Self::menu_item(
+                        "tab-ctx-close-right",
+                        "Close Tabs to the Right",
+                        p,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.context_menu = None;
+                            this.state.update(cx, |s, cx| {
+                                if let Some(idx) =
+                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                {
+                                    s.close_tabs_to_right(idx);
+                                }
+                                cx.notify();
+                            });
                             cx.notify();
-                        });
-                        cx.notify();
-                    })))
+                        }),
+                    ))
                 }
             })
             .into_any_element();
 
         deferred(
-            anchored().position(point(px(x), px(y))).snap_to_window().child(
-                div()
-                    .id("tab-context-menu-dismiss")
-                    .on_mouse_down_out(cx.listener(|this, _ev: &MouseDownEvent, _window, cx| {
-                        if this.context_menu.take().is_some() {
-                            cx.notify();
-                        }
-                    }))
-                    .child(panel),
-            ),
+            anchored()
+                .position(point(px(x), px(y)))
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("tab-context-menu-dismiss")
+                        .on_mouse_down_out(cx.listener(
+                            |this, _ev: &MouseDownEvent, _window, cx| {
+                                if this.context_menu.take().is_some() {
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                        .child(panel),
+                ),
         )
         .with_priority(1)
         .into_any_element()
@@ -304,7 +339,12 @@ impl TabBar {
     /// identically here) — reimplemented locally rather than shared since
     /// that state machine lives on `AppState`/per-tab fields, and this
     /// buffer is transient UI state that belongs on `TabBar` itself.
-    fn handle_rename_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_rename_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         match ks.key.as_str() {
             "escape" => {
@@ -324,7 +364,11 @@ impl TabBar {
                 self.rename_buffer.pop();
             }
             _ => {
-                if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                if let Some(c) = crate::state::vim_find_target_char(
+                    &ks.key,
+                    ks.modifiers.shift,
+                    ks.key_char.as_deref(),
+                ) {
                     self.rename_buffer.push(c);
                 }
             }
@@ -357,8 +401,8 @@ impl Render for TabBar {
         let state = self.state.read(cx);
         let p = state.current_palette();
         let accent_alt = p.accent_alt;
-        let tabs = state.tabs.clone();
-        let active_idx = state.active_tab;
+        let tabs = state.workspace.tabs.clone();
+        let active_idx = state.workspace.active_tab;
         // The secondary pane's tab is marked so it's clear which half of a
         // split a document lives in — it is not `active_tab` unless that pane
         // also has focus.
@@ -382,7 +426,7 @@ impl Render for TabBar {
             .enumerate()
             .map(|(idx, tab)| {
                 let is_active = idx == active_idx;
-                let title = if tab.is_modified {
+                let title = if tab.document.is_modified {
                     format!("● {}", tab.title)
                 } else {
                     tab.title.clone()
@@ -406,9 +450,9 @@ impl Render for TabBar {
 
                 // Use stable tab.id (not loop idx) so GPUI doesn't confuse element
                 // state when tabs are removed and remaining ones shift positions.
-                let tab_id = ElementId::named_usize("tab", tab.id);
-                let close_id = ElementId::named_usize("tab-close", tab.id);
-                let rename_input_id = ElementId::named_usize("tab-rename-input", tab.id);
+                let tab_id = ElementId::named_usize("tab", tab.id.0);
+                let close_id = ElementId::named_usize("tab-close", tab.id.0);
+                let rename_input_id = ElementId::named_usize("tab-rename-input", tab.id.0);
                 // Raw (un-prefixed) title — `title` above may carry a "● "
                 // modified-indicator prefix, which the rename buffer should
                 // never start pre-populated with.
@@ -500,33 +544,43 @@ impl Render for TabBar {
                     // threshold) instead arms inline rename mode and claims
                     // keyboard focus for `rename_focus` so `handle_rename_key`
                     // starts receiving keystrokes.
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                        if ev.click_count >= 2 {
-                            this.renaming_tab_id = Some(tab_id_for_rename);
-                            this.rename_buffer = tab_title_for_rename.clone();
-                            this.rename_focus.clone().focus(window, cx);
-                        } else {
-                            // Switching tabs abandons any in-progress rename
-                            // on another tab (no separate blur-tracking
-                            // machinery — this covers the actual reachable
-                            // case, since the rename input's own
-                            // stop_propagation keeps clicks inside it from
-                            // ever reaching here).
-                            this.renaming_tab_id = None;
-                            this.rename_buffer.clear();
-                            this.state.update(cx, |s, cx| {
-                                s.set_active_tab(idx);
-                                cx.notify();
-                            });
-                        }
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            if ev.click_count >= 2 {
+                                this.renaming_tab_id = Some(tab_id_for_rename);
+                                this.rename_buffer = tab_title_for_rename.clone();
+                                this.rename_focus.clone().focus(window, cx);
+                            } else {
+                                // Switching tabs abandons any in-progress rename
+                                // on another tab (no separate blur-tracking
+                                // machinery — this covers the actual reachable
+                                // case, since the rename input's own
+                                // stop_propagation keeps clicks inside it from
+                                // ever reaching here).
+                                this.renaming_tab_id = None;
+                                this.rename_buffer.clear();
+                                this.state.update(cx, |s, cx| {
+                                    s.set_active_tab(idx);
+                                    cx.notify();
+                                });
+                            }
+                            cx.notify();
+                        }),
+                    )
                     // Right-click a tab → save / save as / close / close left
                     // / close right. Carries the tab's stable id, not `idx`.
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        this.open_context_menu(TabContextTarget::Tab(tab_id_for_rename), ev, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.open_context_menu(
+                                TabContextTarget::Tab(tab_id_for_rename),
+                                ev,
+                                cx,
+                            );
+                        }),
+                    )
                     // Begin drag — carry the source index and title as payload.
                     // Plain closure (not cx.listener): on_drag constructor signature is
                     // Fn(&T, Point<Pixels>, &mut Window, &mut App) -> Entity<W>, which does
@@ -574,7 +628,9 @@ impl Render for TabBar {
                             .text_color(rgb(p.text_muted))
                             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                             .active(move |s| s.bg(rgb(p.chrome_active)))
-                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
+                                cx.stop_propagation()
+                            })
                             .on_click(cx.listener(move |this, _ev, _window, cx| {
                                 cx.stop_propagation();
                                 this.state.update(cx, |s, cx| {
@@ -613,13 +669,15 @@ impl Render for TabBar {
             .drag_over::<TabDragPayload>(move |style, _, _, _| {
                 style.border_l_2().border_color(rgb(p.accent))
             })
-            .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
-                this.state.update(cx, |s, cx| {
-                    s.move_tab(payload.from_idx, tab_count);
+            .on_drop(
+                cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.move_tab(payload.from_idx, tab_count);
+                        cx.notify();
+                    });
                     cx.notify();
-                });
-                cx.notify();
-            }))
+                }),
+            )
             .on_click(cx.listener(|this, _ev, _window, cx| {
                 this.state.update(cx, |s, cx| {
                     s.new_tab();
@@ -628,10 +686,13 @@ impl Render for TabBar {
                 cx.notify();
             }))
             // Right-click "+" → open the most recently closed tab.
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
-                cx.stop_propagation();
-                this.open_context_menu(TabContextTarget::NewTabButton, ev, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.open_context_menu(TabContextTarget::NewTabButton, ev, cx);
+                }),
+            )
             .child("+");
 
         // Invisible spacer that fills remaining width. macOS/Linux drag the window via
@@ -662,13 +723,15 @@ impl Render for TabBar {
                     .drag_over::<TabDragPayload>(move |style, _, _, _| {
                         style.border_l_2().border_color(rgb(p.accent))
                     })
-                    .on_drop(cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.move_tab(payload.from_idx, tab_count);
+                    .on_drop(
+                        cx.listener(move |this, payload: &TabDragPayload, _window, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.move_tab(payload.from_idx, tab_count);
+                                cx.notify();
+                            });
                             cx.notify();
-                        });
-                        cx.notify();
-                    })),
+                        }),
+                    ),
             );
 
         // Scrollable container for tabs only. min_w_0 lets it shrink so the

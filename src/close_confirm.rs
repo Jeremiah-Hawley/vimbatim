@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::{AppState, PendingClose};
-use crate::theme::{palette, Palette};
+use crate::theme::Palette;
 
 /// Save/Discard/Cancel confirmation for closing a dirty tab or the whole
 /// app, shown whenever `AppState.pending_close` is `Some` (set by
@@ -33,8 +33,11 @@ impl Render for CloseConfirm {
         };
 
         let message = match pending {
-            PendingClose::Tab(idx) => match state.tabs.get(idx) {
-                Some(tab) => format!("Save changes to \u{201c}{}\u{201d} before closing?", tab.title),
+            PendingClose::Tab(idx) => match state.workspace.tabs.iter().find(|tab| tab.id == idx) {
+                Some(tab) => format!(
+                    "Save changes to \u{201c}{}\u{201d} before closing?",
+                    tab.title
+                ),
                 None => "Save changes before closing?".to_string(),
             },
             PendingClose::App => "Save changes before quitting?".to_string(),
@@ -51,10 +54,16 @@ impl Render for CloseConfirm {
             .justify_center()
             .bg(black().opacity(0.55))
             // Backdrop click cancels, same as settings_modal.rs's backdrop.
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
-                this.state.update(cx, |s, cx| { s.cancel_close(); cx.notify(); });
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.cancel_close();
+                        cx.notify();
+                    });
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .id("close-confirm-panel")
@@ -91,7 +100,10 @@ impl Render for CloseConfirm {
                                 "Cancel",
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| { s.cancel_close(); cx.notify(); });
+                                    this.state.update(cx, |s, cx| {
+                                        s.cancel_close();
+                                        cx.notify();
+                                    });
                                     cx.notify();
                                 }),
                             ))
@@ -105,9 +117,14 @@ impl Render for CloseConfirm {
                                     // this pure state layer has no way to call
                                     // cx.quit() itself, so the GPUI view here is the
                                     // one place that does it once the state settles.
-                                    let was_app =
-                                        matches!(this.state.read(cx).pending_close, Some(PendingClose::App));
-                                    this.state.update(cx, |s, cx| { s.confirm_close_discard(); cx.notify(); });
+                                    let was_app = matches!(
+                                        this.state.read(cx).pending_close,
+                                        Some(PendingClose::App)
+                                    );
+                                    this.state.update(cx, |s, cx| {
+                                        s.confirm_close_discard();
+                                        cx.notify();
+                                    });
                                     cx.notify();
                                     if was_app {
                                         cx.quit();
@@ -119,8 +136,10 @@ impl Render for CloseConfirm {
                                 "Save",
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
-                                    let was_app =
-                                        matches!(this.state.read(cx).pending_close, Some(PendingClose::App));
+                                    let was_app = matches!(
+                                        this.state.read(cx).pending_close,
+                                        Some(PendingClose::App)
+                                    );
                                     // confirm_close_save reports whether everything
                                     // it touched actually persisted (a tab with no
                                     // file_path — no "Save As" flow to fall back to

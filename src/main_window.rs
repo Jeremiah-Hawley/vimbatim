@@ -7,23 +7,24 @@ use gpui::*;
 
 use crate::app_toolbar::AppToolbar;
 use crate::close_confirm::CloseConfirm;
-use crate::docx_parser::{DocxOrigin, Paragraph};
-use crate::document_ops::FormatOp;
-use crate::file_explorer::{FileExplorer, SidebarResizePayload};
-use crate::font_import_modal::FontImportModal;
 use crate::command_palette::CommandPaletteView;
+use crate::document::TabId;
+use crate::document_ops::FormatOp;
+use crate::docx_parser::{DocxOrigin, Paragraph};
+use crate::file_explorer::{FileExplorer, SidebarResizePayload};
 use crate::find_bar::FindBarView;
+use crate::font_import_modal::FontImportModal;
 use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
-    BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction, CloseTabAction,
-    AnalyticAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction, EmphasisAction,
-    FindAction,
-    FindReplaceAction, HatAction, HighlightAction, NewTabAction, NextTabAction, OpenStatsAction, PasteAction,
-    CommandPaletteAction, PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction, SelectSimilarFormattingAction,
-    ShrinkAction, StartTimerAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
-    ToggleSidebarModeAction,
-    UndoAction, UnderlineAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
-    OpenFileAction, OpenFolderAction, SwitchActivePaneAction, NewFileAction, RefreshFileTreeAction,
+    AnalyticAction, BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction,
+    CloseTabAction, CommandPaletteAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction,
+    EmphasisAction, FindAction, FindReplaceAction, HatAction, HighlightAction, NewFileAction,
+    NewTabAction, NextTabAction, OpenFileAction, OpenFolderAction, OpenStatsAction, PasteAction,
+    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction,
+    RefreshFileTreeAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction,
+    SelectSimilarFormattingAction, ShrinkAction, StartTimerAction, SwitchActivePaneAction,
+    TagAction, ToggleSettingsAction, ToggleSidebarAction, ToggleSidebarModeAction, UnderlineAction,
+    UndoAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
 };
 use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
@@ -98,24 +99,24 @@ impl MainWindow {
          */
         let state = cx.new(|_cx| AppState::new());
 
-        let tab_bar           = cx.new(|cx| TabBar::new(state.clone(), cx));
-        let app_toolbar       = cx.new(|_cx| AppToolbar::new(state.clone()));
+        let tab_bar = cx.new(|cx| TabBar::new(state.clone(), cx));
+        let app_toolbar = cx.new(|_cx| AppToolbar::new(state.clone()));
         let formatting_ribbon = cx.new(|cx| FormattingRibbon::new(state.clone(), cx));
-        let text_editor       = cx.new(|cx|  TextEditor::new(state.clone(), cx));
+        let text_editor = cx.new(|cx| TextEditor::new(state.clone(), cx));
         // Constructed always, mounted only while the split is open. Each pane
         // needs its own scroll handle, row cache, spell cache and focus handle
         // — sharing one editor would make the panes fight over all four.
         let text_editor_secondary =
             cx.new(|cx| TextEditor::for_pane(state.clone(), crate::state::Pane::Secondary, cx));
-        let file_explorer     = cx.new(|cx| FileExplorer::new(state.clone(), cx));
-        let find_bar          = cx.new(|cx|  FindBarView::new(state.clone(), cx));
-        let command_palette   = cx.new(|cx|  CommandPaletteView::new(state.clone(), cx));
-        let settings_modal    = cx.new(|cx|  SettingsModal::new(state.clone(), cx));
-        let close_confirm     = cx.new(|_cx| CloseConfirm::new(state.clone()));
+        let file_explorer = cx.new(|cx| FileExplorer::new(state.clone(), cx));
+        let find_bar = cx.new(|cx| FindBarView::new(state.clone(), cx));
+        let command_palette = cx.new(|cx| CommandPaletteView::new(state.clone(), cx));
+        let settings_modal = cx.new(|cx| SettingsModal::new(state.clone(), cx));
+        let close_confirm = cx.new(|_cx| CloseConfirm::new(state.clone()));
         let font_import_modal = cx.new(|_cx| FontImportModal::new(state.clone()));
-        let recovery_prompt   = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
-        let word_count        = cx.new(|_cx| WordCount::new(state.clone()));
-        let timer             = cx.new(|cx|  Timer::new(state.clone(), cx));
+        let recovery_prompt = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
+        let word_count = cx.new(|_cx| WordCount::new(state.clone()));
+        let timer = cx.new(|cx| Timer::new(state.clone(), cx));
 
         // ── Crash-recovery snapshots ────────────────────────────────────
         // One task for the whole app, not one per tab: it wakes on a fixed
@@ -142,42 +143,50 @@ impl MainWindow {
                 // can close while an earlier entry in this same batch is
                 // being written (each write below is awaited in turn), which
                 // would shift every later index — the id is immune to that.
-                let due: Vec<(usize, u64, Vec<Paragraph>, Option<Arc<DocxOrigin>>, Option<PathBuf>, String, crate::docx_parser::NewDocStyle)> =
-                    match snapshot_state.read_with(cx, |s, _| {
-                        let now = Instant::now();
-                        // Read once per tick, not per tab: it is the same
-                        // for every tab in the document.
-                        let doc_style = s.new_doc_style();
-                        s.tabs
-                            .iter()
-                            .filter(|t| {
-                                crate::recovery::needs_snapshot(
-                                    t.is_modified,
-                                    t.content_version,
-                                    t.last_snapshot_version,
-                                    t.last_edit_at,
-                                    now,
-                                    crate::recovery::snapshot_interval(t.last_snapshot_cost),
-                                )
-                            })
-                            .map(|t| {
-                                (
-                                    t.id,
-                                    t.content_version,
-                                    t.paragraphs.clone(),
-                                    t.docx_origin.clone(),
-                                    t.file_path.clone(),
-                                    t.title.clone(),
-                                    doc_style,
-                                )
-                            })
-                            .collect()
-                    }) {
-                        Ok(due) => due,
-                        // The AppState entity is gone: the app is shutting
-                        // down, so stop ticking.
-                        Err(_) => return,
-                    };
+                let due: Vec<(
+                    TabId,
+                    u64,
+                    Vec<Paragraph>,
+                    Option<Arc<DocxOrigin>>,
+                    Option<PathBuf>,
+                    String,
+                    crate::docx_parser::NewDocStyle,
+                )> = match snapshot_state.read_with(cx, |s, _| {
+                    let now = Instant::now();
+                    // Read once per tick, not per tab: it is the same
+                    // for every tab in the document.
+                    let doc_style = s.new_doc_style();
+                    s.workspace
+                        .tabs
+                        .iter()
+                        .filter(|t| {
+                            crate::recovery::needs_snapshot(
+                                t.document.is_modified,
+                                t.document.content_version,
+                                t.last_snapshot_version,
+                                t.document.last_edit_at,
+                                now,
+                                crate::recovery::snapshot_interval(t.last_snapshot_cost),
+                            )
+                        })
+                        .map(|t| {
+                            (
+                                t.id,
+                                t.document.content_version,
+                                t.document.paragraphs.clone(),
+                                t.docx_origin.clone(),
+                                t.file_path.clone(),
+                                t.title.clone(),
+                                doc_style,
+                            )
+                        })
+                        .collect()
+                }) {
+                    Ok(due) => due,
+                    // The AppState entity is gone: the app is shutting
+                    // down, so stop ticking.
+                    Err(_) => return,
+                };
 
                 // Keep the panic hook's view of the dirty tabs current. Cheap
                 // relative to the snapshot writes below, and it must be fresh
@@ -217,8 +226,8 @@ impl MainWindow {
                             // Look up by id, not index: the tab may have
                             // moved, been saved, or closed while this write
                             // was in flight.
-                            match s.tabs.iter_mut().find(|t| t.id == tab_id) {
-                                Some(tab) if tab.is_modified => {
+                            match s.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                Some(tab) if tab.document.is_modified => {
                                     tab.last_snapshot_version = version;
                                     tab.last_snapshot_cost = Some(cost);
                                 }
@@ -280,7 +289,10 @@ impl MainWindow {
     fn register_global_actions(state: Entity<AppState>, cx: &mut App) {
         let s = state.clone();
         cx.on_action(move |_: &NewTabAction, cx| {
-            s.update(cx, |st, cx| { st.new_tab(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.new_tab();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -291,12 +303,18 @@ impl MainWindow {
             // — otherwise this keybind would be a silent-discard backdoor
             // around the whole point of this confirmation flow.
             let idx = s.read(cx).active_tab;
-            s.update(cx, |st, cx| { st.request_close_tab(idx); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.request_close_tab(idx);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &ReopenClosedTabAction, cx| {
-            s.update(cx, |st, cx| { st.reopen_closed_tab(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.reopen_closed_tab();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -309,7 +327,10 @@ impl MainWindow {
             if !s.read(cx).command_palette_enabled {
                 return;
             }
-            s.update(cx, |st, cx| { st.open_command_palette(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.open_command_palette();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -356,11 +377,11 @@ impl MainWindow {
             // some unrelated default.
             let (dir, suggested) = {
                 let st = s.read(cx);
-                let tab = st.tabs.get(st.active_tab);
+                let tab = st.workspace.tabs.get(st.workspace.active_tab);
                 let dir = tab
                     .and_then(|t| t.file_path.as_ref())
                     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                    .unwrap_or_else(|| st.working_directory.clone());
+                    .unwrap_or_else(|| st.workspace.working_directory.clone());
                 let suggested = tab
                     .map(|t| t.title.clone())
                     .filter(|t| t.ends_with(".docx"))
@@ -442,17 +463,26 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &SwitchActivePaneAction, cx| {
-            s.update(cx, |st, cx| { st.switch_active_pane(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.switch_active_pane();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &NewFileAction, cx| {
-            s.update(cx, |st, cx| { st.create_new_file_in_working_directory(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.create_new_file_in_working_directory();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &RefreshFileTreeAction, cx| {
-            s.update(cx, |st, cx| { st.refresh_file_tree(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.refresh_file_tree();
+                cx.notify();
+            });
         });
 
         // Ctrl+F and Ctrl+H open the same panel — it always carries both a
@@ -460,7 +490,10 @@ impl MainWindow {
         // to differ on beyond which field starts focused.
         let s = state.clone();
         cx.on_action(move |_: &FindAction, cx| {
-            s.update(cx, |st, cx| { st.open_find_bar(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.open_find_bar();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -477,7 +510,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &CopyAction, cx| {
             let state = s.read(cx);
-            let Some(text) = state.copy_selection() else { return };
+            let Some(text) = state.copy_selection() else {
+                return;
+            };
             let runs = state.copy_selection_runs().unwrap_or_default();
             let paras = state.copy_selection_paragraph_attrs().unwrap_or_default();
             let metadata = crate::rich_clipboard::encode_with_lengths(&runs, &paras);
@@ -487,10 +522,15 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &CutAction, cx| {
             let runs = s.read(cx).copy_selection_runs().unwrap_or_default();
-            let paras = s.read(cx).copy_selection_paragraph_attrs().unwrap_or_default();
+            let paras = s
+                .read(cx)
+                .copy_selection_paragraph_attrs()
+                .unwrap_or_default();
             let text = s.update(cx, |st, cx| {
                 let result = st.cut_selection();
-                if result.is_some() { cx.notify(); }
+                if result.is_some() {
+                    cx.notify();
+                }
                 result
             });
             if let Some(text) = text {
@@ -501,9 +541,13 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &PasteAction, cx| {
-            let Some(item) = cx.read_from_clipboard() else { return };
+            let Some(item) = cx.read_from_clipboard() else {
+                return;
+            };
             let Some(text) = item.text() else { return };
-            let rich = item.metadata().and_then(|m| crate::rich_clipboard::decode(m, &text));
+            let rich = item
+                .metadata()
+                .and_then(|m| crate::rich_clipboard::decode(m, &text));
             s.update(cx, |st, cx| {
                 match rich {
                     Some((runs, paras)) => {
@@ -524,29 +568,44 @@ impl MainWindow {
                 if let Some(text) = item.text() {
                     // Plain text by request — but "without formatting" is
                     // about the pasted text, not about the line it lands in.
-                    s.update(cx, |st, cx| { st.insert_str_with_runs(&text, &[]); cx.notify(); });
+                    s.update(cx, |st, cx| {
+                        st.insert_str_with_runs(&text, &[]);
+                        cx.notify();
+                    });
                 }
             }
         });
 
         let s = state.clone();
         cx.on_action(move |_: &UndoAction, cx| {
-            s.update(cx, |st, cx| { st.undo(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.undo();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &RedoAction, cx| {
-            s.update(cx, |st, cx| { st.redo(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.redo();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &SelectAllAction, cx| {
-            s.update(cx, |st, cx| { st.select_all(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.select_all();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &SelectSimilarFormattingAction, cx| {
-            s.update(cx, |st, cx| { st.select_similar_formatting(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.select_similar_formatting();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -567,7 +626,10 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &ShrinkAction, cx| {
-            s.update(cx, |st, cx| { st.shrink_text(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.shrink_text();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -580,27 +642,42 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &ZoomInAction, cx| {
-            s.update(cx, |st, cx| { st.zoom_in(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.zoom_in();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &ZoomOutAction, cx| {
-            s.update(cx, |st, cx| { st.zoom_out(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.zoom_out();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &ZoomResetAction, cx| {
-            s.update(cx, |st, cx| { st.zoom_reset(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.zoom_reset();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &NextTabAction, cx| {
-            s.update(cx, |st, cx| { st.next_tab(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.next_tab();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &PrevTabAction, cx| {
-            s.update(cx, |st, cx| { st.prev_tab(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.prev_tab();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -617,27 +694,42 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &CondenseAction, cx| {
-            s.update(cx, |st, cx| { st.condense_selection(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.condense_selection();
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &PocketAction, cx| {
-            s.update(cx, |st, cx| { st.apply_card_style(CardStyleKind::Pocket); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.apply_card_style(CardStyleKind::Pocket);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &HatAction, cx| {
-            s.update(cx, |st, cx| { st.apply_card_style(CardStyleKind::Hat); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.apply_card_style(CardStyleKind::Hat);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &BlockAction, cx| {
-            s.update(cx, |st, cx| { st.apply_card_style(CardStyleKind::Block); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.apply_card_style(CardStyleKind::Block);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &TagAction, cx| {
-            s.update(cx, |st, cx| { st.apply_card_style(CardStyleKind::Tag); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.apply_card_style(CardStyleKind::Tag);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
@@ -679,7 +771,10 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &DeleteTagsAction, cx| {
-            s.update(cx, |st, cx| { st.delete_tags(); cx.notify(); });
+            s.update(cx, |st, cx| {
+                st.delete_tags();
+                cx.notify();
+            });
         });
 
         // Opens the timer popup rather than starting the clock directly: Start
@@ -737,16 +832,16 @@ impl Render for MainWindow {
          * The outer container has `.relative()` so the modal's `.absolute()` is
          * scoped to this window rather than the display.
          */
-        let sidebar_visible  = self.state.read(cx).sidebar_visible;
+        let sidebar_visible = self.state.read(cx).sidebar_visible;
         let settings_visible = self.state.read(cx).settings_visible;
-        let pending_close    = self.state.read(cx).pending_close;
+        let pending_close = self.state.read(cx).pending_close;
         let font_import_modal_open = self.state.read(cx).font_import_modal_open;
-        let has_recovery     = !self.state.read(cx).pending_recovery.is_empty();
+        let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
         let word_count_visible = self.state.read(cx).word_count_visible;
-        let timer_visible    = self.state.read(cx).timer.visible;
-        let split_view       = self.state.read(cx).split_view;
-        let split_ratio      = self.state.read(cx).split_ratio;
-        let sidebar_width    = self.state.read(cx).sidebar_width;
+        let timer_visible = self.state.read(cx).timer.visible;
+        let split_view = self.state.read(cx).split_view;
+        let split_ratio = self.state.read(cx).split_ratio;
+        let sidebar_width = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).find_bar.is_some();
         let command_palette_visible = self.state.read(cx).command_palette.is_some();
         let p = self.state.read(cx).current_palette();
@@ -773,8 +868,8 @@ impl Render for MainWindow {
                 let s = drag_end_state.clone();
                 move |_ev, _window, cx| {
                     s.update(cx, |st, cx| {
-                        if st.split_dragging {
-                            st.split_dragging = false;
+                        if st.workspace.split_dragging {
+                            st.workspace.split_dragging = false;
                             cx.notify();
                         }
                     });
@@ -809,26 +904,32 @@ impl Render for MainWindow {
                 split_state.update(cx, |s, cx| {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
-                    let left = if s.sidebar_visible { s.sidebar_width } else { 0.0 };
+                    let left = if s.sidebar_visible {
+                        s.sidebar_width
+                    } else {
+                        0.0
+                    };
                     let width = (window_width - left).max(1.0);
                     let next = clamp_split_ratio((x - left) / width);
-                    if s.split_ratio == next && s.split_dragging {
+                    if s.workspace.split_ratio == next && s.workspace.split_dragging {
                         return; // no movement worth a repaint
                     }
-                    s.split_ratio = next;
+                    s.workspace.split_ratio = next;
                     // Suspends the editors' full-document re-wrap for the
                     // duration of the drag — see `AppState.split_dragging`.
-                    s.split_dragging = true;
+                    s.workspace.split_dragging = true;
                     cx.notify();
                 });
             })
-            .on_drag_move(move |e: &DragMoveEvent<SidebarResizePayload>, _window, cx| {
-                let new_width = clamp_sidebar_width(e.event.position.x.as_f32());
-                resize_state.update(cx, |s, cx| {
-                    s.sidebar_width = new_width;
-                    cx.notify();
-                });
-            })
+            .on_drag_move(
+                move |e: &DragMoveEvent<SidebarResizePayload>, _window, cx| {
+                    let new_width = clamp_sidebar_width(e.event.position.x.as_f32());
+                    resize_state.update(cx, |s, cx| {
+                        s.sidebar_width = new_width;
+                        cx.notify();
+                    });
+                },
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -851,16 +952,19 @@ impl Render for MainWindow {
                     .relative()
                     .child(self.formatting_ribbon.clone())
                     .when(timer_visible, |d| {
-                        d.child(deferred(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .justify_center()
-                                .child(self.timer.clone()),
-                        ).with_priority(150))
+                        d.child(
+                            deferred(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .flex()
+                                    .justify_center()
+                                    .child(self.timer.clone()),
+                            )
+                            .with_priority(150),
+                        )
                     })
                     // ── Command palette ────────────────────────────────────
                     // Hosted by this same ribbon-relative wrapper, and for the
@@ -877,16 +981,21 @@ impl Render for MainWindow {
                     // taller than the ribbon and deliberately overlays it,
                     // spilling down over the editor.
                     .when(command_palette_visible, |d| {
-                        d.child(deferred(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .justify_center()
-                                .child(div().w(relative(0.5)).child(self.command_palette.clone())),
-                        ).with_priority(160))
+                        d.child(
+                            deferred(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        div().w(relative(0.5)).child(self.command_palette.clone()),
+                                    ),
+                            )
+                            .with_priority(160),
+                        )
                     }),
             )
             // ── Main content row ───────────────────────────────────────────
@@ -934,9 +1043,12 @@ impl Render for MainWindow {
                                         .bg(rgb(p.border))
                                         .cursor_col_resize()
                                         .occlude()
-                                        .on_drag(SplitResizePayload, |payload: &SplitResizePayload, _offset, _window, cx| {
-                                            cx.new(|_| payload.clone())
-                                        }),
+                                        .on_drag(
+                                            SplitResizePayload,
+                                            |payload: &SplitResizePayload, _offset, _window, cx| {
+                                                cx.new(|_| payload.clone())
+                                            },
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -957,7 +1069,7 @@ impl Render for MainWindow {
                                         .child(self.find_bar.clone()),
                                 )
                             }),
-                    )
+                    ),
             )
             // ── Settings modal overlay ─────────────────────────────────────
             // Added last so it paints on top of all other children
@@ -966,12 +1078,16 @@ impl Render for MainWindow {
             // Mounted only while a tab-close or app-close is awaiting a
             // Save/Discard/Cancel answer; painted after the settings modal
             // so it's still on top even if somehow both were open at once.
-            .when(pending_close.is_some(), |d| d.child(self.close_confirm.clone()))
+            .when(pending_close.is_some(), |d| {
+                d.child(self.close_confirm.clone())
+            })
             // ── Add Font overlay ─────────────────────────────────────────────
             // Mounted from the Font Family dropdown's "+ Add Font" row or the
             // Fonts settings section; painted after close-confirm so it can
             // still be opened from within Settings.
-            .when(font_import_modal_open, |d| d.child(self.font_import_modal.clone()))
+            .when(font_import_modal_open, |d| {
+                d.child(self.font_import_modal.clone())
+            })
             // ── Recovery prompt overlay ─────────────────────────────────────
             // Mounted at launch when a previous session left unsaved work
             // behind. Painted last so it sits above both other modals — it

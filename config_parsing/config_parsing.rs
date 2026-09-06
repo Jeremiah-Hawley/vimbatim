@@ -36,6 +36,12 @@ pub struct Settings {
     pub wikifi: String,
 }
 
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Settings {
     pub fn new() -> Settings {
         Settings {
@@ -80,30 +86,30 @@ impl Settings {
                 let key = &caps[1];
                 let value = caps[2].trim().to_string();
                 match key {
-                    "highlight_color"    => s.highlight_color = value,
-                    "small_size"         => s.small_size = value.parse().unwrap_or(0),
-                    "large_size"         => s.large_size = value.parse().unwrap_or(0),
-                    "paragraph_integrity"=> s.paragraph_integrity = value == "true",
-                    "pilcrows"           => s.pilcrows = value == "true",
-                    "vim"                => s.vim = value == "true",
-                    "paste"              => s.paste = value,
-                    "condense"           => s.condense = value,
-                    "pocket_hotkey"      => s.pocket_hotkey = value,
-                    "hat"                => s.hat = value,
-                    "block"              => s.block = value,
-                    "tag"                => s.tag = value,
-                    "cite"               => s.cite = value,
-                    "underline"          => s.underline = value,
-                    "emphasis"           => s.emphasis = value,
-                    "highlight"          => s.highlight = value,
-                    "clear"              => s.clear = value,
-                    "delete_tags"        => s.delete_tags = value,
-                    "new_document"       => s.new_document = value,
-                    "start_timer"        => s.start_timer = value,
-                    "open_stats"         => s.open_stats = value,
-                    "shrink"             => s.shrink = value,
-                    "cite_from_link"     => s.cite_from_link = value,
-                    "wikifi"             => s.wikifi = value,
+                    "highlight_color" => s.highlight_color = value,
+                    "small_size" => s.small_size = value.parse().unwrap_or(0),
+                    "large_size" => s.large_size = value.parse().unwrap_or(0),
+                    "paragraph_integrity" => s.paragraph_integrity = value == "true",
+                    "pilcrows" => s.pilcrows = value == "true",
+                    "vim" => s.vim = value == "true",
+                    "paste" => s.paste = value,
+                    "condense" => s.condense = value,
+                    "pocket_hotkey" => s.pocket_hotkey = value,
+                    "hat" => s.hat = value,
+                    "block" => s.block = value,
+                    "tag" => s.tag = value,
+                    "cite" => s.cite = value,
+                    "underline" => s.underline = value,
+                    "emphasis" => s.emphasis = value,
+                    "highlight" => s.highlight = value,
+                    "clear" => s.clear = value,
+                    "delete_tags" => s.delete_tags = value,
+                    "new_document" => s.new_document = value,
+                    "start_timer" => s.start_timer = value,
+                    "open_stats" => s.open_stats = value,
+                    "shrink" => s.shrink = value,
+                    "cite_from_link" => s.cite_from_link = value,
+                    "wikifi" => s.wikifi = value,
                     _ => {}
                 }
             }

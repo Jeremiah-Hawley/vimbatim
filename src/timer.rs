@@ -13,7 +13,7 @@ use gpui::*;
 use std::time::{Duration, Instant};
 
 use crate::state::AppState;
-use crate::theme::{palette, radius, space, Palette};
+use crate::theme::{radius, space, Palette};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerMode {
@@ -166,7 +166,9 @@ pub fn parse_duration(text: &str) -> Option<Duration> {
     }
     let mut secs: u64 = 0;
     for part in &parts {
-        secs = secs.checked_mul(60)?.checked_add(part.trim().parse::<u64>().ok()?)?;
+        secs = secs
+            .checked_mul(60)?
+            .checked_add(part.trim().parse::<u64>().ok()?)?;
     }
     Some(Duration::from_secs(secs))
 }
@@ -208,7 +210,11 @@ pub struct Timer {
 
 impl Timer {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Timer { state, input_focus: cx.focus_handle(), ticking: false }
+        Timer {
+            state,
+            input_focus: cx.focus_handle(),
+            ticking: false,
+        }
     }
 
     /// Repaints while the clock runs. GPUI has no "render every frame" mode:
@@ -224,7 +230,9 @@ impl Timer {
             loop {
                 // Fast enough that the seconds digit never looks stuck,
                 // slow enough to be invisible on a battery.
-                cx.background_executor().timer(Duration::from_millis(200)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
                 let keep_going = this.update(cx, |this: &mut Timer, cx| {
                     let running = this.state.read(cx).timer.is_running();
                     if !running {
@@ -244,7 +252,12 @@ impl Timer {
         .detach();
     }
 
-    fn handle_input_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_input_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let key = event.keystroke.key.clone();
         self.state.update(cx, |state, _cx| {
             let input = &mut state.timer.input;
@@ -310,7 +323,15 @@ impl Timer {
             .into_any_element()
     }
 
-    fn mode_tab(&self, id: &'static str, label: &'static str, mode: TimerMode, current: TimerMode, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn mode_tab(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        mode: TimerMode,
+        current: TimerMode,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = mode == current;
         div()
             .id(id)
@@ -322,7 +343,11 @@ impl Timer {
             .rounded(px(radius::MD))
             .text_xs()
             .cursor_pointer()
-            .bg(rgb(if selected { p.accent } else { p.chrome_elevated }))
+            .bg(rgb(if selected {
+                p.accent
+            } else {
+                p.chrome_elevated
+            }))
             .text_color(rgb(if selected { 0xffffff } else { p.text_muted }))
             .hover(move |s| s.text_color(rgb(if selected { 0xffffff } else { p.text })))
             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -354,7 +379,13 @@ impl Timer {
             None => ("select text read to calculate wpm".to_string(), true),
             Some(0) => ("selection has no text read aloud".to_string(), true),
             Some(words) => match words_per_minute(words, over) {
-                Some(wpm) => (format!("{wpm} wpm to read {words} words in {}", format_duration(over)), false),
+                Some(wpm) => (
+                    format!(
+                        "{wpm} wpm to read {words} words in {}",
+                        format_duration(over)
+                    ),
+                    false,
+                ),
                 None => ("set a time to calculate wpm".to_string(), true),
             },
         };
@@ -414,8 +445,22 @@ impl Render for Timer {
                             .flex()
                             .flex_row()
                             .gap(px(space::XXS))
-                            .child(self.mode_tab("timer-mode-countdown", "Timer", TimerMode::Countdown, mode, p, cx))
-                            .child(self.mode_tab("timer-mode-stopwatch", "Stopwatch", TimerMode::Stopwatch, mode, p, cx)),
+                            .child(self.mode_tab(
+                                "timer-mode-countdown",
+                                "Timer",
+                                TimerMode::Countdown,
+                                mode,
+                                p,
+                                cx,
+                            ))
+                            .child(self.mode_tab(
+                                "timer-mode-stopwatch",
+                                "Stopwatch",
+                                TimerMode::Stopwatch,
+                                mode,
+                                p,
+                                cx,
+                            )),
                     )
                     .child(
                         div()
@@ -459,7 +504,12 @@ impl Render for Timer {
                         .items_center()
                         .justify_center()
                         .gap(px(space::XS))
-                        .child(div().text_xs().text_color(rgb(p.text_muted)).child("Count down from"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.text_muted))
+                                .child("Count down from"),
+                        )
                         .child(
                             div()
                                 .id("timer-input")
@@ -477,7 +527,11 @@ impl Render for Timer {
                                 .text_color(rgb(if unparseable { p.accent_alt } else { p.text }))
                                 .cursor_pointer()
                                 .border_1()
-                                .border_color(rgb(if unparseable { p.accent_alt } else { p.border_subtle }))
+                                .border_color(rgb(if unparseable {
+                                    p.accent_alt
+                                } else {
+                                    p.border_subtle
+                                }))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this, _ev, window, cx| {
@@ -568,42 +622,69 @@ mod tests {
     #[test]
     fn pausing_and_resuming_accumulates_both_segments() {
         let t0 = Instant::now();
-        let mut timer = TimerState { mode: TimerMode::Stopwatch, ..TimerState::default() };
+        let mut timer = TimerState {
+            mode: TimerMode::Stopwatch,
+            ..TimerState::default()
+        };
 
         timer.start_at(t0);
         timer.stop_at(t0 + Duration::from_secs(10));
-        assert_eq!(timer.elapsed_at(t0 + Duration::from_secs(999)), Duration::from_secs(10));
+        assert_eq!(
+            timer.elapsed_at(t0 + Duration::from_secs(999)),
+            Duration::from_secs(10)
+        );
 
         timer.start_at(t0 + Duration::from_secs(20));
-        assert_eq!(timer.elapsed_at(t0 + Duration::from_secs(25)), Duration::from_secs(15));
+        assert_eq!(
+            timer.elapsed_at(t0 + Duration::from_secs(25)),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
     fn a_second_start_does_not_rebase_a_running_clock() {
         let t0 = Instant::now();
-        let mut timer = TimerState { mode: TimerMode::Stopwatch, ..TimerState::default() };
+        let mut timer = TimerState {
+            mode: TimerMode::Stopwatch,
+            ..TimerState::default()
+        };
 
         timer.start_at(t0);
         timer.start_at(t0 + Duration::from_secs(5));
 
-        assert_eq!(timer.elapsed_at(t0 + Duration::from_secs(10)), Duration::from_secs(10));
+        assert_eq!(
+            timer.elapsed_at(t0 + Duration::from_secs(10)),
+            Duration::from_secs(10)
+        );
     }
 
     #[test]
     fn countdown_shows_time_remaining_and_floors_at_zero() {
         let t0 = Instant::now();
-        let mut timer = TimerState { input: "1:00".into(), ..TimerState::default() };
+        let mut timer = TimerState {
+            input: "1:00".into(),
+            ..TimerState::default()
+        };
         timer.start_at(t0);
 
-        assert_eq!(timer.displayed_at(t0 + Duration::from_secs(20)), Duration::from_secs(40));
+        assert_eq!(
+            timer.displayed_at(t0 + Duration::from_secs(20)),
+            Duration::from_secs(40)
+        );
         // Overrunning parks at 0:00 rather than going negative (or panicking
         // on a `Duration` subtraction overflow).
-        assert_eq!(timer.displayed_at(t0 + Duration::from_secs(90)), Duration::ZERO);
+        assert_eq!(
+            timer.displayed_at(t0 + Duration::from_secs(90)),
+            Duration::ZERO
+        );
     }
 
     #[test]
     fn an_unparseable_countdown_length_reads_as_zero_rather_than_panicking() {
-        let timer = TimerState { input: "oops".into(), ..TimerState::default() };
+        let timer = TimerState {
+            input: "oops".into(),
+            ..TimerState::default()
+        };
         assert_eq!(timer.target(), None);
         assert_eq!(timer.displayed_at(Instant::now()), Duration::ZERO);
     }
@@ -612,7 +693,10 @@ mod tests {
     #[test]
     fn laps_record_elapsed_not_the_countdown_display() {
         let t0 = Instant::now();
-        let mut timer = TimerState { input: "5:00".into(), ..TimerState::default() };
+        let mut timer = TimerState {
+            input: "5:00".into(),
+            ..TimerState::default()
+        };
         timer.start_at(t0);
         timer.stop_at(t0 + Duration::from_secs(48));
 
@@ -624,7 +708,10 @@ mod tests {
     #[test]
     fn switching_mode_clears_a_clock_that_would_be_meaningless_in_the_other() {
         let t0 = Instant::now();
-        let mut timer = TimerState { mode: TimerMode::Stopwatch, ..TimerState::default() };
+        let mut timer = TimerState {
+            mode: TimerMode::Stopwatch,
+            ..TimerState::default()
+        };
         timer.start_at(t0);
         timer.stop_at(t0 + Duration::from_secs(30));
         timer.lap();

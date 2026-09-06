@@ -1,4 +1,5 @@
-use crate::docx_parser::{Alignment, Paragraph, Run};
+pub(crate) use crate::document::normalize::merge_adjacent_same_format_runs;
+use crate::document::{Alignment, Paragraph, Run};
 
 /// Resolves a byte offset into `content` (the flat string vim-mode and the
 /// rest of the editor operate on) into a `(paragraph_index, run_index,
@@ -39,8 +40,15 @@ pub fn resolve_position(paragraphs: &[Paragraph], byte_offset: usize) -> (usize,
     // cursor, but clamp to the very end of the last paragraph rather than
     // panicking.
     let last_idx = paragraphs.len().saturating_sub(1);
-    match paragraphs.get(last_idx).and_then(|p| p.runs.len().checked_sub(1)) {
-        Some(last_run_idx) => (last_idx, last_run_idx, paragraphs[last_idx].runs[last_run_idx].text.len()),
+    match paragraphs
+        .get(last_idx)
+        .and_then(|p| p.runs.len().checked_sub(1))
+    {
+        Some(last_run_idx) => (
+            last_idx,
+            last_run_idx,
+            paragraphs[last_idx].runs[last_run_idx].text.len(),
+        ),
         None => (0, 0, 0),
     }
 }
@@ -61,7 +69,9 @@ pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch:
         // clear needed for the newline case.
         split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
     } else {
-        paragraphs[para_idx].runs[run_idx].text.insert(char_offset, ch);
+        paragraphs[para_idx].runs[run_idx]
+            .text
+            .insert(char_offset, ch);
         paragraphs[para_idx].unsupported_xml = None;
     }
 }
@@ -80,7 +90,12 @@ pub fn sync_insert_str(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text
 /// equal `text` (the contract `rich_clipboard::decode` already guarantees);
 /// an empty `runs` falls back to `sync_insert_str`'s plain, inheriting
 /// behavior rather than silently dropping `text`.
-pub fn sync_insert_str_with_runs(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text: &str, runs: &[Run]) {
+pub fn sync_insert_str_with_runs(
+    paragraphs: &mut Vec<Paragraph>,
+    byte_offset: usize,
+    text: &str,
+    runs: &[Run],
+) {
     if runs.is_empty() {
         sync_insert_str(paragraphs, byte_offset, text);
     } else {
@@ -88,7 +103,12 @@ pub fn sync_insert_str_with_runs(paragraphs: &mut Vec<Paragraph>, byte_offset: u
     }
 }
 
-fn sync_insert_str_impl(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, text: &str, runs: Option<&[Run]>) {
+fn sync_insert_str_impl(
+    paragraphs: &mut Vec<Paragraph>,
+    byte_offset: usize,
+    text: &str,
+    runs: Option<&[Run]>,
+) {
     let mut offset = byte_offset;
     match runs {
         None => {
@@ -153,7 +173,12 @@ fn insert_styled_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: c
     paragraphs[para_idx].unsupported_xml = None;
 }
 
-fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx: usize, char_offset: usize) {
+fn split_paragraph_at(
+    paragraphs: &mut Vec<Paragraph>,
+    para_idx: usize,
+    run_idx: usize,
+    char_offset: usize,
+) {
     /*
      * Splits paragraph `para_idx` into two at (run_idx, char_offset): the
      * run being split becomes a "head" run ending the first paragraph, and
@@ -202,7 +227,13 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     let new_line_list = if was_heading { None } else { new_line_list };
     let tail_text = split_run.text[char_offset..].to_string();
     let (tail_run, new_alignment) = if was_heading {
-        (Run { text: tail_text, ..Run::default() }, Alignment::default())
+        (
+            Run {
+                text: tail_text,
+                ..Run::default()
+            },
+            Alignment::default(),
+        )
     } else {
         let mut run = split_run.clone();
         run.text = tail_text;
@@ -218,8 +249,20 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
     paragraphs.splice(
         para_idx..=para_idx,
         [
-            Paragraph { list, runs: para_a_runs, heading, alignment, unsupported_xml: None },
-            Paragraph { list: new_line_list, runs: para_b_runs, heading: 0, alignment: new_alignment, unsupported_xml: None },
+            Paragraph {
+                list,
+                runs: para_a_runs,
+                heading,
+                alignment,
+                unsupported_xml: None,
+            },
+            Paragraph {
+                list: new_line_list,
+                runs: para_b_runs,
+                heading: 0,
+                alignment: new_alignment,
+                unsupported_xml: None,
+            },
         ],
     );
 }
@@ -234,12 +277,20 @@ fn split_paragraph_at(paragraphs: &mut Vec<Paragraph>, para_idx: usize, run_idx:
 /// runs, since every other function here assumes at least one always
 /// exists.
 pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize) {
-    if start >= end { return; }
+    if start >= end {
+        return;
+    }
     let (start_para, start_run, start_char) = resolve_position(paragraphs, start);
     let (end_para, end_run, end_char) = resolve_position(paragraphs, end);
 
     if start_para == end_para {
-        delete_within_runs(&mut paragraphs[start_para].runs, start_run, start_char, end_run, end_char);
+        delete_within_runs(
+            &mut paragraphs[start_para].runs,
+            start_run,
+            start_char,
+            end_run,
+            end_char,
+        );
         paragraphs[start_para].unsupported_xml = None;
         clear_heading_if_now_empty(&mut paragraphs[start_para]);
         return;
@@ -283,7 +334,16 @@ pub fn sync_delete_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usi
         (heading, alignment, list)
     };
 
-    paragraphs.splice(start_para..=end_para, [Paragraph { runs: merged_runs, heading, alignment, list, unsupported_xml: None }]);
+    paragraphs.splice(
+        start_para..=end_para,
+        [Paragraph {
+            runs: merged_runs,
+            heading,
+            alignment,
+            list,
+            unsupported_xml: None,
+        }],
+    );
 }
 
 /// Once a paragraph's own within-paragraph deletion (not a cross-paragraph
@@ -299,7 +359,13 @@ fn clear_heading_if_now_empty(para: &mut Paragraph) {
     }
 }
 
-fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, end_run: usize, end_char: usize) {
+fn delete_within_runs(
+    runs: &mut Vec<Run>,
+    start_run: usize,
+    start_char: usize,
+    end_run: usize,
+    end_char: usize,
+) {
     if start_run == end_run {
         runs[start_run].text.replace_range(start_char..end_char, "");
     } else {
@@ -312,61 +378,6 @@ fn delete_within_runs(runs: &mut Vec<Run>, start_run: usize, start_char: usize, 
     merge_adjacent_same_format_runs(runs);
     if runs.is_empty() {
         runs.push(Run::default());
-    }
-}
-
-/// Merges adjacent runs that share identical formatting into one, comparing
-/// every `Run` field except `text`. Deletion can make two runs that
-/// previously had unrelated text become textually adjacent — without this,
-/// repeated edits would let paragraphs accumulate more and more same-format
-/// runs indefinitely.
-pub(crate) fn merge_adjacent_same_format_runs(runs: &mut Vec<Run>) {
-    /*
-     * Empty runs go first, before the merge — they render nothing but are not
-     * harmless. `sync_insert_str_with_runs` inserts one character at a time
-     * and splits paragraphs as it goes, which strands an empty remnant of each
-     * source run in the paragraph the split left behind. A multi-line paste of
-     * Pocket/Hat/Block/Tag lines therefore ended with a paragraph holding
-     * `[("test", 0), ("", 26), ("", 32), ("", 44), ("", 52)]` — four invisible
-     * runs whose sizes and `box_format` still fed paragraph-level rendering
-     * (a spurious border) and got written straight back out to the .docx.
-     *
-     * The all-empty case is a genuinely blank paragraph: keep exactly one run,
-     * both to hold the invariant that a paragraph always has at least one and
-     * to preserve the formatting typing there should inherit.
-     */
-    if runs.iter().all(|r| r.text.is_empty()) {
-        runs.truncate(1);
-    } else {
-        runs.retain(|r| !r.text.is_empty());
-    }
-
-    let mut i = 0;
-    while i + 1 < runs.len() {
-        let same_format = runs[i].bold == runs[i + 1].bold
-            && runs[i].italic == runs[i + 1].italic
-            && runs[i].underline == runs[i + 1].underline
-            && runs[i].double_underline == runs[i + 1].double_underline
-            && runs[i].strikethrough == runs[i + 1].strikethrough
-            && runs[i].highlight == runs[i + 1].highlight
-            && runs[i].highlight_color == runs[i + 1].highlight_color
-            && runs[i].size == runs[i + 1].size
-            && runs[i].font == runs[i + 1].font
-            && runs[i].color == runs[i + 1].color
-            && runs[i].box_format == runs[i + 1].box_format
-            && runs[i].whitespace_preserve == runs[i + 1].whitespace_preserve
-            && runs[i].emphasis == runs[i + 1].emphasis
-            && runs[i].emphasis_boxed == runs[i + 1].emphasis_boxed
-            // Two runs that look identical but carry different markers are
-            // different things — fusing them would erase one.
-            && runs[i].style == runs[i + 1].style;
-        if same_format {
-            let next_text = runs[i + 1].text.clone();
-            runs[i].text.push_str(&next_text);
-            runs.remove(i + 1);
-        } else {
-            i += 1;
-        }
     }
 }
 
@@ -410,7 +421,7 @@ pub enum FormatOp {
     Color(Option<String>),
     Box(bool),
     /// The debate style marker (`Run.style`), or `None` to clear it.
-    Style(Option<crate::docx_parser::CardStyle>),
+    Style(Option<crate::document::CardStyle>),
     /// The Emphasis button's own marker (`Run.emphasis`), independent of
     /// whichever of Bold/Underline/`Box` it also applied.
     Emphasis(bool),
@@ -421,7 +432,9 @@ pub enum FormatOp {
     /// highlight/font/color) back to the unformatted default, and size to
     /// `default_size` (half-points — spec: "Clear" resets to settings.conf's
     /// `normal_text_size`, not to "no override").
-    ClearAll { default_size: u16 },
+    ClearAll {
+        default_size: u16,
+    },
 }
 
 /// Applies `op` to every run (byte-)range `[start, end)` spans (spec 7.2),
@@ -429,7 +442,9 @@ pub enum FormatOp {
 /// overlaps the range doesn't get formatted in its entirety. A no-op when
 /// `start >= end`.
 pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize, op: FormatOp) {
-    if start >= end { return; }
+    if start >= end {
+        return;
+    }
     let (start_para, start_run, start_char) = resolve_position(paragraphs, start);
     let (end_para, end_run, end_char) = resolve_position(paragraphs, end);
 
@@ -469,7 +484,7 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
 /// byte range `[start, end)` across `paragraphs`, in document order. A
 /// paragraph-separating `'\n'` crossed by the range is itself emitted as its
 /// own unformatted `Run` (text `"\n"`) — the plain text this is meant to
-/// pair with (e.g. `AppState::copy_selection`'s `tab.content[start..end]`)
+/// pair with (e.g. `AppState::copy_selection`'s `tab.document.content[start..end]`)
 /// contains that literal byte for any multi-paragraph selection, and
 /// `rich_clipboard::decode` requires the returned runs' lengths to sum to
 /// exactly that text's length, so omitting it silently broke every
@@ -497,7 +512,10 @@ pub fn runs_in_range(paragraphs: &[Paragraph], start: usize, end: usize) -> Vec<
             // cumulative is now this paragraph's end; the separating '\n'
             // occupies the single byte [cumulative, cumulative + 1).
             if start <= cumulative && cumulative < end {
-                out.push(Run { text: "\n".to_string(), ..Run::default() });
+                out.push(Run {
+                    text: "\n".to_string(),
+                    ..Run::default()
+                });
             }
             cumulative += 1;
         }
@@ -593,7 +611,11 @@ pub fn apply_pasted_paragraph_attrs(
 /// user ever chose, and leaving it in would split otherwise-identical runs
 /// apart purely over leading/trailing spaces.
 fn format_key(run: &Run) -> Run {
-    Run { text: String::new(), whitespace_preserve: false, ..run.clone() }
+    Run {
+        text: String::new(),
+        whitespace_preserve: false,
+        ..run.clone()
+    }
 }
 
 /// Byte ranges, in document order, of every run whose formatting matches
@@ -627,7 +649,12 @@ pub fn ranges_matching_format(paragraphs: &[Paragraph], target: &Run) -> Vec<(us
     out
 }
 
-pub(crate) fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usize, run_idx: usize, byte_offset: usize) {
+pub(crate) fn split_run_at_position(
+    paragraphs: &mut [Paragraph],
+    para_idx: usize,
+    run_idx: usize,
+    byte_offset: usize,
+) {
     /*
      * Splits `paragraphs[para_idx].runs[run_idx]` into two runs (same
      * formatting, just the text divided) at `byte_offset` — unless
@@ -642,7 +669,9 @@ pub(crate) fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usiz
     head.text.truncate(byte_offset);
     let mut tail = run.clone();
     tail.text = run.text[byte_offset..].to_string();
-    paragraphs[para_idx].runs.splice(run_idx..=run_idx, [head, tail]);
+    paragraphs[para_idx]
+        .runs
+        .splice(run_idx..=run_idx, [head, tail]);
 }
 
 /// True if every run overlapping `[start, end)` is already in the "on"
@@ -655,8 +684,15 @@ pub(crate) fn split_run_at_position(paragraphs: &mut [Paragraph], para_idx: usiz
 /// anything (unlike `apply_formatting`).
 /// Applies paragraph-level alignment to all paragraphs that overlap `[start, end)`,
 /// or to the single paragraph containing the cursor when start == end.
-pub fn apply_paragraph_alignment(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize, alignment: Alignment) {
-    if start > end { return; }
+pub fn apply_paragraph_alignment(
+    paragraphs: &mut Vec<Paragraph>,
+    start: usize,
+    end: usize,
+    alignment: Alignment,
+) {
+    if start > end {
+        return;
+    }
     let (start_para, _, _) = resolve_position(paragraphs, start);
     let (end_para, _, _) = if start == end {
         (start_para, 0, 0) // When no selection, only affect the paragraph at start
@@ -681,7 +717,9 @@ pub fn apply_paragraph_alignment(paragraphs: &mut Vec<Paragraph>, start: usize, 
 /// and `apply_formatting_to_selection` both call one choke point instead of
 /// each re-deriving it.
 pub fn reset_card_style_in_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize) {
-    if start > end { return; }
+    if start > end {
+        return;
+    }
     let (start_para, _, _) = resolve_position(paragraphs, start);
     let (end_para, _, _) = if start == end {
         (start_para, 0, 0)
@@ -697,8 +735,15 @@ pub fn reset_card_style_in_range(paragraphs: &mut Vec<Paragraph>, start: usize, 
     }
 }
 
-pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, op: &FormatOp) -> bool {
-    if start >= end { return false; }
+pub fn is_uniformly_active(
+    paragraphs: &[Paragraph],
+    start: usize,
+    end: usize,
+    op: &FormatOp,
+) -> bool {
+    if start >= end {
+        return false;
+    }
     let mut cumulative = 0usize;
     let mut touched_any = false;
     for para in paragraphs {
@@ -708,7 +753,9 @@ pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, o
             cumulative = run_end;
             let overlap_start = run_start.max(start);
             let overlap_end = run_end.min(end);
-            if overlap_start >= overlap_end { continue; }
+            if overlap_start >= overlap_end {
+                continue;
+            }
             touched_any = true;
             let active = match op {
                 FormatOp::Bold(true) => run.bold,
@@ -720,7 +767,9 @@ pub fn is_uniformly_active(paragraphs: &[Paragraph], start: usize, end: usize, o
                 FormatOp::Box(true) => run.box_format,
                 _ => false,
             };
-            if !active { return false; }
+            if !active {
+                return false;
+            }
         }
         cumulative += 1; // the paragraph-separating '\n'
     }
@@ -788,11 +837,20 @@ mod tests {
     use crate::docx_parser::{CardStyle, ListItem, ListKind, Run};
 
     fn run(text: &str) -> Run {
-        Run { text: text.to_string(), ..Run::default() }
+        Run {
+            text: text.to_string(),
+            ..Run::default()
+        }
     }
 
     fn para(runs: Vec<Run>) -> Paragraph {
-        Paragraph { list: None, runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+        Paragraph {
+            list: None,
+            runs,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
     }
 
     #[test]
@@ -854,11 +912,7 @@ mod tests {
     #[test]
     fn test_empty_paragraph_between_two_others() {
         // "one\n\ntwo": "one" 0..3, '\n' at 3, empty para at 4..4, '\n' at 4, "two" 5..8
-        let paragraphs = vec![
-            para(vec![run("one")]),
-            para(vec![]),
-            para(vec![run("two")]),
-        ];
+        let paragraphs = vec![para(vec![run("one")]), para(vec![]), para(vec![run("two")])];
         assert_eq!(resolve_position(&paragraphs, 4), (1, 0, 0));
         assert_eq!(resolve_position(&paragraphs, 5), (2, 0, 0));
     }
@@ -867,7 +921,11 @@ mod tests {
 
     #[test]
     fn test_insert_char_inherits_surrounding_runs_format() {
-        let mut paragraphs = vec![para(vec![Run { text: "abc".into(), bold: true, ..Run::default() }])];
+        let mut paragraphs = vec![para(vec![Run {
+            text: "abc".into(),
+            bold: true,
+            ..Run::default()
+        }])];
         sync_insert_char(&mut paragraphs, 1, 'X');
         assert_eq!(paragraphs[0].runs.len(), 1);
         assert_eq!(paragraphs[0].runs[0].text, "aXbc");
@@ -892,7 +950,11 @@ mod tests {
 
     #[test]
     fn test_insert_newline_mid_run_preserves_format_on_both_sides() {
-        let mut paragraphs = vec![para(vec![Run { text: "hello".into(), bold: true, ..Run::default() }])];
+        let mut paragraphs = vec![para(vec![Run {
+            text: "hello".into(),
+            bold: true,
+            ..Run::default()
+        }])];
         sync_insert_char(&mut paragraphs, 2, '\n');
         assert!(paragraphs[0].runs[0].bold);
         assert!(paragraphs[1].runs[0].bold);
@@ -912,34 +974,67 @@ mod tests {
     #[test]
     fn test_insert_newline_on_nonempty_list_item_continues_the_list_on_both_halves() {
         let mut item = para(vec![run("hello")]);
-        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        item.list = Some(ListItem {
+            kind: ListKind::BulletSolid,
+            level: 0,
+        });
         let mut paragraphs = vec![item];
         sync_insert_char(&mut paragraphs, 2, '\n'); // splits "he" | "llo"
         assert_eq!(paragraphs.len(), 2);
-        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
-        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(
+            paragraphs[0].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
+        assert_eq!(
+            paragraphs[1].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
     }
 
     #[test]
     fn test_insert_newline_on_nonempty_numbered_item_continues_numbering_on_new_line() {
         let mut item = para(vec![run("hello")]);
-        item.list = Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 });
+        item.list = Some(ListItem {
+            kind: ListKind::NumberDecimalDot,
+            level: 0,
+        });
         let mut paragraphs = vec![item];
         sync_insert_char(&mut paragraphs, 5, '\n'); // cursor at end of "hello"
         assert_eq!(paragraphs.len(), 2);
-        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }));
+        assert_eq!(
+            paragraphs[1].list,
+            Some(ListItem {
+                kind: ListKind::NumberDecimalDot,
+                level: 0
+            })
+        );
     }
 
     #[test]
     fn test_insert_newline_on_empty_list_item_does_not_continue_the_list() {
         let mut item = para(vec![run("")]);
-        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        item.list = Some(ListItem {
+            kind: ListKind::BulletSolid,
+            level: 0,
+        });
         let mut paragraphs = vec![item];
         sync_insert_char(&mut paragraphs, 0, '\n');
         assert_eq!(paragraphs.len(), 2);
         // The original (now still-empty) line keeps whatever it had — this
         // task only specifies the *new* line's behavior.
-        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(
+            paragraphs[0].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
         // The new line does not continue the list: no character followed
         // the marker on the line that was split.
         assert_eq!(paragraphs[1].list, None);
@@ -951,11 +1046,20 @@ mod tests {
         // ("|hello", not "hello|" or empty) — still counts as "a character
         // follows the marker" on the pre-split line as a whole.
         let mut item = para(vec![run("hello")]);
-        item.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        item.list = Some(ListItem {
+            kind: ListKind::BulletSolid,
+            level: 0,
+        });
         let mut paragraphs = vec![item];
         sync_insert_char(&mut paragraphs, 0, '\n');
         assert_eq!(paragraphs.len(), 2);
-        assert_eq!(paragraphs[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(
+            paragraphs[1].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
         assert_eq!(paragraphs[1].runs[0].text, "hello");
     }
 
@@ -964,8 +1068,15 @@ mod tests {
         // A Pocket-styled line (heading 1, bold, sized, boxed, centered) —
         // pressing Enter at its end should start a plain body-text line,
         // not continue looking like a Pocket.
-        let heading_line = Paragraph { list: None,
-            runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+        let heading_line = Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hello".into(),
+                bold: true,
+                size: 52,
+                box_format: true,
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::Center,
             unsupported_xml: None,
@@ -990,8 +1101,15 @@ mod tests {
         // Splitting in the middle of a Hat-styled line: the trailing half
         // that moves to the new paragraph loses the Hat formatting too,
         // matching Word's "Enter inside a heading reverts to body style".
-        let heading_line = Paragraph { list: None,
-            runs: vec![Run { text: "hello world".into(), bold: true, size: 44, double_underline: true, ..Run::default() }],
+        let heading_line = Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hello world".into(),
+                bold: true,
+                size: 44,
+                double_underline: true,
+                ..Run::default()
+            }],
             heading: 2,
             alignment: Alignment::Center,
             unsupported_xml: None,
@@ -1033,7 +1151,11 @@ mod tests {
     #[test]
     fn test_delete_preserves_formatting_outside_deleted_range() {
         let mut paragraphs = vec![para(vec![
-            Run { text: "bold".into(), bold: true, ..Run::default() },
+            Run {
+                text: "bold".into(),
+                bold: true,
+                ..Run::default()
+            },
             run(" plain"),
         ])];
         // delete " plai" (indices 4..9), leaving "bold" + "n"
@@ -1069,18 +1191,30 @@ mod tests {
     #[test]
     fn test_delete_across_paragraph_boundary_carries_over_start_paragraphs_list() {
         let mut start = para(vec![run("item")]);
-        start.list = Some(ListItem { kind: ListKind::BulletSolid, level: 0 });
+        start.list = Some(ListItem {
+            kind: ListKind::BulletSolid,
+            level: 0,
+        });
         let mut paragraphs = vec![start, para(vec![run("")])];
         // content = "item\n"; delete the newline (byte offset 4..5) to merge.
         sync_delete_range(&mut paragraphs, 4, 5);
         assert_eq!(paragraphs.len(), 1);
-        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(
+            paragraphs[0].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
     }
 
     #[test]
     fn test_delete_across_paragraph_boundary_clears_list_when_result_is_empty() {
         let mut start = para(vec![run("x")]);
-        start.list = Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 });
+        start.list = Some(ListItem {
+            kind: ListKind::NumberDecimalDot,
+            level: 0,
+        });
         let mut paragraphs = vec![start, para(vec![run("")])];
         // content = "x\n"; delete everything (both chars) so the merge result is empty.
         sync_delete_range(&mut paragraphs, 0, 2);
@@ -1150,7 +1284,13 @@ mod tests {
     #[test]
     fn test_char_spans_use_char_count_not_byte_len_for_multibyte_text() {
         // "café" is 4 chars but 5 bytes (é is 2 bytes in UTF-8).
-        let p = para(vec![Run { text: "café".into(), ..Run::default() }, run("bar")]);
+        let p = para(vec![
+            Run {
+                text: "café".into(),
+                ..Run::default()
+            },
+            run("bar"),
+        ]);
         assert_eq!(paragraph_run_char_spans(&p), vec![(0, 4, 0), (4, 7, 1)]);
     }
 
@@ -1192,7 +1332,7 @@ mod tests {
     fn test_apply_formatting_across_multiple_runs_in_one_paragraph() {
         let mut paragraphs = vec![para(vec![run("foo"), run("bar")])];
         apply_formatting(&mut paragraphs, 1, 5, FormatOp::Italic(true)); // "oob" + "a" of "bar" -> spans both runs partially
-        // "foobar": f-o-o-b-a-r, italic [1,5) = "ooba"
+                                                                         // "foobar": f-o-o-b-a-r, italic [1,5) = "ooba"
         assert_eq!(paragraphs[0].runs.len(), 3);
         assert_eq!(paragraphs[0].runs[0].text, "f");
         assert!(!paragraphs[0].runs[0].italic);
@@ -1224,9 +1364,17 @@ mod tests {
         // Two already-bold runs with a plain run between them; bolding the
         // plain run's exact range should merge all three into one.
         let mut paragraphs = vec![para(vec![
-            Run { text: "one".into(), bold: true, ..Run::default() },
+            Run {
+                text: "one".into(),
+                bold: true,
+                ..Run::default()
+            },
             run("two"),
-            Run { text: "three".into(), bold: true, ..Run::default() },
+            Run {
+                text: "three".into(),
+                bold: true,
+                ..Run::default()
+            },
         ])];
         apply_formatting(&mut paragraphs, 3, 6, FormatOp::Bold(true));
         assert_eq!(paragraphs[0].runs.len(), 1);
@@ -1239,11 +1387,25 @@ mod tests {
         // Same text formatting, but one run carries the Emphasis box and the
         // other doesn't — merging would silently drop or spread the box.
         let mut runs = vec![
-            Run { text: "one".into(), emphasis: true, emphasis_boxed: true, ..Run::default() },
-            Run { text: "two".into(), emphasis: true, emphasis_boxed: false, ..Run::default() },
+            Run {
+                text: "one".into(),
+                emphasis: true,
+                emphasis_boxed: true,
+                ..Run::default()
+            },
+            Run {
+                text: "two".into(),
+                emphasis: true,
+                emphasis_boxed: false,
+                ..Run::default()
+            },
         ];
         merge_adjacent_same_format_runs(&mut runs);
-        assert_eq!(runs.len(), 2, "runs differing only in emphasis_boxed must not merge");
+        assert_eq!(
+            runs.len(),
+            2,
+            "runs differing only in emphasis_boxed must not merge"
+        );
         assert!(runs[0].emphasis_boxed);
         assert!(!runs[1].emphasis_boxed);
     }
@@ -1251,7 +1413,12 @@ mod tests {
     #[test]
     fn test_apply_highlight_sets_color_name() {
         let mut paragraphs = vec![para(vec![run("hello")])];
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::Highlight(Some("yellow".to_string())));
+        apply_formatting(
+            &mut paragraphs,
+            0,
+            5,
+            FormatOp::Highlight(Some("yellow".to_string())),
+        );
         assert!(paragraphs[0].runs[0].highlight);
         assert_eq!(paragraphs[0].runs[0].highlight_color, "yellow");
     }
@@ -1259,7 +1426,10 @@ mod tests {
     #[test]
     fn test_apply_highlight_none_removes_it() {
         let mut paragraphs = vec![para(vec![Run {
-            text: "hello".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default()
+            text: "hello".into(),
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
         }])];
         apply_formatting(&mut paragraphs, 0, 5, FormatOp::Highlight(None));
         assert!(!paragraphs[0].runs[0].highlight);
@@ -1281,7 +1451,12 @@ mod tests {
             emphasis_boxed: true,
             ..Run::default()
         }])];
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::ClearAll { default_size: 22 });
+        apply_formatting(
+            &mut paragraphs,
+            0,
+            5,
+            FormatOp::ClearAll { default_size: 22 },
+        );
         let r = &paragraphs[0].runs[0];
         assert!(!r.bold && !r.italic && !r.underline && !r.highlight);
         assert_eq!(r.size, 22);
@@ -1313,8 +1488,18 @@ mod tests {
     #[test]
     fn test_apply_font_family_and_color() {
         let mut paragraphs = vec![para(vec![run("hello")])];
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::FontFamily(Some("Georgia".to_string())));
-        apply_formatting(&mut paragraphs, 0, 5, FormatOp::Color(Some("00FF00".to_string())));
+        apply_formatting(
+            &mut paragraphs,
+            0,
+            5,
+            FormatOp::FontFamily(Some("Georgia".to_string())),
+        );
+        apply_formatting(
+            &mut paragraphs,
+            0,
+            5,
+            FormatOp::Color(Some("00FF00".to_string())),
+        );
         assert_eq!(paragraphs[0].runs[0].font, Some("Georgia".to_string()));
         assert_eq!(paragraphs[0].runs[0].color, Some("00FF00".to_string()));
     }
@@ -1323,59 +1508,124 @@ mod tests {
 
     #[test]
     fn test_is_uniformly_active_true_when_whole_range_already_bold() {
-        let paragraphs = vec![para(vec![Run { text: "hello".into(), bold: true, ..Run::default() }])];
-        assert!(is_uniformly_active(&paragraphs, 0, 5, &FormatOp::Bold(true)));
+        let paragraphs = vec![para(vec![Run {
+            text: "hello".into(),
+            bold: true,
+            ..Run::default()
+        }])];
+        assert!(is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::Bold(true)
+        ));
     }
 
     #[test]
     fn test_is_uniformly_active_false_when_only_part_is_bold() {
         let paragraphs = vec![para(vec![
-            Run { text: "hel".into(), bold: true, ..Run::default() },
+            Run {
+                text: "hel".into(),
+                bold: true,
+                ..Run::default()
+            },
             run("lo"),
         ])];
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::Bold(true)));
+        assert!(!is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::Bold(true)
+        ));
     }
 
     #[test]
     fn test_is_uniformly_active_false_when_nothing_is_bold() {
         let paragraphs = vec![para(vec![run("hello")])];
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::Bold(true)));
+        assert!(!is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::Bold(true)
+        ));
     }
 
     #[test]
     fn test_is_uniformly_active_checks_highlight_color_match() {
         let paragraphs = vec![para(vec![Run {
-            text: "hello".into(), highlight: true, highlight_color: "yellow".into(), ..Run::default()
+            text: "hello".into(),
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
         }])];
-        assert!(is_uniformly_active(&paragraphs, 0, 5, &FormatOp::Highlight(Some("yellow".into()))));
+        assert!(is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::Highlight(Some("yellow".into()))
+        ));
         // Same range is highlighted, but a *different* color — clicking the
         // green button on yellow-highlighted text should apply green, not
         // toggle it off.
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::Highlight(Some("green".into()))));
+        assert!(!is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::Highlight(Some("green".into()))
+        ));
     }
 
     #[test]
     fn test_is_uniformly_active_spans_multiple_paragraphs() {
         let paragraphs = vec![
-            para(vec![Run { text: "one".into(), italic: true, ..Run::default() }]),
-            para(vec![Run { text: "two".into(), italic: true, ..Run::default() }]),
+            para(vec![Run {
+                text: "one".into(),
+                italic: true,
+                ..Run::default()
+            }]),
+            para(vec![Run {
+                text: "two".into(),
+                italic: true,
+                ..Run::default()
+            }]),
         ];
         // "one\ntwo", italic [0, 7)
-        assert!(is_uniformly_active(&paragraphs, 0, 7, &FormatOp::Italic(true)));
+        assert!(is_uniformly_active(
+            &paragraphs,
+            0,
+            7,
+            &FormatOp::Italic(true)
+        ));
     }
 
     #[test]
     fn test_is_uniformly_active_false_for_non_togglable_ops() {
         let paragraphs = vec![para(vec![run("hello")])];
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::FontSize(24)));
-        assert!(!is_uniformly_active(&paragraphs, 0, 5, &FormatOp::ClearAll { default_size: 22 }));
+        assert!(!is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::FontSize(24)
+        ));
+        assert!(!is_uniformly_active(
+            &paragraphs,
+            0,
+            5,
+            &FormatOp::ClearAll { default_size: 22 }
+        ));
     }
 
     #[test]
     fn test_toggled_off_maps_each_togglable_op() {
         assert_eq!(toggled_off(&FormatOp::Bold(true)), FormatOp::Bold(false));
-        assert_eq!(toggled_off(&FormatOp::Italic(true)), FormatOp::Italic(false));
-        assert_eq!(toggled_off(&FormatOp::Underline(true)), FormatOp::Underline(false));
+        assert_eq!(
+            toggled_off(&FormatOp::Italic(true)),
+            FormatOp::Italic(false)
+        );
+        assert_eq!(
+            toggled_off(&FormatOp::Underline(true)),
+            FormatOp::Underline(false)
+        );
         assert_eq!(
             toggled_off(&FormatOp::Highlight(Some("yellow".into()))),
             FormatOp::Highlight(None)
@@ -1386,7 +1636,10 @@ mod tests {
 
     #[test]
     fn test_sync_insert_char_clears_unsupported_xml_on_touched_paragraph() {
-        let mut paragraphs = vec![para(vec![Run { text: "hi".into(), ..Run::default() }])];
+        let mut paragraphs = vec![para(vec![Run {
+            text: "hi".into(),
+            ..Run::default()
+        }])];
         paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
 
         sync_insert_char(&mut paragraphs, 1, 'X');
@@ -1396,7 +1649,10 @@ mod tests {
 
     #[test]
     fn test_sync_delete_range_clears_unsupported_xml_on_touched_paragraph() {
-        let mut paragraphs = vec![para(vec![Run { text: "hello".into(), ..Run::default() }])];
+        let mut paragraphs = vec![para(vec![Run {
+            text: "hello".into(),
+            ..Run::default()
+        }])];
         paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
 
         sync_delete_range(&mut paragraphs, 1, 3);
@@ -1407,8 +1663,14 @@ mod tests {
     #[test]
     fn test_apply_formatting_clears_unsupported_xml_only_on_touched_paragraphs() {
         let mut paragraphs = vec![
-            para(vec![Run { text: "one".into(), ..Run::default() }]),
-            para(vec![Run { text: "two".into(), ..Run::default() }]),
+            para(vec![Run {
+                text: "one".into(),
+                ..Run::default()
+            }]),
+            para(vec![Run {
+                text: "two".into(),
+                ..Run::default()
+            }]),
         ];
         paragraphs[0].unsupported_xml = Some("<w:hyperlink/>".to_string());
         paragraphs[1].unsupported_xml = Some("<w:hyperlink/>".to_string());
@@ -1417,14 +1679,25 @@ mod tests {
         apply_formatting(&mut paragraphs, 0, 3, FormatOp::Bold(true));
 
         assert_eq!(paragraphs[0].unsupported_xml, None);
-        assert_eq!(paragraphs[1].unsupported_xml, Some("<w:hyperlink/>".to_string()));
+        assert_eq!(
+            paragraphs[1].unsupported_xml,
+            Some("<w:hyperlink/>".to_string())
+        );
     }
 
     #[test]
     fn test_runs_in_range_extracts_overlapping_runs_across_a_paragraph_boundary() {
         let paragraphs = vec![
-            para(vec![Run { text: "hello ".into(), bold: true, ..Run::default() }]),
-            para(vec![Run { text: "world".into(), italic: true, ..Run::default() }]),
+            para(vec![Run {
+                text: "hello ".into(),
+                bold: true,
+                ..Run::default()
+            }]),
+            para(vec![Run {
+                text: "world".into(),
+                italic: true,
+                ..Run::default()
+            }]),
         ];
         // "hello \nworld" — select "lo \nwo" (indices 3..9), which crosses
         // the paragraph-separating '\n' at index 6 — it must come back as
@@ -1435,7 +1708,13 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].text, "lo ");
         assert!(result[0].bold);
-        assert_eq!(result[1], Run { text: "\n".into(), ..Run::default() });
+        assert_eq!(
+            result[1],
+            Run {
+                text: "\n".into(),
+                ..Run::default()
+            }
+        );
         assert_eq!(result[2].text, "wo");
         assert!(result[2].italic);
     }
@@ -1444,7 +1723,11 @@ mod tests {
     fn test_runs_in_range_single_paragraph_selection_has_no_newline_run() {
         // A selection that never crosses a paragraph boundary shouldn't gain
         // a spurious '\n' run.
-        let paragraphs = vec![para(vec![Run { text: "hello world".into(), bold: true, ..Run::default() }])];
+        let paragraphs = vec![para(vec![Run {
+            text: "hello world".into(),
+            bold: true,
+            ..Run::default()
+        }])];
         let result = runs_in_range(&paragraphs, 0, 5);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "hello");
@@ -1455,10 +1738,7 @@ mod tests {
         // end is exclusive and lands exactly on the paragraph boundary (not
         // past it) — the '\n' byte itself is [end, end+1) here, so it must
         // NOT be included.
-        let paragraphs = vec![
-            para(vec![run("hello")]),
-            para(vec![run("world")]),
-        ];
+        let paragraphs = vec![para(vec![run("hello")]), para(vec![run("world")])];
         let result = runs_in_range(&paragraphs, 0, 5); // "hello", stops before '\n'
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].text, "hello");
@@ -1467,9 +1747,17 @@ mod tests {
     #[test]
     fn test_runs_in_range_spanning_three_paragraphs_emits_two_newline_runs() {
         let paragraphs = vec![
-            para(vec![Run { text: "one".into(), bold: true, ..Run::default() }]),
+            para(vec![Run {
+                text: "one".into(),
+                bold: true,
+                ..Run::default()
+            }]),
             para(vec![run("two")]),
-            para(vec![Run { text: "three".into(), highlight: true, ..Run::default() }]),
+            para(vec![Run {
+                text: "three".into(),
+                highlight: true,
+                ..Run::default()
+            }]),
         ];
         // "one\ntwo\nthree" (13 bytes) — whole document.
         let result = runs_in_range(&paragraphs, 0, 13);
@@ -1484,8 +1772,16 @@ mod tests {
     fn test_sync_insert_str_with_runs_appends_distinct_runs_at_end() {
         let mut paragraphs = vec![para(vec![run("foo")])];
         let runs = vec![
-            Run { text: "bar".into(), bold: true, ..Run::default() },
-            Run { text: "baz".into(), italic: true, ..Run::default() },
+            Run {
+                text: "bar".into(),
+                bold: true,
+                ..Run::default()
+            },
+            Run {
+                text: "baz".into(),
+                italic: true,
+                ..Run::default()
+            },
         ];
         sync_insert_str_with_runs(&mut paragraphs, 3, "barbaz", &runs);
 
@@ -1498,7 +1794,11 @@ mod tests {
     #[test]
     fn test_sync_insert_str_with_runs_splits_the_run_it_lands_inside() {
         let mut paragraphs = vec![para(vec![run("hello world")])];
-        let runs = vec![Run { text: " brave".into(), bold: true, ..Run::default() }];
+        let runs = vec![Run {
+            text: " brave".into(),
+            bold: true,
+            ..Run::default()
+        }];
         // "hello world" -> insert " brave" at byte 5 (between "hello" and " world")
         sync_insert_str_with_runs(&mut paragraphs, 5, " brave", &runs);
 
@@ -1512,7 +1812,11 @@ mod tests {
     /// bold run matches and nothing else does, across paragraph boundaries.
     #[test]
     fn test_ranges_matching_format_finds_every_matching_run() {
-        let bold = |t: &str| Run { text: t.into(), bold: true, ..Run::default() };
+        let bold = |t: &str| Run {
+            text: t.into(),
+            bold: true,
+            ..Run::default()
+        };
         let paragraphs = vec![
             // "tag" (0..3) | " plain" (3..9)      -> paragraph is 0..9, '\n' at 9
             para(vec![bold("tag"), run(" plain")]),
@@ -1531,10 +1835,7 @@ mod tests {
     /// the separating '\n' belongs to no run and must stay unselected.
     #[test]
     fn test_ranges_matching_format_merges_neighbours_but_not_across_paragraphs() {
-        let paragraphs = vec![
-            para(vec![run("ab"), run("cd")]),
-            para(vec![run("ef")]),
-        ];
+        let paragraphs = vec![para(vec![run("ab"), run("cd")]), para(vec![run("ef")])];
 
         assert_eq!(
             ranges_matching_format(&paragraphs, &run("")),
@@ -1548,8 +1849,16 @@ mod tests {
     fn test_ranges_matching_format_excludes_a_run_differing_in_one_field() {
         let paragraphs = vec![para(vec![
             run("plain"),
-            Run { text: "big".into(), size: 48, ..Run::default() },
-            Run { text: "cited".into(), style: Some(CardStyle::Cite), ..Run::default() },
+            Run {
+                text: "big".into(),
+                size: 48,
+                ..Run::default()
+            },
+            Run {
+                text: "cited".into(),
+                style: Some(CardStyle::Cite),
+                ..Run::default()
+            },
         ])];
 
         assert_eq!(ranges_matching_format(&paragraphs, &run("")), vec![(0, 5)]);
@@ -1560,7 +1869,11 @@ mod tests {
         // No runs supplied (e.g. decode() produced an empty Vec) should
         // behave exactly like the plain sync_insert_str, inheriting the
         // surrounding run's formatting rather than inserting nothing.
-        let mut plain = vec![para(vec![Run { text: "hi".into(), bold: true, ..Run::default() }])];
+        let mut plain = vec![para(vec![Run {
+            text: "hi".into(),
+            bold: true,
+            ..Run::default()
+        }])];
         let mut with_empty_runs = plain.clone();
 
         sync_insert_str(&mut plain, 2, "!");

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::state::{
     AppState, FileContextMenu, FileContextMenuTarget, FileNode, NavContextMenuTarget, SidebarMode,
 };
-use crate::theme::{palette, radius, space, Palette};
+use crate::theme::{radius, space, Palette};
 
 /// Drag payload used solely to identify a sidebar-resize drag to
 /// `MainWindow`'s `on_drag_move` handler (`main_window.rs`) — GPUI
@@ -93,18 +93,29 @@ impl FileExplorer {
     /// resolves to a literal through `vim_find_target_char` so shifted
     /// punctuation behaves) — the buffer just lives in `FileContextMenu`
     /// instead of on the view, since the menu owns its own mode.
-    fn handle_rename_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_rename_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         self.state.update(cx, |s, cx| {
-            let Some(menu) = s.file_context_menu.as_mut() else { return };
-            let Some(buffer) = menu.rename_buffer.as_mut() else { return };
+            let Some(menu) = s.file_context_menu.as_mut() else {
+                return;
+            };
+            let Some(buffer) = menu.rename_buffer.as_mut() else {
+                return;
+            };
             match ks.key.as_str() {
                 "escape" => s.close_file_context_menu(),
                 "enter" => {
                     let new_name = std::mem::take(buffer);
                     let target = menu.target.clone();
                     s.close_file_context_menu();
-                    if let FileContextMenuTarget::File(old) | FileContextMenuTarget::Dir(old) = target {
+                    if let FileContextMenuTarget::File(old) | FileContextMenuTarget::Dir(old) =
+                        target
+                    {
                         if let Err(e) = s.rename_path(&old, &new_name) {
                             crate::state::log_line(&format!("[FileExplorer] rename failed: {e}"));
                         }
@@ -114,7 +125,11 @@ impl FileExplorer {
                     buffer.pop();
                 }
                 _ => {
-                    if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                    if let Some(c) = crate::state::vim_find_target_char(
+                        &ks.key,
+                        ks.modifiers.shift,
+                        ks.key_char.as_deref(),
+                    ) {
                         buffer.push(c);
                     }
                 }
@@ -143,8 +158,14 @@ impl FileExplorer {
             .items_center()
             .cursor_pointer()
             .text_sm()
-            .when(danger, |d| d.text_color(rgb(0xf14c4c)).hover(move |s| s.bg(rgba(0xf14c4c33))))
-            .when(!danger, |d| d.text_color(rgb(p.text)).hover(move |s| s.bg(rgb(p.chrome_hover))))
+            .when(danger, |d| {
+                d.text_color(rgb(0xf14c4c))
+                    .hover(move |s| s.bg(rgba(0xf14c4c33)))
+            })
+            .when(!danger, |d| {
+                d.text_color(rgb(p.text))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
+            })
             .on_click(on_click)
             .child(label.into())
     }
@@ -167,7 +188,11 @@ impl FileExplorer {
         let dir = self.state.read(cx).working_directory.clone();
         self.state.update(cx, |s, cx| {
             if let Err(e) = s.create_new_docx_in(&dir) {
-                crate::state::log_line(&format!("[FileExplorer] failed to create new file in {}: {}", dir.display(), e));
+                crate::state::log_line(&format!(
+                    "[FileExplorer] failed to create new file in {}: {}",
+                    dir.display(),
+                    e
+                ));
             }
             cx.notify();
         });
@@ -237,8 +262,8 @@ impl FileExplorer {
                             .on_click(move |_ev, _window, cx| {
                                 let p = path_clone.clone();
                                 state_clone.update(cx, |s, cx| {
-                                    toggle_dir_expanded(&mut s.file_tree, &p);
-                                    let expanded = collect_expanded_dirs(&s.file_tree);
+                                    toggle_dir_expanded(&mut s.workspace.file_tree, &p);
+                                    let expanded = collect_expanded_dirs(&s.workspace.file_tree);
                                     let _ = crate::state::save_expanded_dirs(
                                         &crate::state::settings_conf_path(),
                                         &expanded,
@@ -386,9 +411,11 @@ impl FileExplorer {
 
         let panel = if menu.confirming_delete {
             let display_name = match &menu.target {
-                FileContextMenuTarget::File(path) => {
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("this file").to_string()
-                }
+                FileContextMenuTarget::File(path) => path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("this file")
+                    .to_string(),
                 _ => "this file".to_string(),
             };
             let cancel_state = state_handle.clone();
@@ -406,12 +433,10 @@ impl FileExplorer {
                 .shadow_lg()
                 .p(px(space::SM))
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(p.text))
-                        .child(format!("Delete \"{}\"? This can't be undone.", display_name)),
-                )
+                .child(div().text_sm().text_color(rgb(p.text)).child(format!(
+                    "Delete \"{}\"? This can't be undone.",
+                    display_name
+                )))
                 .child(
                     div()
                         .flex()
@@ -458,7 +483,10 @@ impl FileExplorer {
                                 .on_click(move |_ev, _window, cx| {
                                     confirm_state.update(cx, |s, cx| {
                                         if let Err(e) = s.confirm_context_menu_delete() {
-                                            crate::state::log_line(&format!("[FileExplorer] failed to delete: {}", e));
+                                            crate::state::log_line(&format!(
+                                                "[FileExplorer] failed to delete: {}",
+                                                e
+                                            ));
                                         }
                                         cx.notify();
                                     });
@@ -485,7 +513,12 @@ impl FileExplorer {
                 .shadow_lg()
                 .p(px(space::SM))
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .child(div().text_xs().text_color(rgb(p.text_muted)).child("Rename to (Enter to confirm)"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.text_muted))
+                        .child("Rename to (Enter to confirm)"),
+                )
                 .child(
                     div()
                         .id("ctx-menu-rename-input")
@@ -541,30 +574,51 @@ impl FileExplorer {
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 // ── File-only: the three "open it where?" variants ──────────
                 .when_some(file_path.clone(), |d, path| {
-                    let (new_tab, current_tab, side_pane) =
-                        (state_handle.clone(), state_handle.clone(), state_handle.clone());
+                    let (new_tab, current_tab, side_pane) = (
+                        state_handle.clone(),
+                        state_handle.clone(),
+                        state_handle.clone(),
+                    );
                     let (p1, p2, p3) = (path.clone(), path.clone(), path);
-                    d.child(Self::menu_item("ctx-open-new-tab", "Open in New Tab", false, p, move |_, _, cx| {
-                        new_tab.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.open_file(p1.clone());
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-open-current-tab", "Open in Current Tab", false, p, move |_, _, cx| {
-                        current_tab.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.open_file_in_current_tab(p2.clone());
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-open-side-pane", "Open in Side Pane", false, p, move |_, _, cx| {
-                        side_pane.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.open_file_in_side_pane(p3.clone());
-                            cx.notify();
-                        });
-                    }))
+                    d.child(Self::menu_item(
+                        "ctx-open-new-tab",
+                        "Open in New Tab",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            new_tab.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.open_file(p1.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-open-current-tab",
+                        "Open in Current Tab",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            current_tab.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.open_file_in_current_tab(p2.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-open-side-pane",
+                        "Open in Side Pane",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            side_pane.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.open_file_in_side_pane(p3.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
                     .child(Self::menu_separator(p))
                 })
                 // ── Dir-only: open everything inside it / cut / rename it ───
@@ -577,76 +631,130 @@ impl FileExplorer {
                     // Seed with the folder's full name — unlike a file, a
                     // folder has no extension for `rename_path` to re-apply,
                     // so there's nothing to strip off first.
-                    let dir_name = p2.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-                    d.child(Self::menu_item("ctx-open-all", "Open All Files in New Tabs", false, p, move |_, _, cx| {
-                        open_all.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.open_all_files_in_dir(&p1);
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-cut-dir", "Cut Folder", false, p, move |_, _, cx| {
-                        cut.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.cut_file(p3.clone());
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-rename-dir", "Rename", false, p, move |_, window, cx| {
-                        rename.update(cx, |s, cx| {
-                            if let Some(menu) = s.file_context_menu.as_mut() {
-                                menu.rename_buffer = Some(dir_name.clone());
-                            }
-                            cx.notify();
-                        });
-                        rename_focus_for_dir_click.focus(window, cx);
-                    }))
+                    let dir_name = p2
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    d.child(Self::menu_item(
+                        "ctx-open-all",
+                        "Open All Files in New Tabs",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            open_all.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.open_all_files_in_dir(&p1);
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-cut-dir",
+                        "Cut Folder",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            cut.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.cut_file(p3.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-rename-dir",
+                        "Rename",
+                        false,
+                        p,
+                        move |_, window, cx| {
+                            rename.update(cx, |s, cx| {
+                                if let Some(menu) = s.file_context_menu.as_mut() {
+                                    menu.rename_buffer = Some(dir_name.clone());
+                                }
+                                cx.notify();
+                            });
+                            rename_focus_for_dir_click.focus(window, cx);
+                        },
+                    ))
                     .child(Self::menu_separator(p))
                 })
                 // ── File-only: duplicate / copy / cut / rename ─────────────
                 .when_some(file_path, |d, path| {
                     let (dup, copy, cut, rename) = (
-                        state_handle.clone(), state_handle.clone(),
-                        state_handle.clone(), state_handle.clone(),
+                        state_handle.clone(),
+                        state_handle.clone(),
+                        state_handle.clone(),
+                        state_handle.clone(),
                     );
                     let (p1, p2, p3) = (path.clone(), path.clone(), path.clone());
                     // Seed the rename buffer with the stem, not the full file
                     // name — `rename_path` re-applies `.docx` via
                     // `with_docx_extension`, so the extension is never the
                     // user's to retype (or to accidentally delete).
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-                    d.child(Self::menu_item("ctx-duplicate", "Duplicate File", false, p, move |_, _, cx| {
-                        dup.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            if let Err(e) = s.duplicate_file(&p1) {
-                                crate::state::log_line(&format!("[FileExplorer] duplicate failed: {e}"));
-                            }
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-copy-file", "Copy File", false, p, move |_, _, cx| {
-                        copy.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.copy_file(p2.clone());
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-cut-file", "Cut File", false, p, move |_, _, cx| {
-                        cut.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            s.cut_file(p3.clone());
-                            cx.notify();
-                        });
-                    }))
-                    .child(Self::menu_item("ctx-rename", "Rename", false, p, move |_, window, cx| {
-                        rename.update(cx, |s, cx| {
-                            if let Some(menu) = s.file_context_menu.as_mut() {
-                                menu.rename_buffer = Some(stem.clone());
-                            }
-                            cx.notify();
-                        });
-                        rename_focus_for_click.focus(window, cx);
-                    }))
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    d.child(Self::menu_item(
+                        "ctx-duplicate",
+                        "Duplicate File",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            dup.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                if let Err(e) = s.duplicate_file(&p1) {
+                                    crate::state::log_line(&format!(
+                                        "[FileExplorer] duplicate failed: {e}"
+                                    ));
+                                }
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-copy-file",
+                        "Copy File",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            copy.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.copy_file(p2.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-cut-file",
+                        "Cut File",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            cut.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                s.cut_file(p3.clone());
+                                cx.notify();
+                            });
+                        },
+                    ))
+                    .child(Self::menu_item(
+                        "ctx-rename",
+                        "Rename",
+                        false,
+                        p,
+                        move |_, window, cx| {
+                            rename.update(cx, |s, cx| {
+                                if let Some(menu) = s.file_context_menu.as_mut() {
+                                    menu.rename_buffer = Some(stem.clone());
+                                }
+                                cx.notify();
+                            });
+                            rename_focus_for_click.focus(window, cx);
+                        },
+                    ))
                     .child(Self::menu_separator(p))
                 })
                 // ── Paste (folders only, and only with something on the
@@ -655,28 +763,49 @@ impl FileExplorer {
                 // it, and the two are easy to mistake once the menu is open.
                 .when_some(dir_path.filter(|_| can_paste), |d, path| {
                     let paste = state_handle.clone();
-                    let label = if pending_cut { "Move Here" } else { "Paste File" };
-                    d.child(Self::menu_item("ctx-paste-file", label, false, p, move |_, _, cx| {
-                        paste.update(cx, |s, cx| {
-                            s.close_file_context_menu();
-                            if let Err(e) = s.paste_file_into(&path) {
-                                crate::state::log_line(&format!("[FileExplorer] paste failed: {e}"));
-                            }
-                            cx.notify();
-                        });
-                    }))
+                    let label = if pending_cut {
+                        "Move Here"
+                    } else {
+                        "Paste File"
+                    };
+                    d.child(Self::menu_item(
+                        "ctx-paste-file",
+                        label,
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            paste.update(cx, |s, cx| {
+                                s.close_file_context_menu();
+                                if let Err(e) = s.paste_file_into(&path) {
+                                    crate::state::log_line(&format!(
+                                        "[FileExplorer] paste failed: {e}"
+                                    ));
+                                }
+                                cx.notify();
+                            });
+                        },
+                    ))
                 })
                 // ── Create, on every target ────────────────────────────────
                 .child({
                     let new_file_state = state_handle.clone();
-                    Self::menu_item("ctx-menu-new-file", "New File", false, p, move |_, _, cx| {
-                        new_file_state.update(cx, |s, cx| {
-                            if let Err(e) = s.create_file_at_context_menu_location() {
-                                crate::state::log_line(&format!("[FileExplorer] failed to create file: {}", e));
-                            }
-                            cx.notify();
-                        });
-                    })
+                    Self::menu_item(
+                        "ctx-menu-new-file",
+                        "New File",
+                        false,
+                        p,
+                        move |_, _, cx| {
+                            new_file_state.update(cx, |s, cx| {
+                                if let Err(e) = s.create_file_at_context_menu_location() {
+                                    crate::state::log_line(&format!(
+                                        "[FileExplorer] failed to create file: {}",
+                                        e
+                                    ));
+                                }
+                                cx.notify();
+                            });
+                        },
+                    )
                 })
                 .child({
                     // Same "where did the click land?" resolution "New File"
@@ -688,12 +817,14 @@ impl FileExplorer {
                                 Some(FileContextMenuTarget::File(path)) => path
                                     .parent()
                                     .map(|p| p.to_path_buf())
-                                    .unwrap_or_else(|| s.working_directory.clone()),
+                                    .unwrap_or_else(|| s.workspace.working_directory.clone()),
                                 Some(FileContextMenuTarget::Dir(path)) => path,
-                                _ => s.working_directory.clone(),
+                                _ => s.workspace.working_directory.clone(),
                             };
                             if let Err(e) = s.create_new_folder_in(&dir) {
-                                crate::state::log_line(&format!("[FileExplorer] new folder failed: {e}"));
+                                crate::state::log_line(&format!(
+                                    "[FileExplorer] new folder failed: {e}"
+                                ));
                             }
                             cx.notify();
                         });
@@ -724,19 +855,22 @@ impl FileExplorer {
         // both panel branches with one handler.
         let dismiss_state = state_handle.clone();
         deferred(
-            anchored().position(point(px(x), px(y))).snap_to_window().child(
-                div()
-                    .id("file-context-menu-dismiss")
-                    .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
-                        dismiss_state.update(cx, |s, cx| {
-                            if s.file_context_menu.is_some() {
-                                s.close_file_context_menu();
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .child(panel),
-            ),
+            anchored()
+                .position(point(px(x), px(y)))
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("file-context-menu-dismiss")
+                        .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                            dismiss_state.update(cx, |s, cx| {
+                                if s.file_context_menu.is_some() {
+                                    s.close_file_context_menu();
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .child(panel),
+                ),
         )
         .with_priority(1)
         .into_any_element()
@@ -787,39 +921,63 @@ impl FileExplorer {
                     state_handle.clone(),
                     state_handle.clone(),
                 );
-                d.child(Self::menu_item("nav-ctx-select", "Select Heading and Contents", false, p, move |_, _, cx| {
-                    sel.update(cx, |s, cx| {
-                        s.close_nav_context_menu();
-                        s.select_heading_and_contents(line);
-                        cx.notify();
-                    });
-                }))
-                .child(Self::menu_item("nav-ctx-copy", "Copy Heading and Contents", false, p, move |_, window, cx| {
-                    copy.update(cx, |s, cx| {
-                        s.close_nav_context_menu();
-                        s.select_heading_and_contents(line);
-                        cx.notify();
-                    });
-                    window.dispatch_action(Box::new(crate::keybinds::CopyAction), cx);
-                }))
-                .child(Self::menu_item("nav-ctx-cut", "Cut Heading and Contents", false, p, move |_, window, cx| {
-                    cut.update(cx, |s, cx| {
-                        s.close_nav_context_menu();
-                        s.select_heading_and_contents(line);
-                        cx.notify();
-                    });
-                    window.dispatch_action(Box::new(crate::keybinds::CutAction), cx);
-                }))
-                .child(Self::menu_item("nav-ctx-delete", "Delete Heading and Contents", true, p, move |_, _, cx| {
-                    del.update(cx, |s, cx| {
-                        s.close_nav_context_menu();
-                        s.select_heading_and_contents(line);
-                        // Pushes its own undo snapshot — a section delete can
-                        // be large, and Ctrl+Z is the only way back.
-                        s.delete_selection();
-                        cx.notify();
-                    });
-                }))
+                d.child(Self::menu_item(
+                    "nav-ctx-select",
+                    "Select Heading and Contents",
+                    false,
+                    p,
+                    move |_, _, cx| {
+                        sel.update(cx, |s, cx| {
+                            s.close_nav_context_menu();
+                            s.select_heading_and_contents(line);
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(Self::menu_item(
+                    "nav-ctx-copy",
+                    "Copy Heading and Contents",
+                    false,
+                    p,
+                    move |_, window, cx| {
+                        copy.update(cx, |s, cx| {
+                            s.close_nav_context_menu();
+                            s.select_heading_and_contents(line);
+                            cx.notify();
+                        });
+                        window.dispatch_action(Box::new(crate::keybinds::CopyAction), cx);
+                    },
+                ))
+                .child(Self::menu_item(
+                    "nav-ctx-cut",
+                    "Cut Heading and Contents",
+                    false,
+                    p,
+                    move |_, window, cx| {
+                        cut.update(cx, |s, cx| {
+                            s.close_nav_context_menu();
+                            s.select_heading_and_contents(line);
+                            cx.notify();
+                        });
+                        window.dispatch_action(Box::new(crate::keybinds::CutAction), cx);
+                    },
+                ))
+                .child(Self::menu_item(
+                    "nav-ctx-delete",
+                    "Delete Heading and Contents",
+                    true,
+                    p,
+                    move |_, _, cx| {
+                        del.update(cx, |s, cx| {
+                            s.close_nav_context_menu();
+                            s.select_heading_and_contents(line);
+                            // Pushes its own undo snapshot — a section delete can
+                            // be large, and Ctrl+Z is the only way back.
+                            s.delete_selection();
+                            cx.notify();
+                        });
+                    },
+                ))
                 .child(Self::menu_separator(p))
             })
             .children((1u8..=4).map(|level| {
@@ -848,19 +1006,22 @@ impl FileExplorer {
 
         let dismiss_state = state_handle.clone();
         deferred(
-            anchored().position(point(px(x), px(y))).snap_to_window().child(
-                div()
-                    .id("nav-context-menu-dismiss")
-                    .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
-                        dismiss_state.update(cx, |s, cx| {
-                            if s.nav_context_menu.is_some() {
-                                s.close_nav_context_menu();
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .child(panel),
-            ),
+            anchored()
+                .position(point(px(x), px(y)))
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("nav-context-menu-dismiss")
+                        .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                            dismiss_state.update(cx, |s, cx| {
+                                if s.nav_context_menu.is_some() {
+                                    s.close_nav_context_menu();
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .child(panel),
+                ),
         )
         .with_priority(1)
         .into_any_element()
@@ -907,7 +1068,9 @@ impl FileExplorer {
             .text_xs()
             .border_1()
             .when(is_active, |d| {
-                d.bg(rgb(p.accent_wash)).text_color(rgb(p.text)).border_color(rgb(p.accent_muted))
+                d.bg(rgb(p.accent_wash))
+                    .text_color(rgb(p.text))
+                    .border_color(rgb(p.accent_muted))
             })
             .when(!is_active, |d| {
                 d.text_color(rgb(p.text_muted))
@@ -934,9 +1097,14 @@ impl FileExplorer {
     /// it has nested headings) toggles `self.nav_collapsed` instead. Shows
     /// a placeholder message instead of an empty list when the active tab
     /// has no headings yet.
-    fn render_nav_tree(&self, state_handle: &Entity<AppState>, p: Palette, cx: &mut Context<FileExplorer>) -> AnyElement {
+    fn render_nav_tree(
+        &self,
+        state_handle: &Entity<AppState>,
+        p: Palette,
+        cx: &mut Context<FileExplorer>,
+    ) -> AnyElement {
         let state = state_handle.read(cx);
-        let Some(tab) = state.tabs.get(state.active_tab) else {
+        let Some(tab) = state.workspace.tabs.get(state.workspace.active_tab) else {
             return div().into_any_element();
         };
 
@@ -947,12 +1115,15 @@ impl FileExplorer {
         // why it isn't expressed as a bulk collapse instead.
         let max_level = self.nav_max_level.unwrap_or(4);
         let headings: Vec<(usize, u8, String)> = tab
+            .document
             .content
             .split('\n')
             .enumerate()
             .filter_map(|(line_idx, line_text)| {
-                let heading = tab.paragraphs.get(line_idx)?.heading;
-                (1..=max_level).contains(&heading).then(|| (line_idx, heading, line_text.to_string()))
+                let heading = tab.document.paragraphs.get(line_idx)?.heading;
+                (1..=max_level)
+                    .contains(&heading)
+                    .then(|| (line_idx, heading, line_text.to_string()))
             })
             .collect();
 
@@ -1026,23 +1197,37 @@ impl FileExplorer {
                     // so "where am I" reads the same way in both sidebar
                     // modes. The indent is reduced by the bar's own width so
                     // adding it doesn't shift the row's text sideways.
-                    .bg(if is_current { rgb(p.selection) } else { rgb(p.sidebar) })
+                    .bg(if is_current {
+                        rgb(p.selection)
+                    } else {
+                        rgb(p.sidebar)
+                    })
                     .border_l_2()
-                    .border_color(if is_current { rgb(p.accent) } else { rgb(p.sidebar) })
+                    .border_color(if is_current {
+                        rgb(p.accent)
+                    } else {
+                        rgb(p.sidebar)
+                    })
                     .pl(indent + px(space::SM - 2.0))
                     .pr(px(space::SM))
                     // Right-click a heading: the Select/Copy/Cut/Delete
                     // "Heading and Contents" items, plus the level rows.
                     // stop_propagation so the list's own background
                     // right-click handler doesn't retarget it to Background.
-                    .on_mouse_down(MouseButton::Right, move |ev: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                        state_for_ctx.update(cx, |s, cx| {
-                            s.open_nav_context_menu(position, NavContextMenuTarget::Heading(line_idx));
-                            cx.notify();
-                        });
-                    })
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        move |ev: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                            state_for_ctx.update(cx, |s, cx| {
+                                s.open_nav_context_menu(
+                                    position,
+                                    NavContextMenuTarget::Heading(line_idx),
+                                );
+                                cx.notify();
+                            });
+                        },
+                    )
                     // Arrow: only present when this heading has nested
                     // headings to collapse. A fixed-width spacer otherwise,
                     // so leaf headings' text still lines up with siblings
@@ -1103,7 +1288,11 @@ impl FileExplorer {
 /// collapsed parent, the nearest *visible* ancestor highlights instead of
 /// nothing at all.
 fn current_nav_line_idx(entries: &[NavEntry], cursor_line: usize) -> Option<usize> {
-    entries.iter().rev().find(|e| e.line_idx <= cursor_line).map(|e| e.line_idx)
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.line_idx <= cursor_line)
+        .map(|e| e.line_idx)
 }
 
 /// One row in the Nav tree, already resolved to its rendering position —
@@ -1129,7 +1318,10 @@ struct NavEntry {
 /// collapsed ancestor's subtree it falls inside — nested collapse state is
 /// preserved even while hidden (an inner collapse isn't lost when its
 /// outer ancestor re-expands, since `collapsed` itself is untouched here).
-fn build_nav_entries(headings: &[(usize, u8, String)], collapsed: &HashSet<usize>) -> Vec<NavEntry> {
+fn build_nav_entries(
+    headings: &[(usize, u8, String)],
+    collapsed: &HashSet<usize>,
+) -> Vec<NavEntry> {
     let mut stack: Vec<u8> = Vec::new();
     let mut entries = Vec::new();
     // Once we enter a collapsed heading's subtree, set to the depth its
@@ -1145,8 +1337,15 @@ fn build_nav_entries(headings: &[(usize, u8, String)], collapsed: &HashSet<usize
         let is_skipped = skip_from_depth.is_some_and(|skip_depth| depth >= skip_depth);
         if !is_skipped {
             skip_from_depth = None;
-            let has_children = headings.get(i + 1).is_some_and(|(_, next_level, _)| next_level > level);
-            entries.push(NavEntry { line_idx: *line_idx, text: text.clone(), depth, has_children });
+            let has_children = headings
+                .get(i + 1)
+                .is_some_and(|(_, next_level, _)| next_level > level);
+            entries.push(NavEntry {
+                line_idx: *line_idx,
+                text: text.clone(),
+                depth,
+                has_children,
+            });
             if has_children && collapsed.contains(line_idx) {
                 skip_from_depth = Some(depth + 1);
             }
@@ -1181,11 +1380,15 @@ impl Render for FileExplorer {
             .and_then(|n| n.to_str())
             .unwrap_or(".")
             .to_string();
-        let active_tab_title = state.tabs.get(state.active_tab).map(|t| t.title.clone());
-        let file_tree = state.file_tree.clone();
+        let active_tab_title = state
+            .workspace
+            .tabs
+            .get(state.workspace.active_tab)
+            .map(|t| t.title.clone());
+        let file_tree = state.workspace.file_tree.clone();
         let active_path = state
             .tabs
-            .get(state.active_tab)
+            .get(state.workspace.active_tab)
             .and_then(|tab| tab.file_path.clone());
         let sidebar_width = state.sidebar_width;
         let has_copied_file = state.copied_file.is_some();
@@ -1262,10 +1465,20 @@ impl Render for FileExplorer {
                             // button (formatting_ribbon.rs) flips the exact same
                             // AppState.sidebar_mode field.
                             .child(Self::render_mode_toggle_btn(
-                                "files-mode-btn", "Files", SidebarMode::Files, sidebar_mode, p, &state_handle,
+                                "files-mode-btn",
+                                "Files",
+                                SidebarMode::Files,
+                                sidebar_mode,
+                                p,
+                                &state_handle,
                             ))
                             .child(Self::render_mode_toggle_btn(
-                                "nav-mode-btn", "Nav", SidebarMode::Nav, sidebar_mode, p, &state_handle,
+                                "nav-mode-btn",
+                                "Nav",
+                                SidebarMode::Nav,
+                                sidebar_mode,
+                                p,
+                                &state_handle,
                             ))
                             .when(sidebar_mode == SidebarMode::Files, |d| {
                                 d
@@ -1371,7 +1584,9 @@ impl Render for FileExplorer {
                                 .when(!is_active, |d| {
                                     d.text_color(rgb(p.text_muted))
                                         .border_color(rgb(p.border_subtle))
-                                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                        .hover(move |s| {
+                                            s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
+                                        })
                                 })
                                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                                     this.set_nav_max_level(level);
@@ -1385,33 +1600,46 @@ impl Render for FileExplorer {
             // `.id()` must come before `.overflow_y_scroll()` because GPUI tracks
             // scroll position per unique element ID.
             .child(match sidebar_mode {
-                SidebarMode::Files => div()
-                    .id("sidebar-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .py(px(space::XS))
-                    // Right-click on empty space (not a file/dir row, which
-                    // stop_propagation()s its own right-click first) — "New
-                    // File" creates at the tree's root; "Delete" has
-                    // nothing to act on.
-                    .on_mouse_down(MouseButton::Right, {
-                        let state_clone = state_handle.clone();
-                        move |ev, _window, cx| {
-                            let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
-                            state_clone.update(cx, |s, cx| {
-                                s.open_file_context_menu(position, FileContextMenuTarget::Background);
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .children(file_tree.iter().map(|node| {
-                        Self::render_node(node, 0, &active_path, p, &state_handle, cx)
-                    }))
-                    .into_any_element(),
+                SidebarMode::Files => {
+                    div()
+                        .id("sidebar-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .py(px(space::XS))
+                        // Right-click on empty space (not a file/dir row, which
+                        // stop_propagation()s its own right-click first) — "New
+                        // File" creates at the tree's root; "Delete" has
+                        // nothing to act on.
+                        .on_mouse_down(MouseButton::Right, {
+                            let state_clone = state_handle.clone();
+                            move |ev, _window, cx| {
+                                let position = (ev.position.x.as_f32(), ev.position.y.as_f32());
+                                state_clone.update(cx, |s, cx| {
+                                    s.open_file_context_menu(
+                                        position,
+                                        FileContextMenuTarget::Background,
+                                    );
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .children(file_tree.iter().map(|node| {
+                            Self::render_node(node, 0, &active_path, p, &state_handle, cx)
+                        }))
+                        .into_any_element()
+                }
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
             .when_some(self.state.read(cx).file_context_menu.clone(), |el, menu| {
-                el.child(Self::render_context_menu(menu, has_copied_file, pending_cut, &rename_focus, p, &state_handle, cx))
+                el.child(Self::render_context_menu(
+                    menu,
+                    has_copied_file,
+                    pending_cut,
+                    &rename_focus,
+                    p,
+                    &state_handle,
+                    cx,
+                ))
             })
             .when_some(self.state.read(cx).nav_context_menu.clone(), |el, menu| {
                 el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx))
@@ -1432,9 +1660,12 @@ impl Render for FileExplorer {
                     .w(px(4.0))
                     .cursor_col_resize()
                     .occlude()
-                    .on_drag(SidebarResizePayload, |payload: &SidebarResizePayload, _offset, _window, cx| {
-                        cx.new(|_| payload.clone())
-                    }),
+                    .on_drag(
+                        SidebarResizePayload,
+                        |payload: &SidebarResizePayload, _offset, _window, cx| {
+                            cx.new(|_| payload.clone())
+                        },
+                    ),
             )
     }
 }
@@ -1472,7 +1703,13 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
 pub(crate) fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for node in tree {
-        if let FileNode::Dir { path, expanded, children, .. } = node {
+        if let FileNode::Dir {
+            path,
+            expanded,
+            children,
+            ..
+        } = node
+        {
             if *expanded {
                 out.push(path.clone());
                 out.extend(collect_expanded_dirs(children));
@@ -1530,7 +1767,12 @@ mod tests {
     #[test]
     fn strictly_increasing_levels_nest_and_flag_has_children() {
         // Pocket > Hat > Block > Tag, each nested one deeper than the last.
-        let headings = vec![h(0, 1, "Pocket"), h(1, 2, "Hat"), h(2, 3, "Block"), h(3, 4, "Tag")];
+        let headings = vec![
+            h(0, 1, "Pocket"),
+            h(1, 2, "Hat"),
+            h(2, 3, "Block"),
+            h(3, 4, "Tag"),
+        ];
         let entries = build_nav_entries(&headings, &HashSet::new());
 
         let depths: Vec<usize> = entries.iter().map(|e| e.depth).collect();
@@ -1597,24 +1839,26 @@ mod tests {
         // right now, but the Hat's own collapsed flag must survive being
         // hidden, so re-expanding the Pocket alone doesn't also silently
         // re-expand the Hat.
-        let headings = vec![
-            h(0, 1, "Pocket"),
-            h(1, 2, "Hat"),
-            h(2, 3, "Block"),
-        ];
+        let headings = vec![h(0, 1, "Pocket"), h(1, 2, "Hat"), h(2, 3, "Block")];
         let mut collapsed = HashSet::new();
         collapsed.insert(0); // Pocket collapsed
         collapsed.insert(1); // Hat (currently hidden) also collapsed
 
         // While the Pocket is collapsed, only it is visible.
         let entries = build_nav_entries(&headings, &collapsed);
-        assert_eq!(entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(),
+            vec![0]
+        );
 
         // Re-expand just the Pocket (remove line 0 from the set) — the Hat's
         // own collapse (line 1, never removed) should still hide the Block.
         collapsed.remove(&0);
         let entries = build_nav_entries(&headings, &collapsed);
-        assert_eq!(entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            entries.iter().map(|e| e.line_idx).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
@@ -1656,7 +1900,10 @@ mod tests {
         let collapsed: HashSet<usize> = [4usize].into_iter().collect();
         let entries = build_nav_entries(&headings, &collapsed);
 
-        assert!(entries.iter().all(|e| e.line_idx != 9), "the Tag row is collapsed away");
+        assert!(
+            entries.iter().all(|e| e.line_idx != 9),
+            "the Tag row is collapsed away"
+        );
         assert_eq!(current_nav_line_idx(&entries, 9), Some(4));
     }
 }

@@ -26,7 +26,11 @@ pub struct FontImportModal {
 
 impl FontImportModal {
     pub fn new(state: Entity<AppState>) -> Self {
-        FontImportModal { state, error: None, warning: None }
+        FontImportModal {
+            state,
+            error: None,
+            warning: None,
+        }
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -50,9 +54,11 @@ impl FontImportModal {
         });
         let state = self.state.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(mut paths))) = paths_rx.await else { return };
+            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                return;
+            };
             let Some(path) = paths.pop() else { return };
-            let result = state.update(cx, |s, cx| {
+            let result = state.update(cx, |_s, cx| {
                 let result = crate::font_import::install_from_path(cx, &path);
                 cx.notify();
                 result
@@ -109,7 +115,10 @@ impl Render for FontImportModal {
             .items_center()
             .justify_center()
             .bg(black().opacity(0.55))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| this.cancel(cx)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| this.cancel(cx)),
+            )
             .child(
                 div()
                     .id("font-import-panel")

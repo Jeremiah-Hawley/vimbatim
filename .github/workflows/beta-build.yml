@@ -15,7 +15,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: bash tools/check_packaging.sh
+      - run: cargo test --all-targets
+      - run: cargo clippy --all-targets --all-features
+
   build:
+    needs: quality
     strategy:
       matrix:
         include:
@@ -89,7 +100,7 @@ jobs:
         run: |
           mkdir -p dist/Vimbatim-Windows
           cp target/release/vimbatim.exe dist/Vimbatim-Windows/
-          cp settings.conf dist/Vimbatim-Windows/
+          cp default_settings.conf dist/Vimbatim-Windows/
           cp FIRST_LAUNCH.txt dist/Vimbatim-Windows/README.txt
 
       - name: Zip

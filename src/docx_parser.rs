@@ -2,11 +2,15 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
+use zip::write::SimpleFileOptions;
 use zip::ZipArchive;
 use zip::ZipWriter;
-use zip::write::SimpleFileOptions;
+
+pub use crate::document::{
+    Alignment, CardStyle, DocDefaults, ListItem, ListKind, NewDocStyle, Paragraph, Run,
+};
 
 /// Elements that represent real content `Paragraph`/`Run` can't model, so a
 /// paragraph containing one has its full inner XML captured verbatim into
@@ -22,259 +26,6 @@ const UNSUPPORTED_INLINE_TAGS: &[&[u8]] = &[
     b"w:fldSimple",
     b"w:instrText",
 ];
-
-/// A named debate style a run carries, independent of the visual formatting
-/// that style happens to apply.
-///
-/// Pocket/Hat/Block/Tag were previously identified only by
-/// `Paragraph.heading`, and Cite and Analytic by nothing at all — they were
-/// recognised by pattern-matching bold + a configured font size + a color,
-/// which mistakes any hand-formatted text that happens to match. A marker
-/// makes the intent explicit and survives a round-trip through the .docx as a
-/// `<w:rStyle>` reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardStyle {
-    Pocket,
-    Hat,
-    Block,
-    Tag,
-    Cite,
-    Analytic,
-}
-
-impl CardStyle {
-    /// The `<w:rStyle w:val>` id written into the document.
-    ///
-    /// Namespaced so it cannot collide with a style a real Word document
-    /// defines. Word ignores a reference to a style id it doesn't know, so
-    /// these are harmless in any other editor — and this parser reads the id
-    /// back directly rather than resolving it through `styles.xml`, so the
-    /// marker survives even though nothing defines it there.
-    pub fn style_id(&self) -> &'static str {
-        match self {
-            CardStyle::Pocket => "VimbatimPocket",
-            CardStyle::Hat => "VimbatimHat",
-            CardStyle::Block => "VimbatimBlock",
-            CardStyle::Tag => "VimbatimTag",
-            CardStyle::Cite => "VimbatimCite",
-            CardStyle::Analytic => "VimbatimAnalytic",
-        }
-    }
-
-    /// The `<w:rStyle>` id to write into a `.docx` for this style, or `None`
-    /// when nothing should be written.
-    ///
-    /// Pocket/Hat/Block/Tag write nothing: real Verbatim puts no run-level
-    /// style on them at all (verified against
-    /// `Verbatim_Formatting_To_Compare_To.docx` — their identity is entirely
-    /// `<w:pStyle w:val="HeadingN">`), and `from_heading` re-derives the marker
-    /// from the heading level at parse. Emitting `VimbatimPocket` and friends
-    /// only ever produced four `<w:rStyle>` references to styles that existed
-    /// in no stylesheet.
-    ///
-    /// Cite and Emphasis take Verbatim's own ids, so a card written here is the
-    /// same thing to Verbatim that one written there is. Analytic has no
-    /// Verbatim equivalent and keeps this app's id — defined in
-    /// `build_new_doc_styles_xml` so it resolves.
-    pub fn docx_rstyle_id(&self) -> Option<&'static str> {
-        match self {
-            CardStyle::Pocket | CardStyle::Hat | CardStyle::Block | CardStyle::Tag => None,
-            CardStyle::Cite => Some("Style13ptBold"),
-            CardStyle::Analytic => Some("VimbatimAnalytic"),
-        }
-    }
-
-    pub fn from_style_id(id: &str) -> Option<CardStyle> {
-        match id {
-            // Verbatim's own ids, and this app's for Analytic — what
-            // `docx_rstyle_id` writes today.
-            "Style13ptBold" => Some(CardStyle::Cite),
-            "VimbatimAnalytic" => Some(CardStyle::Analytic),
-
-            // LEGACY (remove once no file in circulation predates the switch
-            // to Verbatim's style ids — see `docx_rstyle_id`). Read-only: none
-            // of these four are written any more, and `VimbatimCite` is
-            // superseded by `Style13ptBold`, so every file converts on its next
-            // save. Dropping this arm early would silently strip the Cite
-            // marker from every document this app has already written — the
-            // direct bold and size would still look right, so nothing would
-            // announce it.
-            "VimbatimPocket" => Some(CardStyle::Pocket),
-            "VimbatimHat" => Some(CardStyle::Hat),
-            "VimbatimBlock" => Some(CardStyle::Block),
-            "VimbatimTag" => Some(CardStyle::Tag),
-            "VimbatimCite" => Some(CardStyle::Cite),
-            _ => None,
-        }
-    }
-
-    /// The card style a Word heading level corresponds to, for documents
-    /// written elsewhere that carry `<w:pStyle w:val="Heading N"/>` but none
-    /// of this app's own markers.
-    pub fn from_heading(level: u8) -> Option<CardStyle> {
-        match level {
-            1 => Some(CardStyle::Pocket),
-            2 => Some(CardStyle::Hat),
-            3 => Some(CardStyle::Block),
-            4 => Some(CardStyle::Tag),
-            _ => None,
-        }
-    }
-}
-
-/// The list style a paragraph carries, if any. `level` is always 0 in
-/// Phase 1 (single-level); Phase 2 uses 0-8, matching Word's own `w:ilvl`
-/// range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ListItem {
-    pub kind: ListKind,
-    pub level: u8,
-}
-
-/// One of the 13 real-Word list styles this app supports, exactly matching
-/// the reference file `Lists.docx`'s four examples (a plain bulleted list,
-/// a plain numbered list, six distinct bullet options, seven distinct
-/// number options). No open-ended "custom" variant — an unrecognized
-/// foreign list is classified to the nearest of these via
-/// `ListKind::classify`, never dropped or stored raw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ListKind {
-    BulletSolid,
-    BulletHollow,
-    BulletSolidBox,
-    BulletDiamond,
-    BulletArrow,
-    BulletCheckmark,
-    NumberDecimalDot,
-    NumberDecimalParen,
-    NumberUpperRoman,
-    NumberUpperLetter,
-    NumberLowerLetterParen,
-    NumberLowerLetterDot,
-    NumberLowerRoman,
-}
-
-impl ListKind {
-    /// `true` for the six bullet variants, `false` for the seven number
-    /// variants — used by the gallery UI to pick which button's menu a
-    /// style belongs in, and by marker rendering to decide whether to
-    /// paint a fixed glyph or a computed ordinal.
-    pub fn is_bullet(&self) -> bool {
-        matches!(
-            self,
-            ListKind::BulletSolid
-                | ListKind::BulletHollow
-                | ListKind::BulletSolidBox
-                | ListKind::BulletDiamond
-                | ListKind::BulletArrow
-                | ListKind::BulletCheckmark
-        )
-    }
-
-    /// Resolves a parsed `(numFmt, lvlText, font)` triple to the nearest of
-    /// the 13 supported styles, per the exact fallback order in
-    /// `docs/superpowers/specs/2026-08-11-lists-design.md`'s "Data model"
-    /// section — never drops or represents a foreign list as raw data.
-    pub fn classify(num_fmt: &str, lvl_text: &str, font: Option<&str>) -> ListKind {
-        match (num_fmt, lvl_text, font) {
-            ("bullet", "\u{f0b7}", Some("Symbol")) => ListKind::BulletSolid,
-            ("bullet", "o", Some("Courier New")) => ListKind::BulletHollow,
-            ("bullet", "\u{f0a7}", Some("Wingdings")) => ListKind::BulletSolidBox,
-            ("bullet", "\u{f076}", Some("Wingdings")) => ListKind::BulletDiamond,
-            ("bullet", "\u{f0d8}", Some("Wingdings")) => ListKind::BulletArrow,
-            ("bullet", "\u{f0fc}", Some("Wingdings")) => ListKind::BulletCheckmark,
-            ("decimal", "%1.", _) => ListKind::NumberDecimalDot,
-            ("decimal", "%1)", _) => ListKind::NumberDecimalParen,
-            ("upperRoman", "%1.", _) => ListKind::NumberUpperRoman,
-            ("upperLetter", "%1.", _) => ListKind::NumberUpperLetter,
-            ("lowerLetter", "%1)", _) => ListKind::NumberLowerLetterParen,
-            ("lowerLetter", "%1.", _) => ListKind::NumberLowerLetterDot,
-            ("lowerRoman", "%1.", _) => ListKind::NumberLowerRoman,
-            ("bullet", _, _) => ListKind::BulletSolid,
-            ("decimal", _, _) => ListKind::NumberDecimalDot,
-            ("upperRoman", _, _) => ListKind::NumberUpperRoman,
-            ("upperLetter", _, _) => ListKind::NumberUpperLetter,
-            ("lowerLetter", _, _) => ListKind::NumberLowerLetterDot,
-            ("lowerRoman", _, _) => ListKind::NumberLowerRoman,
-            _ => ListKind::NumberDecimalDot,
-        }
-    }
-}
-
-/// A single formatting run within a paragraph — the smallest unit of text with
-/// consistent styling. Word documents split paragraphs into runs whenever
-/// formatting changes (e.g., switching from plain to bold text).
-///
-/// Derives `Clone` so a tab's live `paragraphs` can be snapshotted into
-/// `undo_stack`/`redo_stack` alongside `content` (rich-text formatting plan,
-/// Phase 1) — none of these fields are expensive to clone.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Run {
-    pub text: String,
-    pub bold: bool,
-    /// `<w:i/>` (rich-text formatting plan, Phase 1).
-    pub italic: bool,
-    pub underline: bool,
-    pub double_underline: bool,
-    pub strikethrough: bool,
-    pub highlight: bool,
-    pub highlight_color: String,
-    pub size: u16,
-    /// `<w:rFonts w:ascii="...">` — `None` means "inherit the document
-    /// default", same convention as `color` below.
-    pub font: Option<String>,
-    /// `<w:color w:val="RRGGBB">`, Word's own hex format. `None` (or
-    /// `w:val="auto"`, parsed the same as absent) means "inherit".
-    pub color: Option<String>,
-    pub box_format: bool,
-    /// True when `xml:space="preserve"` is set on `<w:t>` — required to keep
-    /// leading/trailing whitespace that XML parsers would otherwise strip.
-    pub whitespace_preserve: bool,
-    /// The debate style this run was given, if any. See `CardStyle`.
-    pub style: Option<CardStyle>,
-    /// Set by `AppState::apply_emphasis_style` — the Emphasis button's own
-    /// marker, independent of `bold`/`underline`/`box_format` (which
-    /// combination it applied is user-configurable and not itself proof the
-    /// text is "emphasized"). `remove_emphasis` reads this directly rather
-    /// than guessing from formatting.
-    pub emphasis: bool,
-    /// The small inline emphasis box (rendered as a border directly on the
-    /// run's span — see `text_editor::apply_run_style`), distinct from
-    /// `box_format`'s paragraph-wide Pocket box.
-    pub emphasis_boxed: bool,
-}
-
-/// One paragraph of the document, composed of zero or more runs.
-/// `heading` is 0 for body text, or 1–9 mirroring Word's Heading 1–9 styles.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Paragraph {
-    pub runs: Vec<Run>,
-    pub heading: u8,
-    pub alignment: Alignment,  // left, center, right, justify
-    /// The list style/level this paragraph carries, if any. See `ListItem`.
-    pub list: Option<ListItem>,
-    /// Raw inner XML (everything between `<w:p...>` and `</w:p>`), captured
-    /// at parse time only when this paragraph contains one of a narrow,
-    /// explicit list of elements the app doesn't model (hyperlinks, inline
-    /// drawings, footnote/endnote references, field codes) — see
-    /// `parse_document_xml`'s `UNSUPPORTED_INLINE_TAGS`. `Some` means
-    /// `rebuild_document_xml` re-emits this verbatim instead of rebuilding
-    /// from `runs`/`heading`/`alignment`. Cleared to `None` the instant this
-    /// paragraph is actually edited (`document_ops.rs`'s mutation choke
-    /// points), at which point whatever exotic content it had is
-    /// permanently, deliberately dropped — there's no way to keep e.g. a
-    /// hyperlink's target in sync with retyped text.
-    pub unsupported_xml: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Alignment {
-    #[default]
-    Left,
-    Center,
-    Right,
-    Justify,
-}
 
 /// The save-time constants needed to reconstruct a real .docx file around
 /// whatever a tab's live `paragraphs` currently holds. `raw_zip` is the
@@ -312,7 +63,11 @@ pub struct DocxOrigin {
 impl DocxOrigin {
     /// Saves `paragraphs` back to `path` as a .docx file, using this
     /// origin's preserved preamble/sectPr/raw ZIP as the template.
-    pub fn save(&self, paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(
+        &self,
+        paragraphs: &[Paragraph],
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.save_with_compression(paragraphs, path, zip::CompressionMethod::Deflated)
     }
 
@@ -321,7 +76,11 @@ impl DocxOrigin {
     /// (to `Stored`, skipping deflate) without touching any real-save path.
     /// See the recovery spec's Performance section — do not change this to
     /// `Stored` until Task 10's measurement justifies it.
-    pub fn save_snapshot(&self, paragraphs: &[Paragraph], path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_snapshot(
+        &self,
+        paragraphs: &[Paragraph],
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.save_with_compression(paragraphs, path, zip::CompressionMethod::Deflated)
     }
 
@@ -339,12 +98,18 @@ impl DocxOrigin {
          */
         let new_xml = rebuild_document_xml(&self.preamble, &self.sect_pr, paragraphs);
         let numbering_xml = build_numbering_xml(paragraphs);
-        write_docx(&self.raw_zip, &new_xml, numbering_xml.as_deref(), path, method)
+        write_docx(
+            &self.raw_zip,
+            &new_xml,
+            numbering_xml.as_deref(),
+            path,
+            method,
+        )
     }
 }
 
 /// Returns all paragraph text joined by newlines. This is the plain-text
-/// content loaded into `tab.content` so the text editor can display it.
+/// content loaded into `tab.document.content` so the text editor can display it.
 pub fn paragraphs_to_plain_text(paragraphs: &[Paragraph]) -> String {
     /*
      * Each paragraph becomes one line.  Runs within a paragraph are
@@ -416,7 +181,16 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
     let sect_pr = extract_sect_pr(&document_xml).unwrap_or("").to_string();
     let has_unsupported_blocks = document_xml.contains("<w:tbl");
 
-    Ok((paragraphs, DocxOrigin { raw_zip, preamble, sect_pr, has_unsupported_blocks, doc_defaults }))
+    Ok((
+        paragraphs,
+        DocxOrigin {
+            raw_zip,
+            preamble,
+            sect_pr,
+            has_unsupported_blocks,
+            doc_defaults,
+        },
+    ))
 }
 
 /// Writes `new_xml` into the .docx at `path`, replacing `word/document.xml`
@@ -646,45 +420,59 @@ fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
-                    b"w:style" => {
-                        current_id = e.attributes().flatten().find_map(|attr| {
-                            (attr.key.as_ref() == b"w:styleId")
-                                .then(|| String::from_utf8_lossy(&attr.value).into_owned())
-                        });
-                        current = StyleDefaults::default();
-                        scratch_run = Run::default();
-                    }
-                    b"w:pPr" => { in_ppr = true; }
-                    b"w:rPr" => { in_rpr = true; }
-                    b"w:jc" if in_ppr => {
-                        let mut para = Paragraph { list: None, runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None };
-                        apply_para_alignment(e, &mut para);
-                        current.alignment = Some(para.alignment);
-                    }
-                    b"w:pBdr" if in_ppr => { current.box_format = true; }
-                    _ if in_rpr => { apply_run_prop(e, &mut scratch_run); }
-                    _ => {}
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                b"w:style" => {
+                    current_id = e.attributes().flatten().find_map(|attr| {
+                        (attr.key.as_ref() == b"w:styleId")
+                            .then(|| String::from_utf8_lossy(&attr.value).into_owned())
+                    });
+                    current = StyleDefaults::default();
+                    scratch_run = Run::default();
                 }
-            }
-            Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
-                    b"w:pPr" => { in_ppr = false; }
-                    b"w:rPr" => { in_rpr = false; }
-                    b"w:style" => {
-                        current.bold = scratch_run.bold;
-                        current.size = scratch_run.size;
-                        current.underline = scratch_run.underline;
-                        current.double_underline = scratch_run.double_underline;
-                        current.emphasis_boxed = scratch_run.emphasis_boxed;
-                        if let Some(id) = current_id.take() {
-                            styles.insert(id, current.clone());
-                        }
-                    }
-                    _ => {}
+                b"w:pPr" => {
+                    in_ppr = true;
                 }
-            }
+                b"w:rPr" => {
+                    in_rpr = true;
+                }
+                b"w:jc" if in_ppr => {
+                    let mut para = Paragraph {
+                        list: None,
+                        runs: Vec::new(),
+                        heading: 0,
+                        alignment: Alignment::default(),
+                        unsupported_xml: None,
+                    };
+                    apply_para_alignment(e, &mut para);
+                    current.alignment = Some(para.alignment);
+                }
+                b"w:pBdr" if in_ppr => {
+                    current.box_format = true;
+                }
+                _ if in_rpr => {
+                    apply_run_prop(e, &mut scratch_run);
+                }
+                _ => {}
+            },
+            Ok(Event::End(ref e)) => match e.name().as_ref() {
+                b"w:pPr" => {
+                    in_ppr = false;
+                }
+                b"w:rPr" => {
+                    in_rpr = false;
+                }
+                b"w:style" => {
+                    current.bold = scratch_run.bold;
+                    current.size = scratch_run.size;
+                    current.underline = scratch_run.underline;
+                    current.double_underline = scratch_run.double_underline;
+                    current.emphasis_boxed = scratch_run.emphasis_boxed;
+                    if let Some(id) = current_id.take() {
+                        styles.insert(id, current.clone());
+                    }
+                }
+                _ => {}
+            },
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -720,82 +508,84 @@ fn parse_numbering_xml(xml: &str) -> HashMap<u32, (String, String, Option<String
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                match e.name().as_ref() {
-                    b"w:abstractNum" => {
-                        current_abstract_id = e.attributes().flatten().find_map(|attr| {
-                            (attr.key.as_ref() == b"w:abstractNumId")
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                b"w:abstractNum" => {
+                    current_abstract_id = e.attributes().flatten().find_map(|attr| {
+                        (attr.key.as_ref() == b"w:abstractNumId")
+                            .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+                            .flatten()
+                    });
+                }
+                b"w:lvl" => {
+                    in_lvl0 = e
+                        .attributes()
+                        .flatten()
+                        .any(|attr| attr.key.as_ref() == b"w:ilvl" && attr.value.as_ref() == b"0");
+                    current_numfmt.clear();
+                    current_lvltext.clear();
+                    current_font = None;
+                }
+                b"w:numFmt" if in_lvl0 => {
+                    if let Some(v) = e.attributes().flatten().find_map(|a| {
+                        (a.key.as_ref() == b"w:val")
+                            .then(|| String::from_utf8_lossy(&a.value).into_owned())
+                    }) {
+                        current_numfmt = v;
+                    }
+                }
+                b"w:lvlText" if in_lvl0 => {
+                    if let Some(v) = e.attributes().flatten().find_map(|a| {
+                        (a.key.as_ref() == b"w:val")
+                            .then(|| String::from_utf8_lossy(&a.value).into_owned())
+                    }) {
+                        current_lvltext = v;
+                    }
+                }
+                b"w:rFonts" if in_lvl0 => {
+                    current_font = e.attributes().flatten().find_map(|a| {
+                        (a.key.as_ref() == b"w:ascii")
+                            .then(|| String::from_utf8_lossy(&a.value).into_owned())
+                    });
+                }
+                b"w:num" => {
+                    current_num_id = e.attributes().flatten().find_map(|attr| {
+                        (attr.key.as_ref() == b"w:numId")
+                            .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+                            .flatten()
+                    });
+                }
+                b"w:abstractNumId" => {
+                    if let Some(num_id) = current_num_id {
+                        if let Some(abs_id) = e.attributes().flatten().find_map(|attr| {
+                            (attr.key.as_ref() == b"w:val")
                                 .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
                                 .flatten()
-                        });
-                    }
-                    b"w:lvl" => {
-                        in_lvl0 = e.attributes().flatten().any(|attr| {
-                            attr.key.as_ref() == b"w:ilvl" && attr.value.as_ref() == b"0"
-                        });
-                        current_numfmt.clear();
-                        current_lvltext.clear();
-                        current_font = None;
-                    }
-                    b"w:numFmt" if in_lvl0 => {
-                        if let Some(v) = e.attributes().flatten().find_map(|a| {
-                            (a.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&a.value).into_owned())
                         }) {
-                            current_numfmt = v;
+                            num_to_abstract.insert(num_id, abs_id);
                         }
                     }
-                    b"w:lvlText" if in_lvl0 => {
-                        if let Some(v) = e.attributes().flatten().find_map(|a| {
-                            (a.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&a.value).into_owned())
-                        }) {
-                            current_lvltext = v;
-                        }
-                    }
-                    b"w:rFonts" if in_lvl0 => {
-                        current_font = e.attributes().flatten().find_map(|a| {
-                            (a.key.as_ref() == b"w:ascii").then(|| String::from_utf8_lossy(&a.value).into_owned())
-                        });
-                    }
-                    b"w:num" => {
-                        current_num_id = e.attributes().flatten().find_map(|attr| {
-                            (attr.key.as_ref() == b"w:numId")
-                                .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
-                                .flatten()
-                        });
-                    }
-                    b"w:abstractNumId" => {
-                        if let Some(num_id) = current_num_id {
-                            if let Some(abs_id) = e.attributes().flatten().find_map(|attr| {
-                                (attr.key.as_ref() == b"w:val")
-                                    .then(|| std::str::from_utf8(&attr.value).ok()?.parse().ok())
-                                    .flatten()
-                            }) {
-                                num_to_abstract.insert(num_id, abs_id);
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            Ok(Event::End(ref e)) => {
-                match e.name().as_ref() {
-                    b"w:lvl" if in_lvl0 => {
-                        if let Some(id) = current_abstract_id {
-                            abstract_defs.insert(
-                                id,
-                                (
-                                    current_numfmt.clone(),
-                                    current_lvltext.clone(),
-                                    current_font.clone(),
-                                ),
-                            );
-                        }
-                        in_lvl0 = false;
+                _ => {}
+            },
+            Ok(Event::End(ref e)) => match e.name().as_ref() {
+                b"w:lvl" if in_lvl0 => {
+                    if let Some(id) = current_abstract_id {
+                        abstract_defs.insert(
+                            id,
+                            (
+                                current_numfmt.clone(),
+                                current_lvltext.clone(),
+                                current_font.clone(),
+                            ),
+                        );
                     }
-                    b"w:num" => { current_num_id = None; }
-                    _ => {}
+                    in_lvl0 = false;
                 }
-            }
+                b"w:num" => {
+                    current_num_id = None;
+                }
+                _ => {}
+            },
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -852,14 +642,14 @@ fn parse_document_xml(
     let mut current_para: Option<Paragraph> = None;
     let mut current_run: Option<Run> = None;
 
-    let mut in_ppr  = false; // inside <w:pPr>
-    let mut in_rpr  = false; // inside <w:rPr>
+    let mut in_ppr = false; // inside <w:pPr>
+    let mut in_rpr = false; // inside <w:rPr>
     let mut in_text = false; // inside <w:t>
-    // Set when the current paragraph's <w:pPr> contains a <w:pBdr> (any
-    // border side implies a full box, matching how apply_card_style's
-    // Pocket always sets all four sides uniformly) — applied to each run
-    // as it's created, since <w:pPr> always precedes every <w:r> in a
-    // well-formed <w:p>.
+                             // Set when the current paragraph's <w:pPr> contains a <w:pBdr> (any
+                             // border side implies a full box, matching how apply_card_style's
+                             // Pocket always sets all four sides uniformly) — applied to each run
+                             // as it's created, since <w:pPr> always precedes every <w:r> in a
+                             // well-formed <w:p>.
     let mut para_has_box_border = false;
     // Set while inside the current paragraph's <w:pPr><w:numPr> — gates the
     // <w:ilvl>/<w:numId> handlers below the same way `in_ppr`/`in_rpr` gate
@@ -893,7 +683,13 @@ fn parse_document_xml(
             Event::Start(ref e) => {
                 match e.name().as_ref() {
                     b"w:p" => {
-                        current_para = Some(Paragraph { list: None, runs: Vec::new(), heading: 0, alignment: Alignment::default(), unsupported_xml: None });
+                        current_para = Some(Paragraph {
+                            list: None,
+                            runs: Vec::new(),
+                            heading: 0,
+                            alignment: Alignment::default(),
+                            unsupported_xml: None,
+                        });
                         para_has_box_border = false;
                         current_style_defaults = None;
                         para_has_unsupported_content = false;
@@ -901,12 +697,21 @@ fn parse_document_xml(
                         current_para_ilvl = 0;
                         para_start_pos = reader.buffer_position();
                     }
-                    b"w:pPr" => { in_ppr = true; }
-                    b"w:numPr" if in_ppr => { in_numpr = true; }
+                    b"w:pPr" => {
+                        in_ppr = true;
+                    }
+                    b"w:numPr" if in_ppr => {
+                        in_numpr = true;
+                    }
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
-                            current_style_defaults = apply_paragraph_style_defaults(e, para, styles, &mut para_has_box_border);
+                            current_style_defaults = apply_paragraph_style_defaults(
+                                e,
+                                para,
+                                styles,
+                                &mut para_has_box_border,
+                            );
                         }
                     }
                     b"w:jc" if in_ppr => {
@@ -918,7 +723,10 @@ fn parse_document_xml(
                         para_has_box_border = true;
                     }
                     b"w:r" => {
-                        let mut run = Run { box_format: para_has_box_border, ..Run::default() };
+                        let mut run = Run {
+                            box_format: para_has_box_border,
+                            ..Run::default()
+                        };
                         if let Some(defaults) = &current_style_defaults {
                             run.bold = defaults.bold;
                             run.size = defaults.size;
@@ -927,7 +735,9 @@ fn parse_document_xml(
                         }
                         current_run = Some(run);
                     }
-                    b"w:rPr" => { in_rpr = true; }
+                    b"w:rPr" => {
+                        in_rpr = true;
+                    }
                     b"w:t" => {
                         in_text = true;
                         // Detect xml:space="preserve" so whitespace is kept.
@@ -990,7 +800,12 @@ fn parse_document_xml(
                     b"w:pStyle" if in_ppr => {
                         if let Some(para) = current_para.as_mut() {
                             apply_para_style(e, para);
-                            current_style_defaults = apply_paragraph_style_defaults(e, para, styles, &mut para_has_box_border);
+                            current_style_defaults = apply_paragraph_style_defaults(
+                                e,
+                                para,
+                                styles,
+                                &mut para_has_box_border,
+                            );
                         }
                     }
                     b"w:jc" if in_ppr => {
@@ -1002,16 +817,27 @@ fn parse_document_xml(
                         para_has_box_border = true;
                     }
                     b"w:ilvl" if in_numpr => {
-                        if let Some(v) = e.attributes().flatten().find_map(|a| {
-                            (a.key.as_ref() == b"w:val").then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
-                        }).flatten() {
+                        if let Some(v) = e
+                            .attributes()
+                            .flatten()
+                            .find_map(|a| {
+                                (a.key.as_ref() == b"w:val")
+                                    .then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                            })
+                            .flatten()
+                        {
                             current_para_ilvl = v;
                         }
                     }
                     b"w:numId" if in_numpr => {
-                        current_para_num_id = e.attributes().flatten().find_map(|a| {
-                            (a.key.as_ref() == b"w:val").then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
-                        }).flatten();
+                        current_para_num_id = e
+                            .attributes()
+                            .flatten()
+                            .find_map(|a| {
+                                (a.key.as_ref() == b"w:val")
+                                    .then(|| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                            })
+                            .flatten();
                     }
                     b"w:rStyle" if in_rpr => {
                         if let Some(run) = current_run.as_mut() {
@@ -1052,7 +878,8 @@ fn parse_document_xml(
                                 // just the inner content, excluding the
                                 // closing tag itself.
                                 let para_end_pos = reader.buffer_position() - 6;
-                                para.unsupported_xml = Some(xml[para_start_pos..para_end_pos].to_string());
+                                para.unsupported_xml =
+                                    Some(xml[para_start_pos..para_end_pos].to_string());
                             }
                             // Word fragments runs heavily (spell-check,
                             // revision-tracking remnants) even when adjacent
@@ -1107,7 +934,9 @@ fn parse_document_xml(
                                     });
                                 }
                             }
-                            crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+                            crate::document::normalize::merge_adjacent_same_format_runs(
+                                &mut para.runs,
+                            );
                             // A blank line that *does* carry paragraph
                             // properties — `<w:p><w:pPr><w:jc .../></w:pPr></w:p>`,
                             // which Word writes constantly — closes with no runs
@@ -1123,18 +952,27 @@ fn parse_document_xml(
                         }
                         in_ppr = false;
                     }
-                    b"w:pPr" => { in_ppr = false; }
-                    b"w:numPr" => { in_numpr = false; }
+                    b"w:pPr" => {
+                        in_ppr = false;
+                    }
+                    b"w:numPr" => {
+                        in_numpr = false;
+                    }
                     b"w:r" => {
                         // Flush the completed run into the current paragraph.
-                        if let (Some(run), Some(para)) = (current_run.take(), current_para.as_mut()) {
+                        if let (Some(run), Some(para)) = (current_run.take(), current_para.as_mut())
+                        {
                             para.runs.push(run);
                         }
-                        in_rpr  = false;
+                        in_rpr = false;
                         in_text = false;
                     }
-                    b"w:rPr" => { in_rpr = false; }
-                    b"w:t"   => { in_text = false; }
+                    b"w:rPr" => {
+                        in_rpr = false;
+                    }
+                    b"w:t" => {
+                        in_text = false;
+                    }
                     _ => {}
                 }
             }
@@ -1274,11 +1112,19 @@ fn apply_run_style_marker(e: &BytesStart, run: &mut Run) {
 /// direct-formatting-beats-style cascade. `box_format` is OR'd rather than
 /// overwritten so this can't clear a box this run already has from its
 /// paragraph's own border.
-fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<String, StyleDefaults>) {
+fn apply_run_character_style(
+    e: &BytesStart,
+    run: &mut Run,
+    styles: &HashMap<String, StyleDefaults>,
+) {
     let Some(style_id) = e.attributes().flatten().find_map(|attr| {
         (attr.key.as_ref() == b"w:val").then(|| String::from_utf8_lossy(&attr.value).into_owned())
-    }) else { return };
-    let Some(defaults) = styles.get(&style_id) else { return };
+    }) else {
+        return;
+    };
+    let Some(defaults) = styles.get(&style_id) else {
+        return;
+    };
     run.bold = defaults.bold;
     run.size = defaults.size;
     run.underline = defaults.underline;
@@ -1304,8 +1150,22 @@ fn apply_run_character_style(e: &BytesStart, run: &mut Run, styles: &HashMap<Str
 /// see `run_props_xml`. `text_editor::highlight_color_hex` maps these same
 /// names to their on-screen color, and a test there asserts the two agree.
 pub(crate) const WORD_HIGHLIGHT_NAMES: [&str; 16] = [
-    "yellow", "green", "cyan", "magenta", "blue", "red", "darkBlue", "darkCyan", "darkGreen",
-    "darkMagenta", "darkRed", "darkYellow", "darkGray", "lightGray", "black", "white",
+    "yellow",
+    "green",
+    "cyan",
+    "magenta",
+    "blue",
+    "red",
+    "darkBlue",
+    "darkCyan",
+    "darkGreen",
+    "darkMagenta",
+    "darkRed",
+    "darkYellow",
+    "darkGray",
+    "lightGray",
+    "black",
+    "white",
 ];
 
 /// The `<w:rPr>` inner XML for one run. Split out of `write_docx` so the
@@ -1325,13 +1185,22 @@ fn run_props_xml(run: &Run) -> String {
         .and_then(|s| s.docx_rstyle_id())
         .or(run.emphasis.then_some("Emphasis"));
     if let Some(style) = rstyle {
-        out.push_str(&format!("<w:rStyle w:val=\"{style}\"/>", ));
+        out.push_str(&format!("<w:rStyle w:val=\"{style}\"/>",));
     }
-    if run.bold { out.push_str("<w:b/>"); }
-    if run.italic { out.push_str("<w:i/>"); }
-    if run.strikethrough { out.push_str("<w:strike/>"); }
-    if run.double_underline { out.push_str("<w:u w:val=\"double\"/>"); }
-    else if run.underline { out.push_str("<w:u w:val=\"single\"/>"); }
+    if run.bold {
+        out.push_str("<w:b/>");
+    }
+    if run.italic {
+        out.push_str("<w:i/>");
+    }
+    if run.strikethrough {
+        out.push_str("<w:strike/>");
+    }
+    if run.double_underline {
+        out.push_str("<w:u w:val=\"double\"/>");
+    } else if run.underline {
+        out.push_str("<w:u w:val=\"single\"/>");
+    }
     if run.emphasis_boxed {
         // Real OOXML run border, matching real Verbatim's own "Emphasis"
         // character style's <w:bdr> exactly (found by diffing
@@ -1346,7 +1215,10 @@ fn run_props_xml(run: &Run) -> String {
         // anything else. A custom hex color goes out as shading, which Word
         // does honor.
         if WORD_HIGHLIGHT_NAMES.contains(&run.highlight_color.as_str()) {
-            out.push_str(&format!("<w:highlight w:val=\"{}\"/>", escape_xml_attr(&run.highlight_color)));
+            out.push_str(&format!(
+                "<w:highlight w:val=\"{}\"/>",
+                escape_xml_attr(&run.highlight_color)
+            ));
         } else {
             out.push_str(&format!(
                 "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
@@ -1358,7 +1230,10 @@ fn run_props_xml(run: &Run) -> String {
         out.push_str(&format!("<w:sz w:val=\"{}\"/>", run.size));
     }
     if let Some(font) = &run.font {
-        out.push_str(&format!("<w:rFonts w:ascii=\"{}\"/>", escape_xml_attr(font)));
+        out.push_str(&format!(
+            "<w:rFonts w:ascii=\"{}\"/>",
+            escape_xml_attr(font)
+        ));
     }
     if let Some(color) = &run.color {
         out.push_str(&format!("<w:color w:val=\"{}\"/>", escape_xml_attr(color)));
@@ -1369,8 +1244,12 @@ fn run_props_xml(run: &Run) -> String {
     // through this app's own round trip even when the rStyle slot was taken by
     // a card marker, and they distinguish "emphasized" from "emphasized and
     // boxed", which one character style cannot.
-    if run.emphasis { out.push_str("<w:vimbatimEmphasis/>"); }
-    if run.emphasis_boxed { out.push_str("<w:vimbatimEmphasisBox/>"); }
+    if run.emphasis {
+        out.push_str("<w:vimbatimEmphasis/>");
+    }
+    if run.emphasis_boxed {
+        out.push_str("<w:vimbatimEmphasisBox/>");
+    }
     out
 }
 
@@ -1406,17 +1285,24 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
      * passed as a parameter to keep the call site clean.
      */
     match e.name().as_ref() {
-        b"w:b" => { run.bold = on_off_attr_is_true(e); }
-        b"w:i" => { run.italic = on_off_attr_is_true(e); }
-        b"w:strike" => { run.strikethrough = on_off_attr_is_true(e); }
+        b"w:b" => {
+            run.bold = on_off_attr_is_true(e);
+        }
+        b"w:i" => {
+            run.italic = on_off_attr_is_true(e);
+        }
+        b"w:strike" => {
+            run.strikethrough = on_off_attr_is_true(e);
+        }
         b"w:u" => {
             if !on_off_attr_is_true(e) {
                 run.underline = false;
                 run.double_underline = false;
             } else {
-                let is_double = e.attributes().flatten().any(|attr| {
-                    attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double"
-                });
+                let is_double = e
+                    .attributes()
+                    .flatten()
+                    .any(|attr| attr.key.as_ref() == b"w:val" && attr.value.as_ref() == b"double");
                 if is_double {
                     run.double_underline = true;
                 } else {
@@ -1478,8 +1364,12 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
                 }
             }
         }
-        b"w:vimbatimEmphasis" => { run.emphasis = true; }
-        b"w:vimbatimEmphasisBox" => { run.emphasis_boxed = true; }
+        b"w:vimbatimEmphasis" => {
+            run.emphasis = true;
+        }
+        b"w:vimbatimEmphasisBox" => {
+            run.emphasis_boxed = true;
+        }
         b"w:bdr" => {
             // OOXML: w:val="none" or w:val="nil" explicitly cancels an inherited border.
             // Otherwise, the border is present and we set emphasis_boxed/emphasis.
@@ -1514,10 +1404,30 @@ fn apply_run_prop(e: &BytesStart, run: &mut Run) {
 const LIST_KIND_TABLE: [(ListKind, &str, &str, Option<&str>); 13] = [
     (ListKind::BulletSolid, "bullet", "\u{f0b7}", Some("Symbol")),
     (ListKind::BulletHollow, "bullet", "o", Some("Courier New")),
-    (ListKind::BulletSolidBox, "bullet", "\u{f0a7}", Some("Wingdings")),
-    (ListKind::BulletDiamond, "bullet", "\u{f076}", Some("Wingdings")),
-    (ListKind::BulletArrow, "bullet", "\u{f0d8}", Some("Wingdings")),
-    (ListKind::BulletCheckmark, "bullet", "\u{f0fc}", Some("Wingdings")),
+    (
+        ListKind::BulletSolidBox,
+        "bullet",
+        "\u{f0a7}",
+        Some("Wingdings"),
+    ),
+    (
+        ListKind::BulletDiamond,
+        "bullet",
+        "\u{f076}",
+        Some("Wingdings"),
+    ),
+    (
+        ListKind::BulletArrow,
+        "bullet",
+        "\u{f0d8}",
+        Some("Wingdings"),
+    ),
+    (
+        ListKind::BulletCheckmark,
+        "bullet",
+        "\u{f0fc}",
+        Some("Wingdings"),
+    ),
     (ListKind::NumberDecimalDot, "decimal", "%1.", None),
     (ListKind::NumberDecimalParen, "decimal", "%1)", None),
     (ListKind::NumberUpperRoman, "upperRoman", "%1.", None),
@@ -1528,14 +1438,24 @@ const LIST_KIND_TABLE: [(ListKind, &str, &str, Option<&str>); 13] = [
 ];
 
 fn abstract_num_id_for(kind: ListKind) -> u32 {
-    LIST_KIND_TABLE.iter().position(|(k, ..)| *k == kind).unwrap() as u32
+    LIST_KIND_TABLE
+        .iter()
+        .position(|(k, ..)| *k == kind)
+        .unwrap() as u32
 }
 
 /// One `<w:lvl>` element. `ind_left`/`ind_hanging` are in twips (1/20 pt),
 /// matching Word's own defaults confirmed from `Lists.docx`: `left`
 /// increases 720 per level, `hanging` is 360 (180 at level 2 for the
 /// numbered cascade specifically — see `cascade_level_xml`).
-fn build_lvl_xml(ilvl: u8, num_fmt: &str, lvl_text: &str, font: Option<&str>, ind_left: u32, ind_hanging: u32) -> String {
+fn build_lvl_xml(
+    ilvl: u8,
+    num_fmt: &str,
+    lvl_text: &str,
+    font: Option<&str>,
+    ind_left: u32,
+    ind_hanging: u32,
+) -> String {
     let font_xml = match font {
         Some(f) => {
             let f = escape_xml_attr(f);
@@ -1587,11 +1507,24 @@ fn cascade_level_xml(ilvl: u8, is_bullet: bool) -> String {
             1 => ("lowerRoman", 180),
             _ => ("decimal", 360),
         };
-        build_lvl_xml(ilvl, num_fmt, &format!("%{}.", ilvl + 1), None, ind_left, hanging)
+        build_lvl_xml(
+            ilvl,
+            num_fmt,
+            &format!("%{}.", ilvl + 1),
+            None,
+            ind_left,
+            hanging,
+        )
     }
 }
 
-fn build_abstract_num_xml(id: u32, kind: ListKind, num_fmt: &str, lvl_text: &str, font: Option<&str>) -> String {
+fn build_abstract_num_xml(
+    id: u32,
+    kind: ListKind,
+    num_fmt: &str,
+    lvl_text: &str,
+    font: Option<&str>,
+) -> String {
     let mut out = format!("<w:abstractNum w:abstractNumId=\"{id}\">");
     out.push_str(&build_lvl_xml(0, num_fmt, lvl_text, font, 720, 360));
     for ilvl in 1..=8u8 {
@@ -1655,78 +1588,6 @@ fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
 /// `apply_card_style` does) stripped — none of those affect whether Word
 /// resolves the style, and a dangling theme reference with no `theme1.xml`
 /// A document's own `<w:docDefaults>` — the body font and size it declares
-/// for everything that doesn't override them.
-///
-/// Read so a document written in Word or Verbatim renders here with *its*
-/// defaults rather than this app's settings. It is deliberately kept as a
-/// document-level fallback and never folded into `Run`s: `run.size == 0` and
-/// `run.font == None` mean "inherit", and that is what keeps a saved file free
-/// of a redundant `<w:sz>` and `<w:rFonts>` on every single run. Baking these
-/// in would write them back out and freeze the document's default at whatever
-/// it happened to be the first time it was opened.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DocDefaults {
-    /// `<w:rPrDefault>`'s `<w:rFonts w:ascii>`, when the document names one.
-    pub font: Option<String>,
-    /// `<w:rPrDefault>`'s `<w:sz>`, half-points. `0` means the document
-    /// declares no default size.
-    pub size: u16,
-}
-
-/// The settings-derived numbers a freshly created `.docx` bakes into its
-/// `word/styles.xml`: the document-wide defaults, each card style's size, and
-/// what Emphasis means here.
-///
-/// Passed in rather than read from `AppState`, because this module
-/// deliberately doesn't depend on `state`. `Default` holds the same constants
-/// `CardStyleKind::font_size` falls back to, so a caller with no settings to
-/// hand — a test, or a crash snapshot — still writes a conventional document.
-///
-/// The point of routing these through here at all is that Word had no idea
-/// what a Vimbatim document's defaults were: with no `<w:docDefaults>` it
-/// applied its own, which differ by Word version, so a blank document created
-/// here and one created in Verbatim didn't agree on body size or line spacing.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NewDocStyle {
-    /// Body text size, half-points (`normal_text_size`).
-    pub normal_size: u16,
-    /// Line spacing multiplier (`line_spacing`): 1.0 single, 2.0 double.
-    pub line_spacing: f32,
-    /// Card style sizes, half-points.
-    pub pocket_size: u16,
-    pub hat_size: u16,
-    pub block_size: u16,
-    pub tag_size: u16,
-    pub cite_size: u16,
-    /// What Emphasis applies, so the `Emphasis` character style written into
-    /// the document matches what this app actually does rather than copying
-    /// Verbatim's fixed definition.
-    pub emphasis_bold: bool,
-    pub emphasis_underline: bool,
-    pub emphasis_box: bool,
-    /// `Some(half_points)` when Emphasis also resizes, `None` when it leaves
-    /// size alone (`emphasis_change_size`).
-    pub emphasis_size: Option<u16>,
-}
-
-impl Default for NewDocStyle {
-    fn default() -> Self {
-        Self {
-            normal_size: 22,
-            line_spacing: 1.0,
-            pocket_size: 52,
-            hat_size: 44,
-            block_size: 32,
-            tag_size: 26,
-            cite_size: 26,
-            emphasis_bold: true,
-            emphasis_underline: false,
-            emphasis_box: false,
-            emphasis_size: None,
-        }
-    }
-}
-
 impl NewDocStyle {
     /// `<w:docDefaults>` built from the user's own settings, not Verbatim's
     /// numbers. Verbatim hardcodes 11pt with 1.15 line spacing and 8pt
@@ -1817,7 +1678,9 @@ fn build_new_doc_styles_xml(style: NewDocStyle) -> String {
         }
         // `w:after="0"` with a small `w:before`, as Verbatim has it: card
         // styles sit tight against the text they head.
-        ppr.push_str(&format!("<w:spacing w:before=\"{space_before}\" w:after=\"0\"/>"));
+        ppr.push_str(&format!(
+            "<w:spacing w:before=\"{space_before}\" w:after=\"0\"/>"
+        ));
         if centered {
             ppr.push_str("<w:jc w:val=\"center\"/>");
         }
@@ -1876,7 +1739,8 @@ fn build_new_doc_styles_xml(style: NewDocStyle) -> String {
     if style.emphasis_box {
         // Same run border Verbatim's own Emphasis style carries, and the same
         // one `run_props_xml` writes directly onto the run.
-        emphasis_rpr.push_str("<w:bdr w:val=\"single\" w:sz=\"12\" w:space=\"0\" w:color=\"auto\"/>");
+        emphasis_rpr
+            .push_str("<w:bdr w:val=\"single\" w:sz=\"12\" w:space=\"0\" w:color=\"auto\"/>");
     }
     out.push_str(&format!(
         "<w:style w:type=\"character\" w:styleId=\"Emphasis\">\
@@ -1912,7 +1776,9 @@ fn build_numbering_xml(paragraphs: &[Paragraph]) -> Option<String> {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">",
     );
     for (id, (kind, num_fmt, lvl_text, font)) in LIST_KIND_TABLE.iter().enumerate() {
-        out.push_str(&build_abstract_num_xml(id as u32, *kind, num_fmt, lvl_text, *font));
+        out.push_str(&build_abstract_num_xml(
+            id as u32, *kind, num_fmt, lvl_text, *font,
+        ));
     }
 
     let num_ids = assign_list_num_ids(paragraphs);
@@ -1924,7 +1790,11 @@ fn build_numbering_xml(paragraphs: &[Paragraph]) -> Option<String> {
     seen.sort_unstable();
     seen.dedup();
     for num_id in seen {
-        let para_idx = num_ids.iter().find(|(_, id)| **id == num_id).map(|(idx, _)| *idx).unwrap();
+        let para_idx = num_ids
+            .iter()
+            .find(|(_, id)| **id == num_id)
+            .map(|(idx, _)| *idx)
+            .unwrap();
         let kind = paragraphs[para_idx].list.unwrap().kind;
         out.push_str(&format!(
             "<w:num w:numId=\"{num_id}\"><w:abstractNumId w:val=\"{}\"/></w:num>",
@@ -2058,7 +1928,11 @@ fn rebuild_document_xml(preamble: &str, sect_pr: &str, paragraphs: &[Paragraph])
             // directly — still showed.
             let needs_preserve = run.text.starts_with(char::is_whitespace)
                 || run.text.ends_with(char::is_whitespace);
-            let space_attr = if needs_preserve { " xml:space=\"preserve\"" } else { "" };
+            let space_attr = if needs_preserve {
+                " xml:space=\"preserve\""
+            } else {
+                ""
+            };
             out.push_str(&format!("<w:t{}>", space_attr));
             out.push_str(&escape_xml_text(&run.text));
             out.push_str("</w:t></w:r>");
@@ -2090,9 +1964,9 @@ fn extract_sect_pr(xml: &str) -> Option<&str> {
      * after all paragraphs.  If multiple `sectPr` elements existed (unlikely in
      * practice), this picks the last one which is the document-level one.
      */
-    let start   = xml.rfind("<w:sectPr")?;
+    let start = xml.rfind("<w:sectPr")?;
     let end_tag = "</w:sectPr>";
-    let end     = xml[start..].find(end_tag)? + start + end_tag.len();
+    let end = xml[start..].find(end_tag)? + start + end_tag.len();
     Some(&xml[start..end])
 }
 
@@ -2140,8 +2014,7 @@ pub fn create_new_docx(
     let tmp_path = tmp_write_path(path);
     let tmp_file = std::fs::File::create(&tmp_path)?;
     let mut writer = ZipWriter::new(tmp_file);
-    let opts = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     let content_types_numbering_override = if numbering_xml.is_some() {
         "<Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>"
@@ -2176,7 +2049,7 @@ Target=\"docProps/core.xml\"/>\
 <Relationship Id=\"rIdApp\" \
 Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties\" \
 Target=\"docProps/app.xml\"/>\
-</Relationships>"
+</Relationships>",
     )?;
 
     // rId2 is reserved for numbering (below, when present) — styles always
@@ -2211,12 +2084,13 @@ Target=\"docProps/app.xml\"/>\
         b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\
 <w:defaultTabStop w:val=\"720\"/>\
-</w:settings>"
+</w:settings>",
     )?;
 
     writer.start_file("docProps/core.xml", opts)?;
-    writer.write_all(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+    writer.write_all(
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
 <cp:coreProperties \
 xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
 xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
@@ -2225,12 +2099,16 @@ xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
 <dc:title>{title}</dc:title>\
 <cp:revision>1</cp:revision>\
 </cp:coreProperties>",
-        // The file's own name, escaped: it is the only title this app knows,
-        // and an unescaped `&` in a filename would produce a part Word rejects.
-        title = escape_xml_text(
-            path.file_stem().and_then(|n| n.to_str()).unwrap_or("Untitled"),
-        ),
-    ).as_bytes())?;
+            // The file's own name, escaped: it is the only title this app knows,
+            // and an unescaped `&` in a filename would produce a part Word rejects.
+            title = escape_xml_text(
+                path.file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Untitled"),
+            ),
+        )
+        .as_bytes(),
+    )?;
 
     writer.start_file("docProps/app.xml", opts)?;
     writer.write_all(
@@ -2239,7 +2117,7 @@ xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\
 xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" \
 xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">\
 <Application>Vimbatim</Application>\
-</Properties>"
+</Properties>",
     )?;
 
     writer.start_file("word/document.xml", opts)?;
@@ -2279,7 +2157,9 @@ fn escape_xml_attr(s: &str) -> String {
 }
 
 fn escape_xml_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -2317,7 +2197,12 @@ mod tests {
 
     #[test]
     fn test_emphasis_boxed_emits_a_real_bdr() {
-        let run = Run { text: "hi".into(), emphasis: true, emphasis_boxed: true, ..Run::default() };
+        let run = Run {
+            text: "hi".into(),
+            emphasis: true,
+            emphasis_boxed: true,
+            ..Run::default()
+        };
         let xml = run_props_xml(&run);
         assert!(
             xml.contains(r#"<w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/>"#),
@@ -2327,7 +2212,11 @@ mod tests {
 
     #[test]
     fn test_non_boxed_emphasis_emits_no_bdr() {
-        let run = Run { text: "hi".into(), emphasis: true, ..Run::default() };
+        let run = Run {
+            text: "hi".into(),
+            emphasis: true,
+            ..Run::default()
+        };
         let xml = run_props_xml(&run);
         assert!(!xml.contains("w:bdr"), "got: {xml}");
     }
@@ -2339,17 +2228,28 @@ mod tests {
         // has been observed silently dropped by Word on reopen even though this
         // parser's own reparse (which is order-insensitive) would still pass.
         let named_highlight = Run {
-            text: "hi".into(), emphasis: true, emphasis_boxed: true,
-            highlight: true, highlight_color: "yellow".into(), ..Run::default()
+            text: "hi".into(),
+            emphasis: true,
+            emphasis_boxed: true,
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
         };
         let xml = run_props_xml(&named_highlight);
         let bdr_pos = xml.find("<w:bdr").expect("bdr missing");
         let highlight_pos = xml.find("<w:highlight").expect("highlight missing");
-        assert!(bdr_pos < highlight_pos, "bdr must precede highlight, got: {xml}");
+        assert!(
+            bdr_pos < highlight_pos,
+            "bdr must precede highlight, got: {xml}"
+        );
 
         let custom_hex_highlight = Run {
-            text: "hi".into(), emphasis: true, emphasis_boxed: true,
-            highlight: true, highlight_color: "00ff88".into(), ..Run::default()
+            text: "hi".into(),
+            emphasis: true,
+            emphasis_boxed: true,
+            highlight: true,
+            highlight_color: "00ff88".into(),
+            ..Run::default()
         };
         let xml = run_props_xml(&custom_hex_highlight);
         let bdr_pos = xml.find("<w:bdr").expect("bdr missing");
@@ -2393,7 +2293,10 @@ mod tests {
         let xml = run_props_xml(&source);
         let inner = xml.trim_start_matches("<w:shd ").trim_end_matches("/>");
         let mut run = Run::default();
-        apply_run_prop(&BytesStart::from_content(format!("w:shd {inner}"), 5), &mut run);
+        apply_run_prop(
+            &BytesStart::from_content(format!("w:shd {inner}"), 5),
+            &mut run,
+        );
         assert!(run.highlight);
         assert_eq!(run.highlight_color, source.highlight_color);
     }
@@ -2499,24 +2402,32 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_center_alignment() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::Center,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:jc w:val="center"/>"#));
     }
 
     #[test]
     fn test_rebuild_omits_jc_for_left_alignment() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::Left,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:jc"));
     }
@@ -2531,17 +2442,30 @@ mod tests {
         // attribute, Word trims that edge space on open even though
         // vimbatim's own renderer — which reads `run.text` directly, not
         // this XML-serialisation flag — still shows it.
-        let paragraphs = vec![Paragraph { list: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
             runs: vec![
-                Run { text: "written and ".into(), whitespace_preserve: false, ..Run::default() },
-                Run { text: "highlighted".into(), highlight: true,
-                      highlight_color: "yellow".into(), ..Run::default() },
-                Run { text: " in vimbatim".into(), whitespace_preserve: false, ..Run::default() },
+                Run {
+                    text: "written and ".into(),
+                    whitespace_preserve: false,
+                    ..Run::default()
+                },
+                Run {
+                    text: "highlighted".into(),
+                    highlight: true,
+                    highlight_color: "yellow".into(),
+                    ..Run::default()
+                },
+                Run {
+                    text: " in vimbatim".into(),
+                    whitespace_preserve: false,
+                    ..Run::default()
+                },
             ],
             heading: 0,
             alignment: Alignment::Left,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(
             xml.contains(r#"<w:t xml:space="preserve">written and </w:t>"#),
@@ -2555,12 +2479,16 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_heading_style() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 2,
             alignment: Alignment::Left,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         // Capitalized to match Word's own built-in styleId casing
         // ("Heading1".."Heading9") — see
@@ -2571,12 +2499,16 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_pstyle_for_body_text() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::Left,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pStyle"));
     }
@@ -2592,39 +2524,56 @@ mod tests {
     #[test]
     fn test_rebuild_heading_wins_over_list_emits_exactly_one_pstyle() {
         let paragraphs = vec![Paragraph {
-            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+            list: Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0,
+            }),
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::Left,
             unsupported_xml: None,
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert_eq!(xml.matches("<w:pStyle").count(), 1, "got: {xml}");
-        assert!(xml.contains(r#"<w:pStyle w:val="Heading1"/>"#), "got: {xml}");
+        assert!(
+            xml.contains(r#"<w:pStyle w:val="Heading1"/>"#),
+            "got: {xml}"
+        );
         assert!(!xml.contains("ListParagraph"), "got: {xml}");
         assert!(!xml.contains("w:numPr"), "got: {xml}");
     }
 
     #[test]
     fn test_rebuild_omits_ppr_entirely_for_plain_paragraph() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::Left,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pPr"));
     }
 
     #[test]
     fn test_alignment_and_heading_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let original = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::Center,
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(reparsed[0].heading, 1);
@@ -2686,7 +2635,10 @@ mod tests {
         let styles = parse_styles_xml(styles_xml);
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
-        assert!(paragraphs[0].runs[0].underline, "character-style underline not applied");
+        assert!(
+            paragraphs[0].runs[0].underline,
+            "character-style underline not applied"
+        );
     }
 
     #[test]
@@ -2701,9 +2653,13 @@ mod tests {
             </w:style>
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
-        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/><w:u w:val="none"/></w:rPr>"#);
+        let xml =
+            wrap_run_xml(r#"<w:rPr><w:rStyle w:val="StyleUnderline"/><w:u w:val="none"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
-        assert!(!paragraphs[0].runs[0].underline, "direct <w:u w:val=\"none\"/> after rStyle should win");
+        assert!(
+            !paragraphs[0].runs[0].underline,
+            "direct <w:u w:val=\"none\"/> after rStyle should win"
+        );
     }
 
     #[test]
@@ -2723,14 +2679,25 @@ mod tests {
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
         let run = &paragraphs[0].runs[0];
-        assert!(run.emphasis_boxed, "style-referenced <w:bdr> should set emphasis_boxed");
-        assert!(run.emphasis, "a real box implies Emphasis, so Remove Emphasis can find it");
-        assert!(run.bold && run.underline, "existing bold/underline resolution must still work");
+        assert!(
+            run.emphasis_boxed,
+            "style-referenced <w:bdr> should set emphasis_boxed"
+        );
+        assert!(
+            run.emphasis,
+            "a real box implies Emphasis, so Remove Emphasis can find it"
+        );
+        assert!(
+            run.bold && run.underline,
+            "existing bold/underline resolution must still work"
+        );
     }
 
     #[test]
     fn test_direct_bdr_on_a_run_sets_emphasis_boxed_and_emphasis() {
-        let xml = wrap_run_xml(r#"<w:rPr><w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:rPr>"#);
+        let xml = wrap_run_xml(
+            r#"<w:rPr><w:bdr w:val="single" w:sz="12" w:space="0" w:color="auto"/></w:rPr>"#,
+        );
         let paragraphs = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].runs[0].emphasis_boxed);
         assert!(paragraphs[0].runs[0].emphasis);
@@ -2757,32 +2724,49 @@ mod tests {
             </w:style>
         </w:styles>"#;
         let styles = parse_styles_xml(styles_xml);
-        let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/><w:bdr w:val="none"/></w:rPr>"#);
+        let xml =
+            wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/><w:bdr w:val="none"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
-        assert!(!paragraphs[0].runs[0].emphasis_boxed, "direct <w:bdr w:val=\"none\"/> after rStyle should cancel the box");
-        assert!(!paragraphs[0].runs[0].emphasis, "canceling the box should also clear emphasis");
+        assert!(
+            !paragraphs[0].runs[0].emphasis_boxed,
+            "direct <w:bdr w:val=\"none\"/> after rStyle should cancel the box"
+        );
+        assert!(
+            !paragraphs[0].runs[0].emphasis,
+            "canceling the box should also clear emphasis"
+        );
     }
 
     #[test]
     fn test_rebuild_emits_double_underline() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                double_underline: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:u w:val="double"/>"#));
     }
 
     #[test]
     fn test_double_underline_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), double_underline: true, ..Run::default() }],
+        let original = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                double_underline: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(reparsed[0].runs[0].double_underline);
@@ -2796,12 +2780,22 @@ mod tests {
     /// anonymous bold-and-underline.
     #[test]
     fn an_emphasized_run_writes_verbatims_emphasis_style() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "read this".into(), emphasis: true, ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "read this".into(),
+                emphasis: true,
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         }];
         let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
-        assert!(xml.contains(r#"<w:rStyle w:val="Emphasis"/>"#), "got: {xml}");
+        assert!(
+            xml.contains(r#"<w:rStyle w:val="Emphasis"/>"#),
+            "got: {xml}"
+        );
     }
 
     /// `<w:rStyle>` is not repeatable in CT_RPr, so a run that is both a Cite
@@ -2810,22 +2804,35 @@ mod tests {
     /// `<w:vimbatimEmphasis/>` and its own direct formatting.
     #[test]
     fn a_card_marker_wins_the_single_rstyle_slot_over_emphasis() {
-        let paragraphs = vec![Paragraph { list: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
             runs: vec![Run {
                 text: "cited and read".into(),
                 emphasis: true,
                 style: Some(CardStyle::Cite),
                 ..Run::default()
             }],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         }];
         let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
-        assert_eq!(xml.matches("<w:rStyle").count(), 1, "one rStyle only: {xml}");
-        assert!(xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#), "got: {xml}");
+        assert_eq!(
+            xml.matches("<w:rStyle").count(),
+            1,
+            "one rStyle only: {xml}"
+        );
+        assert!(
+            xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#),
+            "got: {xml}"
+        );
 
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(reparsed[0].runs[0].style, Some(CardStyle::Cite));
-        assert!(reparsed[0].runs[0].emphasis, "the emphasis flag still round-trips");
+        assert!(
+            reparsed[0].runs[0].emphasis,
+            "the emphasis flag still round-trips"
+        );
     }
 
     /// Verbatim's Emphasis is read as emphasis whether or not the style draws a
@@ -2839,7 +2846,10 @@ mod tests {
         );
         let xml = wrap_run_xml(r#"<w:rPr><w:rStyle w:val="Emphasis"/></w:rPr>"#);
         let paragraphs = parse_document_xml(&xml, &styles, &no_numbering()).unwrap();
-        assert!(paragraphs[0].runs[0].emphasis, "unboxed Emphasis is still Emphasis");
+        assert!(
+            paragraphs[0].runs[0].emphasis,
+            "unboxed Emphasis is still Emphasis"
+        );
         assert!(!paragraphs[0].runs[0].emphasis_boxed);
     }
 
@@ -2852,10 +2862,20 @@ mod tests {
     /// line spacing.
     #[test]
     fn doc_defaults_are_generated_from_the_callers_settings() {
-        let style = NewDocStyle { normal_size: 24, line_spacing: 2.0, ..Default::default() };
+        let style = NewDocStyle {
+            normal_size: 24,
+            line_spacing: 2.0,
+            ..Default::default()
+        };
         let xml = build_new_doc_styles_xml(style);
-        assert!(xml.contains("<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>"), "got: {xml}");
-        assert!(xml.contains("w:line=\"480\""), "2.0 spacing is 480 twentieths: {xml}");
+        assert!(
+            xml.contains("<w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/>"),
+            "got: {xml}"
+        );
+        assert!(
+            xml.contains("w:line=\"480\""),
+            "2.0 spacing is 480 twentieths: {xml}"
+        );
         // No `<w:rFonts>`: this app has no default-font setting, so it has no
         // opinion to record and Word's own default is the honest answer.
         let defaults = &xml[..xml.find("</w:docDefaults>").unwrap()];
@@ -2869,14 +2889,21 @@ mod tests {
     #[test]
     fn heading_styles_carry_the_configured_card_sizes() {
         let style = NewDocStyle {
-            pocket_size: 60, hat_size: 50, block_size: 40, tag_size: 30, ..Default::default()
+            pocket_size: 60,
+            hat_size: 50,
+            block_size: 40,
+            tag_size: 30,
+            ..Default::default()
         };
         let xml = build_new_doc_styles_xml(style);
         for (level, size) in [(1, 60), (2, 50), (3, 40), (4, 30)] {
-            let head = xml.find(&format!("w:styleId=\"Heading{level}\"")).expect("style present");
+            let head = xml
+                .find(&format!("w:styleId=\"Heading{level}\""))
+                .expect("style present");
             let tail = &xml[head..];
             assert!(
-                tail[..tail.find("</w:style>").unwrap()].contains(&format!("<w:sz w:val=\"{size}\"/>")),
+                tail[..tail.find("</w:style>").unwrap()]
+                    .contains(&format!("<w:sz w:val=\"{size}\"/>")),
                 "Heading{level} should carry {size}: {xml}",
             );
         }
@@ -2895,9 +2922,15 @@ mod tests {
             tail[..tail.find("</w:style>").unwrap()].to_string()
         };
         for level in [1, 2, 3] {
-            assert!(style_body(level).contains("<w:pageBreakBefore/>"), "Heading{level}");
+            assert!(
+                style_body(level).contains("<w:pageBreakBefore/>"),
+                "Heading{level}"
+            );
         }
-        assert!(!style_body(4).contains("<w:pageBreakBefore/>"), "Tag must not page-break");
+        assert!(
+            !style_body(4).contains("<w:pageBreakBefore/>"),
+            "Tag must not page-break"
+        );
     }
 
     /// The `Emphasis` character style is generated from *this* app's Emphasis
@@ -2915,8 +2948,11 @@ mod tests {
         };
 
         let plain = body(NewDocStyle {
-            emphasis_bold: true, emphasis_underline: false,
-            emphasis_box: false, emphasis_size: None, ..Default::default()
+            emphasis_bold: true,
+            emphasis_underline: false,
+            emphasis_box: false,
+            emphasis_size: None,
+            ..Default::default()
         });
         assert!(plain.contains("<w:b/>"));
         assert!(!plain.contains("<w:u "));
@@ -2924,8 +2960,11 @@ mod tests {
         assert!(!plain.contains("<w:sz "));
 
         let everything = body(NewDocStyle {
-            emphasis_bold: true, emphasis_underline: true,
-            emphasis_box: true, emphasis_size: Some(24), ..Default::default()
+            emphasis_bold: true,
+            emphasis_underline: true,
+            emphasis_box: true,
+            emphasis_size: Some(24),
+            ..Default::default()
         });
         assert!(everything.contains("<w:b/>"));
         assert!(everything.contains("<w:u w:val=\"single\"/>"));
@@ -2939,8 +2978,14 @@ mod tests {
     fn heading_char_styles_exist_for_every_link() {
         let xml = build_new_doc_styles_xml(Default::default());
         for level in 1..=4 {
-            assert!(xml.contains(&format!("<w:link w:val=\"Heading{level}Char\"/>")), "link {level}");
-            assert!(xml.contains(&format!("w:styleId=\"Heading{level}Char\"")), "style {level}");
+            assert!(
+                xml.contains(&format!("<w:link w:val=\"Heading{level}Char\"/>")),
+                "link {level}"
+            );
+            assert!(
+                xml.contains(&format!("w:styleId=\"Heading{level}Char\"")),
+                "style {level}"
+            );
         }
     }
 
@@ -2973,7 +3018,11 @@ mod tests {
     /// halves of `docDefaults` have to agree.
     #[test]
     fn generated_doc_defaults_round_trip() {
-        let style = NewDocStyle { normal_size: 26, line_spacing: 1.5, ..Default::default() };
+        let style = NewDocStyle {
+            normal_size: 26,
+            line_spacing: 1.5,
+            ..Default::default()
+        };
         let defaults = parse_doc_defaults(&build_new_doc_styles_xml(style));
         assert_eq!(defaults.size, 26);
         assert_eq!(defaults.font, None);
@@ -2996,14 +3045,20 @@ mod tests {
             ("self-closing", "<w:p/>"),
             ("self-closing with attrs", "<w:p w:rsidR=\"005D388F\"/>"),
             ("empty start+end", "<w:p></w:p>"),
-            ("pPr but no runs", "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>"),
+            (
+                "pPr but no runs",
+                "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:p>",
+            ),
             ("empty run", "<w:p><w:r><w:t></w:t></w:r></w:p>"),
         ] {
             let xml = format!("<w:document><w:body>{body}</w:body></w:document>");
             let paras = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
             assert_eq!(paras.len(), 1, "{label}: expected one paragraph");
             assert_eq!(paras[0].runs.len(), 1, "{label}: expected one run");
-            assert!(paras[0].runs[0].text.is_empty(), "{label}: the run is blank");
+            assert!(
+                paras[0].runs[0].text.is_empty(),
+                "{label}: the run is blank"
+            );
         }
     }
 
@@ -3013,8 +3068,11 @@ mod tests {
     #[test]
     fn a_document_with_no_paragraphs_still_yields_one() {
         let paras = parse_document_xml(
-            "<w:document><w:body></w:body></w:document>", &no_styles(), &no_numbering(),
-        ).unwrap();
+            "<w:document><w:body></w:body></w:document>",
+            &no_styles(),
+            &no_numbering(),
+        )
+        .unwrap();
         assert_eq!(paras.len(), 1);
         assert_eq!(paras[0].runs.len(), 1);
     }
@@ -3033,11 +3091,17 @@ mod tests {
         assert_eq!(once.len(), 4, "two blank lines between the two text lines");
 
         let twice = parse_document_xml(
-            &rebuild_document_xml("<w:document>", "", &once), &no_styles(), &no_numbering(),
-        ).unwrap();
+            &rebuild_document_xml("<w:document>", "", &once),
+            &no_styles(),
+            &no_numbering(),
+        )
+        .unwrap();
         assert_eq!(twice.len(), 4, "a resave must not drop the blank lines");
         assert_eq!(
-            twice.iter().map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>()).collect::<Vec<_>>(),
+            twice
+                .iter()
+                .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>(),
             vec!["Tag", "", "", "Body"],
         );
     }
@@ -3051,7 +3115,8 @@ mod tests {
     /// `settings.conf` colour reaches `w:color` the same way.
     #[test]
     fn attribute_values_with_xml_metacharacters_survive_a_round_trip() {
-        let original = vec![Paragraph { list: None,
+        let original = vec![Paragraph {
+            list: None,
             runs: vec![Run {
                 text: "hi".into(),
                 font: Some("Ev\"il<&>'s Sans".into()),
@@ -3063,10 +3128,16 @@ mod tests {
             unsupported_xml: None,
         }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
-        assert!(!xml.contains("w:ascii=\"Ev\"il"), "unescaped quote closed the attribute: {xml}");
+        assert!(
+            !xml.contains("w:ascii=\"Ev\"il"),
+            "unescaped quote closed the attribute: {xml}"
+        );
 
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
-        assert_eq!(reparsed[0].runs[0].font.as_deref(), Some("Ev\"il<&>'s Sans"));
+        assert_eq!(
+            reparsed[0].runs[0].font.as_deref(),
+            Some("Ev\"il<&>'s Sans")
+        );
         assert_eq!(reparsed[0].runs[0].color.as_deref(), Some("aa\"bb"));
         // `highlight_color` deliberately isn't exercised here: `w:shd`'s own
         // parse already refuses anything that isn't 6 hex digits (so ordinary
@@ -3080,22 +3151,33 @@ mod tests {
     /// be identical to one.
     #[test]
     fn an_ampersand_in_a_font_name_does_not_grow_on_repeated_saves() {
-        let paras = |font: &str| vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), font: Some(font.into()), ..Run::default() }],
-            heading: 0,
-            alignment: Alignment::default(),
-            unsupported_xml: None,
-        }];
+        let paras = |font: &str| {
+            vec![Paragraph {
+                list: None,
+                runs: vec![Run {
+                    text: "hi".into(),
+                    font: Some(font.into()),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            }]
+        };
         let once = parse_document_xml(
             &rebuild_document_xml("<w:document>", "", &paras("Foo & Bar")),
-            &no_styles(), &no_numbering(),
-        ).unwrap();
+            &no_styles(),
+            &no_numbering(),
+        )
+        .unwrap();
         assert_eq!(once[0].runs[0].font.as_deref(), Some("Foo & Bar"));
 
         let twice = parse_document_xml(
             &rebuild_document_xml("<w:document>", "", &once),
-            &no_styles(), &no_numbering(),
-        ).unwrap();
+            &no_styles(),
+            &no_numbering(),
+        )
+        .unwrap();
         assert_eq!(twice[0].runs[0].font.as_deref(), Some("Foo & Bar"));
     }
 
@@ -3110,24 +3192,34 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_strikethrough() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                strikethrough: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:strike/>"));
     }
 
     #[test]
     fn test_strikethrough_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), strikethrough: true, ..Run::default() }],
+        let original = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                strikethrough: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         assert!(reparsed[0].runs[0].strikethrough);
@@ -3173,12 +3265,17 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_four_sided_pbdr_when_box_format_set() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), box_format: true, ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                box_format: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:pBdr>"));
         // top/bottom: space="1"; left/right: space="4" — matching real Verbatim's
@@ -3206,12 +3303,16 @@ mod tests {
 
     #[test]
     fn test_rebuild_omits_pbdr_when_no_run_has_box_format() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("w:pBdr"));
     }
@@ -3232,8 +3333,13 @@ mod tests {
             (CardStyle::Tag, 4),
         ];
         for (style, heading) in by_heading {
-            let paragraphs = vec![Paragraph { list: None,
-                runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
+            let paragraphs = vec![Paragraph {
+                list: None,
+                runs: vec![Run {
+                    text: "marked".into(),
+                    style: Some(style),
+                    ..Run::default()
+                }],
                 heading,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
@@ -3252,8 +3358,13 @@ mod tests {
         }
 
         for style in [CardStyle::Cite, CardStyle::Analytic] {
-            let paragraphs = vec![Paragraph { list: None,
-                runs: vec![Run { text: "marked".into(), style: Some(style), ..Run::default() }],
+            let paragraphs = vec![Paragraph {
+                list: None,
+                runs: vec![Run {
+                    text: "marked".into(),
+                    style: Some(style),
+                    ..Run::default()
+                }],
                 heading: 0,
                 alignment: Alignment::default(),
                 unsupported_xml: None,
@@ -3275,10 +3386,16 @@ mod tests {
     fn every_emitted_rstyle_id_is_defined_in_a_new_documents_styles() {
         let styles = build_new_doc_styles_xml(Default::default());
         for style in [
-            CardStyle::Pocket, CardStyle::Hat, CardStyle::Block,
-            CardStyle::Tag, CardStyle::Cite, CardStyle::Analytic,
+            CardStyle::Pocket,
+            CardStyle::Hat,
+            CardStyle::Block,
+            CardStyle::Tag,
+            CardStyle::Cite,
+            CardStyle::Analytic,
         ] {
-            let Some(id) = style.docx_rstyle_id() else { continue };
+            let Some(id) = style.docx_rstyle_id() else {
+                continue;
+            };
             assert!(
                 styles.contains(&format!("w:styleId=\"{id}\"")),
                 "{style:?} writes <w:rStyle w:val=\"{id}\"/> but no style defines it",
@@ -3309,8 +3426,13 @@ mod tests {
     /// the style isn't defined — so a marked document opens cleanly elsewhere.
     #[test]
     fn test_style_marker_is_written_as_an_rstyle_reference() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "a cite".into(), style: Some(CardStyle::Cite), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "a cite".into(),
+                style: Some(CardStyle::Cite),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
             unsupported_xml: None,
@@ -3318,7 +3440,10 @@ mod tests {
         let xml = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
         // Verbatim's own id for a Cite, so a card written here is the same
         // thing to Verbatim that one written there is.
-        assert!(xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#), "got: {xml}");
+        assert!(
+            xml.contains(r#"<w:rStyle w:val="Style13ptBold"/>"#),
+            "got: {xml}"
+        );
     }
 
     /// The Emphasis markers round-trip through save/load, and independently
@@ -3326,9 +3451,14 @@ mod tests {
     /// and emphasized-but-not-boxed at the same time.
     #[test]
     fn test_emphasis_markers_survive_round_trip() {
-        let paragraphs = vec![Paragraph { list: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
             runs: vec![
-                Run { text: "emphasized only".into(), emphasis: true, ..Run::default() },
+                Run {
+                    text: "emphasized only".into(),
+                    emphasis: true,
+                    ..Run::default()
+                },
                 Run {
                     text: "emphasized and boxed".into(),
                     emphasis: true,
@@ -3374,24 +3504,41 @@ mod tests {
     #[test]
     fn test_runs_with_different_markers_do_not_merge() {
         let mut runs = vec![
-            Run { text: "a".into(), style: Some(CardStyle::Cite), ..Run::default() },
-            Run { text: "b".into(), style: Some(CardStyle::Analytic), ..Run::default() },
+            Run {
+                text: "a".into(),
+                style: Some(CardStyle::Cite),
+                ..Run::default()
+            },
+            Run {
+                text: "b".into(),
+                style: Some(CardStyle::Analytic),
+                ..Run::default()
+            },
         ];
-        crate::document_ops::merge_adjacent_same_format_runs(&mut runs);
+        crate::document::normalize::merge_adjacent_same_format_runs(&mut runs);
         assert_eq!(runs.len(), 2);
     }
 
     #[test]
     fn test_box_format_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph { list: None,
+        let original = vec![Paragraph {
+            list: None,
             runs: vec![
-                Run { text: "a".into(), box_format: true, ..Run::default() },
-                Run { text: "b".into(), box_format: true, ..Run::default() },
+                Run {
+                    text: "a".into(),
+                    box_format: true,
+                    ..Run::default()
+                },
+                Run {
+                    text: "b".into(),
+                    box_format: true,
+                    ..Run::default()
+                },
             ],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
         // Parse-time run merging collapses "a"+"b" (identical formatting)
@@ -3404,17 +3551,22 @@ mod tests {
 
     #[test]
     fn test_real_file_round_trip_preserves_all_five_fixed_attributes() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_docx_roundtrip_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_docx_roundtrip_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         // 1. Create a minimal real .docx on disk.
-        let initial = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hello".into(), ..Run::default() }],
+        let initial = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hello".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         create_new_docx(&initial, &path, Default::default()).unwrap();
 
         // 2. Open it through the real parse_docx path (ZIP + XML), not the
@@ -3457,13 +3609,21 @@ mod tests {
     /// hand-written XML fixture.
     #[test]
     fn test_parses_real_verbatim_authored_emphasis_box() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verbatim_emphasis_reference.docx");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/verbatim_emphasis_reference.docx");
         let (paragraphs, _origin) = parse_docx(&path).unwrap();
 
-        let pocket = paragraphs.iter().find(|p| p.runs.iter().any(|r| r.text == "Pocket")).unwrap();
-        assert!(pocket.runs[0].box_format, "Pocket paragraph should carry the paragraph-wide box");
+        let pocket = paragraphs
+            .iter()
+            .find(|p| p.runs.iter().any(|r| r.text == "Pocket"))
+            .unwrap();
+        assert!(
+            pocket.runs[0].box_format,
+            "Pocket paragraph should carry the paragraph-wide box"
+        );
 
-        let emphasis_para = paragraphs.iter()
+        let emphasis_para = paragraphs
+            .iter()
             .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (Size")))
             .expect("Emphasis paragraph not found");
         assert!(
@@ -3472,11 +3632,19 @@ mod tests {
             emphasis_para.runs,
         );
 
-        let emphasis_highlight_para = paragraphs.iter()
-            .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (same as above) and highlight")))
+        let emphasis_highlight_para = paragraphs
+            .iter()
+            .find(|p| {
+                p.runs
+                    .iter()
+                    .any(|r| r.text.contains("Emphasis (same as above) and highlight"))
+            })
             .expect("Emphasis+highlight paragraph not found");
         let run = &emphasis_highlight_para.runs[0];
-        assert!(run.emphasis && run.emphasis_boxed, "Emphasis+highlight should also carry the box");
+        assert!(
+            run.emphasis && run.emphasis_boxed,
+            "Emphasis+highlight should also carry the box"
+        );
         assert!(run.highlight && run.highlight_color == "yellow");
     }
 
@@ -3486,8 +3654,12 @@ mod tests {
     /// it, and saves — not just an in-memory transformation.
     #[test]
     fn test_real_verbatim_file_emphasis_box_survives_save_and_reload() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verbatim_emphasis_reference.docx");
-        let dir = std::env::temp_dir().join(format!("vimbatim_verbatim_roundtrip_{}", std::process::id()));
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/verbatim_emphasis_reference.docx");
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_verbatim_roundtrip_{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
         std::fs::copy(&src, &path).unwrap();
@@ -3496,15 +3668,23 @@ mod tests {
         origin.save(&paragraphs, &path).unwrap();
 
         let (reparsed, _origin2) = parse_docx(&path).unwrap();
-        let emphasis_para = reparsed.iter()
+        let emphasis_para = reparsed
+            .iter()
             .find(|p| p.runs.iter().any(|r| r.text.contains("Emphasis (Size")))
             .expect("Emphasis paragraph not found after save/reload");
-        assert!(emphasis_para.runs.iter().all(|r| r.emphasis && r.emphasis_boxed));
+        assert!(emphasis_para
+            .runs
+            .iter()
+            .all(|r| r.emphasis && r.emphasis_boxed));
 
-        let pocket = reparsed.iter()
+        let pocket = reparsed
+            .iter()
             .find(|p| p.runs.iter().any(|r| r.text == "Pocket"))
             .expect("Pocket paragraph not found after save/reload");
-        assert!(pocket.runs[0].box_format, "Pocket's box_format should survive save/reload");
+        assert!(
+            pocket.runs[0].box_format,
+            "Pocket's box_format should survive save/reload"
+        );
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
@@ -3525,8 +3705,12 @@ mod tests {
         // drops out of Word's Navigation pane, even though parsing it back
         // into Vimbatim still shows a heading (apply_para_style lower-cases
         // before matching, so it doesn't notice the mismatch).
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::default(),
             unsupported_xml: None,
@@ -3549,8 +3733,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("with_table.docx");
 
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "before table".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "before table".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
             unsupported_xml: None,
@@ -3615,7 +3803,8 @@ mod tests {
     fn test_paragraph_without_pstyle_is_unaffected_by_styles_map() {
         let styles_xml = format!("<w:styles>{}</w:styles>", POCKET_STYLE_XML);
         let styles = parse_styles_xml(&styles_xml);
-        let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
+        let xml =
+            "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
         let paragraphs = parse_document_xml(xml, &styles, &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].alignment, Alignment::Left);
         assert!(!paragraphs[0].runs[0].box_format);
@@ -3664,12 +3853,17 @@ mod tests {
         let xml = "<w:document><w:body><w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink></w:p></w:body></w:document>";
         let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert!(paragraphs[0].unsupported_xml.is_some());
-        assert!(paragraphs[0].unsupported_xml.as_ref().unwrap().contains("w:hyperlink"));
+        assert!(paragraphs[0]
+            .unsupported_xml
+            .as_ref()
+            .unwrap()
+            .contains("w:hyperlink"));
     }
 
     #[test]
     fn test_plain_paragraph_has_no_unsupported_xml() {
-        let xml = "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
+        let xml =
+            "<w:document><w:body><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:body></w:document>";
         let paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
         assert_eq!(paragraphs[0].unsupported_xml, None);
     }
@@ -3684,11 +3878,18 @@ mod tests {
 
     #[test]
     fn test_rebuild_reemits_unsupported_xml_verbatim_when_present() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "ignored".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "ignored".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-            unsupported_xml: Some("<w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink>".to_string()),
+            unsupported_xml: Some(
+                "<w:hyperlink r:id=\"rId1\"><w:r><w:t>link text</w:t></w:r></w:hyperlink>"
+                    .to_string(),
+            ),
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:hyperlink r:id=\"rId1\">"));
@@ -3718,55 +3919,75 @@ mod tests {
 
     #[test]
     fn test_rebuild_emits_italic() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), italic: true, ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                italic: true,
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:i/>"));
     }
 
     #[test]
     fn test_rebuild_emits_font_ascii() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), font: Some("Georgia".into()), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                font: Some("Georgia".into()),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:rFonts w:ascii="Georgia"/>"#));
     }
 
     #[test]
     fn test_rebuild_emits_color() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), color: Some("FF0000".into()), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                color: Some("FF0000".into()),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains(r#"<w:color w:val="FF0000"/>"#));
     }
 
     #[test]
     fn test_rebuild_omits_rpr_entirely_when_no_properties_set() {
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("<w:rPr>"));
     }
 
     #[test]
     fn test_italic_font_color_round_trip_through_parse_and_rebuild() {
-        let original = vec![Paragraph { list: None,
+        let original = vec![Paragraph {
+            list: None,
             runs: vec![Run {
                 text: "hi".into(),
                 italic: true,
@@ -3776,8 +3997,8 @@ mod tests {
             }],
             heading: 0,
             alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
+            unsupported_xml: None,
+        }];
         let xml = rebuild_document_xml("<w:document>", "", &original);
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
         // matching what parse_document_xml expects to find.
@@ -3798,7 +4019,10 @@ mod tests {
 
         // Build a real docx, then reload it to get a genuine DocxOrigin.
         let mut para = Paragraph::default();
-        para.runs.push(Run { text: "hello world".into(), ..Default::default() });
+        para.runs.push(Run {
+            text: "hello world".into(),
+            ..Default::default()
+        });
         create_new_docx(&[para.clone()], &original, Default::default()).unwrap();
         let (paragraphs, origin) = parse_docx(&original).unwrap();
 
@@ -3837,32 +4061,66 @@ mod tests {
             "\u{f0b7}",
         );
         let map = parse_numbering_xml(&xml);
-        assert_eq!(map.get(&1), Some(&("bullet".to_string(), "\u{f0b7}".to_string(), Some("Symbol".to_string()))));
-        assert_eq!(map.get(&2), Some(&("decimal".to_string(), "%1.".to_string(), None)));
+        assert_eq!(
+            map.get(&1),
+            Some(&(
+                "bullet".to_string(),
+                "\u{f0b7}".to_string(),
+                Some("Symbol".to_string())
+            ))
+        );
+        assert_eq!(
+            map.get(&2),
+            Some(&("decimal".to_string(), "%1.".to_string(), None))
+        );
     }
 
     #[test]
     fn test_list_kind_classify_exact_matches() {
-        assert_eq!(ListKind::classify("bullet", "\u{f0b7}", Some("Symbol")), ListKind::BulletSolid);
-        assert_eq!(ListKind::classify("bullet", "o", Some("Courier New")), ListKind::BulletHollow);
-        assert_eq!(ListKind::classify("decimal", "%1.", None), ListKind::NumberDecimalDot);
-        assert_eq!(ListKind::classify("lowerRoman", "%1.", None), ListKind::NumberLowerRoman);
+        assert_eq!(
+            ListKind::classify("bullet", "\u{f0b7}", Some("Symbol")),
+            ListKind::BulletSolid
+        );
+        assert_eq!(
+            ListKind::classify("bullet", "o", Some("Courier New")),
+            ListKind::BulletHollow
+        );
+        assert_eq!(
+            ListKind::classify("decimal", "%1.", None),
+            ListKind::NumberDecimalDot
+        );
+        assert_eq!(
+            ListKind::classify("lowerRoman", "%1.", None),
+            ListKind::NumberLowerRoman
+        );
     }
 
     #[test]
     fn test_list_kind_classify_falls_back_for_unrecognized_bullet() {
-        assert_eq!(ListKind::classify("bullet", "\u{2013}", Some("Arial")), ListKind::BulletSolid);
+        assert_eq!(
+            ListKind::classify("bullet", "\u{2013}", Some("Arial")),
+            ListKind::BulletSolid
+        );
     }
 
     #[test]
     fn test_list_kind_classify_falls_back_for_unrecognized_number_punctuation() {
-        assert_eq!(ListKind::classify("decimal", "%1:", None), ListKind::NumberDecimalDot);
-        assert_eq!(ListKind::classify("lowerLetter", "%1:", None), ListKind::NumberLowerLetterDot);
+        assert_eq!(
+            ListKind::classify("decimal", "%1:", None),
+            ListKind::NumberDecimalDot
+        );
+        assert_eq!(
+            ListKind::classify("lowerLetter", "%1:", None),
+            ListKind::NumberLowerLetterDot
+        );
     }
 
     #[test]
     fn test_list_kind_classify_falls_back_for_unrecognized_numfmt() {
-        assert_eq!(ListKind::classify("cardinalText", "%1.", None), ListKind::NumberDecimalDot);
+        assert_eq!(
+            ListKind::classify("cardinalText", "%1.", None),
+            ListKind::NumberDecimalDot
+        );
     }
 
     #[test]
@@ -3872,9 +4130,22 @@ mod tests {
                    <w:r><w:t>Item One</w:t></w:r>\
                    </w:p></w:body></w:document>";
         let mut numbering = HashMap::new();
-        numbering.insert(1u32, ("bullet".to_string(), "\u{f0b7}".to_string(), Some("Symbol".to_string())));
+        numbering.insert(
+            1u32,
+            (
+                "bullet".to_string(),
+                "\u{f0b7}".to_string(),
+                Some("Symbol".to_string()),
+            ),
+        );
         let paragraphs = parse_document_xml(xml, &no_styles(), &numbering).unwrap();
-        assert_eq!(paragraphs[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
+        assert_eq!(
+            paragraphs[0].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
     }
 
     #[test]
@@ -3889,8 +4160,14 @@ mod tests {
     #[test]
     fn test_build_numbering_xml_returns_none_for_no_lists() {
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: None,
+            unsupported_xml: None,
         }];
         assert!(build_numbering_xml(&paragraphs).is_none());
     }
@@ -3898,20 +4175,41 @@ mod tests {
     #[test]
     fn test_build_numbering_xml_emits_all_13_abstract_nums_with_9_levels_each() {
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(),
-            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0,
+            }),
             unsupported_xml: None,
         }];
         let xml = build_numbering_xml(&paragraphs).unwrap();
         assert_eq!(xml.matches("<w:abstractNum ").count(), 13, "got: {xml}");
         // Spot-check one full abstractNum's level-0/1/2, matching Lists.docx exactly.
-        assert!(xml.contains("<w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"\u{f0b7}\"/>"), "got: {xml}");
-        assert!(xml.contains("<w:rFonts w:ascii=\"Symbol\" w:hAnsi=\"Symbol\"/>"), "got: {xml}");
+        assert!(
+            xml.contains("<w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"\u{f0b7}\"/>"),
+            "got: {xml}"
+        );
+        assert!(
+            xml.contains("<w:rFonts w:ascii=\"Symbol\" w:hAnsi=\"Symbol\"/>"),
+            "got: {xml}"
+        );
         // Confirmed cascade: every bullet style's level 1 is 'o'/Courier New,
         // level 2 is /Wingdings, regardless of the level-0 style.
-        assert!(xml.matches("<w:lvlText w:val=\"o\"/>").count() >= 6, "got: {xml}");
-        assert!(xml.matches("<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\"/>").count() >= 6, "got: {xml}");
+        assert!(
+            xml.matches("<w:lvlText w:val=\"o\"/>").count() >= 6,
+            "got: {xml}"
+        );
+        assert!(
+            xml.matches("<w:rFonts w:ascii=\"Courier New\" w:hAnsi=\"Courier New\"/>")
+                .count()
+                >= 6,
+            "got: {xml}"
+        );
     }
 
     /// Exhaustive ilvl 1-8 check against the *complete* real-Word cascade
@@ -3934,8 +4232,14 @@ mod tests {
         ];
         for (ilvl, lvl_text, font) in bullet_expected {
             let xml = cascade_level_xml(ilvl, true);
-            assert!(xml.contains(&format!("<w:lvlText w:val=\"{lvl_text}\"/>")), "ilvl {ilvl}, got: {xml}");
-            assert!(xml.contains(&format!("w:ascii=\"{font}\"")), "ilvl {ilvl}, got: {xml}");
+            assert!(
+                xml.contains(&format!("<w:lvlText w:val=\"{lvl_text}\"/>")),
+                "ilvl {ilvl}, got: {xml}"
+            );
+            assert!(
+                xml.contains(&format!("w:ascii=\"{font}\"")),
+                "ilvl {ilvl}, got: {xml}"
+            );
         }
 
         let number_expected = [
@@ -3950,22 +4254,69 @@ mod tests {
         ];
         for (ilvl, num_fmt, hanging) in number_expected {
             let xml = cascade_level_xml(ilvl, false);
-            assert!(xml.contains(&format!("<w:numFmt w:val=\"{num_fmt}\"/>")), "ilvl {ilvl}, got: {xml}");
-            assert!(xml.contains(&format!("w:hanging=\"{hanging}\"")), "ilvl {ilvl}, got: {xml}");
+            assert!(
+                xml.contains(&format!("<w:numFmt w:val=\"{num_fmt}\"/>")),
+                "ilvl {ilvl}, got: {xml}"
+            );
+            assert!(
+                xml.contains(&format!("w:hanging=\"{hanging}\"")),
+                "ilvl {ilvl}, got: {xml}"
+            );
         }
     }
 
     #[test]
     fn test_build_numbering_xml_emits_one_num_per_contiguous_list_run() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: None, unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+            Paragraph {
+                runs: vec![Run {
+                    text: "a".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "b".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "not a list".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: None,
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "c".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
         ];
         let xml = build_numbering_xml(&paragraphs).unwrap();
         // Two runs of decimal-dot list paragraphs (a,b) and (c) -> two <w:num> entries.
@@ -3984,12 +4335,45 @@ mod tests {
     #[test]
     fn test_build_numbering_xml_gives_each_list_kind_its_own_num_even_with_no_break_between() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletHollow, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletCheckmark, level: 0 }), unsupported_xml: None },
+            Paragraph {
+                runs: vec![Run {
+                    text: "a".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "b".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletHollow,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "c".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletCheckmark,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
         ];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         // Three different kinds, immediately adjacent -> three distinct numIds.
@@ -3998,14 +4382,27 @@ mod tests {
         assert!(xml.contains("<w:numId w:val=\"3\"/>"), "got: {xml}");
 
         let numbering_xml = build_numbering_xml(&paragraphs).unwrap();
-        assert_eq!(numbering_xml.matches("<w:num ").count(), 3, "got: {numbering_xml}");
+        assert_eq!(
+            numbering_xml.matches("<w:num ").count(),
+            3,
+            "got: {numbering_xml}"
+        );
         // Each numId must resolve back to its own paragraph's real kind,
         // not an arbitrary one sharing the id.
         let numbering = parse_numbering_xml(&numbering_xml);
         let reparsed = parse_document_xml(&xml, &no_styles(), &numbering).unwrap();
-        assert_eq!(reparsed[0].list.map(|l| l.kind), Some(ListKind::BulletSolid));
-        assert_eq!(reparsed[1].list.map(|l| l.kind), Some(ListKind::BulletHollow));
-        assert_eq!(reparsed[2].list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
+        assert_eq!(
+            reparsed[0].list.map(|l| l.kind),
+            Some(ListKind::BulletSolid)
+        );
+        assert_eq!(
+            reparsed[1].list.map(|l| l.kind),
+            Some(ListKind::BulletHollow)
+        );
+        assert_eq!(
+            reparsed[2].list.map(|l| l.kind),
+            Some(ListKind::BulletCheckmark)
+        );
     }
 
     // ── pStyle/numPr emission + shared numId assignment ─────────────────────
@@ -4013,26 +4410,87 @@ mod tests {
     #[test]
     fn test_rebuild_emits_pstyle_and_numpr_for_list_paragraphs() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "one".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "two".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
+            Paragraph {
+                runs: vec![Run {
+                    text: "one".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "two".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
         ];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
-        assert_eq!(xml.matches("<w:pStyle w:val=\"ListParagraph\"/>").count(), 2, "got: {xml}");
+        assert_eq!(
+            xml.matches("<w:pStyle w:val=\"ListParagraph\"/>").count(),
+            2,
+            "got: {xml}"
+        );
         // Both paragraphs are one contiguous run -> same numId, both ilvl 0.
-        assert_eq!(xml.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>").count(), 2, "got: {xml}");
+        assert_eq!(
+            xml.matches("<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>")
+                .count(),
+            2,
+            "got: {xml}"
+        );
     }
 
     #[test]
     fn test_rebuild_gives_separate_list_runs_different_numids() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: None, unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), unsupported_xml: None },
+            Paragraph {
+                runs: vec![Run {
+                    text: "a".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "not a list".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: None,
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "b".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
         ];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(xml.contains("<w:numId w:val=\"1\"/>"), "got: {xml}");
@@ -4042,8 +4500,14 @@ mod tests {
     #[test]
     fn test_rebuild_omits_pstyle_numpr_for_non_list_paragraphs() {
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "hi".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+            runs: vec![Run {
+                text: "hi".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: None,
+            unsupported_xml: None,
         }];
         let xml = rebuild_document_xml("<w:document>", "", &paragraphs);
         assert!(!xml.contains("ListParagraph"), "got: {xml}");
@@ -4054,14 +4518,22 @@ mod tests {
 
     #[test]
     fn test_write_docx_includes_numbering_xml_and_plumbing_when_document_has_a_list() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_list_plumbing_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_list_plumbing_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "item".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(),
-            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            runs: vec![Run {
+                text: "item".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0,
+            }),
             unsupported_xml: None,
         }];
         create_new_docx(&paragraphs, &path, Default::default()).unwrap();
@@ -4070,15 +4542,30 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
 
         let mut numbering_xml = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/numbering.xml").unwrap(), &mut numbering_xml).unwrap();
-        assert!(numbering_xml.contains("<w:abstractNum"), "got: {numbering_xml}");
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/numbering.xml").unwrap(),
+            &mut numbering_xml,
+        )
+        .unwrap();
+        assert!(
+            numbering_xml.contains("<w:abstractNum"),
+            "got: {numbering_xml}"
+        );
 
         let mut content_types = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("[Content_Types].xml").unwrap(), &mut content_types).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("[Content_Types].xml").unwrap(),
+            &mut content_types,
+        )
+        .unwrap();
         assert!(content_types.contains("numbering"), "got: {content_types}");
 
         let mut rels = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/_rels/document.xml.rels").unwrap(), &mut rels).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/_rels/document.xml.rels").unwrap(),
+            &mut rels,
+        )
+        .unwrap();
         assert!(rels.contains("numbering"), "got: {rels}");
 
         std::fs::remove_file(&path).ok();
@@ -4087,13 +4574,20 @@ mod tests {
 
     #[test]
     fn test_write_docx_omits_numbering_xml_when_document_has_no_list() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_no_list_plumbing_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_no_list_plumbing_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "plain".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+            runs: vec![Run {
+                text: "plain".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: None,
+            unsupported_xml: None,
         }];
         create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
@@ -4109,13 +4603,20 @@ mod tests {
 
     #[test]
     fn test_create_new_docx_includes_styles_xml_with_all_four_card_style_headings() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_styles_plumbing_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_styles_plumbing_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "plain".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+            runs: vec![Run {
+                text: "plain".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: None,
+            unsupported_xml: None,
         }];
         create_new_docx(&paragraphs, &path, Default::default()).unwrap();
 
@@ -4123,19 +4624,40 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
 
         let mut styles = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/styles.xml").unwrap(), &mut styles).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/styles.xml").unwrap(),
+            &mut styles,
+        )
+        .unwrap();
         for (level, alias) in [(1, "Pocket"), (2, "Hat"), (3, "Block"), (4, "Tag")] {
-            assert!(styles.contains(&format!("w:styleId=\"Heading{level}\"")), "got: {styles}");
-            assert!(styles.contains(&format!("w:val=\"{alias}\"")), "got: {styles}");
+            assert!(
+                styles.contains(&format!("w:styleId=\"Heading{level}\"")),
+                "got: {styles}"
+            );
+            assert!(
+                styles.contains(&format!("w:val=\"{alias}\"")),
+                "got: {styles}"
+            );
         }
         assert!(styles.contains("w:styleId=\"Normal\""), "got: {styles}");
 
         let mut content_types = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("[Content_Types].xml").unwrap(), &mut content_types).unwrap();
-        assert!(content_types.contains("wordprocessingml.styles+xml"), "got: {content_types}");
+        std::io::Read::read_to_string(
+            &mut archive.by_name("[Content_Types].xml").unwrap(),
+            &mut content_types,
+        )
+        .unwrap();
+        assert!(
+            content_types.contains("wordprocessingml.styles+xml"),
+            "got: {content_types}"
+        );
 
         let mut rels = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/_rels/document.xml.rels").unwrap(), &mut rels).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/_rels/document.xml.rels").unwrap(),
+            &mut rels,
+        )
+        .unwrap();
         assert!(rels.contains("relationships/styles"), "got: {rels}");
 
         std::fs::remove_file(&path).ok();
@@ -4151,12 +4673,21 @@ mod tests {
         // rebuild_document_xml for a card-style paragraph) overwrite them —
         // the run/paragraph that comes back must match exactly what went in,
         // not some doubled or drifted value.
-        let dir = std::env::temp_dir().join(format!("vimbatim_pocket_no_doubleapply_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_pocket_no_doubleapply_{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         let paragraphs = vec![Paragraph {
-            runs: vec![Run { text: "hello".into(), bold: true, size: 52, box_format: true, ..Run::default() }],
+            runs: vec![Run {
+                text: "hello".into(),
+                bold: true,
+                size: 52,
+                box_format: true,
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::Center,
             list: None,
@@ -4181,22 +4712,38 @@ mod tests {
 
     #[test]
     fn test_real_file_round_trip_preserves_list_through_save() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_list_roundtrip_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_list_roundtrip_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
 
         let initial = vec![Paragraph {
-            runs: vec![Run { text: "hello".into(), ..Run::default() }],
-            heading: 0, alignment: Alignment::default(), list: None, unsupported_xml: None,
+            runs: vec![Run {
+                text: "hello".into(),
+                ..Run::default()
+            }],
+            heading: 0,
+            alignment: Alignment::default(),
+            list: None,
+            unsupported_xml: None,
         }];
         create_new_docx(&initial, &path, Default::default()).unwrap();
 
         let (mut paragraphs, origin) = parse_docx(&path).unwrap();
-        paragraphs[0].list = Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 });
+        paragraphs[0].list = Some(ListItem {
+            kind: ListKind::NumberUpperRoman,
+            level: 0,
+        });
         origin.save(&paragraphs, &path).unwrap();
 
         let (reparsed, _origin2) = parse_docx(&path).unwrap();
-        assert_eq!(reparsed[0].list, Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }));
+        assert_eq!(
+            reparsed[0].list,
+            Some(ListItem {
+                kind: ListKind::NumberUpperRoman,
+                level: 0
+            })
+        );
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
@@ -4211,7 +4758,8 @@ mod tests {
     /// Every other example uses unique item text.
     #[test]
     fn test_parses_real_lists_docx_all_four_examples() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
         let (paragraphs, _origin) = parse_docx(&path).unwrap();
 
         // By concatenated paragraph text, not a single run's text: some of
@@ -4229,7 +4777,11 @@ mod tests {
 
         // Plain bulleted list (example 1): three items, indices 1-3.
         for i in 1..=3 {
-            assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::BulletSolid), "index {i}");
+            assert_eq!(
+                paragraphs[i].list.map(|l| l.kind),
+                Some(ListKind::BulletSolid),
+                "index {i}"
+            );
         }
         // Index 4 is a genuinely blank line in the source file, written as a
         // self-closing `<w:p/>`. The parser used to drop those entirely, which
@@ -4241,41 +4793,91 @@ mod tests {
             "index 4 is the file's blank line: {:?}",
             paragraphs[4].runs,
         );
-        assert!(!paragraphs[4].runs.is_empty(), "a blank paragraph still holds one run");
+        assert!(
+            !paragraphs[4].runs.is_empty(),
+            "a blank paragraph still holds one run"
+        );
 
         // Plain numbered list (example 2): three items, indices 6-8.
         for i in 6..=8 {
-            assert_eq!(paragraphs[i].list.map(|l| l.kind), Some(ListKind::NumberDecimalDot), "index {i}");
+            assert_eq!(
+                paragraphs[i].list.map(|l| l.kind),
+                Some(ListKind::NumberDecimalDot),
+                "index {i}"
+            );
         }
 
         // Six distinct bullet options (example 3).
-        assert_eq!(find("Solid Bullet").list.map(|l| l.kind), Some(ListKind::BulletSolid));
-        assert_eq!(find("Hollow Bullet").list.map(|l| l.kind), Some(ListKind::BulletHollow));
-        assert_eq!(find("Solid Box").list.map(|l| l.kind), Some(ListKind::BulletSolidBox));
-        assert_eq!(find("Four Diamonds").list.map(|l| l.kind), Some(ListKind::BulletDiamond));
-        assert_eq!(find("Arrow").list.map(|l| l.kind), Some(ListKind::BulletArrow));
-        assert_eq!(find("Checkmark").list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
+        assert_eq!(
+            find("Solid Bullet").list.map(|l| l.kind),
+            Some(ListKind::BulletSolid)
+        );
+        assert_eq!(
+            find("Hollow Bullet").list.map(|l| l.kind),
+            Some(ListKind::BulletHollow)
+        );
+        assert_eq!(
+            find("Solid Box").list.map(|l| l.kind),
+            Some(ListKind::BulletSolidBox)
+        );
+        assert_eq!(
+            find("Four Diamonds").list.map(|l| l.kind),
+            Some(ListKind::BulletDiamond)
+        );
+        assert_eq!(
+            find("Arrow").list.map(|l| l.kind),
+            Some(ListKind::BulletArrow)
+        );
+        assert_eq!(
+            find("Checkmark").list.map(|l| l.kind),
+            Some(ListKind::BulletCheckmark)
+        );
 
         // Seven distinct number options (example 4).
-        assert_eq!(find("One Dot").list.map(|l| l.kind), Some(ListKind::NumberDecimalDot));
-        assert_eq!(find("One Parenthesis").list.map(|l| l.kind), Some(ListKind::NumberDecimalParen));
-        assert_eq!(find("Roman Numeral One").list.map(|l| l.kind), Some(ListKind::NumberUpperRoman));
-        assert_eq!(find("Capital A Dot").list.map(|l| l.kind), Some(ListKind::NumberUpperLetter));
-        assert_eq!(find("Lowercase A Parenthesis").list.map(|l| l.kind), Some(ListKind::NumberLowerLetterParen));
-        assert_eq!(find("Lowercase A Dot").list.map(|l| l.kind), Some(ListKind::NumberLowerLetterDot));
-        assert_eq!(find("Roman Numeral Lowercase one").list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
+        assert_eq!(
+            find("One Dot").list.map(|l| l.kind),
+            Some(ListKind::NumberDecimalDot)
+        );
+        assert_eq!(
+            find("One Parenthesis").list.map(|l| l.kind),
+            Some(ListKind::NumberDecimalParen)
+        );
+        assert_eq!(
+            find("Roman Numeral One").list.map(|l| l.kind),
+            Some(ListKind::NumberUpperRoman)
+        );
+        assert_eq!(
+            find("Capital A Dot").list.map(|l| l.kind),
+            Some(ListKind::NumberUpperLetter)
+        );
+        assert_eq!(
+            find("Lowercase A Parenthesis").list.map(|l| l.kind),
+            Some(ListKind::NumberLowerLetterParen)
+        );
+        assert_eq!(
+            find("Lowercase A Dot").list.map(|l| l.kind),
+            Some(ListKind::NumberLowerLetterDot)
+        );
+        assert_eq!(
+            find("Roman Numeral Lowercase one").list.map(|l| l.kind),
+            Some(ListKind::NumberLowerRoman)
+        );
 
         // Non-list lines (the four intro sentences) stay unlisted.
         assert_eq!(find("This is a line above a bulleted list:").list, None);
         assert_eq!(find("This is a line above a numbered list:").list, None);
         assert_eq!(find("Here are items with different bullets:").list, None);
-        assert_eq!(find("Here are items with different types of numbers:").list, None);
+        assert_eq!(
+            find("Here are items with different types of numbers:").list,
+            None
+        );
     }
 
     #[test]
     fn test_real_lists_docx_survives_save_and_reload() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
-        let dir = std::env::temp_dir().join(format!("vimbatim_lists_roundtrip_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_lists_roundtrip_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
         std::fs::copy(&src, &path).unwrap();
@@ -4284,10 +4886,26 @@ mod tests {
         origin.save(&paragraphs, &path).unwrap();
 
         let (reparsed, _origin2) = parse_docx(&path).unwrap();
-        let checkmark = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Checkmark")).unwrap();
-        assert_eq!(checkmark.list.map(|l| l.kind), Some(ListKind::BulletCheckmark));
-        let roman_lower = reparsed.iter().find(|p| p.runs.iter().any(|r| r.text == "Roman Numeral Lowercase one")).unwrap();
-        assert_eq!(roman_lower.list.map(|l| l.kind), Some(ListKind::NumberLowerRoman));
+        let checkmark = reparsed
+            .iter()
+            .find(|p| p.runs.iter().any(|r| r.text == "Checkmark"))
+            .unwrap();
+        assert_eq!(
+            checkmark.list.map(|l| l.kind),
+            Some(ListKind::BulletCheckmark)
+        );
+        let roman_lower = reparsed
+            .iter()
+            .find(|p| {
+                p.runs
+                    .iter()
+                    .any(|r| r.text == "Roman Numeral Lowercase one")
+            })
+            .unwrap();
+        assert_eq!(
+            roman_lower.list.map(|l| l.kind),
+            Some(ListKind::NumberLowerRoman)
+        );
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
@@ -4303,14 +4921,21 @@ mod tests {
     #[test]
     fn test_real_lists_docx_heading_applied_to_a_list_item_survives_resave_as_one_pstyle() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lists_reference.docx");
-        let dir = std::env::temp_dir().join(format!("vimbatim_heading_over_list_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_heading_over_list_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
         std::fs::copy(&src, &path).unwrap();
 
         let (mut paragraphs, origin) = parse_docx(&path).unwrap();
-        let idx = paragraphs.iter().position(|p| p.runs.iter().any(|r| r.text == "Checkmark")).unwrap();
-        assert!(paragraphs[idx].list.is_some(), "sanity: must actually be a list item");
+        let idx = paragraphs
+            .iter()
+            .position(|p| p.runs.iter().any(|r| r.text == "Checkmark"))
+            .unwrap();
+        assert!(
+            paragraphs[idx].list.is_some(),
+            "sanity: must actually be a list item"
+        );
         paragraphs[idx].heading = 1;
         origin.save(&paragraphs, &path).unwrap();
 
@@ -4320,17 +4945,25 @@ mod tests {
         // The rest of the package survives untouched — this bug was scoped
         // to the one paragraph's own <w:pPr>, not the manifest.
         let mut styles = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/styles.xml").unwrap(), &mut styles).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/styles.xml").unwrap(),
+            &mut styles,
+        )
+        .unwrap();
         assert!(styles.contains("styleId=\"Heading1\""));
 
         let mut doc = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
+        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut doc)
+            .unwrap();
         let pos = doc.find("Checkmark").unwrap();
         let start = doc[..pos].rfind("<w:p>").unwrap();
         let end = doc[pos..].find("</w:p>").map(|e| pos + e + 6).unwrap();
         let para_xml = &doc[start..end];
         assert_eq!(para_xml.matches("<w:pStyle").count(), 1, "got: {para_xml}");
-        assert!(para_xml.contains(r#"<w:pStyle w:val="Heading1"/>"#), "got: {para_xml}");
+        assert!(
+            para_xml.contains(r#"<w:pStyle w:val="Heading1"/>"#),
+            "got: {para_xml}"
+        );
         assert!(!para_xml.contains("ListParagraph"), "got: {para_xml}");
         assert!(!para_xml.contains("w:numPr"), "got: {para_xml}");
 
@@ -4349,8 +4982,10 @@ mod tests {
     /// synthetic case above.
     #[test]
     fn test_real_bug_test_docx_gains_xml_space_preserve_around_highlight_boundary_on_save() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/highlight_space_boundary.docx");
-        let dir = std::env::temp_dir().join(format!("vimbatim_highlight_space_{}", std::process::id()));
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/highlight_space_boundary.docx");
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_highlight_space_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.docx");
         std::fs::copy(&src, &path).unwrap();
@@ -4361,7 +4996,11 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut document_xml = String::new();
-        std::io::Read::read_to_string(&mut archive.by_name("word/document.xml").unwrap(), &mut document_xml).unwrap();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("word/document.xml").unwrap(),
+            &mut document_xml,
+        )
+        .unwrap();
 
         assert!(
             document_xml.contains(r#"<w:t xml:space="preserve">this is written and </w:t>"#),
@@ -4380,8 +5019,15 @@ mod tests {
         let file2 = std::fs::File::open(&path).unwrap();
         let mut archive2 = zip::ZipArchive::new(file2).unwrap();
         let mut document_xml2 = String::new();
-        std::io::Read::read_to_string(&mut archive2.by_name("word/document.xml").unwrap(), &mut document_xml2).unwrap();
-        assert_eq!(document_xml, document_xml2, "second save must match the first byte-for-byte");
+        std::io::Read::read_to_string(
+            &mut archive2.by_name("word/document.xml").unwrap(),
+            &mut document_xml2,
+        )
+        .unwrap();
+        assert_eq!(
+            document_xml, document_xml2,
+            "second save must match the first byte-for-byte"
+        );
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
@@ -4392,15 +5038,49 @@ mod tests {
     #[test]
     fn test_multilevel_list_round_trips_through_parse_and_rebuild() {
         let original = vec![
-            Paragraph { runs: vec![Run { text: "top".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), unsupported_xml: None },
-            Paragraph { runs: vec![Run { text: "nested".into(), ..Run::default() }], heading: 0, alignment: Alignment::default(),
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 1 }), unsupported_xml: None },
+            Paragraph {
+                runs: vec![Run {
+                    text: "top".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                unsupported_xml: None,
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "nested".into(),
+                    ..Run::default()
+                }],
+                heading: 0,
+                alignment: Alignment::default(),
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 1,
+                }),
+                unsupported_xml: None,
+            },
         ];
         let xml = rebuild_document_xml(&fallback_preamble(), "", &original);
         let numbering = parse_numbering_xml(&build_numbering_xml(&original).unwrap());
         let reparsed = parse_document_xml(&xml, &no_styles(), &numbering).unwrap();
-        assert_eq!(reparsed[0].list, Some(ListItem { kind: ListKind::BulletSolid, level: 0 }));
-        assert_eq!(reparsed[1].list, Some(ListItem { kind: ListKind::BulletSolid, level: 1 }));
+        assert_eq!(
+            reparsed[0].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0
+            })
+        );
+        assert_eq!(
+            reparsed[1].list,
+            Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 1
+            })
+        );
     }
 }

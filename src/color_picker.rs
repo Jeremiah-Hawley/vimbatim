@@ -3,7 +3,6 @@ use gpui::*;
 
 use crate::theme::{radius, space, Palette};
 
-
 /// `Hsla` -> packed `0xRRGGBB`. gpui already owns the conversion math
 /// (`From<Hsla> for Rgba`); this only packs the channels.
 pub fn hsla_to_hex(color: Hsla) -> u32 {
@@ -112,7 +111,6 @@ pub fn contrast_text(hex: u32) -> u32 {
         0xFFFFFF
     }
 }
-
 
 /// The picker's visuals. Concretely typed to `FormattingRibbon` because that's
 /// the only view that owns one; generalize only if a second one appears.
@@ -296,7 +294,13 @@ pub fn render_picker(
                 .flex_row()
                 .items_center()
                 .gap(px(space::XS))
-                .child(div().w(px(20.0)).h(px(20.0)).rounded(px(radius::SM)).bg(rgb(current)))
+                .child(
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(radius::SM))
+                        .bg(rgb(current)),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -320,15 +324,23 @@ mod tests {
     fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds {
             origin: point(px(x), px(y)),
-            size: Size { width: px(w), height: px(h) },
+            size: Size {
+                width: px(w),
+                height: px(h),
+            },
         }
     }
 
     #[test]
     fn test_hex_hsla_round_trip() {
-        for hex in [0xFF0000, 0x00FF00, 0x0000FF, 0x000000, 0xFFFFFF, 0x808080, 0x00FF88, 0xFFD700]
-        {
-            assert_eq!(hsla_to_hex(hex_to_hsla(hex)), hex, "round trip failed for {hex:06X}");
+        for hex in [
+            0xFF0000, 0x00FF00, 0x0000FF, 0x000000, 0xFFFFFF, 0x808080, 0x00FF88, 0xFFD700,
+        ] {
+            assert_eq!(
+                hsla_to_hex(hex_to_hsla(hex)),
+                hex,
+                "round trip failed for {hex:06X}"
+            );
         }
     }
 

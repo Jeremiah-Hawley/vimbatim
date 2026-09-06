@@ -2,10 +2,10 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::AppState;
-use crate::theme::{palette, Palette};
+use crate::theme::Palette;
 
 /// Launch-time "we recovered unsaved changes" prompt, shown whenever
-/// `AppState.pending_recovery` is non-empty (filled by `AppState::new` from
+/// `AppState.recovery.pending_entries` is non-empty (filled by `AppState::new` from
 /// `recovery::scan_recovery_dir`).
 ///
 /// Mirrors `close_confirm.rs`'s backdrop+centred-panel convention: this view
@@ -35,11 +35,11 @@ impl Render for RecoveryPrompt {
         let state = self.state.read(cx);
         let p = state.current_palette();
 
-        let Some(entry) = state.pending_recovery.first() else {
+        let Some(entry) = state.recovery.pending_entries.first() else {
             return div();
         };
         let title = entry.title.clone();
-        let remaining = state.pending_recovery.len();
+        let remaining = state.recovery.pending_entries.len();
         let origin_line = match &entry.original_path {
             Some(path) => format!("Was editing: {}", path.display()),
             None => "This document had never been saved.".to_string(),
@@ -95,7 +95,10 @@ impl Render for RecoveryPrompt {
                                 "Discard",
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| { s.discard_recovery(); cx.notify(); });
+                                    this.state.update(cx, |s, cx| {
+                                        s.discard_recovery();
+                                        cx.notify();
+                                    });
                                     cx.notify();
                                 }),
                             ))
@@ -110,10 +113,13 @@ impl Render for RecoveryPrompt {
                                     // picker leaves the entry in place (this
                                     // closure simply returns without ever
                                     // calling complete_recovery_save_as, so
-                                    // pending_recovery is untouched and the
+                                    // recovery queue is untouched and the
                                     // modal keeps showing the same entry).
-                                    let Some(entry) = this.state.update(cx, |s, _| s.take_recovery_for_save_as())
-                                    else { return };
+                                    let Some(entry) =
+                                        this.state.update(cx, |s, _| s.take_recovery_for_save_as())
+                                    else {
+                                        return;
+                                    };
                                     // gpui's prompt_for_new_path (unlike
                                     // prompt_for_paths, used elsewhere for
                                     // folder selection) wants a starting
@@ -130,10 +136,13 @@ impl Render for RecoveryPrompt {
                                         std::path::Path::new(&entry.title),
                                     );
                                     let suggested = suggested.to_string_lossy().into_owned();
-                                    let dest_rx = cx.prompt_for_new_path(&directory, Some(&suggested));
+                                    let dest_rx =
+                                        cx.prompt_for_new_path(&directory, Some(&suggested));
                                     let state = this.state.clone();
                                     cx.spawn_in(window, async move |_this, cx| {
-                                        let Ok(Ok(Some(dest))) = dest_rx.await else { return };
+                                        let Ok(Ok(Some(dest))) = dest_rx.await else {
+                                            return;
+                                        };
                                         let _ = state.update(cx, |s, cx| {
                                             let _ = s.complete_recovery_save_as(&entry, &dest);
                                             cx.notify();
@@ -147,7 +156,10 @@ impl Render for RecoveryPrompt {
                                 "Resume Editing",
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| { s.resume_recovery(); cx.notify(); });
+                                    this.state.update(cx, |s, cx| {
+                                        s.resume_recovery();
+                                        cx.notify();
+                                    });
                                     cx.notify();
                                 }),
                             )),

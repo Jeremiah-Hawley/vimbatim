@@ -611,7 +611,9 @@ pub fn load_theme_mode(path: &Path) -> ThemeMode {
     contents
         .lines()
         .filter_map(|line| line.split_once('='))
-        .find_map(|(key, value)| (key.trim() == "theme_mode").then(|| ThemeMode::from_conf_value(value)))
+        .find_map(|(key, value)| {
+            (key.trim() == "theme_mode").then(|| ThemeMode::from_conf_value(value))
+        })
         .unwrap_or(ThemeMode::Dark)
 }
 
@@ -631,10 +633,26 @@ pub fn save_theme_color_mode(path: &Path, mode: ThemeColorMode) -> std::io::Resu
 /// theme TOML in this module uses it, so a template, an export, and the
 /// parser's expectations can never quietly drift apart.
 const PALETTE_FIELDS: [&str; 20] = [
-    "app_bg", "editor_bg", "editor_bg_raised", "chrome", "chrome_elevated",
-    "chrome_hover", "chrome_active", "sidebar", "border", "border_subtle",
-    "text", "text_muted", "text_faint", "accent", "accent_strong",
-    "accent_muted", "accent_wash", "accent_alt", "highlight", "selection",
+    "app_bg",
+    "editor_bg",
+    "editor_bg_raised",
+    "chrome",
+    "chrome_elevated",
+    "chrome_hover",
+    "chrome_active",
+    "sidebar",
+    "border",
+    "border_subtle",
+    "text",
+    "text_muted",
+    "text_faint",
+    "accent",
+    "accent_strong",
+    "accent_muted",
+    "accent_wash",
+    "accent_alt",
+    "highlight",
+    "selection",
 ];
 
 fn palette_field(p: &Palette, name: &str) -> Option<u32> {
@@ -669,10 +687,26 @@ fn palette_field(p: &Palette, name: &str) -> Option<u32> {
 /// a color nobody asked for.
 fn palette_from_fields(values: &std::collections::HashMap<&str, u32>) -> Option<Palette> {
     let mut p = Palette {
-        app_bg: 0, editor_bg: 0, editor_bg_raised: 0, chrome: 0, chrome_elevated: 0,
-        chrome_hover: 0, chrome_active: 0, sidebar: 0, border: 0, border_subtle: 0,
-        text: 0, text_muted: 0, text_faint: 0, accent: 0, accent_strong: 0,
-        accent_muted: 0, accent_wash: 0, accent_alt: 0, highlight: 0, selection: 0,
+        app_bg: 0,
+        editor_bg: 0,
+        editor_bg_raised: 0,
+        chrome: 0,
+        chrome_elevated: 0,
+        chrome_hover: 0,
+        chrome_active: 0,
+        sidebar: 0,
+        border: 0,
+        border_subtle: 0,
+        text: 0,
+        text_muted: 0,
+        text_faint: 0,
+        accent: 0,
+        accent_strong: 0,
+        accent_muted: 0,
+        accent_wash: 0,
+        accent_alt: 0,
+        highlight: 0,
+        selection: 0,
     };
     for field in PALETTE_FIELDS {
         let value = *values.get(field)?;
@@ -718,8 +752,12 @@ fn parse_palette_section(lines: &[&str]) -> Option<Palette> {
     let mut values = std::collections::HashMap::new();
     for line in lines {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        let Some((key, value)) = line.split_once('=') else { continue };
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim().trim_matches('"');
         if let Some(hex) = crate::color_picker::parse_hex(value) {
             values.insert(key.trim(), hex);
@@ -753,8 +791,14 @@ pub fn parse_custom_theme_toml(content: &str) -> Option<(Palette, Palette)> {
     let mut section: Option<&str> = None;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("[dark]") { section = Some("dark"); continue; }
-        if trimmed.eq_ignore_ascii_case("[light]") { section = Some("light"); continue; }
+        if trimmed.eq_ignore_ascii_case("[dark]") {
+            section = Some("dark");
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("[light]") {
+            section = Some("light");
+            continue;
+        }
         match section {
             Some("dark") => dark_lines.push(line),
             Some("light") => light_lines.push(line),
@@ -911,7 +955,11 @@ mod visibility_tests {
     #[test]
     fn adjusting_preserves_hue() {
         let channels = |hex: u32| (hex >> 16 & 0xFF, hex >> 8 & 0xFF, hex & 0xFF);
-        for (name, color) in [("magenta", 0xFF00FFu32), ("blue", 0x0000FF), ("yellow", 0xFFD700)] {
+        for (name, color) in [
+            ("magenta", 0xFF00FFu32),
+            ("blue", 0x0000FF),
+            ("yellow", 0xFFD700),
+        ] {
             for mode in [ThemeMode::Dark, ThemeMode::Light] {
                 let (r0, g0, b0) = channels(color);
                 let (r1, g1, b1) = channels(visible_on_chrome(color, mode));
@@ -956,7 +1004,10 @@ mod tests {
 
     #[test]
     fn parse_custom_theme_toml_rejects_a_missing_section() {
-        let dark_only = format!("[dark]\n{}\n", palette_to_toml_lines(&dark_palette(ThemeKind::WorkbenchDark)));
+        let dark_only = format!(
+            "[dark]\n{}\n",
+            palette_to_toml_lines(&dark_palette(ThemeKind::WorkbenchDark))
+        );
         assert_eq!(parse_custom_theme_toml(&dark_only), None);
     }
 
@@ -964,7 +1015,11 @@ mod tests {
     fn parse_custom_theme_toml_rejects_a_missing_field() {
         let mut broken = custom_theme_template();
         // Drop the `app_bg` line from the [dark] section entirely.
-        broken = broken.lines().filter(|l| !l.trim().starts_with("app_bg")).collect::<Vec<_>>().join("\n");
+        broken = broken
+            .lines()
+            .filter(|l| !l.trim().starts_with("app_bg"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(parse_custom_theme_toml(&broken), None);
     }
 
@@ -973,7 +1028,8 @@ mod tests {
         // The template quotes values, but a hand-edited file without quotes
         // (still valid per `color_picker::parse_hex`) should work too.
         let unquoted = custom_theme_template().replace('"', "");
-        let (dark, light) = parse_custom_theme_toml(&unquoted).expect("unquoted hex must still parse");
+        let (dark, light) =
+            parse_custom_theme_toml(&unquoted).expect("unquoted hex must still parse");
         assert_eq!(dark, dark_palette(ThemeKind::WorkbenchDark));
         assert_eq!(light, light_palette(ThemeKind::WorkbenchDark));
     }
@@ -1052,8 +1108,8 @@ mod tests {
 
     #[test]
     fn test_save_then_load_theme_mode_round_trips() {
-        let dir = std::env::temp_dir()
-            .join(format!("vimbatim-theme-mode-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim-theme-mode-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.conf");

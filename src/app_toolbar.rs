@@ -3,7 +3,7 @@ use gpui::*;
 
 use crate::keybinds::{FindAction, OpenStatsAction, SaveAction, SaveAsAction};
 use crate::state::AppState;
-use crate::theme::{palette, radius, space};
+use crate::theme::{radius, space};
 
 /// A toolbar row below the tab bar showing the app name, sidebar toggle,
 /// the file/find/word-count/save-as commands, and secondary app controls.
@@ -19,7 +19,6 @@ impl AppToolbar {
          */
         AppToolbar { state }
     }
-
 }
 
 impl Render for AppToolbar {

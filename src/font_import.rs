@@ -34,7 +34,12 @@ fn parse_face(bytes: Vec<u8>) -> Option<Face> {
     let bold = face.is_bold();
     let italic = face.is_italic();
     drop(face);
-    Some(Face { family, bold, italic, bytes })
+    Some(Face {
+        family,
+        bold,
+        italic,
+        bytes,
+    })
 }
 
 fn is_font_entry(name: &str) -> bool {
@@ -52,10 +57,15 @@ fn is_font_entry(name: &str) -> bool {
 /// (bold, italic) slot, which GPUI's own weight/style matching can't tell
 /// apart anyway (see `main.rs`'s `assert_family_has_four_distinct_faces`).
 fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let raw_faces: Vec<Vec<u8>> = match ext.as_str() {
         "zip" => {
-            let file = std::fs::File::open(path).map_err(|e| format!("Couldn't open that file: {e}"))?;
+            let file =
+                std::fs::File::open(path).map_err(|e| format!("Couldn't open that file: {e}"))?;
             let mut archive =
                 zip::ZipArchive::new(file).map_err(|e| format!("Not a valid .zip file: {e}"))?;
             let mut out = Vec::new();
@@ -83,7 +93,9 @@ fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
     let mut seen = std::collections::HashSet::new();
     let mut faces = Vec::new();
     for bytes in raw_faces {
-        let Some(face) = parse_face(bytes) else { continue };
+        let Some(face) = parse_face(bytes) else {
+            continue;
+        };
         if seen.insert((face.family.clone(), face.bold, face.italic)) {
             faces.push(face);
         }
@@ -100,7 +112,13 @@ fn fonts_root() -> PathBuf {
 
 fn slugify(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -109,8 +127,13 @@ fn slugify(name: &str) -> String {
 /// runtime registry (`text_editor::register_imported_font`) so it renders
 /// and appears in the picker immediately.
 fn activate_family(cx: &App, family: &str, dir: PathBuf, faces: &[Face]) -> Result<(), String> {
-    let font_bytes = faces.iter().map(|f| std::borrow::Cow::Owned(f.bytes.clone())).collect();
-    cx.text_system().add_fonts(font_bytes).map_err(|e| format!("Couldn't load that font: {e}"))?;
+    let font_bytes = faces
+        .iter()
+        .map(|f| std::borrow::Cow::Owned(f.bytes.clone()))
+        .collect();
+    cx.text_system()
+        .add_fonts(font_bytes)
+        .map_err(|e| format!("Couldn't load that font: {e}"))?;
     let ratio = crate::text_editor::measure_advance_ratio(cx, family);
     crate::text_editor::register_imported_font(family.to_string(), ratio, dir);
     Ok(())
@@ -147,7 +170,11 @@ pub fn missing_style_warning(outcomes: &[FontImportOutcome]) -> Option<String> {
             ))
         })
         .collect();
-    if lines.is_empty() { None } else { Some(lines.join("\n")) }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 /// Imports `path` (a `.ttf`, `.otf`, or `.zip`): parses it, writes each
@@ -177,12 +204,17 @@ pub fn install_from_path(cx: &App, path: &Path) -> Result<Vec<FontImportOutcome>
         }
         for (i, face) in faces.iter().enumerate() {
             let file = dir.join(format!("{}_{}_{}.font", face.bold, face.italic, i));
-            std::fs::write(&file, &face.bytes).map_err(|e| format!("Couldn't save that font: {e}"))?;
+            std::fs::write(&file, &face.bytes)
+                .map_err(|e| format!("Couldn't save that font: {e}"))?;
         }
         let has_bold = faces.iter().any(|f| f.bold);
         let has_italic = faces.iter().any(|f| f.italic);
         activate_family(cx, &family, dir, &faces)?;
-        installed.push(FontImportOutcome { family, has_bold, has_italic });
+        installed.push(FontImportOutcome {
+            family,
+            has_bold,
+            has_italic,
+        });
     }
     installed.sort_by(|a, b| a.family.cmp(&b.family));
     Ok(installed)
@@ -194,19 +226,25 @@ pub fn install_from_path(cx: &App, path: &Path) -> Result<Vec<FontImportOutcome>
 /// skipped rather than aborting the rest.
 pub fn load_persisted(cx: &App) {
     let root = fonts_root();
-    let Ok(entries) = std::fs::read_dir(&root) else { return };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
             continue;
         }
-        let Ok(files) = std::fs::read_dir(&dir) else { continue };
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let faces: Vec<Face> = files
             .flatten()
             .filter_map(|f| std::fs::read(f.path()).ok())
             .filter_map(parse_face)
             .collect();
-        let Some(family) = faces.first().map(|f| f.family.clone()) else { continue };
+        let Some(family) = faces.first().map(|f| f.family.clone()) else {
+            continue;
+        };
         let _ = activate_family(cx, &family, dir, &faces);
     }
 }
@@ -218,7 +256,8 @@ pub fn load_persisted(cx: &App) {
 /// deletes its face files from disk.
 pub fn remove(name: &str) -> Result<(), String> {
     if let Some(dir) = crate::text_editor::unregister_imported_font(name) {
-        std::fs::remove_dir_all(dir).map_err(|e| format!("Couldn't delete that font's files: {e}"))?;
+        std::fs::remove_dir_all(dir)
+            .map_err(|e| format!("Couldn't delete that font's files: {e}"))?;
     }
     Ok(())
 }
@@ -238,7 +277,11 @@ mod tests {
         // this asserts those are all filtered out, leaving exactly the one
         // (ttf, otf) pair collapsed to one face by the (family, bold,
         // italic) dedupe.
-        assert_eq!(faces.len(), 1, "expected the .ttf/.otf duplicate to collapse to one face");
+        assert_eq!(
+            faces.len(),
+            1,
+            "expected the .ttf/.otf duplicate to collapse to one face"
+        );
         assert_eq!(faces[0].family, "Bebas Neue");
         assert!(!faces[0].bold);
         assert!(!faces[0].italic);
@@ -258,7 +301,9 @@ mod tests {
         {
             let file = std::fs::File::create(&zip_path).unwrap();
             let mut writer = zip::ZipWriter::new(file);
-            writer.start_file("README.md", zip::write::SimpleFileOptions::default()).unwrap();
+            writer
+                .start_file("README.md", zip::write::SimpleFileOptions::default())
+                .unwrap();
             std::io::Write::write_all(&mut writer, b"no fonts here").unwrap();
             writer.finish().unwrap();
         }
@@ -275,26 +320,58 @@ mod tests {
 
     #[test]
     fn test_missing_style_warning_names_exactly_the_missing_faces() {
-        let complete = FontImportOutcome { family: "Complete".to_string(), has_bold: true, has_italic: true };
-        let no_bold = FontImportOutcome { family: "NoBold".to_string(), has_bold: false, has_italic: true };
-        let no_italic = FontImportOutcome { family: "NoItalic".to_string(), has_bold: true, has_italic: false };
-        let regular_only =
-            FontImportOutcome { family: "RegularOnly".to_string(), has_bold: false, has_italic: false };
+        let complete = FontImportOutcome {
+            family: "Complete".to_string(),
+            has_bold: true,
+            has_italic: true,
+        };
+        let no_bold = FontImportOutcome {
+            family: "NoBold".to_string(),
+            has_bold: false,
+            has_italic: true,
+        };
+        let no_italic = FontImportOutcome {
+            family: "NoItalic".to_string(),
+            has_bold: true,
+            has_italic: false,
+        };
+        let regular_only = FontImportOutcome {
+            family: "RegularOnly".to_string(),
+            has_bold: false,
+            has_italic: false,
+        };
 
         assert_eq!(missing_style_warning(&[complete]), None);
 
         let warning = missing_style_warning(&[no_bold]).unwrap();
-        assert!(warning.contains("NoBold") && warning.contains("bold"), "got: {warning}");
+        assert!(
+            warning.contains("NoBold") && warning.contains("bold"),
+            "got: {warning}"
+        );
 
         let warning = missing_style_warning(&[no_italic]).unwrap();
-        assert!(warning.contains("NoItalic") && warning.contains("italic"), "got: {warning}");
+        assert!(
+            warning.contains("NoItalic") && warning.contains("italic"),
+            "got: {warning}"
+        );
 
         let warning = missing_style_warning(&[regular_only]).unwrap();
-        assert!(warning.contains("RegularOnly") && warning.contains("bold or italic"), "got: {warning}");
+        assert!(
+            warning.contains("RegularOnly") && warning.contains("bold or italic"),
+            "got: {warning}"
+        );
 
         // Multiple families, only the incomplete ones produce a line.
-        let no_bold2 = FontImportOutcome { family: "NoBold".to_string(), has_bold: false, has_italic: true };
-        let complete2 = FontImportOutcome { family: "Complete".to_string(), has_bold: true, has_italic: true };
+        let no_bold2 = FontImportOutcome {
+            family: "NoBold".to_string(),
+            has_bold: false,
+            has_italic: true,
+        };
+        let complete2 = FontImportOutcome {
+            family: "Complete".to_string(),
+            has_bold: true,
+            has_italic: true,
+        };
         let warning = missing_style_warning(&[no_bold2, complete2]).unwrap();
         assert_eq!(warning.lines().count(), 1, "got: {warning}");
     }

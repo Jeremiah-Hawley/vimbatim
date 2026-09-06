@@ -4,7 +4,10 @@ use std::rc::Rc;
 use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window};
 
 use crate::state::AppState;
-use crate::text_editor::{document_lines, expand_rows_for_display, line_col_from_mouse_position, real_row_height_px, visual_rows_for_viewport};
+use crate::text_editor::{
+    document_lines, expand_rows_for_display, line_col_from_mouse_position, real_row_height_px,
+    visual_rows_for_viewport,
+};
 
 /// How close a click-drag has to get to the top/bottom of the viewport
 /// before auto-scroll kicks in.
@@ -13,7 +16,13 @@ const EDGE_MARGIN_PX: f32 = 24.0;
 /// re-armed animation frame) while a drag sits in the trigger zone.
 const SCROLL_STEP_PX: f32 = 12.0;
 
-fn auto_scroll_delta(mouse_y: f32, viewport_top: f32, viewport_height: f32, edge_margin: f32, scroll_step: f32) -> f32 {
+fn auto_scroll_delta(
+    mouse_y: f32,
+    viewport_top: f32,
+    viewport_height: f32,
+    edge_margin: f32,
+    scroll_step: f32,
+) -> f32 {
     /*
      * Returns how much to adjust the scroll offset by this tick, when a
      * drag's mouse position sits within `edge_margin` pixels of the top or
@@ -22,7 +31,9 @@ fn auto_scroll_delta(mouse_y: f32, viewport_top: f32, viewport_height: f32, edge
      * bottom edge, or 0.0 outside both trigger zones. The caller adds this
      * to the current scroll offset and clamps it with `clamp_scroll_offset`.
      */
-    if viewport_height <= 0.0 { return 0.0; }
+    if viewport_height <= 0.0 {
+        return 0.0;
+    }
     let viewport_bottom = viewport_top + viewport_height;
     if mouse_y < viewport_top + edge_margin {
         scroll_step
@@ -72,7 +83,11 @@ pub struct AutoScroller {
 }
 
 impl AutoScroller {
-    pub fn new(scroll_handle: ScrollHandle, uniform_list_scroll_handle: UniformListScrollHandle, state: Entity<AppState>) -> Self {
+    pub fn new(
+        scroll_handle: ScrollHandle,
+        uniform_list_scroll_handle: UniformListScrollHandle,
+        state: Entity<AppState>,
+    ) -> Self {
         /*
          * Constructs an idle AutoScroller. `scroll_handle` should be the
          * same handle the owning TextEditor tracks via `.track_scroll()`,
@@ -102,7 +117,9 @@ impl AutoScroller {
          * the next tick, so this doesn't re-arm.
          */
         self.last_mouse_position.set(position);
-        if self.running.get() { return; }
+        if self.running.get() {
+            return;
+        }
         let bounds = self.scroll_handle.bounds();
         let delta = auto_scroll_delta(
             position.y.as_f32(),
@@ -142,7 +159,9 @@ impl AutoScroller {
          * is picked up on the very next tick without needing a separate
          * signal. Re-arms itself for the next frame only if still active.
          */
-        if !self.running.get() { return; }
+        if !self.running.get() {
+            return;
+        }
         let bounds = self.scroll_handle.bounds();
         let position = self.last_mouse_position.get();
         let delta = auto_scroll_delta(
@@ -173,10 +192,22 @@ impl AutoScroller {
         let font_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
         let line_spacing = self.state.read(cx).line_spacing;
         let content = self.state.read(cx).active_content().to_string();
-        let paragraphs = self.state.read(cx).tabs.get(self.state.read(cx).active_tab)
-            .map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let paragraphs = self
+            .state
+            .read(cx)
+            .tabs
+            .get(self.state.read(cx).active_tab)
+            .map(|t| t.document.paragraphs.clone())
+            .unwrap_or_default();
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(cx, &lines, bounds.size.width.as_f32(), zoom, &paragraphs, font_size_px);
+        let rows = visual_rows_for_viewport(
+            cx,
+            &lines,
+            bounds.size.width.as_f32(),
+            zoom,
+            &paragraphs,
+            font_size_px,
+        );
         // Same filtered display table the editor paints from, or a drag-select
         // would resolve rows the user cannot see.
         let (invisibility, cite_size, folds) = {
@@ -184,16 +215,47 @@ impl AutoScroller {
             (
                 st.invisibility_mode,
                 st.cite_size_half_points,
-                st.tabs.get(st.active_tab).map(|t| t.folded_headings.clone()).unwrap_or_default(),
+                st.workspace
+                    .tabs
+                    .get(st.workspace.active_tab)
+                    .map(|t| t.folded_headings.clone())
+                    .unwrap_or_default(),
             )
         };
         let folded_paras = crate::state::AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = crate::text_editor::hidden_wrap_rows(
-            &rows, &paragraphs, invisibility, cite_size, &folded_paras,
+            &rows,
+            &paragraphs,
+            invisibility,
+            cite_size,
+            &folded_paras,
         );
-        let (display_to_wrap, _) = expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, font_size_px, line_spacing);
-        let row_height_px = real_row_height_px(&self.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
-        let (line, col) = line_col_from_mouse_position(position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
+        let (display_to_wrap, _) = expand_rows_for_display(
+            &rows,
+            &paragraphs,
+            zoom,
+            &hidden,
+            font_size_px,
+            line_spacing,
+        );
+        let row_height_px = real_row_height_px(
+            &self.uniform_list_scroll_handle,
+            display_to_wrap.len(),
+            font_size_px,
+            zoom,
+            line_spacing,
+        );
+        let (line, col) = line_col_from_mouse_position(
+            position,
+            bounds,
+            scroll_y,
+            &rows,
+            &display_to_wrap,
+            zoom,
+            font_size_px,
+            &paragraphs,
+            row_height_px,
+        );
         self.state.update(cx, |state, cx| {
             state.extend_selection_to_line_col(line, col);
             cx.notify();

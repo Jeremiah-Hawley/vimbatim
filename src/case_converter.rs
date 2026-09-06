@@ -71,12 +71,18 @@ mod tests {
 
     #[test]
     fn title_preserves_whitespace() {
-        assert_eq!(apply_case("hello  world ", CaseType::Title), "Hello  World ");
+        assert_eq!(
+            apply_case("hello  world ", CaseType::Title),
+            "Hello  World "
+        );
     }
 
     #[test]
     fn title_does_not_capitalize_after_an_apostrophe() {
-        assert_eq!(apply_case("don't stop o'brien", CaseType::Title), "Don't Stop O'brien");
+        assert_eq!(
+            apply_case("don't stop o'brien", CaseType::Title),
+            "Don't Stop O'brien"
+        );
     }
 
     #[test]
@@ -99,6 +105,9 @@ mod tests {
 
     #[test]
     fn toggle() {
-        assert_eq!(apply_case("Hello World! 123", CaseType::Toggle), "hELLO wORLD! 123");
+        assert_eq!(
+            apply_case("Hello World! 123", CaseType::Toggle),
+            "hELLO wORLD! 123"
+        );
     }
 }

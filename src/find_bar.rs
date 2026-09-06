@@ -23,11 +23,19 @@ pub struct FindBarView {
 
 impl FindBarView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        FindBarView { state, focus_handle: cx.focus_handle() }
+        FindBarView {
+            state,
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     /// Applies one keystroke to whichever field has focus.
-    fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         let key = ks.key.as_str();
         let shift = ks.modifiers.shift;
@@ -44,7 +52,13 @@ impl FindBarView {
         // means without this guard the catch-all arm would push every
         // keystroke into the now-hidden `bar.query`, and typing into the
         // document would silently stop working while the panel is open.
-        if self.state.read(cx).find_bar.as_ref().is_some_and(|b| b.list_mode) {
+        if self
+            .state
+            .read(cx)
+            .find_bar
+            .as_ref()
+            .is_some_and(|b| b.list_mode)
+        {
             match key {
                 "escape" => {
                     self.state.update(cx, |s, cx| {
@@ -95,8 +109,12 @@ impl FindBarView {
                 self.state.update(cx, |s, cx| {
                     if let Some(bar) = s.find_bar.as_mut() {
                         match bar.focus {
-                            FindField::Query => { bar.query.pop(); }
-                            FindField::Replace => { bar.replacement.pop(); }
+                            FindField::Query => {
+                                bar.query.pop();
+                            }
+                            FindField::Replace => {
+                                bar.replacement.pop();
+                            }
                         }
                     }
                     s.refresh_find_matches();
@@ -109,7 +127,8 @@ impl FindBarView {
                 // punctuation correctly on this GPUI backend, where `key`
                 // alone doesn't) and returns `None` for named keys like
                 // "left"/"f1", which simply do nothing here.
-                let Some(ch) = crate::state::vim_find_target_char(key, shift, ks.key_char.as_deref())
+                let Some(ch) =
+                    crate::state::vim_find_target_char(key, shift, ks.key_char.as_deref())
                 else {
                     return;
                 };
@@ -173,15 +192,18 @@ impl FindBarView {
                     .cursor_pointer()
                     .text_xs()
                     .text_color(rgb(p.text))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            if let Some(bar) = s.find_bar.as_mut() {
-                                bar.focus = field;
-                            }
-                            cx.notify();
-                        });
-                        this.focus_handle.clone().focus(window, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, window, cx| {
+                            this.state.update(cx, |s, cx| {
+                                if let Some(bar) = s.find_bar.as_mut() {
+                                    bar.focus = field;
+                                }
+                                cx.notify();
+                            });
+                            this.focus_handle.clone().focus(window, cx);
+                        }),
+                    )
                     // A block caret on the focused field, so an empty field
                     // still shows where typing goes.
                     .child(value.to_string())
@@ -212,7 +234,8 @@ impl FindBarView {
                     .active(move |s| s.bg(rgb(p.chrome_active)))
             })
             .when(!enabled, |d| {
-                d.text_color(rgb(p.text_faint)).border_color(rgb(p.border_subtle))
+                d.text_color(rgb(p.text_faint))
+                    .border_color(rgb(p.border_subtle))
             })
             .child(label)
     }
@@ -231,13 +254,24 @@ impl Render for FindBarView {
             self.focus_handle.clone().focus(window, cx);
         }
 
-        let FindBarState { query, replacement, focus, match_count, current_match, list_mode } = bar;
+        let FindBarState {
+            query,
+            replacement,
+            focus,
+            match_count,
+            current_match,
+            list_mode,
+        } = bar;
         let word_count = self.state.read(cx).search_word_list.len();
         // What "there is something to search for" means differs by mode — and
         // four separate things below key off it (both fields' visibility, the
         // buttons' enabled styling, the readout, and the Replace pair). One
         // guard so they can't disagree.
-        let active = if list_mode { word_count > 0 } else { !query.is_empty() };
+        let active = if list_mode {
+            word_count > 0
+        } else {
+            !query.is_empty()
+        };
         let readout = if !active {
             String::new()
         } else if match_count == 0 {
@@ -291,24 +325,31 @@ impl Render for FindBarView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(if active { p.text_muted } else { p.text_faint }))
+                                    .text_color(rgb(if active {
+                                        p.text_muted
+                                    } else {
+                                        p.text_faint
+                                    }))
                                     .child(match word_count {
-                                        0 => "No words — add them in Settings → Toggle Features".to_string(),
+                                        0 => "No words — add them in Settings → Toggle Features"
+                                            .to_string(),
                                         1 => "1 word".to_string(),
                                         n => format!("{n} words"),
                                     }),
                             )
                             .into_any_element()
                     } else {
-                        self.field("Find", &query, FindField::Query, focus == FindField::Query, p, cx)
-                            .into_any_element()
+                        self.field(
+                            "Find",
+                            &query,
+                            FindField::Query,
+                            focus == FindField::Query,
+                            p,
+                            cx,
+                        )
+                        .into_any_element()
                     })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(p.text_muted))
-                            .child(readout),
-                    )
+                    .child(div().text_xs().text_color(rgb(p.text_muted)).child(readout))
                     .child(
                         div()
                             .id("find-bar-close")
@@ -337,7 +378,14 @@ impl Render for FindBarView {
             // `replace_current`/`replace_all` already early-return on an empty
             // query, so hiding is enough; they need no extra guard.
             .when(!list_mode, |d| {
-                d.child(self.field("Replace", &replacement, FindField::Replace, focus == FindField::Replace, p, cx))
+                d.child(self.field(
+                    "Replace",
+                    &replacement,
+                    FindField::Replace,
+                    focus == FindField::Replace,
+                    p,
+                    cx,
+                ))
             })
             .child(
                 div()
@@ -345,28 +393,43 @@ impl Render for FindBarView {
                     .flex_row()
                     .gap(px(space::XS))
                     .child(
-                        Self::button("find-bar-next", "Next", active, p)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.state.update(cx, |s, cx| { s.find_next(true); cx.notify(); });
-                            })),
+                        Self::button("find-bar-next", "Next", active, p).on_click(cx.listener(
+                            |this, _ev, _window, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.find_next(true);
+                                    cx.notify();
+                                });
+                            },
+                        )),
                     )
                     .child(
-                        Self::button("find-bar-prev", "Previous", active, p)
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.state.update(cx, |s, cx| { s.find_next(false); cx.notify(); });
-                            })),
+                        Self::button("find-bar-prev", "Previous", active, p).on_click(cx.listener(
+                            |this, _ev, _window, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.find_next(false);
+                                    cx.notify();
+                                });
+                            },
+                        )),
                     )
                     .when(!list_mode, |d| {
                         d.child(
-                            Self::button("find-bar-replace", "Replace", active, p)
-                                .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| { s.replace_current(); cx.notify(); });
-                                })),
+                            Self::button("find-bar-replace", "Replace", active, p).on_click(
+                                cx.listener(|this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.replace_current();
+                                        cx.notify();
+                                    });
+                                }),
+                            ),
                         )
                         .child(
                             Self::button("find-bar-replace-all", "Replace All", active, p)
                                 .on_click(cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| { s.replace_all(); cx.notify(); });
+                                    this.state.update(cx, |s, cx| {
+                                        s.replace_all();
+                                        cx.notify();
+                                    });
                                 })),
                         )
                     }),

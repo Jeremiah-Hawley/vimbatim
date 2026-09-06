@@ -6,33 +6,35 @@
 // placed after any item is a compile error, not a silent no-op.
 #![windows_subsystem = "windows"]
 
-mod docx_parser;
-mod document_ops;
-mod keybinds;
-mod vim_keybinds;
-mod rich_clipboard;
-mod recovery;
-mod recovery_prompt;
-mod state;
-mod tab_bar;
 mod app_toolbar;
-mod formatting_ribbon;
-mod text_editor;
 mod auto_scroll;
 mod case_converter;
+mod close_confirm;
 mod color_picker;
+mod command_palette;
+mod document;
+mod document_ops;
+mod docx_parser;
 mod file_explorer;
 mod find_bar;
-mod wikifi_export;
-mod settings_modal;
-mod close_confirm;
-mod command_palette;
 mod font_import;
 mod font_import_modal;
+mod formatting_ribbon;
+mod keybinds;
 mod main_window;
+mod preferences;
+mod recovery;
+mod recovery_prompt;
+mod rich_clipboard;
+mod settings_modal;
 mod spellcheck;
+mod state;
+mod tab_bar;
+mod text_editor;
 mod theme;
 mod timer;
+mod vim_keybinds;
+mod wikifi_export;
 mod word_count;
 
 use gpui::prelude::*;
@@ -61,7 +63,11 @@ fn install_panic_hook() {
             }
         }
 
-        let build = format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VIMBATIM_GIT_SHA"));
+        let build = format!(
+            "{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("VIMBATIM_GIT_SHA")
+        );
         let backtrace = std::backtrace::Backtrace::force_capture();
         let entry = format!("\n--- vimbatim crash: build {build} ---\n{info}\n{backtrace}\n");
 
@@ -69,7 +75,11 @@ fn install_panic_hook() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = file.write_all(entry.as_bytes());
         }
     }));
@@ -116,12 +126,18 @@ fn load_bundled_fonts(cx: &mut App) {
     let fonts = vec![
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono.ttf").as_slice()),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Bold.ttf").as_slice()),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-Oblique.ttf").as_slice()),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(
+            include_bytes!("../assets/DejaVuSansMono-Oblique.ttf").as_slice(),
+        ),
+        std::borrow::Cow::Borrowed(
+            include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf").as_slice(),
+        ),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif.ttf").as_slice()),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-Bold.ttf").as_slice()),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-Italic.ttf").as_slice()),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf").as_slice()),
+        std::borrow::Cow::Borrowed(
+            include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf").as_slice(),
+        ),
     ];
     // Deliberately not `let _ =`: a silently-failing font load is exactly
     // the failure class that produced this bug in the first place, and a
@@ -129,7 +145,9 @@ fn load_bundled_fonts(cx: &mut App) {
     // reasoning as `install_panic_hook`'s crash log) — so a failure here
     // gets written to that same file instead of vanishing.
     if let Err(e) = cx.text_system().add_fonts(fonts) {
-        state::log_line(&format!("\n--- vimbatim: failed to load bundled fonts: {e} ---"));
+        state::log_line(&format!(
+            "\n--- vimbatim: failed to load bundled fonts: {e} ---"
+        ));
     }
 }
 
@@ -169,36 +187,33 @@ fn main() {
         let keybinds = Keybinds::load(&state::settings_conf_path());
         rebuild_keymap(cx, &keybinds);
 
-        let bounds = Bounds::centered(
-            None,
-            size(px(1280.0), px(768.0)),
-            cx,
-        );
+        let bounds = Bounds::centered(None, size(px(1280.0), px(768.0)), cx);
 
-        let _ = recovery::PANIC_SNAPSHOT
-            .set(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let _ =
+            recovery::PANIC_SNAPSHOT.set(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
 
-        let window = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Vimbatim".into()),
-                    // tab_bar.rs draws its own drag region + minimize/maximize/close
-                    // buttons. `false` here leaves GPUI's Windows backend showing the
-                    // native OS caption too (gpui_windows/window.rs maps this straight
-                    // to `hide_title_bar`), stacking a second, native set of window
-                    // chrome above the app's own — the "two menus" bug. macOS shows its
-                    // native traffic lights regardless of this flag (different style
-                    // mask), so scoping to Windows avoids trading a stacked duplicate
-                    // there for an overlapping one.
-                    appears_transparent: cfg!(target_os = "windows"),
-                    traffic_light_position: None,
-                }),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(|cx| MainWindow::new(cx)),
-        )
-        .expect("Failed to open main window");
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Vimbatim".into()),
+                        // tab_bar.rs draws its own drag region + minimize/maximize/close
+                        // buttons. `false` here leaves GPUI's Windows backend showing the
+                        // native OS caption too (gpui_windows/window.rs maps this straight
+                        // to `hide_title_bar`), stacking a second, native set of window
+                        // chrome above the app's own — the "two menus" bug. macOS shows its
+                        // native traffic lights regardless of this flag (different style
+                        // mask), so scoping to Windows avoids trading a stacked duplicate
+                        // there for an overlapping one.
+                        appears_transparent: cfg!(target_os = "windows"),
+                        traffic_light_position: None,
+                    }),
+                    ..Default::default()
+                },
+                |_window, cx| cx.new(|cx| MainWindow::new(cx)),
+            )
+            .expect("Failed to open main window");
 
         // The native titlebar close button previously bypassed the
         // Save/Discard/Cancel prompt entirely: every other quit path routes
@@ -269,7 +284,11 @@ mod tests {
                  GPUI's weight/style matching can't tell these two apart"
             );
         }
-        assert_eq!(seen.len(), 4, "expected 4 distinct (bold, italic) combinations, got {seen:?}");
+        assert_eq!(
+            seen.len(),
+            4,
+            "expected 4 distinct (bold, italic) combinations, got {seen:?}"
+        );
     }
 
     #[test]
@@ -279,8 +298,14 @@ mod tests {
             [
                 ("Book", include_bytes!("../assets/DejaVuSansMono.ttf")),
                 ("Bold", include_bytes!("../assets/DejaVuSansMono-Bold.ttf")),
-                ("Oblique", include_bytes!("../assets/DejaVuSansMono-Oblique.ttf")),
-                ("BoldOblique", include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf")),
+                (
+                    "Oblique",
+                    include_bytes!("../assets/DejaVuSansMono-Oblique.ttf"),
+                ),
+                (
+                    "BoldOblique",
+                    include_bytes!("../assets/DejaVuSansMono-BoldOblique.ttf"),
+                ),
             ],
         );
     }
@@ -298,7 +323,10 @@ mod tests {
                 ("Book", include_bytes!("../assets/DejaVuSerif.ttf")),
                 ("Bold", include_bytes!("../assets/DejaVuSerif-Bold.ttf")),
                 ("Italic", include_bytes!("../assets/DejaVuSerif-Italic.ttf")),
-                ("BoldItalic", include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf")),
+                (
+                    "BoldItalic",
+                    include_bytes!("../assets/DejaVuSerif-BoldItalic.ttf"),
+                ),
             ],
         );
     }

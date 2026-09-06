@@ -9,14 +9,14 @@ use std::rc::Rc;
 use std::sync::{OnceLock, RwLock};
 
 use crate::auto_scroll::AutoScroller;
-use crate::docx_parser::{ListKind, Paragraph, Run};
 use crate::document_ops::paragraph_run_char_spans;
+use crate::docx_parser::{ListKind, Paragraph, Run};
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{
     matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, Pane, SpellTarget,
     VimMode,
 };
-use crate::theme::{palette, Palette, ThemeMode};
+use crate::theme::{Palette, ThemeMode};
 
 /// `CHAR_WIDTH_PX`/`FONT_SIZE_PX`/`LINE_HEIGHT_PX` below are the 100%-zoom
 /// baseline (`AppState.zoom == 1.0`) — every call site multiplies by the
@@ -246,7 +246,10 @@ pub(crate) fn all_curated_font_names() -> Vec<String> {
 /// rendering and appears in the picker. Called by `font_import.rs` after the
 /// faces are already handed to `cx.text_system().add_fonts`.
 pub(crate) fn register_imported_font(name: String, ratio: f32, dir: PathBuf) {
-    imported_fonts().write().unwrap().insert(name, ImportedFontMeta { ratio, dir });
+    imported_fonts()
+        .write()
+        .unwrap()
+        .insert(name, ImportedFontMeta { ratio, dir });
 }
 
 /// Drops a font from the picker/render path and returns where its face
@@ -257,7 +260,11 @@ pub(crate) fn register_imported_font(name: String, ratio: f32, dir: PathBuf) {
 /// freshly-reopened `.docx`) falls back to `FONT_FAMILY` immediately, not
 /// just after restart.
 pub(crate) fn unregister_imported_font(name: &str) -> Option<PathBuf> {
-    imported_fonts().write().unwrap().remove(name).map(|m| m.dir)
+    imported_fonts()
+        .write()
+        .unwrap()
+        .remove(name)
+        .map(|m| m.dir)
 }
 
 fn is_curated_font(name: &str) -> bool {
@@ -374,7 +381,11 @@ fn page_scroll_offset(
     // so a viewport shorter than a single line still advances.
     let rows_per_page = (viewport_h / row_height).floor().max(1.0);
     let delta = rows_per_page * row_height;
-    let target = if forward { current - delta } else { current + delta };
+    let target = if forward {
+        current - delta
+    } else {
+        current + delta
+    };
     let clamped = target.clamp(-max_y.max(0.0), 0.0);
     ((clamped - current).abs() >= 0.5).then_some(clamped)
 }
@@ -520,7 +531,11 @@ pub(crate) struct ScrollbarGeometry {
 ///
 /// Split out of `ScrollbarDecoration::compute` because it is the only part
 /// with arithmetic worth checking, and `compute` needs a live GPUI frame.
-pub(crate) fn scrollbar_geometry(viewport_h: f32, content_h: f32, scrolled: f32) -> ScrollbarGeometry {
+pub(crate) fn scrollbar_geometry(
+    viewport_h: f32,
+    content_h: f32,
+    scrolled: f32,
+) -> ScrollbarGeometry {
     /*
      * The thumb is as large a fraction of the track as the viewport is of the
      * document, floored at SCROLLBAR_MIN_THUMB_PX so a long document leaves
@@ -537,7 +552,11 @@ pub(crate) fn scrollbar_geometry(viewport_h: f32, content_h: f32, scrolled: f32)
     } else {
         0.0
     };
-    ScrollbarGeometry { thumb_h, travel, thumb_top }
+    ScrollbarGeometry {
+        thumb_h,
+        travel,
+        thumb_top,
+    }
 }
 
 impl UniformListDecoration for ScrollbarDecoration {
@@ -571,8 +590,11 @@ impl UniformListDecoration for ScrollbarDecoration {
         // `scroll_offset.y` grows more negative the further down the document
         // is scrolled, which is why this negates before taking a fraction.
         let scrolled = (-scroll_offset.y.as_f32()).clamp(0.0, max_scroll);
-        let ScrollbarGeometry { thumb_h, travel, thumb_top } =
-            scrollbar_geometry(viewport_h, content_h, scrolled);
+        let ScrollbarGeometry {
+            thumb_h,
+            travel,
+            thumb_top,
+        } = scrollbar_geometry(viewport_h, content_h, scrolled);
 
         // The decoration is prepainted at `padded_bounds.origin + scroll_offset`
         // (gpui's `uniform_list`), i.e. in *scrolled content* space, so
@@ -591,11 +613,16 @@ impl UniformListDecoration for ScrollbarDecoration {
         // Hug the editor's true right edge. `bounds` is the list's *padded*
         // box, and the content mask is its *outer* bounds, so painting back
         // out across the padding is visible rather than clipped.
-        let track_left = bounds.size.width.as_f32() + CONTENT_PADDING_PX - SCROLLBAR_WIDTH_PX + pin_x;
+        let track_left =
+            bounds.size.width.as_f32() + CONTENT_PADDING_PX - SCROLLBAR_WIDTH_PX + pin_x;
         // ...and in window space, which is what the pointer is compared against.
         let track_top_window = bounds.origin.y.as_f32() + pin_y;
 
-        let payload = ScrollbarDragPayload { track_top: track_top_window, travel, max_scroll };
+        let payload = ScrollbarDragPayload {
+            track_top: track_top_window,
+            travel,
+            max_scroll,
+        };
         let grab = self.grab_offset.clone();
         let thumb_top_window = track_top_window + thumb_top;
         let track_handle = self.scroll_handle.clone();
@@ -617,21 +644,24 @@ impl UniformListDecoration for ScrollbarDecoration {
             // Clicking the track jumps there, centring the thumb on the
             // click. The thumb's own handler stops propagation, so grabbing
             // the thumb never also jumps.
-            .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _window, cx| {
-                // Same reason the thumb stops propagation: without this the
-                // click also reaches the editor underneath and moves the text
-                // cursor to wherever the pointer happened to be.
-                cx.stop_propagation();
-                track_pressed.set(true);
-                if travel <= 0.0 {
-                    return;
-                }
-                let want_top = ev.position.y.as_f32() - track_top_window - thumb_h / 2.0;
-                let fraction = (want_top / travel).clamp(0.0, 1.0);
-                let offset = track_handle.offset();
-                track_handle.set_offset(point(offset.x, px(-(fraction * max_scroll))));
-                cx.refresh_windows();
-            })
+            .on_mouse_down(
+                MouseButton::Left,
+                move |ev: &MouseDownEvent, _window, cx| {
+                    // Same reason the thumb stops propagation: without this the
+                    // click also reaches the editor underneath and moves the text
+                    // cursor to wherever the pointer happened to be.
+                    cx.stop_propagation();
+                    track_pressed.set(true);
+                    if travel <= 0.0 {
+                        return;
+                    }
+                    let want_top = ev.position.y.as_f32() - track_top_window - thumb_h / 2.0;
+                    let fraction = (want_top / travel).clamp(0.0, 1.0);
+                    let offset = track_handle.offset();
+                    track_handle.set_offset(point(offset.x, px(-(fraction * max_scroll))));
+                    cx.refresh_windows();
+                },
+            )
             .child(
                 div()
                     .id("editor-scrollbar-thumb")
@@ -640,21 +670,26 @@ impl UniformListDecoration for ScrollbarDecoration {
                     .left(px(SCROLLBAR_THUMB_INSET_PX))
                     .w(px(SCROLLBAR_WIDTH_PX - 2.0 * SCROLLBAR_THUMB_INSET_PX))
                     .h(px(thumb_h))
-                    .rounded(px((SCROLLBAR_WIDTH_PX - 2.0 * SCROLLBAR_THUMB_INSET_PX) / 2.0))
+                    .rounded(px(
+                        (SCROLLBAR_WIDTH_PX - 2.0 * SCROLLBAR_THUMB_INSET_PX) / 2.0
+                    ))
                     .bg(rgb(thumb_color))
                     .cursor_pointer()
                     .hover(move |st| st.bg(rgb(thumb_hover)))
                     // Records where in the thumb the grab landed. Mouse-down
                     // always precedes the first drag-move, so the offset is
                     // set before anything reads it.
-                    .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, _window, cx| {
-                        // Grabbing the thumb must not also register as a
-                        // track click, which would teleport it to the cursor
-                        // before the drag even starts.
-                        cx.stop_propagation();
-                        thumb_pressed.set(true);
-                        grab.set(ev.position.y.as_f32() - thumb_top_window);
-                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        move |ev: &MouseDownEvent, _window, cx| {
+                            // Grabbing the thumb must not also register as a
+                            // track click, which would teleport it to the cursor
+                            // before the drag even starts.
+                            cx.stop_propagation();
+                            thumb_pressed.set(true);
+                            grab.set(ev.position.y.as_f32() - thumb_top_window);
+                        },
+                    )
                     .on_drag(payload, |p: &ScrollbarDragPayload, _offset, _window, cx| {
                         cx.new(|_| p.clone())
                     }),
@@ -853,7 +888,10 @@ enum RowEdge {
 /// H/M/L landed on the wrong row whenever a card-style row sat above the
 /// viewport, from assuming every row was the same pixel height instead of
 /// going through this same display-row translation).
-fn nearest_wrap_row_for_display_row(display_to_wrap: &[Option<usize>], display_row: usize) -> usize {
+fn nearest_wrap_row_for_display_row(
+    display_to_wrap: &[Option<usize>],
+    display_row: usize,
+) -> usize {
     /*
      * Forwards, not backwards. `expand_rows_for_display` reserves a row's
      * blank slots *before* its content (its own doc comment explains why:
@@ -886,7 +924,12 @@ fn nearest_wrap_row_for_display_row(display_to_wrap: &[Option<usize>], display_r
 /// given the current visual row's `[row_start, row_end)` char range —
 /// factored out of `TextEditor::move_cursor_to_row_edge` so this (the part
 /// with an actual branch worth testing) doesn't need a live GPUI context.
-fn row_edge_target_col(edge: RowEdge, line_chars: &[char], row_start: usize, row_end: usize) -> usize {
+fn row_edge_target_col(
+    edge: RowEdge,
+    line_chars: &[char],
+    row_start: usize,
+    row_end: usize,
+) -> usize {
     match edge {
         RowEdge::Start => row_start,
         RowEdge::End => row_end,
@@ -929,7 +972,11 @@ impl TextEditor {
         let focus_handle = cx.focus_handle();
         let uniform_list_scroll_handle = UniformListScrollHandle::new();
         let scroll_handle = uniform_list_scroll_handle.0.borrow().base_handle.clone();
-        let auto_scroller = AutoScroller::new(scroll_handle.clone(), uniform_list_scroll_handle.clone(), state.clone());
+        let auto_scroller = AutoScroller::new(
+            scroll_handle.clone(),
+            uniform_list_scroll_handle.clone(),
+            state.clone(),
+        );
         TextEditor {
             state,
             focus_handle,
@@ -990,13 +1037,17 @@ impl TextEditor {
          * The method is a no-op when the scroll handle has not been laid out
          * yet (viewport_h <= 0), which can happen on the very first frame.
          */
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
-        let line_height    = line_height_px(normal_size_px, line_spacing) * zoom;
-        let cursor_bottom  = cursor_top + line_height;
-        let margin         = SCROLL_MARGIN_LINES * line_height;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) =
+            self.cursor_scroll_geometry(cx)
+        else {
+            return;
+        };
+        let line_height = line_height_px(normal_size_px, line_spacing) * zoom;
+        let cursor_bottom = cursor_top + line_height;
+        let margin = SCROLL_MARGIN_LINES * line_height;
 
-        let offset         = self.scroll_handle.offset();
-        let visible_top    = -offset.y.as_f32();
+        let offset = self.scroll_handle.offset();
+        let visible_top = -offset.y.as_f32();
         let visible_bottom = visible_top + viewport_h;
 
         if cursor_top < visible_top + margin {
@@ -1020,7 +1071,10 @@ impl TextEditor {
     /// and max scroll offset needed to clamp any new offset. `None` when the
     /// scroll handle hasn't been laid out yet (viewport_h <= 0), which can
     /// happen on the very first frame.
-    fn cursor_scroll_geometry(&self, cx: &Context<Self>) -> Option<(f32, f32, f32, Pixels, f32, f32, f32)> {
+    fn cursor_scroll_geometry(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(f32, f32, f32, Pixels, f32, f32, f32)> {
         let state = self.state.read(cx);
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
@@ -1049,14 +1103,25 @@ impl TextEditor {
         // per line (`ROW_SUBDIVISIONS == 1`) this reduces exactly to the old
         // `display_row * line_height`.
         let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
-        let cursor_top =
-            (display_row + 1) as f32 * slot_px - line_height_px(normal_size_px, line_spacing) * zoom;
+        let cursor_top = (display_row + 1) as f32 * slot_px
+            - line_height_px(normal_size_px, line_spacing) * zoom;
 
-        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
-        if viewport_h <= 0.0 { return None; }
+        let viewport_h =
+            self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+        if viewport_h <= 0.0 {
+            return None;
+        }
 
         let max_y = self.scroll_handle.max_offset().y.as_f32();
-        Some((cursor_top, viewport_h, max_y, self.scroll_handle.offset().x, zoom, normal_size_px, line_spacing))
+        Some((
+            cursor_top,
+            viewport_h,
+            max_y,
+            self.scroll_handle.offset().x,
+            zoom,
+            normal_size_px,
+            line_spacing,
+        ))
     }
 
     /// Returns the row tables the most recent `render()` already computed
@@ -1072,37 +1137,78 @@ impl TextEditor {
         &self,
         cx: &Context<Self>,
         viewport_width: f32,
-    ) -> (Rc<Vec<(usize, usize, usize)>>, Rc<Vec<Option<usize>>>, Rc<Vec<usize>>) {
+    ) -> (
+        Rc<Vec<(usize, usize, usize)>>,
+        Rc<Vec<Option<usize>>>,
+        Rc<Vec<usize>>,
+    ) {
         let idx = self.tab_index(cx);
         let state = self.state.read(cx);
-        let dragging = state.split_dragging;
+        let dragging = state.workspace.split_dragging;
         let invisibility = state.invisibility_mode;
         let cite_size = state.cite_size_half_points;
-        let fold_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.fold_version).unwrap_or(0);
+        let fold_version = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.fold_version)
+            .unwrap_or(0);
         let folds = idx
-            .and_then(|i| state.tabs.get(i))
+            .and_then(|i| state.workspace.tabs.get(i))
             .map(|t| t.folded_headings.clone())
             .unwrap_or_default();
-        let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
-        let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
+        let tab_id = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.id.0)
+            .unwrap_or(usize::MAX);
+        let content_version = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.document.content_version)
+            .unwrap_or(0);
         let zoom = state.zoom;
         let line_spacing = state.line_spacing;
         if let Some(cache) = self.row_cache.as_ref() {
-            if row_cache_is_valid_for(cache, tab_id, content_version, viewport_width, zoom, line_spacing, dragging, invisibility, fold_version) {
-                return (cache.rows.clone(), cache.display_to_wrap.clone(), cache.wrap_to_display.clone());
+            if row_cache_is_valid_for(
+                cache,
+                tab_id,
+                content_version,
+                viewport_width,
+                zoom,
+                line_spacing,
+                dragging,
+                invisibility,
+                fold_version,
+            ) {
+                return (
+                    cache.rows.clone(),
+                    cache.display_to_wrap.clone(),
+                    cache.wrap_to_display.clone(),
+                );
             }
         }
         let content = state.pane_content(self.pane).to_string();
-        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let paragraphs = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.document.paragraphs.clone())
+            .unwrap_or_default();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let lines = document_lines(&content);
         let rows = Rc::new(visual_rows_for_viewport(
-            cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
+            cx,
+            &lines,
+            viewport_width,
+            zoom,
+            &paragraphs,
+            normal_size_px,
         ));
         let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
         let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
-        let (display_to_wrap, wrap_to_display) =
-            expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px, line_spacing);
+        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(
+            &rows,
+            &paragraphs,
+            zoom,
+            &hidden,
+            normal_size_px,
+            line_spacing,
+        );
         (rows, Rc::new(display_to_wrap), Rc::new(wrap_to_display))
     }
 
@@ -1137,7 +1243,8 @@ impl TextEditor {
         if row_height <= 0.0 {
             return false;
         }
-        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+        let viewport_h =
+            self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
         if viewport_h <= 0.0 {
             return false;
         }
@@ -1152,8 +1259,13 @@ impl TextEditor {
     }
 
     fn scroll_to_cursor_centered(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom) / 2.0;
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) =
+            self.cursor_scroll_geometry(cx)
+        else {
+            return;
+        };
+        let target_visible_top =
+            cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom) / 2.0;
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -1164,7 +1276,11 @@ impl TextEditor {
     /// for why this needs live GPUI viewport geometry rather than living in
     /// `AppState`.
     fn scroll_to_cursor_top(&self, cx: &Context<Self>) {
-        let Some((cursor_top, _viewport_h, max_y, offset_x, _zoom, _normal_size_px, _line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
+        let Some((cursor_top, _viewport_h, max_y, offset_x, _zoom, _normal_size_px, _line_spacing)) =
+            self.cursor_scroll_geometry(cx)
+        else {
+            return;
+        };
         let new_y = (-cursor_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -1172,8 +1288,13 @@ impl TextEditor {
     /// Real vim's `zb`: scrolls so the cursor's line sits at the bottom
     /// edge of the viewport.
     fn scroll_to_cursor_bottom(&self, cx: &Context<Self>) {
-        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) = self.cursor_scroll_geometry(cx) else { return };
-        let target_visible_top = cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom);
+        let Some((cursor_top, viewport_h, max_y, offset_x, zoom, normal_size_px, line_spacing)) =
+            self.cursor_scroll_geometry(cx)
+        else {
+            return;
+        };
+        let target_visible_top =
+            cursor_top - (viewport_h - line_height_px(normal_size_px, line_spacing) * zoom);
         let new_y = (-target_visible_top).clamp(-max_y.max(0.0), 0.0);
         self.scroll_handle.set_offset(point(offset_x, px(new_y)));
     }
@@ -1197,7 +1318,10 @@ impl TextEditor {
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let paragraphs = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.document.paragraphs.clone())
+            .unwrap_or_default();
         let _ = state;
 
         let lines = document_lines(&content);
@@ -1211,7 +1335,10 @@ impl TextEditor {
         );
         let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         let (line, row_start, row_end) = rows[current_row];
-        let line_chars: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        let line_chars: Vec<char> = lines
+            .get(line)
+            .map(|l| l.chars().collect())
+            .unwrap_or_default();
         let target_col = row_edge_target_col(edge, &line_chars, row_start, row_end);
 
         self.state.update(cx, |state, cx| {
@@ -1250,7 +1377,10 @@ impl TextEditor {
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let paragraphs = idx.and_then(|i| state.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default();
+        let paragraphs = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.document.paragraphs.clone())
+            .unwrap_or_default();
         let _ = state;
 
         let lines = document_lines(&content);
@@ -1267,7 +1397,15 @@ impl TextEditor {
         let (_, row_start, _) = rows[current_row];
         let col_in_row = cursor_col - row_start;
 
-        let Some((target_line, target_col)) = visual_row_step(&rows, current_row, col_in_row, delta, &paragraphs, normal_size_px, zoom) else {
+        let Some((target_line, target_col)) = visual_row_step(
+            &rows,
+            current_row,
+            col_in_row,
+            delta,
+            &paragraphs,
+            normal_size_px,
+            zoom,
+        ) else {
             return; // no-op past the first/last visual row
         };
 
@@ -1281,7 +1419,12 @@ impl TextEditor {
         });
     }
 
-    fn handle_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         /*
          * Dispatches raw key-down events to `process_key`, which does the
          * actual work — split out so macro replay (`@<register>`, a
@@ -1345,10 +1488,27 @@ impl TextEditor {
             }
         }
 
-        self.process_key(&ks.key, ks.modifiers.shift, ks.modifiers.control, ks.modifiers.platform, ks.key_char.as_deref(), window, cx);
+        self.process_key(
+            &ks.key,
+            ks.modifiers.shift,
+            ks.modifiers.control,
+            ks.modifiers.platform,
+            ks.key_char.as_deref(),
+            window,
+            cx,
+        );
     }
 
-    fn process_key(&mut self, key: &str, shift: bool, control: bool, platform: bool, key_char: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    fn process_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        control: bool,
+        platform: bool,
+        key_char: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         /*
          * The actual key-handling logic `handle_key_down` used to contain
          * directly, now parameterized so both a live `KeyDownEvent` and a
@@ -1382,11 +1542,15 @@ impl TextEditor {
         // completes the operator (ending the recording) must still be
         // captured; see `vim_is_recording_change`'s doc comment.
         if self.state.read(cx).vim_is_recording_change() {
-            self.state.update(cx, |state, _cx| state.record_change_key(key, shift, key_char));
+            self.state.update(cx, |state, _cx| {
+                state.record_change_key(key, shift, key_char)
+            });
         }
         self.process_key_plain(key, shift, key_char, window, cx);
         if was_recording && self.state.read(cx).vim_is_recording_macro() {
-            self.state.update(cx, |state, _cx| state.record_macro_key(key, shift, key_char));
+            self.state.update(cx, |state, _cx| {
+                state.record_macro_key(key, shift, key_char)
+            });
         }
     }
 
@@ -1410,7 +1574,8 @@ impl TextEditor {
             "o" => {
                 // Ctrl+O: jump list back (spec 5.5). Vim-specific, out of
                 // scope for the configurable keybind system.
-                self.state.update(cx, |state, _cx| state.vim_jump_backward());
+                self.state
+                    .update(cx, |state, _cx| state.vim_jump_backward());
                 cx.notify();
                 self.scroll_to_cursor(cx);
             }
@@ -1430,8 +1595,9 @@ impl TextEditor {
             "r" => {
                 let (vim_enabled, vim_mode) = {
                     let state = self.state.read(cx);
-                    let mode = self.tab_index(cx)
-                        .and_then(|i| state.tabs.get(i))
+                    let mode = self
+                        .tab_index(cx)
+                        .and_then(|i| state.workspace.tabs.get(i))
                         .map(|t| t.vim_mode)
                         .unwrap_or(VimMode::Insert);
                     (state.vim_enabled, mode)
@@ -1446,13 +1612,21 @@ impl TextEditor {
             // moving (spec 4.3). Plain (unmodified) arrow/Home/End are handled below.
             "left" => {
                 self.state.update(cx, |state, _cx| {
-                    if shift { state.extend_word_backward() } else { state.move_word_backward() }
+                    if shift {
+                        state.extend_word_backward()
+                    } else {
+                        state.move_word_backward()
+                    }
                 });
                 cx.notify();
             }
             "right" => {
                 self.state.update(cx, |state, _cx| {
-                    if shift { state.extend_word_forward() } else { state.move_word_forward() }
+                    if shift {
+                        state.extend_word_forward()
+                    } else {
+                        state.move_word_forward()
+                    }
                 });
                 cx.notify();
             }
@@ -1471,22 +1645,32 @@ impl TextEditor {
             // selection-clearing move would read as a broken extend rather
             // than an unimplemented one.
             "up" => {
-                self.state.update(cx, |state, _cx| state.move_paragraph_backward());
+                self.state
+                    .update(cx, |state, _cx| state.move_paragraph_backward());
                 cx.notify();
             }
             "down" => {
-                self.state.update(cx, |state, _cx| state.move_paragraph_forward());
+                self.state
+                    .update(cx, |state, _cx| state.move_paragraph_forward());
                 cx.notify();
             }
             "home" => {
                 self.state.update(cx, |state, _cx| {
-                    if shift { state.extend_doc_start() } else { state.move_doc_start() }
+                    if shift {
+                        state.extend_doc_start()
+                    } else {
+                        state.move_doc_start()
+                    }
                 });
                 cx.notify();
             }
             "end" => {
                 self.state.update(cx, |state, _cx| {
-                    if shift { state.extend_doc_end() } else { state.move_doc_end() }
+                    if shift {
+                        state.extend_doc_end()
+                    } else {
+                        state.move_doc_end()
+                    }
                 });
                 cx.notify();
             }
@@ -1506,7 +1690,14 @@ impl TextEditor {
         self.scroll_to_cursor(cx);
     }
 
-    fn process_key_plain(&mut self, key: &str, shift: bool, key_char: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    fn process_key_plain(
+        &mut self,
+        key: &str,
+        shift: bool,
+        key_char: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         /*
          * Handles every non-Ctrl/Cmd keystroke: vim-mode routing plus the
          * plain-editor fallback. Split out of `process_key` so macro
@@ -1523,13 +1714,17 @@ impl TextEditor {
         let (vim_enabled, vim_mode) = {
             let idx = self.tab_index(cx);
             let state = self.state.read(cx);
-            let mode = idx.and_then(|i| state.tabs.get(i)).map(|t| t.vim_mode).unwrap_or_default();
+            let mode = idx
+                .and_then(|i| state.workspace.tabs.get(i))
+                .map(|t| t.vim_mode)
+                .unwrap_or_default();
             (state.vim_enabled, mode)
         };
         if vim_enabled {
             if vim_mode == VimMode::Insert {
                 if key == "escape" {
-                    self.state.update(cx, |state, _cx| state.vim_exit_to_normal());
+                    self.state
+                        .update(cx, |state, _cx| state.vim_exit_to_normal());
                     cx.notify();
                     self.scroll_to_cursor(cx);
                     return;
@@ -1560,8 +1755,15 @@ impl TextEditor {
                 let no_pending_trigger = self.state.read(cx).vim_pending_trigger().is_none()
                     && self.state.read(cx).vim_pending_operator().is_none();
                 let is_visual = matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
-                if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger && !shift && (key == "j" || key == "k") {
-                    let count = self.state.update(cx, |state, _cx| state.take_vim_count()).unwrap_or(1);
+                if (vim_mode == VimMode::Normal || is_visual)
+                    && no_pending_trigger
+                    && !shift
+                    && (key == "j" || key == "k")
+                {
+                    let count = self
+                        .state
+                        .update(cx, |state, _cx| state.take_vim_count())
+                        .unwrap_or(1);
                     let delta: isize = if key == "k" { -1 } else { 1 };
                     for _ in 0..count {
                         self.move_cursor_visual_row(cx, delta, is_visual);
@@ -1591,26 +1793,36 @@ impl TextEditor {
                 // belongs to the nearest real row before it" rule
                 // `line_col_from_mouse_position` already established for
                 // clicks landing on one.
-                if (vim_mode == VimMode::Normal || is_visual) && no_pending_trigger
-                    && shift && matches!(key, "h" | "m" | "l")
+                if (vim_mode == VimMode::Normal || is_visual)
+                    && no_pending_trigger
+                    && shift
+                    && matches!(key, "h" | "m" | "l")
                 {
                     let zoom = self.state.read(cx).zoom;
-                    let normal_size_px = self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
+                    let normal_size_px =
+                        self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                     let line_spacing = self.state.read(cx).line_spacing;
                     let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-                    let (rows, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
+                    let (rows, display_to_wrap, _) =
+                        self.cached_or_fresh_row_tables(cx, viewport_width);
                     if !rows.is_empty() && !display_to_wrap.is_empty() {
                         // Display-row indices, so this steps by the display
                         // grid's own pitch, not by a full line of text.
                         let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
-                        let viewport_h = self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+                        let viewport_h = self.scroll_handle.bounds().size.height.as_f32()
+                            - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
                         let last_display_row = display_to_wrap.len() - 1;
-                        let top_display = (((-offset.y.as_f32()) / slot_px).floor().max(0.0) as usize).min(last_display_row);
+                        let top_display = (((-offset.y.as_f32()) / slot_px).floor().max(0.0)
+                            as usize)
+                            .min(last_display_row);
                         let visible_count = ((viewport_h / slot_px).floor().max(1.0)) as usize;
-                        let bottom_display = (top_display + visible_count.saturating_sub(1)).min(last_display_row);
-                        let top_row = nearest_wrap_row_for_display_row(&display_to_wrap, top_display);
-                        let bottom_row = nearest_wrap_row_for_display_row(&display_to_wrap, bottom_display);
+                        let bottom_display =
+                            (top_display + visible_count.saturating_sub(1)).min(last_display_row);
+                        let top_row =
+                            nearest_wrap_row_for_display_row(&display_to_wrap, top_display);
+                        let bottom_row =
+                            nearest_wrap_row_for_display_row(&display_to_wrap, bottom_display);
                         let target_row = match key {
                             "h" => top_row,
                             "l" => bottom_row,
@@ -1645,14 +1857,26 @@ impl TextEditor {
                 // fall through to `continue_vim_keybind_sequence`, resolve
                 // to `VimLookup::None`, and silently do nothing, which is
                 // exactly the reported bug.
-                if vim_mode == VimMode::Normal && no_pending_trigger && !shift && matches!(key, "z" | "t" | "b") {
+                if vim_mode == VimMode::Normal
+                    && no_pending_trigger
+                    && !shift
+                    && matches!(key, "z" | "t" | "b")
+                {
                     let pending_z = self
                         .tab_index(cx)
-                        .and_then(|i| self.state.read(cx).tabs.get(i).map(|t| t.vim_keybind_seq == "z"))
+                        .and_then(|i| {
+                            self.state
+                                .read(cx)
+                                .tabs
+                                .get(i)
+                                .map(|t| t.vim_keybind_seq == "z")
+                        })
                         .unwrap_or(false);
                     if pending_z {
                         self.state.update(cx, |state, _cx| {
-                            if let Some(tab) = state.tabs.get_mut(state.active_tab) {
+                            if let Some(tab) =
+                                state.workspace.tabs.get_mut(state.workspace.active_tab)
+                            {
                                 tab.vim_keybind_seq.clear();
                             }
                         });
@@ -1710,17 +1934,24 @@ impl TextEditor {
                     // a motion.
                     let buf_empty = self
                         .tab_index(cx)
-                        .and_then(|i| self.state.read(cx).tabs.get(i).map(|t| t.vim_command_buf.is_empty()))
+                        .and_then(|i| {
+                            self.state
+                                .read(cx)
+                                .tabs
+                                .get(i)
+                                .map(|t| t.vim_command_buf.is_empty())
+                        })
                         .unwrap_or(true);
-                    let edge = if matches_shifted_symbol(key, shift, key_char, "4", "$") || key == "end" {
-                        Some(RowEdge::End)
-                    } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
-                        Some(RowEdge::FirstNonBlank)
-                    } else if key == "home" || (key == "0" && !shift && buf_empty) {
-                        Some(RowEdge::Start)
-                    } else {
-                        None
-                    };
+                    let edge =
+                        if matches_shifted_symbol(key, shift, key_char, "4", "$") || key == "end" {
+                            Some(RowEdge::End)
+                        } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
+                            Some(RowEdge::FirstNonBlank)
+                        } else if key == "home" || (key == "0" && !shift && buf_empty) {
+                            Some(RowEdge::Start)
+                        } else {
+                            None
+                        };
                     if let Some(edge) = edge {
                         self.move_cursor_to_row_edge(cx, edge, is_visual);
                         return;
@@ -1782,8 +2013,14 @@ impl TextEditor {
 
                 let (consumed, clipboard_sync, vim_action) = self.state.update(cx, |state, cx| {
                     let handled = state.handle_vim_key(key, shift, key_char);
-                    if handled { cx.notify(); }
-                    (handled, state.take_pending_clipboard_sync(), state.take_pending_vim_action())
+                    if handled {
+                        cx.notify();
+                    }
+                    (
+                        handled,
+                        state.take_pending_clipboard_sync(),
+                        state.take_pending_vim_action(),
+                    )
                 });
                 // `"+y`/`"+d`/`"+c` (write direction): mirrors the read
                 // direction above — `execute_vim_operator_range` stages the
@@ -1824,7 +2061,8 @@ impl TextEditor {
         // fall through, which requires extending too or it would silently
         // clear the active selection via a plain, non-extending move.
         if key == "up" || key == "down" {
-            let vim_visual = vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
+            let vim_visual =
+                vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
             let delta = if key == "up" { -1 } else { 1 };
             self.move_cursor_visual_row(cx, delta, shift || vim_visual);
             self.scroll_to_cursor(cx);
@@ -1837,24 +2075,58 @@ impl TextEditor {
         // `move_cursor_to_row_edge`'s doc comment), and an operator-pending
         // Home/End (`dEnd`) is consumed before ever reaching this point.
         if key == "home" || key == "end" {
-            let edge = if key == "home" { RowEdge::Start } else { RowEdge::End };
+            let edge = if key == "home" {
+                RowEdge::Start
+            } else {
+                RowEdge::End
+            };
             self.move_cursor_to_row_edge(cx, edge, shift);
             return;
         }
 
         let consumed = self.state.update(cx, |state, cx| {
             match key {
-                "backspace" => { state.backspace(); cx.notify(); true }
-                "delete"    => { state.delete_forward(); cx.notify(); true }
-                "enter"     => { state.insert_char('\n'); cx.notify(); true }
-                "space"     => { state.insert_char(' '); cx.notify(); true }
+                "backspace" => {
+                    state.backspace();
+                    cx.notify();
+                    true
+                }
+                "delete" => {
+                    state.delete_forward();
+                    cx.notify();
+                    true
+                }
+                "enter" => {
+                    state.insert_char('\n');
+                    cx.notify();
+                    true
+                }
+                "space" => {
+                    state.insert_char(' ');
+                    cx.notify();
+                    true
+                }
                 "tab" => {
-                    let in_list = state.tabs.get(state.active_tab).is_some_and(|t| {
-                        let (para_idx, ..) = crate::document_ops::resolve_position(&t.paragraphs, t.cursor);
-                        t.paragraphs.get(para_idx).is_some_and(|p| p.list.is_some())
-                    });
+                    let in_list = state
+                        .workspace
+                        .tabs
+                        .get(state.workspace.active_tab)
+                        .is_some_and(|t| {
+                            let (para_idx, ..) = crate::document_ops::resolve_position(
+                                &t.document.paragraphs,
+                                t.cursor,
+                            );
+                            t.document
+                                .paragraphs
+                                .get(para_idx)
+                                .is_some_and(|p| p.list.is_some())
+                        });
                     if in_list {
-                        if shift { state.outdent_list_item() } else { state.indent_list_item() }
+                        if shift {
+                            state.outdent_list_item()
+                        } else {
+                            state.indent_list_item()
+                        }
                     } else {
                         state.insert_char('\t');
                     }
@@ -1862,8 +2134,24 @@ impl TextEditor {
                     true
                 }
                 // Shift+<key> extends the selection instead of moving plainly (spec 4.3).
-                "left"      => { if shift { state.extend_left() } else { state.move_left() }; cx.notify(); true }
-                "right"     => { if shift { state.extend_right() } else { state.move_right() }; cx.notify(); true }
+                "left" => {
+                    if shift {
+                        state.extend_left()
+                    } else {
+                        state.move_left()
+                    };
+                    cx.notify();
+                    true
+                }
+                "right" => {
+                    if shift {
+                        state.extend_right()
+                    } else {
+                        state.move_right()
+                    };
+                    cx.notify();
+                    true
+                }
                 k if k.chars().count() == 1 => {
                     let mut ch = k.chars().next().unwrap();
                     // Apply shift for uppercase; GPUI gives lowercase key names
@@ -1877,7 +2165,9 @@ impl TextEditor {
                 _ => false,
             }
         });
-        if consumed { cx.notify(); }
+        if consumed {
+            cx.notify();
+        }
         self.scroll_to_cursor(cx);
     }
 
@@ -1896,10 +2186,22 @@ impl TextEditor {
          * same entity, which would happen if this loop were written inside
          * a `self.state.update(...)` closure instead.
          */
-        self.state.update(cx, |state, _cx| { state.vim_last_macro_register = Some(register); });
-        let Some(keys) = self.state.read(cx).macro_keys(register) else { return };
+        self.state.update(cx, |state, _cx| {
+            state.vim_last_macro_register = Some(register);
+        });
+        let Some(keys) = self.state.read(cx).macro_keys(register) else {
+            return;
+        };
         for k in keys {
-            self.process_key(&k.key, k.shift, false, false, k.key_char.as_deref(), window, cx);
+            self.process_key(
+                &k.key,
+                k.shift,
+                false,
+                false,
+                k.key_char.as_deref(),
+                window,
+                cx,
+            );
         }
     }
 }
@@ -1936,7 +2238,8 @@ impl Render for TextEditor {
         // mounted, an unqualified flag lets whichever renders first steal the
         // keyboard from the pane the user actually acted on.
         if self.state.read(cx).pending_focus_editor == Some(self.pane) {
-            self.state.update(cx, |state, _cx| state.pending_focus_editor = None);
+            self.state
+                .update(cx, |state, _cx| state.workspace.pending_focus_editor = None);
             self.focus_handle.clone().focus(window, cx);
         }
 
@@ -1949,7 +2252,7 @@ impl Render for TextEditor {
         let pane_idx = self.tab_index(cx);
         let should_scroll = self.state.update(cx, |state, _cx| {
             let active = pane_idx.unwrap_or(usize::MAX);
-            if let Some(tab) = state.tabs.get_mut(active) {
+            if let Some(tab) = state.workspace.tabs.get_mut(active) {
                 if tab.pending_scroll_to_cursor {
                     tab.pending_scroll_to_cursor = false;
                     return true;
@@ -1971,12 +2274,19 @@ impl Render for TextEditor {
         // offset under its old id, then restore the incoming tab's saved
         // offset — or `Point::default()` (scrolled to top) if this is the
         // first time that tab has ever been active.
-        let active_tab_id = self.tab_index(cx).and_then(|i| self.state.read(cx).tabs.get(i)).map(|t| t.id);
+        let active_tab_id = self
+            .tab_index(cx)
+            .and_then(|i| self.state.read(cx).tabs.get(i))
+            .map(|t| t.id.0);
         if self.last_seen_active_tab != active_tab_id {
             if let Some(prev_id) = self.last_seen_active_tab {
-                self.tab_scroll_offsets.insert(prev_id, self.scroll_handle.offset());
+                self.tab_scroll_offsets
+                    .insert(prev_id, self.scroll_handle.offset());
             }
-            let restore = active_tab_id.and_then(|id| self.tab_scroll_offsets.get(&id)).copied().unwrap_or_default();
+            let restore = active_tab_id
+                .and_then(|id| self.tab_scroll_offsets.get(&id))
+                .copied()
+                .unwrap_or_default();
             self.scroll_handle.set_offset(restore);
             self.last_seen_active_tab = active_tab_id;
         }
@@ -1989,7 +2299,11 @@ impl Render for TextEditor {
         // surface too, not just the frame around it.
         let p = state.current_palette();
         let theme_mode = state.theme_mode;
-        let cursor_style = if state.vim_enabled { CursorStyle::Block } else { CursorStyle::Line };
+        let cursor_style = if state.vim_enabled {
+            CursorStyle::Block
+        } else {
+            CursorStyle::Line
+        };
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         // The document's own `<w:docDefaults>` font, when it names one this app
         // can actually render. `is_curated_font` is the same gate `run.font`
@@ -2004,29 +2318,50 @@ impl Render for TextEditor {
             .unwrap_or_else(|| SharedString::from(FONT_FAMILY));
         let line_spacing = state.line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-        let dragging = state.split_dragging;
+        let dragging = state.workspace.split_dragging;
         // Scroll movement re-arms the scrollbar's fade. Compared with a small
         // tolerance so sub-pixel jitter in the offset can't hold the bar
         // permanently visible by restarting the animation every frame.
         let scroll_y_now = self.scroll_handle.offset().y.as_f32();
-        if self.last_scrollbar_offset_y.is_none_or(|prev| (prev - scroll_y_now).abs() > 0.5) {
+        if self
+            .last_scrollbar_offset_y
+            .is_none_or(|prev| (prev - scroll_y_now).abs() > 0.5)
+        {
             self.last_scrollbar_offset_y = Some(scroll_y_now);
             self.scrollbar_activity = self.scrollbar_activity.wrapping_add(1);
         }
         let scrollbar_activity = self.scrollbar_activity;
         let invisibility = state.invisibility_mode;
         let cite_size = state.cite_size_half_points;
-        let fold_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.fold_version).unwrap_or(0);
+        let fold_version = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.fold_version)
+            .unwrap_or(0);
         let folds = idx
-            .and_then(|i| state.tabs.get(i))
+            .and_then(|i| state.workspace.tabs.get(i))
             .map(|t| t.folded_headings.clone())
             .unwrap_or_default();
-        let tab_id = idx.and_then(|i| state.tabs.get(i)).map(|t| t.id).unwrap_or(usize::MAX);
-        let content_version = idx.and_then(|i| state.tabs.get(i)).map(|t| t.content_version).unwrap_or(0);
-        let cache_valid = self
-            .row_cache
-            .as_ref()
-            .is_some_and(|c| row_cache_is_valid_for(c, tab_id, content_version, viewport_width, zoom, line_spacing, dragging, invisibility, fold_version));
+        let tab_id = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.id.0)
+            .unwrap_or(usize::MAX);
+        let content_version = idx
+            .and_then(|i| state.workspace.tabs.get(i))
+            .map(|t| t.document.content_version)
+            .unwrap_or(0);
+        let cache_valid = self.row_cache.as_ref().is_some_and(|c| {
+            row_cache_is_valid_for(
+                c,
+                tab_id,
+                content_version,
+                viewport_width,
+                zoom,
+                line_spacing,
+                dragging,
+                invisibility,
+                fold_version,
+            )
+        });
         // Only pay for the full content/paragraphs clone on a cache miss.
         // `document_lines`/word-wrap need `cx` free of `state`'s borrow (see
         // `let _ = state;` below), so the actual wrap happens further down —
@@ -2034,7 +2369,11 @@ impl Render for TextEditor {
         let fresh_content_and_paragraphs = (!cache_valid).then(|| {
             (
                 state.pane_content(self.pane).to_string(),
-                state.tabs.get(idx.unwrap_or(usize::MAX)).map(|t| t.paragraphs.clone()).unwrap_or_default(),
+                state
+                    .tabs
+                    .get(idx.unwrap_or(usize::MAX))
+                    .map(|t| t.document.paragraphs.clone())
+                    .unwrap_or_default(),
             )
         });
         let is_new_tab = state
@@ -2072,15 +2411,16 @@ impl Render for TextEditor {
         // entirely", both of which otherwise render an identical blank
         // indicator strip.
         let mode_indicator_text: Option<&'static str> = if state.vim_enabled {
-            idx.and_then(|i| state.tabs.get(i)).map(|t| match t.vim_mode {
-                VimMode::Normal => "-- NORMAL --",
-                VimMode::Insert => "-- INSERT --",
-                VimMode::Visual => "-- VISUAL --",
-                VimMode::VisualLine => "-- VISUAL LINE --",
-                VimMode::Command => "-- COMMAND --",
-                VimMode::Replace => "-- REPLACE --",
-                VimMode::Search => "-- SEARCH --",
-            })
+            idx.and_then(|i| state.workspace.tabs.get(i))
+                .map(|t| match t.vim_mode {
+                    VimMode::Normal => "-- NORMAL --",
+                    VimMode::Insert => "-- INSERT --",
+                    VimMode::Visual => "-- VISUAL --",
+                    VimMode::VisualLine => "-- VISUAL LINE --",
+                    VimMode::Command => "-- COMMAND --",
+                    VimMode::Replace => "-- REPLACE --",
+                    VimMode::Search => "-- SEARCH --",
+                })
         } else {
             None
         };
@@ -2139,7 +2479,9 @@ impl Render for TextEditor {
                     buf
                 };
                 if let Some(err) = &t.vim_command_error {
-                    if !buf.is_empty() { buf.push(' '); }
+                    if !buf.is_empty() {
+                        buf.push(' ');
+                    }
                     buf.push_str(err);
                 }
                 buf
@@ -2174,12 +2516,24 @@ impl Render for TextEditor {
             // functions) so all three always agree on where each row's
             // boundaries fall.
             let rows = visual_rows_for_viewport(
-                cx, &lines, viewport_width, zoom, &paragraphs, normal_size_px,
+                cx,
+                &lines,
+                viewport_width,
+                zoom,
+                &paragraphs,
+                normal_size_px,
             );
             let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
-        let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
-            let (display_to_wrap, wrap_to_display) =
-                expand_rows_for_display(&rows, &paragraphs, zoom, &hidden, normal_size_px, line_spacing);
+            let hidden =
+                hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
+            let (display_to_wrap, wrap_to_display) = expand_rows_for_display(
+                &rows,
+                &paragraphs,
+                zoom,
+                &hidden,
+                normal_size_px,
+                line_spacing,
+            );
 
             self.row_cache = Some(RowCache {
                 tab_id,
@@ -2198,10 +2552,9 @@ impl Render for TextEditor {
                 wrap_to_display: Rc::new(wrap_to_display),
             });
         }
-        let cache = self
-            .row_cache
-            .as_ref()
-            .expect("populated just above on a miss; cache_valid guarantees it already existed on a hit");
+        let cache = self.row_cache.as_ref().expect(
+            "populated just above on a miss; cache_valid guarantees it already existed on a hit",
+        );
         let lines = cache.lines.clone();
         let line_chars = cache.line_chars.clone();
         let line_byte_starts = cache.line_byte_starts.clone();
@@ -2270,7 +2623,9 @@ impl Render for TextEditor {
                                     let pane = this.pane;
                                     this.state.update(cx, |s, cx| {
                                         let i = s.pane_tab_index(pane);
-                                        if let Some(tab) = i.and_then(|i| s.tabs.get_mut(i)) {
+                                        if let Some(tab) =
+                                            i.and_then(|i| s.workspace.tabs.get_mut(i))
+                                        {
                                             tab.banner_dismissed = true;
                                         }
                                         cx.notify();
@@ -2287,625 +2642,794 @@ impl Render for TextEditor {
                     .key_context("TextEditor")
                     .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(Self::handle_key_down))
-            // Clicking the editor area claims keyboard focus and moves the
-            // cursor to the clicked position (spec 4.1 click-to-position).
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                // Claim the pane before anything reads a tab: `focus_pane`
-                // repoints `active_tab`, and every state call below (cursor
-                // placement, selection) resolves through it.
-                let pane = this.pane;
-                this.state.update(cx, |s, cx| { s.focus_pane(pane); cx.notify(); });
-                this.focus_handle.clone().focus(window, cx);
-                let bounds = this.scroll_handle.bounds();
-                let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                let line_spacing = this.state.read(cx).line_spacing;
-                let paragraphs = {
-                    let st = this.state.read(cx);
-                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
-                };
-                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
-                let click_count = ev.click_count;
-                let shift_click = ev.modifiers.shift && click_count == 1;
-                this.state.update(cx, |state, cx| {
-                    state.editor_context_menu = None;
-                    state.clear_similar_selection();
-                    if shift_click {
-                        // Shift+Click: extend the selection from wherever the
-                        // cursor already is to the click point — the same
-                        // `extend_selection_to_line_col` a click-drag calls on
-                        // every `on_mouse_move`, just driven by one click
-                        // instead of a series of move events. Anchors at the
-                        // current cursor position when there's no selection
-                        // yet (see that function's own doc comment).
-                        state.extend_selection_to_line_col(line, col);
-                    } else {
-                        // `set_cursor_from_line_col` does the line/col -> byte-offset
-                        // conversion (there's no standalone public helper for it) and
-                        // leaves the result in `tab.cursor`, so double/triple-click
-                        // reuse that single call instead of re-deriving the byte
-                        // position themselves.
-                        state.set_cursor_from_line_col(line, col);
-                        let byte_pos = pane_idx.and_then(|i| state.tabs.get(i)).map(|t| t.cursor).unwrap_or(0);
-                        match click_count {
-                            2 => state.select_word_at(byte_pos),
-                            3 => state.select_line_at(byte_pos),
-                            _ => {}
-                        }
-                    }
-                    cx.notify();
-                });
-                cx.notify();
-            }))
-            // Right-click opens the Cut/Copy/Paste menu (rendered by
-            // `render_context_menu` at the bottom of this wrapper).
-            //
-            // ponytail: an existing selection is left alone rather than
-            // hit-tested against the click point — right-clicking *inside* a
-            // selection must keep it (that's the whole point of the Copy
-            // item), and right-clicking outside one is rare enough that
-            // "menu opens, selection unchanged" beats redoing the byte-offset
-            // math just to decide whether to clear it. Add the hit-test if
-            // that ever bites.
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                let pane = this.pane;
-                this.state.update(cx, |s, cx| { s.focus_pane(pane); cx.notify(); });
-                this.focus_handle.clone().focus(window, cx);
-                let has_selection = {
-                    let st = this.state.read(cx);
-                    pane_idx.and_then(|i| st.tabs.get(i)).is_some_and(|t| t.selection.is_some())
-                };
-                // Resolve the click to a (line, col) whether or not there's a
-                // selection — without a selection it also moves the caret,
-                // but either way it's what locates a misspelled word below.
-                let bounds = this.scroll_handle.bounds();
-                let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                let line_spacing = this.state.read(cx).line_spacing;
-                let paragraphs = {
-                    let st = this.state.read(cx);
-                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
-                };
-                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
-                if !has_selection {
-                    this.state.update(cx, |state, _cx| state.set_cursor_from_line_col(line, col));
-                }
-
-                // Did the click land on a squiggle? `suggest` runs here, once,
-                // rather than during render — it's a dictionary search, far
-                // slower than the per-word `check` the squiggles use.
-                let spell_target = {
-                    let st = this.state.read(cx);
-                    if !st.spellcheck_enabled {
-                        None
-                    } else {
-                        let content = pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.content.clone()).unwrap_or_default();
-                        let lines = document_lines(&content);
-                        lines.get(line).and_then(|text| {
-                            crate::spellcheck::misspelled_ranges(text, &st.user_dictionary)
-                                .into_iter()
-                                .find(|&(s, e)| col >= s && col < e)
-                                .map(|(start_col, end_col)| {
-                                    let word: String =
-                                        text.chars().skip(start_col).take(end_col - start_col).collect();
-                                    let suggestions = crate::spellcheck::suggest(&word);
-                                    SpellTarget { line, start_col, end_col, word, suggestions }
-                                })
-                        })
-                    }
-                };
-
-                this.state.update(cx, |state, cx| {
-                    state.editor_context_menu = Some(EditorContextMenu {
-                        position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
-                        spell_target,
-                    });
-                    cx.notify();
-                });
-            }))
-            // Dragging with the left button held extends a selection from
-            // wherever on_mouse_down landed (spec 4.3 "mouse click-drag
-            // creates a selection"). `auto_scroller.notify` starts (or feeds)
-            // a per-frame auto-scroll loop when the drag is near the top/
-            // bottom edge of the viewport, so the selection can extend past
-            // what's currently visible even if the mouse stops moving.
-            // `on_mouse_move` only fires while the cursor is over this
-            // element's own bounds, so a drag that exits the editor (e.g.
-            // into the sidebar) stops updating until it re-enters —
-            // acceptable for a first pass, not spec-required to track drags
-            // that leave the editor.
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, window, cx| {
-                if !ev.dragging() {
-                    // Self-heal. If a release ever escapes both mouse-up
-                    // handlers, a stuck flag would kill text selection for
-                    // the rest of the session; the first move with no button
-                    // held proves the pointer is up and clears it.
-                    this.scrollbar_pressed.set(false);
-                    return;
-                }
-                // A drag that belongs to something else is not a text
-                // selection. Dragging the scrollbar holds the left button
-                // down and moves the pointer across the document, which is
-                // indistinguishable from a click-drag at this level — so it
-                // selected everything it passed over, and fed the edge
-                // auto-scroller besides (bug report: "scrolling down
-                // highlights text because it requires LMB down"). The same
-                // guard covers the tab, sidebar-resize and split-resize
-                // drags, none of which should extend a selection either.
-                if cx.has_active_drag() || this.scrollbar_pressed.get() { return; }
-                let bounds = this.scroll_handle.bounds();
-                let scroll_y = this.scroll_handle.offset().y.as_f32();
-                let zoom = this.state.read(cx).zoom;
-                let font_size_px = this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                let line_spacing = this.state.read(cx).line_spacing;
-                let paragraphs = {
-                    let st = this.state.read(cx);
-                    pane_idx.and_then(|i| st.tabs.get(i)).map(|t| t.paragraphs.clone()).unwrap_or_default()
-                };
-                let (rows, display_to_wrap, _) = this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
-                let row_height_px = real_row_height_px(&this.uniform_list_scroll_handle, display_to_wrap.len(), font_size_px, zoom, line_spacing);
-                let (line, col) = line_col_from_mouse_position(ev.position, bounds, scroll_y, &rows, &display_to_wrap, zoom, font_size_px, &paragraphs, row_height_px);
-                this.state.update(cx, |state, cx| {
-                    state.extend_selection_to_line_col(line, col);
-                    cx.notify();
-                });
-                this.auto_scroller.notify(ev.position, window);
-                cx.notify();
-            }))
-            // Stop any in-progress auto-scroll loop on mouse-up, whether the
-            // release happens over the editor (on_mouse_up) or elsewhere
-            // (on_mouse_up_out, e.g. the user dragged into the sidebar and
-            // released there) — otherwise a drag that ends while parked in
-            // the edge zone would keep scrolling forever with nothing left
-            // to stop it.
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _ev, _window, _cx| {
-                this.auto_scroller.stop();
-                this.scrollbar_pressed.set(false);
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _ev, _window, _cx| {
-                this.auto_scroller.stop();
-                this.scrollbar_pressed.set(false);
-            }))
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            // Critical (see main_window.rs's `min_h_0` comment for the same
-            // pattern): this div is now a flex_1 child on a flex_col's main
-            // axis (its parent wrapper, added by this task) rather than a
-            // cross-axis-stretched flex_row child like before — on the main
-            // axis a flex item's default min-height is its content size, so
-            // without this a document taller than the viewport could grow
-            // the div past the wrapper's allocated height instead of
-            // scrolling internally.
-            .min_h_0()
-            .bg(rgb(p.editor_bg))
-            // No `.overflow_y_scroll()`/`.track_scroll()`/`.p()`/`.border_1()`
-            // here anymore — `uniform_list` below owns the actual scrolling
-            // now (it sets its own vertical overflow internally and is
-            // `.track_scroll()`ed to `uniform_list_scroll_handle`), and
-            // padding/border move with it: `self.scroll_handle.bounds()`
-            // (via the shared handle, see `TextEditor::new()`) reflects
-            // *uniform_list's* box, and the click/scroll pixel math's
-            // `CONTENT_PADDING_PX` subtraction assumes that box already
-            // includes the padding inset, same as it did when this div was
-            // both the padded box and the tracked scroll container at once.
-            // This div is now just a plain flex_col wrapper stacking
-            // [new-tab placeholder?, the scrollable row list].
-            // Placeholder shown on an empty, unsaved tab — a plain sibling
-            // above the row list now rather than uniform_list's first
-            // "item" (uniform_list has no such prepend slot); low-risk since
-            // a genuinely empty new tab has nothing to scroll to anyway.
-            .when(is_new_tab, |d| {
-                d.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(p.text_faint))
-                        .font_family(FONT_FAMILY)
-                        .p(px(16.0))
-                        .child("Open a file from the sidebar, or start typing…"),
-                )
-            })
-            .child(
-                uniform_list("text-editor-rows", display_to_wrap.len(), {
-                    let lines = lines.clone();
-                    let selections = selections.clone();
-                    let line_chars = line_chars.clone();
-                    let line_byte_starts = line_byte_starts.clone();
-                    let rows = rows.clone();
-                    let paragraphs = paragraphs.clone();
-                    let display_to_wrap = display_to_wrap.clone();
-                    // Spellcheck inputs, read once per frame rather than per
-                    // row. `user_dictionary` is `Rc` in `AppState` precisely
-                    // so this is a refcount bump, not a deep clone.
-                    let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
-                    let user_dictionary = self.state.read(cx).user_dictionary.clone();
-                    let spell_cache = self.spell_cache.clone();
-                    let spellcheck_color =
-                        highlight_color_hex(&self.state.read(cx).spellcheck_underline_color);
-                    let invisibility_mode = self.state.read(cx).invisibility_mode;
-                    let cite_size_half_points = self.state.read(cx).cite_size_half_points;
-                    let folded_headings = {
-                        let st = self.state.read(cx);
-                        st.tabs.get(st.active_tab).map(|t| t.folded_headings.clone()).unwrap_or_default()
-                    };
-                    let fold_state = self.state.clone();
-                    move |range: std::ops::Range<usize>, _window, _cx| {
-                        range.map(|display_idx| {
-                        // A `None` slot is a blank spacer reserved before an
-                        // oversized (card-style/heading) row so its content
-                        // has empty space to visually spill upward into
-                        // instead of overlapping the row above — see
-                        // `expand_rows_for_display`'s doc comment. Same
-                        // fixed `.h()` as a real row, just no content, so
-                        // `uniform_list`'s single-measurement layout still
-                        // sees a uniform row height everywhere.
-                        let Some(visual_idx) = display_to_wrap[display_idx] else {
-                            return div().h(px(row_slot_px(normal_size_px, line_spacing, zoom))).into_any_element();
-                        };
-                            let (li, row_start, row_end) = rows[visual_idx];
-                        let chars = &line_chars[li];
-                        let row_text: String = chars[row_start..row_end].iter().collect();
-
-                        // `.then(|| ...)` (lazy), not `.then_some(...)` — the latter's
-                        // argument is a plain value, evaluated eagerly *before* the
-                        // bool is even checked. With `then_some`, `cursor_col - row_start`
-                        // was computed for every row regardless of the condition, and
-                        // underflowed (panicked) on any row whose row_start exceeded the
-                        // cursor's column — i.e. almost any row that isn't the cursor's own.
-                        let row_cursor_col = (cursor_visual_row == Some(display_idx))
-                            .then(|| cursor_col - row_start);
-
-                        // Clip the logical line's selection char-range (if any) down
-                        // to this row's own [row_start, row_end) sub-range, then
-                        // rebase it to be relative to the row instead of the line.
-                        let row_selections: Vec<(usize, usize)> = selections
-                            .iter()
-                            .filter_map(|&(s, e)| selection_span_for_line(&lines[li], line_byte_starts[li], s, e))
-                            .filter_map(|(sel_start, sel_end)| {
-                                let clipped_start = sel_start.max(row_start);
-                                let clipped_end = sel_end.min(row_end);
-                                // Same eager-vs-lazy pitfall as row_cursor_col above: use
-                                // `.then(|| ...)` since clipped_end can be < row_start when
-                                // the selection doesn't reach this row, which would
-                                // underflow `clipped_end - row_start` if evaluated eagerly.
-                                (clipped_start < clipped_end)
-                                    .then(|| (clipped_start - row_start, clipped_end - row_start))
-                            })
-                            .collect();
-
-                        // Rich-text formatting (Phase 1): clip this logical
-                        // line's paragraph run boundaries down to this row's
-                        // own [row_start, row_end) sub-range, same rebasing
-                        // pattern as `row_selection` above — a wrapped row
-                        // only needs to know about the runs it actually spans.
-                        let row_run_spans: Vec<(usize, usize, usize)> = paragraphs
-                            .get(li)
-                            .map(|p| paragraph_run_char_spans(p))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|(rs, re, run_idx)| {
-                                let clipped_start = rs.max(row_start);
-                                let clipped_end = re.min(row_end);
-                                (clipped_start < clipped_end)
-                                    .then(|| (clipped_start - row_start, clipped_end - row_start, run_idx))
-                            })
-                            .collect();
-
-                        // Spellcheck: the logical line's misspelled ranges,
-                        // clipped and rebased onto this row exactly like
-                        // `row_selection` and `row_run_spans` above.
-                        //
-                        // Memoized per line text (see `spell_ranges_cached`),
-                        // so a keystroke re-checks only the line being edited
-                        // and scrolling is free. Measured uncached, for
-                        // reference: ~10µs per realistic card paragraph in
-                        // release, ~6x that in debug.
-                        let row_misspelled: Vec<(usize, usize)> = if spellcheck_enabled {
-                            spell_ranges_cached(&spell_cache, &lines[li], &user_dictionary)
-                                .iter()
-                                .filter_map(|&(ms, me)| {
-                                    let clipped_start = ms.max(row_start);
-                                    let clipped_end = me.min(row_end);
-                                    (clipped_start < clipped_end)
-                                        .then(|| (clipped_start - row_start, clipped_end - row_start))
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-
-                        // Check if previous paragraph also has box_format (for merging boxes)
-                        let prev_has_box = li > 0 && paragraphs.get(li - 1)
-                            .is_some_and(|p| p.runs.iter().any(|r| r.box_format));
-
-                        // Fold marker, on a heading's *first* row only — a
-                        // wrapped heading gets one marker, not one per visual
-                        // row. Hidden until the row is hovered, so a folded
-                        // outline reads as clean text rather than a column of
-                        // arrows.
-                        let row_heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
-                        let fold_toggle = (row_heading != 0 && row_start == 0).then(|| {
-                            let collapsed = folded_headings.contains(&li);
-                            let state = fold_state.clone();
-                            div()
-                                .id(ElementId::named_usize("fold-toggle", li))
-                                .w(px(12.0 * zoom))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                // Independent of the heading's own (possibly
-                                // very large) font size, so markers stay a
-                                // consistent size down the outline.
-                                .text_size(px(9.0 * zoom))
-                                .font_weight(FontWeight::NORMAL)
-                                // Transparent rather than absent: the marker
-                                // keeps its width at all times, so hovering a
-                                // heading doesn't shift its text sideways.
-                                .text_color(transparent_black())
-                                .group_hover(FOLD_ROW_GROUP, move |s| s.text_color(rgb(p.text_muted)))
-                                .cursor_pointer()
-                                .hover(move |s| s.text_color(rgb(p.text)))
-                                .on_mouse_down(MouseButton::Left, {
-                                    // A plain closure over a cloned handle,
-                                    // not `cx.listener` — the `uniform_list`
-                                    // closure is `'static` and cannot borrow
-                                    // the view's context.
-                                    move |_ev, _window, cx: &mut App| {
-                                        // Stops the click also placing the
-                                        // caret in the heading.
-                                        cx.stop_propagation();
-                                        state.update(cx, |st, cx| {
-                                            st.toggle_paragraph_fold(li);
-                                            cx.notify();
-                                        });
-                                    }
-                                })
-                                .child(if collapsed { "▶" } else { "▼" })
-                                .into_any_element()
-                        });
-
-                        // List marker (bullet glyph or number), on a list
-                        // paragraph's *first* row only — see
-                        // `LIST_GUTTER_PX`'s doc comment on why wrapped
-                        // continuation rows don't get one. `list_item_ordinal`
-                        // uses the same contiguous-run rule
-                        // `docx_parser::assign_list_num_ids` uses on the
-                        // write side, so what's on screen always matches
-                        // what gets saved. `(level + 1)` widths: level 0
-                        // gets one gutter's worth of indent (unchanged from
-                        // Phase 1), each deeper level shifts the marker one
-                        // more gutter-width right — approximates Word's real
-                        // per-level indent step (720 twips per
-                        // `cascade_level_xml`) as a single fixed pixel step
-                        // rather than modeling twips.
-                        let list_marker = (row_start == 0)
-                            .then(|| paragraphs.get(li).and_then(|para| para.list))
-                            .flatten()
-                            .map(|item| {
-                                let ordinal = list_item_ordinal(&paragraphs, li);
-                                div()
-                                    .id(ElementId::named_usize("list-marker", li))
-                                    .w(px(LIST_GUTTER_PX * (item.level as f32 + 1.0) * zoom))
-                                    .flex_none()
-                                    .flex()
-                                    .justify_end()
-                                    .pr(px(4.0 * zoom))
-                                    .text_color(rgb(p.text))
-                                    .child(list_marker_text_for_level(item.kind, item.level, ordinal))
-                                    .into_any_element()
+                    // Clicking the editor area claims keyboard focus and moves the
+                    // cursor to the clicked position (spec 4.1 click-to-position).
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            // Claim the pane before anything reads a tab: `focus_pane`
+                            // repoints `active_tab`, and every state call below (cursor
+                            // placement, selection) resolves through it.
+                            let pane = this.pane;
+                            this.state.update(cx, |s, cx| {
+                                s.focus_pane(pane);
+                                cx.notify();
                             });
+                            this.focus_handle.clone().focus(window, cx);
+                            let bounds = this.scroll_handle.bounds();
+                            let scroll_y = this.scroll_handle.offset().y.as_f32();
+                            let zoom = this.state.read(cx).zoom;
+                            let font_size_px =
+                                this.state.read(cx).effective_normal_size_half_points() as f32
+                                    / 2.0;
+                            let line_spacing = this.state.read(cx).line_spacing;
+                            let paragraphs = {
+                                let st = this.state.read(cx);
+                                pane_idx
+                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .map(|t| t.document.paragraphs.clone())
+                                    .unwrap_or_default()
+                            };
+                            let (rows, display_to_wrap, _) =
+                                this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                            let row_height_px = real_row_height_px(
+                                &this.uniform_list_scroll_handle,
+                                display_to_wrap.len(),
+                                font_size_px,
+                                zoom,
+                                line_spacing,
+                            );
+                            let (line, col) = line_col_from_mouse_position(
+                                ev.position,
+                                bounds,
+                                scroll_y,
+                                &rows,
+                                &display_to_wrap,
+                                zoom,
+                                font_size_px,
+                                &paragraphs,
+                                row_height_px,
+                            );
+                            let click_count = ev.click_count;
+                            let shift_click = ev.modifiers.shift && click_count == 1;
+                            this.state.update(cx, |state, cx| {
+                                state.editor_context_menu = None;
+                                state.clear_similar_selection();
+                                if shift_click {
+                                    // Shift+Click: extend the selection from wherever the
+                                    // cursor already is to the click point — the same
+                                    // `extend_selection_to_line_col` a click-drag calls on
+                                    // every `on_mouse_move`, just driven by one click
+                                    // instead of a series of move events. Anchors at the
+                                    // current cursor position when there's no selection
+                                    // yet (see that function's own doc comment).
+                                    state.extend_selection_to_line_col(line, col);
+                                } else {
+                                    // `set_cursor_from_line_col` does the line/col -> byte-offset
+                                    // conversion (there's no standalone public helper for it) and
+                                    // leaves the result in `tab.cursor`, so double/triple-click
+                                    // reuse that single call instead of re-deriving the byte
+                                    // position themselves.
+                                    state.set_cursor_from_line_col(line, col);
+                                    let byte_pos = pane_idx
+                                        .and_then(|i| state.workspace.tabs.get(i))
+                                        .map(|t| t.cursor)
+                                        .unwrap_or(0);
+                                    match click_count {
+                                        2 => state.select_word_at(byte_pos),
+                                        3 => state.select_line_at(byte_pos),
+                                        _ => {}
+                                    }
+                                }
+                                cx.notify();
+                            });
+                            cx.notify();
+                        }),
+                    )
+                    // Right-click opens the Cut/Copy/Paste menu (rendered by
+                    // `render_context_menu` at the bottom of this wrapper).
+                    //
+                    // ponytail: an existing selection is left alone rather than
+                    // hit-tested against the click point — right-clicking *inside* a
+                    // selection must keep it (that's the whole point of the Copy
+                    // item), and right-clicking outside one is rare enough that
+                    // "menu opens, selection unchanged" beats redoing the byte-offset
+                    // math just to decide whether to clear it. Add the hit-test if
+                    // that ever bites.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            let pane = this.pane;
+                            this.state.update(cx, |s, cx| {
+                                s.focus_pane(pane);
+                                cx.notify();
+                            });
+                            this.focus_handle.clone().focus(window, cx);
+                            let has_selection = {
+                                let st = this.state.read(cx);
+                                pane_idx
+                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .is_some_and(|t| t.selection.is_some())
+                            };
+                            // Resolve the click to a (line, col) whether or not there's a
+                            // selection — without a selection it also moves the caret,
+                            // but either way it's what locates a misspelled word below.
+                            let bounds = this.scroll_handle.bounds();
+                            let scroll_y = this.scroll_handle.offset().y.as_f32();
+                            let zoom = this.state.read(cx).zoom;
+                            let font_size_px =
+                                this.state.read(cx).effective_normal_size_half_points() as f32
+                                    / 2.0;
+                            let line_spacing = this.state.read(cx).line_spacing;
+                            let paragraphs = {
+                                let st = this.state.read(cx);
+                                pane_idx
+                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .map(|t| t.document.paragraphs.clone())
+                                    .unwrap_or_default()
+                            };
+                            let (rows, display_to_wrap, _) =
+                                this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                            let row_height_px = real_row_height_px(
+                                &this.uniform_list_scroll_handle,
+                                display_to_wrap.len(),
+                                font_size_px,
+                                zoom,
+                                line_spacing,
+                            );
+                            let (line, col) = line_col_from_mouse_position(
+                                ev.position,
+                                bounds,
+                                scroll_y,
+                                &rows,
+                                &display_to_wrap,
+                                zoom,
+                                font_size_px,
+                                &paragraphs,
+                                row_height_px,
+                            );
+                            if !has_selection {
+                                this.state.update(cx, |state, _cx| {
+                                    state.set_cursor_from_line_col(line, col)
+                                });
+                            }
 
-                        let content_el = render_line(
-                            &row_text,
-                            row_cursor_col,
-                            &row_selections,
-                            &row_run_spans,
-                            paragraphs.get(li),
-                            prev_has_box,
-                            zoom,
-                            p,
-                            cursor_style,
-                            &row_misspelled,
-                            spellcheck_color,
-                            invisibility_mode,
-                            cite_size_half_points,
-                            fold_toggle,
-                            list_marker,
-                        );
-                        // Heading styles (spec 6.5): a paragraph-wide default
-                        // that per-run formatting (bold/size/etc., applied
-                        // inside `content_el`'s own children) still overrides
-                        // for the specific characters it covers, since GPUI's
-                        // text style cascades to children and a child's own
-                        // call wins. NOTE: a heading's larger font size can
-                        // visually overflow this row's fixed `LINE_HEIGHT_PX`
-                        // by design — `expand_rows_for_display` reserves
-                        // blank spacer rows after this one sized for exactly
-                        // that overflow (see `slot_count_for_paragraph`), so
-                        // it spills into empty space rather than the next
-                        // row's content; still needs real-hardware
-                        // verification (this sandbox has no display) to
-                        // confirm how it actually looks.
-                        let heading = paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
-                        // `normal_size_px` (settings.conf's `normal_text_size`,
-                        // read once above as `normal_text_size_half_points`)
-                        // is the visual default for any run with no explicit
-                        // `FontSize` override (`size == 0` — brand-new
-                        // documents' single default run, and any plain-typed
-                        // text) — a run-level or heading-level override still
-                        // wins underneath, same as before this was configurable.
-                        // The row's base font size, and the line box that
-                        // goes with it. `.line_height()` writes into the
-                        // cascading text style, so every span in this row —
-                        // including the ones carrying a highlight background
-                        // or an emphasis ring — is laid out in a box this
-                        // tall instead of GPUI's default golden-ratio one.
-                        // See `text_line_box_px` for why that default is
-                        // what made highlights cover each other.
-                        // The same size the row's space was reserved against
-                        // (`line_font_px`), not just the heading size — a
-                        // manually enlarged run in a plain paragraph grows the
-                        // reservation, so its line box has to grow with it or
-                        // its highlight would be painted shorter than its own
-                        // glyphs.
-                        let row_font_px = line_font_px(paragraphs.get(li), zoom, normal_size_px);
-                        let row_div = div()
-                            .font_family(body_font.clone())
-                            .text_size(px(normal_size_px * zoom))
-                            .line_height(px(text_line_box_px(row_font_px)))
-                            .text_color(rgb(p.text));
-                        let row_div = match heading_font_size_px(heading, zoom) {
-                            Some(size) => row_div.text_size(px(size)).font_weight(FontWeight::BOLD),
-                            None => row_div,
-                        };
-                        row_div
-                            // Locks this row's height so wrapping stays fully
-                            // decided by `wrap_line_into_rows` up front — nowrap
-                            // stops GPUI from *also* word-wrapping this row's text
-                            // internally if CHAR_WIDTH_PX's monospace estimate
-                            // ever slightly overshoots the real glyph width, which
-                            // would otherwise grow this div past one row and break
-                            // the fixed-row-height assumption click/scroll math relies on.
-                            .whitespace_nowrap()
-                            // `.h()`, not `.min_h()` — uniform_list measures
-                            // exactly one row (`measure_item`, always at
-                            // `list_width: None` i.e. unconstrained/MinContent
-                            // width — confirmed in the vendored gpui source,
-                            // `elements/uniform_list.rs`'s `request_layout`/
-                            // `prepaint`) and applies *that single row's*
-                            // height to *every* row in the whole list
-                            // (`item_top = item_height * item_index`, same
-                            // file). `.min_h()` only floors the height, so
-                            // any row whose content naturally measures taller
-                            // than `LINE_HEIGHT_PX` under that unconstrained-
-                            // width measurement pass — which any wrapped or
-                            // multi-span row can — poisoned every row's
-                            // spacing uniformly (found from a real bug
-                            // report: lines rendering ~2x too far apart, and
-                            // auto-scroll/scroll-to-cursor firing late since
-                            // their pixel math assumes exactly
-                            // `LINE_HEIGHT_PX` per row). An explicit `.h()`
-                            // is a fixed layout size independent of content
-                            // or measurement width, so `measure_item` always
-                            // returns exactly `LINE_HEIGHT_PX * zoom`
-                            // regardless of which row it happens to measure.
-                            // A heading's larger font can still visually
-                            // overflow this box (unchanged from before this
-                            // fix, still not clipped since overflow stays
-                            // visible — see the comment on `heading` above).
-                            .h(px(row_slot_px(normal_size_px, line_spacing, zoom)))
-                            // Column direction + justify_end bottom-aligns
-                            // `content_el` within this fixed-height slot when
-                            // it's shorter (a Shrunk line next to normal-size
-                            // ones) instead of the block-layout default of
-                            // sitting flush at the top with empty space below.
-                            // Column's *cross* axis is horizontal and defaults
-                            // to `Stretch`, so this doesn't change width
-                            // behavior — `content_el` still fills the row
-                            // exactly as it did as a plain block child, which
-                            // is what its own internal justify_center/
-                            // justify_end (paragraph alignment) and the
-                            // Pocket box's `w_full()` depend on.
-                            //
-                            // `.w_full()`: this row_div is a genuine Taffy
-                            // *root* for this layout pass — uniform_list's
-                            // paint loop calls `item.layout_as_root(available_space)`
-                            // per row (`elements/uniform_list.rs`) — and
-                            // Taffy's root-sizing carve-out that auto-stretches
-                            // an unsized node to its available space only
-                            // applies to `display: block` nodes
-                            // (`compute_root_layout`, gated on
-                            // `style.is_block()`); this is `display: flex`,
-                            // so with no width of its own it fell through to
-                            // ordinary flex content-sizing and hugged its
-                            // widest child instead — the real reason
-                            // alignment silently did nothing no matter what
-                            // was set further down the tree (`line_div`'s own
-                            // `w_full()`, `box_div`'s too, both resolve
-                            // against *this* node's width, which was never
-                            // definite). Confirmed by reading Taffy's actual
-                            // `compute_root_layout`/`perform_child_layout`
-                            // source, not guessed — this is the fourth
-                            // reported attempt at this bug, and the first
-                            // three all added width one or more levels too
-                            // low to matter.
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            // Marks this row as the hover group the fold
-                            // marker inside it watches.
-                            .group(FOLD_ROW_GROUP)
-                            .child(content_el)
-                            .into_any_element()
-                        }).collect()
-                    }
-                })
-                // `uniform_list` is the actual scrollable element now (it
-                // sets vertical overflow internally); padding/border move
-                // here from the old outer div for the reason explained
-                // above this `.child(...)` block.
-                .with_decoration(ScrollbarDecoration {
-                    scroll_handle: self.scroll_handle.clone(),
-                    grab_offset: self.scrollbar_grab.clone(),
-                    pressed: self.scrollbar_pressed.clone(),
-                    activity: scrollbar_activity,
-                    track: p.editor_bg_raised,
-                    thumb: p.border,
-                    thumb_hover: p.text_muted,
-                })
-                .track_scroll(&self.uniform_list_scroll_handle)
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .w_full()
-                // Prevent long lines from expanding the editor past its
-                // flex_1 allocation — uniform_list only constrains the
-                // vertical axis internally, same as the old div's own
-                // `.overflow_y_scroll()` needed an explicit
-                // `.overflow_x_hidden()` alongside it.
-                .overflow_x_hidden()
-                // Scrollbar thumb drag. `on_drag_move` dispatches in the
-                // capture phase and checks only the drag's *type*, not the
-                // pointer's position (gpui's `Interactivity::on_drag_move`),
-                // so this keeps tracking after the cursor leaves the thumb —
-                // or the editor entirely — which is what dragging a scrollbar
-                // demands. Registered here rather than on the thumb because
-                // the thumb is rebuilt every frame by the decoration.
-                .on_drag_move({
-                    let scroll_handle = self.scroll_handle.clone();
-                    let grab = self.scrollbar_grab.clone();
-                    move |e: &DragMoveEvent<ScrollbarDragPayload>, _window, cx| {
-                        let d = e.drag(cx);
-                        if d.travel <= 0.0 {
+                            // Did the click land on a squiggle? `suggest` runs here, once,
+                            // rather than during render — it's a dictionary search, far
+                            // slower than the per-word `check` the squiggles use.
+                            let spell_target = {
+                                let st = this.state.read(cx);
+                                if !st.spellcheck_enabled {
+                                    None
+                                } else {
+                                    let content = pane_idx
+                                        .and_then(|i| st.workspace.tabs.get(i))
+                                        .map(|t| t.document.content.clone())
+                                        .unwrap_or_default();
+                                    let lines = document_lines(&content);
+                                    lines.get(line).and_then(|text| {
+                                        crate::spellcheck::misspelled_ranges(
+                                            text,
+                                            &st.user_dictionary,
+                                        )
+                                        .into_iter()
+                                        .find(|&(s, e)| col >= s && col < e)
+                                        .map(
+                                            |(start_col, end_col)| {
+                                                let word: String = text
+                                                    .chars()
+                                                    .skip(start_col)
+                                                    .take(end_col - start_col)
+                                                    .collect();
+                                                let suggestions = crate::spellcheck::suggest(&word);
+                                                SpellTarget {
+                                                    line,
+                                                    start_col,
+                                                    end_col,
+                                                    word,
+                                                    suggestions,
+                                                }
+                                            },
+                                        )
+                                    })
+                                }
+                            };
+
+                            this.state.update(cx, |state, cx| {
+                                state.editor_context_menu = Some(EditorContextMenu {
+                                    position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
+                                    spell_target,
+                                });
+                                cx.notify();
+                            });
+                        }),
+                    )
+                    // Dragging with the left button held extends a selection from
+                    // wherever on_mouse_down landed (spec 4.3 "mouse click-drag
+                    // creates a selection"). `auto_scroller.notify` starts (or feeds)
+                    // a per-frame auto-scroll loop when the drag is near the top/
+                    // bottom edge of the viewport, so the selection can extend past
+                    // what's currently visible even if the mouse stops moving.
+                    // `on_mouse_move` only fires while the cursor is over this
+                    // element's own bounds, so a drag that exits the editor (e.g.
+                    // into the sidebar) stops updating until it re-enters —
+                    // acceptable for a first pass, not spec-required to track drags
+                    // that leave the editor.
+                    .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, window, cx| {
+                        if !ev.dragging() {
+                            // Self-heal. If a release ever escapes both mouse-up
+                            // handlers, a stuck flag would kill text selection for
+                            // the rest of the session; the first move with no button
+                            // held proves the pointer is up and clears it.
+                            this.scrollbar_pressed.set(false);
                             return;
                         }
-                        // Where the thumb's *top* would sit if it followed the
-                        // pointer, keeping the grab point under the cursor.
-                        let thumb_top = e.event.position.y.as_f32() - grab.get() - d.track_top;
-                        let fraction = (thumb_top / d.travel).clamp(0.0, 1.0);
-                        let offset = scroll_handle.offset();
-                        // Negative Y scrolls down, matching every other scroll
-                        // path in this file.
-                        scroll_handle.set_offset(point(offset.x, px(-(fraction * d.max_scroll))));
-                        cx.refresh_windows();
-                    }
-                })
-                .p(px(16.0))
-                // Thin focus ring so the user can tell where key input lands
-                .border_1()
-                .border_color(if is_focused { rgb(p.accent) } else { rgb(p.editor_bg) })
-            ) // closes the "text-editor" div's .child(uniform_list...)
+                        // A drag that belongs to something else is not a text
+                        // selection. Dragging the scrollbar holds the left button
+                        // down and moves the pointer across the document, which is
+                        // indistinguishable from a click-drag at this level — so it
+                        // selected everything it passed over, and fed the edge
+                        // auto-scroller besides (bug report: "scrolling down
+                        // highlights text because it requires LMB down"). The same
+                        // guard covers the tab, sidebar-resize and split-resize
+                        // drags, none of which should extend a selection either.
+                        if cx.has_active_drag() || this.scrollbar_pressed.get() {
+                            return;
+                        }
+                        let bounds = this.scroll_handle.bounds();
+                        let scroll_y = this.scroll_handle.offset().y.as_f32();
+                        let zoom = this.state.read(cx).zoom;
+                        let font_size_px =
+                            this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
+                        let line_spacing = this.state.read(cx).line_spacing;
+                        let paragraphs = {
+                            let st = this.state.read(cx);
+                            pane_idx
+                                .and_then(|i| st.workspace.tabs.get(i))
+                                .map(|t| t.document.paragraphs.clone())
+                                .unwrap_or_default()
+                        };
+                        let (rows, display_to_wrap, _) =
+                            this.cached_or_fresh_row_tables(cx, bounds.size.width.as_f32());
+                        let row_height_px = real_row_height_px(
+                            &this.uniform_list_scroll_handle,
+                            display_to_wrap.len(),
+                            font_size_px,
+                            zoom,
+                            line_spacing,
+                        );
+                        let (line, col) = line_col_from_mouse_position(
+                            ev.position,
+                            bounds,
+                            scroll_y,
+                            &rows,
+                            &display_to_wrap,
+                            zoom,
+                            font_size_px,
+                            &paragraphs,
+                            row_height_px,
+                        );
+                        this.state.update(cx, |state, cx| {
+                            state.extend_selection_to_line_col(line, col);
+                            cx.notify();
+                        });
+                        this.auto_scroller.notify(ev.position, window);
+                        cx.notify();
+                    }))
+                    // Stop any in-progress auto-scroll loop on mouse-up, whether the
+                    // release happens over the editor (on_mouse_up) or elsewhere
+                    // (on_mouse_up_out, e.g. the user dragged into the sidebar and
+                    // released there) — otherwise a drag that ends while parked in
+                    // the edge zone would keep scrolling forever with nothing left
+                    // to stop it.
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev, _window, _cx| {
+                            this.auto_scroller.stop();
+                            this.scrollbar_pressed.set(false);
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev, _window, _cx| {
+                            this.auto_scroller.stop();
+                            this.scrollbar_pressed.set(false);
+                        }),
+                    )
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    // Critical (see main_window.rs's `min_h_0` comment for the same
+                    // pattern): this div is now a flex_1 child on a flex_col's main
+                    // axis (its parent wrapper, added by this task) rather than a
+                    // cross-axis-stretched flex_row child like before — on the main
+                    // axis a flex item's default min-height is its content size, so
+                    // without this a document taller than the viewport could grow
+                    // the div past the wrapper's allocated height instead of
+                    // scrolling internally.
+                    .min_h_0()
+                    .bg(rgb(p.editor_bg))
+                    // No `.overflow_y_scroll()`/`.track_scroll()`/`.p()`/`.border_1()`
+                    // here anymore — `uniform_list` below owns the actual scrolling
+                    // now (it sets its own vertical overflow internally and is
+                    // `.track_scroll()`ed to `uniform_list_scroll_handle`), and
+                    // padding/border move with it: `self.scroll_handle.bounds()`
+                    // (via the shared handle, see `TextEditor::new()`) reflects
+                    // *uniform_list's* box, and the click/scroll pixel math's
+                    // `CONTENT_PADDING_PX` subtraction assumes that box already
+                    // includes the padding inset, same as it did when this div was
+                    // both the padded box and the tracked scroll container at once.
+                    // This div is now just a plain flex_col wrapper stacking
+                    // [new-tab placeholder?, the scrollable row list].
+                    // Placeholder shown on an empty, unsaved tab — a plain sibling
+                    // above the row list now rather than uniform_list's first
+                    // "item" (uniform_list has no such prepend slot); low-risk since
+                    // a genuinely empty new tab has nothing to scroll to anyway.
+                    .when(is_new_tab, |d| {
+                        d.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(p.text_faint))
+                                .font_family(FONT_FAMILY)
+                                .p(px(16.0))
+                                .child("Open a file from the sidebar, or start typing…"),
+                        )
+                    })
+                    .child(
+                        uniform_list("text-editor-rows", display_to_wrap.len(), {
+                            let lines = lines.clone();
+                            let selections = selections.clone();
+                            let line_chars = line_chars.clone();
+                            let line_byte_starts = line_byte_starts.clone();
+                            let rows = rows.clone();
+                            let paragraphs = paragraphs.clone();
+                            let display_to_wrap = display_to_wrap.clone();
+                            // Spellcheck inputs, read once per frame rather than per
+                            // row. `user_dictionary` is `Rc` in `AppState` precisely
+                            // so this is a refcount bump, not a deep clone.
+                            let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
+                            let user_dictionary = self.state.read(cx).user_dictionary.clone();
+                            let spell_cache = self.spell_cache.clone();
+                            let spellcheck_color = highlight_color_hex(
+                                &self.state.read(cx).spellcheck_underline_color,
+                            );
+                            let invisibility_mode = self.state.read(cx).invisibility_mode;
+                            let cite_size_half_points = self.state.read(cx).cite_size_half_points;
+                            let folded_headings = {
+                                let st = self.state.read(cx);
+                                st.workspace
+                                    .tabs
+                                    .get(st.workspace.active_tab)
+                                    .map(|t| t.folded_headings.clone())
+                                    .unwrap_or_default()
+                            };
+                            let fold_state = self.state.clone();
+                            move |range: std::ops::Range<usize>, _window, _cx| {
+                                range
+                                    .map(|display_idx| {
+                                        // A `None` slot is a blank spacer reserved before an
+                                        // oversized (card-style/heading) row so its content
+                                        // has empty space to visually spill upward into
+                                        // instead of overlapping the row above — see
+                                        // `expand_rows_for_display`'s doc comment. Same
+                                        // fixed `.h()` as a real row, just no content, so
+                                        // `uniform_list`'s single-measurement layout still
+                                        // sees a uniform row height everywhere.
+                                        let Some(visual_idx) = display_to_wrap[display_idx] else {
+                                            return div()
+                                                .h(px(row_slot_px(
+                                                    normal_size_px,
+                                                    line_spacing,
+                                                    zoom,
+                                                )))
+                                                .into_any_element();
+                                        };
+                                        let (li, row_start, row_end) = rows[visual_idx];
+                                        let chars = &line_chars[li];
+                                        let row_text: String =
+                                            chars[row_start..row_end].iter().collect();
+
+                                        // `.then(|| ...)` (lazy), not `.then_some(...)` — the latter's
+                                        // argument is a plain value, evaluated eagerly *before* the
+                                        // bool is even checked. With `then_some`, `cursor_col - row_start`
+                                        // was computed for every row regardless of the condition, and
+                                        // underflowed (panicked) on any row whose row_start exceeded the
+                                        // cursor's column — i.e. almost any row that isn't the cursor's own.
+                                        let row_cursor_col = (cursor_visual_row
+                                            == Some(display_idx))
+                                        .then(|| cursor_col - row_start);
+
+                                        // Clip the logical line's selection char-range (if any) down
+                                        // to this row's own [row_start, row_end) sub-range, then
+                                        // rebase it to be relative to the row instead of the line.
+                                        let row_selections: Vec<(usize, usize)> = selections
+                                            .iter()
+                                            .filter_map(|&(s, e)| {
+                                                selection_span_for_line(
+                                                    &lines[li],
+                                                    line_byte_starts[li],
+                                                    s,
+                                                    e,
+                                                )
+                                            })
+                                            .filter_map(|(sel_start, sel_end)| {
+                                                let clipped_start = sel_start.max(row_start);
+                                                let clipped_end = sel_end.min(row_end);
+                                                // Same eager-vs-lazy pitfall as row_cursor_col above: use
+                                                // `.then(|| ...)` since clipped_end can be < row_start when
+                                                // the selection doesn't reach this row, which would
+                                                // underflow `clipped_end - row_start` if evaluated eagerly.
+                                                (clipped_start < clipped_end).then(|| {
+                                                    (
+                                                        clipped_start - row_start,
+                                                        clipped_end - row_start,
+                                                    )
+                                                })
+                                            })
+                                            .collect();
+
+                                        // Rich-text formatting (Phase 1): clip this logical
+                                        // line's paragraph run boundaries down to this row's
+                                        // own [row_start, row_end) sub-range, same rebasing
+                                        // pattern as `row_selection` above — a wrapped row
+                                        // only needs to know about the runs it actually spans.
+                                        let row_run_spans: Vec<(usize, usize, usize)> = paragraphs
+                                            .get(li)
+                                            .map(|p| paragraph_run_char_spans(p))
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .filter_map(|(rs, re, run_idx)| {
+                                                let clipped_start = rs.max(row_start);
+                                                let clipped_end = re.min(row_end);
+                                                (clipped_start < clipped_end).then(|| {
+                                                    (
+                                                        clipped_start - row_start,
+                                                        clipped_end - row_start,
+                                                        run_idx,
+                                                    )
+                                                })
+                                            })
+                                            .collect();
+
+                                        // Spellcheck: the logical line's misspelled ranges,
+                                        // clipped and rebased onto this row exactly like
+                                        // `row_selection` and `row_run_spans` above.
+                                        //
+                                        // Memoized per line text (see `spell_ranges_cached`),
+                                        // so a keystroke re-checks only the line being edited
+                                        // and scrolling is free. Measured uncached, for
+                                        // reference: ~10µs per realistic card paragraph in
+                                        // release, ~6x that in debug.
+                                        let row_misspelled: Vec<(usize, usize)> =
+                                            if spellcheck_enabled {
+                                                spell_ranges_cached(
+                                                    &spell_cache,
+                                                    &lines[li],
+                                                    &user_dictionary,
+                                                )
+                                                .iter()
+                                                .filter_map(|&(ms, me)| {
+                                                    let clipped_start = ms.max(row_start);
+                                                    let clipped_end = me.min(row_end);
+                                                    (clipped_start < clipped_end).then(|| {
+                                                        (
+                                                            clipped_start - row_start,
+                                                            clipped_end - row_start,
+                                                        )
+                                                    })
+                                                })
+                                                .collect()
+                                            } else {
+                                                Vec::new()
+                                            };
+
+                                        // Check if previous paragraph also has box_format (for merging boxes)
+                                        let prev_has_box = li > 0
+                                            && paragraphs.get(li - 1).is_some_and(|p| {
+                                                p.runs.iter().any(|r| r.box_format)
+                                            });
+
+                                        // Fold marker, on a heading's *first* row only — a
+                                        // wrapped heading gets one marker, not one per visual
+                                        // row. Hidden until the row is hovered, so a folded
+                                        // outline reads as clean text rather than a column of
+                                        // arrows.
+                                        let row_heading =
+                                            paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
+                                        let fold_toggle = (row_heading != 0 && row_start == 0)
+                                            .then(|| {
+                                                let collapsed = folded_headings.contains(&li);
+                                                let state = fold_state.clone();
+                                                div()
+                                                    .id(ElementId::named_usize("fold-toggle", li))
+                                                    .w(px(12.0 * zoom))
+                                                    .flex_none()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    // Independent of the heading's own (possibly
+                                                    // very large) font size, so markers stay a
+                                                    // consistent size down the outline.
+                                                    .text_size(px(9.0 * zoom))
+                                                    .font_weight(FontWeight::NORMAL)
+                                                    // Transparent rather than absent: the marker
+                                                    // keeps its width at all times, so hovering a
+                                                    // heading doesn't shift its text sideways.
+                                                    .text_color(transparent_black())
+                                                    .group_hover(FOLD_ROW_GROUP, move |s| {
+                                                        s.text_color(rgb(p.text_muted))
+                                                    })
+                                                    .cursor_pointer()
+                                                    .hover(move |s| s.text_color(rgb(p.text)))
+                                                    .on_mouse_down(MouseButton::Left, {
+                                                        // A plain closure over a cloned handle,
+                                                        // not `cx.listener` — the `uniform_list`
+                                                        // closure is `'static` and cannot borrow
+                                                        // the view's context.
+                                                        move |_ev, _window, cx: &mut App| {
+                                                            // Stops the click also placing the
+                                                            // caret in the heading.
+                                                            cx.stop_propagation();
+                                                            state.update(cx, |st, cx| {
+                                                                st.toggle_paragraph_fold(li);
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                    .child(if collapsed { "▶" } else { "▼" })
+                                                    .into_any_element()
+                                            });
+
+                                        // List marker (bullet glyph or number), on a list
+                                        // paragraph's *first* row only — see
+                                        // `LIST_GUTTER_PX`'s doc comment on why wrapped
+                                        // continuation rows don't get one. `list_item_ordinal`
+                                        // uses the same contiguous-run rule
+                                        // `docx_parser::assign_list_num_ids` uses on the
+                                        // write side, so what's on screen always matches
+                                        // what gets saved. `(level + 1)` widths: level 0
+                                        // gets one gutter's worth of indent (unchanged from
+                                        // Phase 1), each deeper level shifts the marker one
+                                        // more gutter-width right — approximates Word's real
+                                        // per-level indent step (720 twips per
+                                        // `cascade_level_xml`) as a single fixed pixel step
+                                        // rather than modeling twips.
+                                        let list_marker = (row_start == 0)
+                                            .then(|| paragraphs.get(li).and_then(|para| para.list))
+                                            .flatten()
+                                            .map(|item| {
+                                                let ordinal = list_item_ordinal(&paragraphs, li);
+                                                div()
+                                                    .id(ElementId::named_usize("list-marker", li))
+                                                    .w(px(LIST_GUTTER_PX
+                                                        * (item.level as f32 + 1.0)
+                                                        * zoom))
+                                                    .flex_none()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .pr(px(4.0 * zoom))
+                                                    .text_color(rgb(p.text))
+                                                    .child(list_marker_text_for_level(
+                                                        item.kind, item.level, ordinal,
+                                                    ))
+                                                    .into_any_element()
+                                            });
+
+                                        let content_el = render_line(
+                                            &row_text,
+                                            row_cursor_col,
+                                            &row_selections,
+                                            &row_run_spans,
+                                            paragraphs.get(li),
+                                            prev_has_box,
+                                            zoom,
+                                            p,
+                                            cursor_style,
+                                            &row_misspelled,
+                                            spellcheck_color,
+                                            invisibility_mode,
+                                            cite_size_half_points,
+                                            fold_toggle,
+                                            list_marker,
+                                        );
+                                        // Heading styles (spec 6.5): a paragraph-wide default
+                                        // that per-run formatting (bold/size/etc., applied
+                                        // inside `content_el`'s own children) still overrides
+                                        // for the specific characters it covers, since GPUI's
+                                        // text style cascades to children and a child's own
+                                        // call wins. NOTE: a heading's larger font size can
+                                        // visually overflow this row's fixed `LINE_HEIGHT_PX`
+                                        // by design — `expand_rows_for_display` reserves
+                                        // blank spacer rows after this one sized for exactly
+                                        // that overflow (see `slot_count_for_paragraph`), so
+                                        // it spills into empty space rather than the next
+                                        // row's content; still needs real-hardware
+                                        // verification (this sandbox has no display) to
+                                        // confirm how it actually looks.
+                                        let heading =
+                                            paragraphs.get(li).map(|p| p.heading).unwrap_or(0);
+                                        // `normal_size_px` (settings.conf's `normal_text_size`,
+                                        // read once above as `normal_text_size_half_points`)
+                                        // is the visual default for any run with no explicit
+                                        // `FontSize` override (`size == 0` — brand-new
+                                        // documents' single default run, and any plain-typed
+                                        // text) — a run-level or heading-level override still
+                                        // wins underneath, same as before this was configurable.
+                                        // The row's base font size, and the line box that
+                                        // goes with it. `.line_height()` writes into the
+                                        // cascading text style, so every span in this row —
+                                        // including the ones carrying a highlight background
+                                        // or an emphasis ring — is laid out in a box this
+                                        // tall instead of GPUI's default golden-ratio one.
+                                        // See `text_line_box_px` for why that default is
+                                        // what made highlights cover each other.
+                                        // The same size the row's space was reserved against
+                                        // (`line_font_px`), not just the heading size — a
+                                        // manually enlarged run in a plain paragraph grows the
+                                        // reservation, so its line box has to grow with it or
+                                        // its highlight would be painted shorter than its own
+                                        // glyphs.
+                                        let row_font_px =
+                                            line_font_px(paragraphs.get(li), zoom, normal_size_px);
+                                        let row_div = div()
+                                            .font_family(body_font.clone())
+                                            .text_size(px(normal_size_px * zoom))
+                                            .line_height(px(text_line_box_px(row_font_px)))
+                                            .text_color(rgb(p.text));
+                                        let row_div = match heading_font_size_px(heading, zoom) {
+                                            Some(size) => row_div
+                                                .text_size(px(size))
+                                                .font_weight(FontWeight::BOLD),
+                                            None => row_div,
+                                        };
+                                        row_div
+                                            // Locks this row's height so wrapping stays fully
+                                            // decided by `wrap_line_into_rows` up front — nowrap
+                                            // stops GPUI from *also* word-wrapping this row's text
+                                            // internally if CHAR_WIDTH_PX's monospace estimate
+                                            // ever slightly overshoots the real glyph width, which
+                                            // would otherwise grow this div past one row and break
+                                            // the fixed-row-height assumption click/scroll math relies on.
+                                            .whitespace_nowrap()
+                                            // `.h()`, not `.min_h()` — uniform_list measures
+                                            // exactly one row (`measure_item`, always at
+                                            // `list_width: None` i.e. unconstrained/MinContent
+                                            // width — confirmed in the vendored gpui source,
+                                            // `elements/uniform_list.rs`'s `request_layout`/
+                                            // `prepaint`) and applies *that single row's*
+                                            // height to *every* row in the whole list
+                                            // (`item_top = item_height * item_index`, same
+                                            // file). `.min_h()` only floors the height, so
+                                            // any row whose content naturally measures taller
+                                            // than `LINE_HEIGHT_PX` under that unconstrained-
+                                            // width measurement pass — which any wrapped or
+                                            // multi-span row can — poisoned every row's
+                                            // spacing uniformly (found from a real bug
+                                            // report: lines rendering ~2x too far apart, and
+                                            // auto-scroll/scroll-to-cursor firing late since
+                                            // their pixel math assumes exactly
+                                            // `LINE_HEIGHT_PX` per row). An explicit `.h()`
+                                            // is a fixed layout size independent of content
+                                            // or measurement width, so `measure_item` always
+                                            // returns exactly `LINE_HEIGHT_PX * zoom`
+                                            // regardless of which row it happens to measure.
+                                            // A heading's larger font can still visually
+                                            // overflow this box (unchanged from before this
+                                            // fix, still not clipped since overflow stays
+                                            // visible — see the comment on `heading` above).
+                                            .h(px(row_slot_px(normal_size_px, line_spacing, zoom)))
+                                            // Column direction + justify_end bottom-aligns
+                                            // `content_el` within this fixed-height slot when
+                                            // it's shorter (a Shrunk line next to normal-size
+                                            // ones) instead of the block-layout default of
+                                            // sitting flush at the top with empty space below.
+                                            // Column's *cross* axis is horizontal and defaults
+                                            // to `Stretch`, so this doesn't change width
+                                            // behavior — `content_el` still fills the row
+                                            // exactly as it did as a plain block child, which
+                                            // is what its own internal justify_center/
+                                            // justify_end (paragraph alignment) and the
+                                            // Pocket box's `w_full()` depend on.
+                                            //
+                                            // `.w_full()`: this row_div is a genuine Taffy
+                                            // *root* for this layout pass — uniform_list's
+                                            // paint loop calls `item.layout_as_root(available_space)`
+                                            // per row (`elements/uniform_list.rs`) — and
+                                            // Taffy's root-sizing carve-out that auto-stretches
+                                            // an unsized node to its available space only
+                                            // applies to `display: block` nodes
+                                            // (`compute_root_layout`, gated on
+                                            // `style.is_block()`); this is `display: flex`,
+                                            // so with no width of its own it fell through to
+                                            // ordinary flex content-sizing and hugged its
+                                            // widest child instead — the real reason
+                                            // alignment silently did nothing no matter what
+                                            // was set further down the tree (`line_div`'s own
+                                            // `w_full()`, `box_div`'s too, both resolve
+                                            // against *this* node's width, which was never
+                                            // definite). Confirmed by reading Taffy's actual
+                                            // `compute_root_layout`/`perform_child_layout`
+                                            // source, not guessed — this is the fourth
+                                            // reported attempt at this bug, and the first
+                                            // three all added width one or more levels too
+                                            // low to matter.
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .justify_end()
+                                            // Marks this row as the hover group the fold
+                                            // marker inside it watches.
+                                            .group(FOLD_ROW_GROUP)
+                                            .child(content_el)
+                                            .into_any_element()
+                                    })
+                                    .collect()
+                            }
+                        })
+                        // `uniform_list` is the actual scrollable element now (it
+                        // sets vertical overflow internally); padding/border move
+                        // here from the old outer div for the reason explained
+                        // above this `.child(...)` block.
+                        .with_decoration(ScrollbarDecoration {
+                            scroll_handle: self.scroll_handle.clone(),
+                            grab_offset: self.scrollbar_grab.clone(),
+                            pressed: self.scrollbar_pressed.clone(),
+                            activity: scrollbar_activity,
+                            track: p.editor_bg_raised,
+                            thumb: p.border,
+                            thumb_hover: p.text_muted,
+                        })
+                        .track_scroll(&self.uniform_list_scroll_handle)
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .w_full()
+                        // Prevent long lines from expanding the editor past its
+                        // flex_1 allocation — uniform_list only constrains the
+                        // vertical axis internally, same as the old div's own
+                        // `.overflow_y_scroll()` needed an explicit
+                        // `.overflow_x_hidden()` alongside it.
+                        .overflow_x_hidden()
+                        // Scrollbar thumb drag. `on_drag_move` dispatches in the
+                        // capture phase and checks only the drag's *type*, not the
+                        // pointer's position (gpui's `Interactivity::on_drag_move`),
+                        // so this keeps tracking after the cursor leaves the thumb —
+                        // or the editor entirely — which is what dragging a scrollbar
+                        // demands. Registered here rather than on the thumb because
+                        // the thumb is rebuilt every frame by the decoration.
+                        .on_drag_move({
+                            let scroll_handle = self.scroll_handle.clone();
+                            let grab = self.scrollbar_grab.clone();
+                            move |e: &DragMoveEvent<ScrollbarDragPayload>, _window, cx| {
+                                let d = e.drag(cx);
+                                if d.travel <= 0.0 {
+                                    return;
+                                }
+                                // Where the thumb's *top* would sit if it followed the
+                                // pointer, keeping the grab point under the cursor.
+                                let thumb_top =
+                                    e.event.position.y.as_f32() - grab.get() - d.track_top;
+                                let fraction = (thumb_top / d.travel).clamp(0.0, 1.0);
+                                let offset = scroll_handle.offset();
+                                // Negative Y scrolls down, matching every other scroll
+                                // path in this file.
+                                scroll_handle
+                                    .set_offset(point(offset.x, px(-(fraction * d.max_scroll))));
+                                cx.refresh_windows();
+                            }
+                        })
+                        .p(px(16.0))
+                        // Thin focus ring so the user can tell where key input lands
+                        .border_1()
+                        .border_color(if is_focused {
+                            rgb(p.accent)
+                        } else {
+                            rgb(p.editor_bg)
+                        }),
+                    ), // closes the "text-editor" div's .child(uniform_list...)
             ) // closes the scrollable-editor .child(...) on the wrapper
             .child({
                 // Mode indicator (spec 5.1) — a sibling below the scrollable
@@ -2916,7 +3440,9 @@ impl Render for TextEditor {
                 // line, matching real vim's bottom-right pending-keys echo.
                 let mut line = mode_indicator_text.unwrap_or("").to_string();
                 if let Some(pending) = &pending_command_text {
-                    if !line.is_empty() { line.push(' '); }
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
                     line.push_str(pending);
                 }
                 div()
@@ -2928,15 +3454,18 @@ impl Render for TextEditor {
                     .text_color(rgb(p.text))
                     .child(line)
             })
-            .when_some(self.state.read(cx).editor_context_menu.clone(), |el, menu| {
-                let has_selection = self
-                    .state
-                    .read(cx)
-                    .tabs
-                    .get(self.tab_index(cx).unwrap_or(usize::MAX))
-                    .is_some_and(|t| t.selection.is_some());
-                el.child(render_context_menu(menu, p, has_selection, &self.state))
-            })
+            .when_some(
+                self.state.read(cx).editor_context_menu.clone(),
+                |el, menu| {
+                    let has_selection = self
+                        .state
+                        .read(cx)
+                        .tabs
+                        .get(self.tab_index(cx).unwrap_or(usize::MAX))
+                        .is_some_and(|t| t.selection.is_some());
+                    el.child(render_context_menu(menu, p, has_selection, &self.state))
+                },
+            )
     }
 }
 
@@ -2973,14 +3502,20 @@ fn render_context_menu(
             .items_center()
             .text_sm()
             .text_color(rgb(if enabled { color } else { p.text_faint }))
-            .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(rgb(p.chrome_hover))))
+            .when(enabled, |d| {
+                d.cursor_pointer().hover(move |s| s.bg(rgb(p.chrome_hover)))
+            })
             .child(label)
     };
     let separator = || div().h(px(1.0)).my(px(4.0)).bg(rgb(p.border_subtle));
 
     // Cut/Copy are no-ops without a selection; show them muted rather than
     // hiding them so the menu doesn't change shape between clicks.
-    let action_item = |id: &'static str, label: &'static str, enabled: bool, action: fn() -> Box<dyn Action>, state: Entity<AppState>| {
+    let action_item = |id: &'static str,
+                       label: &'static str,
+                       enabled: bool,
+                       action: fn() -> Box<dyn Action>,
+                       state: Entity<AppState>| {
         row(id.into(), label.to_string(), enabled, p.text).when(enabled, |d| {
             d.on_click(move |_ev, window, cx| {
                 state.update(cx, |s, cx| {
@@ -3030,14 +3565,19 @@ fn render_context_menu(
                 let target = target.clone();
                 let replacement = suggestion.clone();
                 panel = panel.child(
-                    row(("editor-ctx-suggestion", i).into(), suggestion.clone(), true, p.text)
-                        .on_click(move |_ev, _window, cx| {
-                            state.update(cx, |s, cx| {
-                                s.replace_spell_target(&target, &replacement);
-                                s.editor_context_menu = None;
-                                cx.notify();
-                            });
-                        }),
+                    row(
+                        ("editor-ctx-suggestion", i).into(),
+                        suggestion.clone(),
+                        true,
+                        p.text,
+                    )
+                    .on_click(move |_ev, _window, cx| {
+                        state.update(cx, |s, cx| {
+                            s.replace_spell_target(&target, &replacement);
+                            s.editor_context_menu = None;
+                            cx.notify();
+                        });
+                    }),
                 );
             }
         }
@@ -3046,41 +3586,67 @@ fn render_context_menu(
 
     // ── Clipboard ──────────────────────────────────────────────────────────
     panel = panel
-        .child(action_item("editor-ctx-cut", "Cut", has_selection, || Box::new(CutAction), state_handle.clone()))
-        .child(action_item("editor-ctx-copy", "Copy", has_selection, || Box::new(CopyAction), state_handle.clone()))
-        .child(action_item("editor-ctx-paste", "Paste", true, || Box::new(PasteAction), state_handle.clone()));
+        .child(action_item(
+            "editor-ctx-cut",
+            "Cut",
+            has_selection,
+            || Box::new(CutAction),
+            state_handle.clone(),
+        ))
+        .child(action_item(
+            "editor-ctx-copy",
+            "Copy",
+            has_selection,
+            || Box::new(CopyAction),
+            state_handle.clone(),
+        ))
+        .child(action_item(
+            "editor-ctx-paste",
+            "Paste",
+            true,
+            || Box::new(PasteAction),
+            state_handle.clone(),
+        ));
 
     // ── Add to Dictionary ──────────────────────────────────────────────────
     if let Some(target) = &menu.spell_target {
         let state = state_handle.clone();
         let word = target.word.clone();
         panel = panel.child(separator()).child(
-            row("editor-ctx-add-to-dict".into(), "Add to Dictionary".to_string(), true, p.text)
-                .on_click(move |_ev, _window, cx| {
-                    state.update(cx, |s, cx| {
-                        s.add_to_user_dictionary(&word);
-                        s.editor_context_menu = None;
-                        cx.notify();
-                    });
-                }),
+            row(
+                "editor-ctx-add-to-dict".into(),
+                "Add to Dictionary".to_string(),
+                true,
+                p.text,
+            )
+            .on_click(move |_ev, _window, cx| {
+                state.update(cx, |s, cx| {
+                    s.add_to_user_dictionary(&word);
+                    s.editor_context_menu = None;
+                    cx.notify();
+                });
+            }),
         );
     }
 
     let dismiss_state = state_handle.clone();
     deferred(
-        anchored().position(point(px(x), px(y))).snap_to_window().child(
-            div()
-                .id("editor-context-menu-dismiss")
-                .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
-                    dismiss_state.update(cx, |s, cx| {
-                        if s.editor_context_menu.is_some() {
-                            s.editor_context_menu = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .child(panel),
-        ),
+        anchored()
+            .position(point(px(x), px(y)))
+            .snap_to_window()
+            .child(
+                div()
+                    .id("editor-context-menu-dismiss")
+                    .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
+                        dismiss_state.update(cx, |s, cx| {
+                            if s.editor_context_menu.is_some() {
+                                s.editor_context_menu = None;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(panel),
+            ),
     )
     .with_priority(1)
     .into_any_element()
@@ -3092,7 +3658,7 @@ fn render_context_menu(
 /// the bundled fonts) and why swapping it for a space here can't desync any
 /// offset-based computation downstream (cursor/selection/misspelled ranges
 /// all index by position, not content). Never touches the actual document
-/// model — callers pass in a line already read out of `tab.content`/
+/// model — callers pass in a line already read out of `tab.document.content`/
 /// `paragraphs`, which still holds the real character for undo/.docx
 /// export/Verbatim round-trip fidelity.
 ///
@@ -3194,7 +3760,14 @@ fn render_line(
     // Cheap pre-check: a card-style line hides nothing, so it keeps the fast
     // path. Passing a non-bold, size-0 run means "could plain body text hide
     // here?" — if not, nothing on this line can.
-    let hides_anything = run_is_hidden(invisibility, heading, false, false, 0, cite_size_half_points);
+    let hides_anything = run_is_hidden(
+        invisibility,
+        heading,
+        false,
+        false,
+        0,
+        cite_size_half_points,
+    );
 
     // The fast paths below emit one element for the whole row, which cannot
     // express "some runs drawn, some not" — fall through to the per-run path
@@ -3203,7 +3776,10 @@ fn render_line(
     // return here is a bare div with no room to compose a leading gutter
     // element beside it, which would silently drop the marker on exactly
     // the most common case (a plain, single-run, unformatted list item).
-    if !hides_anything && cursor_col.is_none() && selections.is_empty() && misspelled.is_empty()
+    if !hides_anything
+        && cursor_col.is_none()
+        && selections.is_empty()
+        && misspelled.is_empty()
         && list_marker.is_none()
     {
         // Don't take any fast path if alignment or a box-shaped visual is
@@ -3235,7 +3811,9 @@ fn render_line(
                     return line.to_string().into_any_element();
                 }
                 if !needs_alignment && !paints_run_box(run) {
-                    return apply_run_style(div(), run, zoom, pal).child(line.to_string()).into_any_element();
+                    return apply_run_style(div(), run, zoom, pal)
+                        .child(line.to_string())
+                        .into_any_element();
                 }
             }
         }
@@ -3514,7 +4092,11 @@ fn render_segment(
     // the glyph color — but deliberately *not* over their backgrounds: the
     // caret and the selection stay visible while reading, which is what makes
     // the mode navigable rather than a blank page.
-    let el = if hidden { el.text_color(transparent_black()) } else { el };
+    let el = if hidden {
+        el.text_color(transparent_black())
+    } else {
+        el
+    };
 
     let formatting_underline = run.is_some_and(|r| r.underline || r.double_underline);
     // Hidden text's real underline already renders transparent via the
@@ -3536,7 +4118,8 @@ fn render_segment(
     // the glyph color (line.rs's `unwrap_or(style_run.color)`), which here
     // is transparent — so the color must be set explicitly, same as the
     // squiggle overlay's `.text_decoration_color()` a few lines down.
-    let underline_hex = run.and_then(|r| r.color.as_deref())
+    let underline_hex = run
+        .and_then(|r| r.color.as_deref())
         .and_then(|c| u32::from_str_radix(c, 16).ok())
         .unwrap_or(pal.text);
     let double_underline_overlay = double_underline.then(|| {
@@ -3604,11 +4187,21 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
      */
     let Some(run) = run else { return el };
     let mut el = el;
-    if run.bold { el = el.font_weight(FontWeight::BOLD); }
-    if run.italic { el = el.italic(); }
-    if run.underline { el = el.underline(); }
-    if run.double_underline { el = el.underline(); }
-    if run.strikethrough { el = el.line_through(); }
+    if run.bold {
+        el = el.font_weight(FontWeight::BOLD);
+    }
+    if run.italic {
+        el = el.italic();
+    }
+    if run.underline {
+        el = el.underline();
+    }
+    if run.double_underline {
+        el = el.underline();
+    }
+    if run.strikethrough {
+        el = el.line_through();
+    }
     // Note: box_format is applied at the line level in render_line(), not here at the run level
     //
     // An inset box-shadow, not `border_1()`: a real border is part of
@@ -3631,7 +4224,9 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     }
     if run.highlight {
         let base_hex = highlight_color_hex(&run.highlight_color);
-        let text_hex = run.color.as_deref()
+        let text_hex = run
+            .color
+            .as_deref()
             .and_then(|c| u32::from_str_radix(c, 16).ok())
             .unwrap_or(pal.text);
         // Word darkens a light highlight sitting under light text so the text
@@ -3814,9 +4409,19 @@ pub(crate) fn to_letter(n: u32) -> String {
 /// range (well past 100) with the standard subtractive-notation table.
 pub(crate) fn to_roman(n: u32) -> String {
     const TABLE: [(u32, &str); 13] = [
-        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
-        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
-        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
     ];
     let mut n = n;
     let mut out = String::new();
@@ -3909,7 +4514,9 @@ pub(crate) fn list_marker_text_for_level(kind: ListKind, level: u8, ordinal: u32
 /// meaningless — callers only invoke this after checking
 /// `paragraphs[index].list.is_some()`.
 pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
-    let Some(run_kind) = paragraphs[index].list.map(|item| item.kind) else { return 1 };
+    let Some(run_kind) = paragraphs[index].list.map(|item| item.kind) else {
+        return 1;
+    };
     let mut ordinal = 1u32;
     let mut i = index;
     while i > 0 && paragraphs[i - 1].list.map(|item| item.kind) == Some(run_kind) {
@@ -3978,7 +4585,9 @@ pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
 /// Returns the plain body size for the cases the reservation treats as one
 /// ordinary line — no paragraph data, and Tag (`heading == 4`).
 fn line_font_px(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> f32 {
-    let Some(para) = para else { return normal_size_px * zoom };
+    let Some(para) = para else {
+        return normal_size_px * zoom;
+    };
     if para.heading == 4 {
         return normal_size_px * zoom;
     }
@@ -4004,13 +4613,25 @@ fn line_font_px(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> f32
     // only relevant when no run carries an explicit size — plain document
     // headings with no card-style override.
     let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-    if run_max_px > 0.0 { run_max_px } else { heading_px }.max(normal_size_px * zoom)
+    if run_max_px > 0.0 {
+        run_max_px
+    } else {
+        heading_px
+    }
+    .max(normal_size_px * zoom)
 }
 
-fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32, line_spacing: f32) -> usize {
+fn slot_count_for_paragraph(
+    para: Option<&Paragraph>,
+    zoom: f32,
+    normal_size_px: f32,
+    line_spacing: f32,
+) -> usize {
     // Both early returns mean "exactly one ordinary line", which is
     // `ROW_SUBDIVISIONS` slots now rather than a single one.
-    let Some(para) = para else { return ROW_SUBDIVISIONS };
+    let Some(para) = para else {
+        return ROW_SUBDIVISIONS;
+    };
     if para.heading == 4 {
         return ROW_SUBDIVISIONS;
     }
@@ -4023,7 +4644,11 @@ fn slot_count_for_paragraph(para: Option<&Paragraph>, zoom: f32, normal_size_px:
     }
     let needed_px = font_px * LINE_HEIGHT_RATIO
         + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 }
-        + if has_emphasis_box { EMPHASIS_BOX_EXTRA_PX } else { 0.0 };
+        + if has_emphasis_box {
+            EMPHASIS_BOX_EXTRA_PX
+        } else {
+            0.0
+        };
     // The epsilon keeps an exact fit from rounding up. A plain line's height
     // is `ROW_SUBDIVISIONS` slots exactly, but that division is float math:
     // a result of 6.0000001 would `ceil` to 7 and make every ordinary line in
@@ -4075,7 +4700,9 @@ pub(crate) fn hidden_wrap_rows(
     }
     rows.iter()
         .map(|&(li, row_start, row_end)| {
-            let Some(para) = paragraphs.get(li) else { return true };
+            let Some(para) = paragraphs.get(li) else {
+                return true;
+            };
             if folded_paras.get(li).copied().unwrap_or(false) {
                 return true;
             }
@@ -4085,21 +4712,23 @@ pub(crate) fn hidden_wrap_rows(
             if para.heading != 0 {
                 return false; // a card-style line stays whole
             }
-            !paragraph_run_char_spans(para).into_iter().any(|(s, e, run_idx)| {
-                // Only runs actually on this row decide it.
-                if s.max(row_start) >= e.min(row_end) {
-                    return false;
-                }
-                let run = para.runs.get(run_idx);
-                !run_is_hidden(
-                    true,
-                    para.heading,
-                    run.is_some_and(|r| r.highlight),
-                    run.is_some_and(|r| r.bold),
-                    run.map(|r| r.size).unwrap_or(0),
-                    cite_size_half_points,
-                )
-            })
+            !paragraph_run_char_spans(para)
+                .into_iter()
+                .any(|(s, e, run_idx)| {
+                    // Only runs actually on this row decide it.
+                    if s.max(row_start) >= e.min(row_end) {
+                        return false;
+                    }
+                    let run = para.runs.get(run_idx);
+                    !run_is_hidden(
+                        true,
+                        para.heading,
+                        run.is_some_and(|r| r.highlight),
+                        run.is_some_and(|r| r.bold),
+                        run.map(|r| r.size).unwrap_or(0),
+                        cite_size_half_points,
+                    )
+                })
         })
         .collect()
 }
@@ -4134,7 +4763,8 @@ pub(crate) fn expand_rows_for_display(
         // filler itself just added unused space below. `wrap_to_display`
         // still has to point at the content slot specifically (not the first
         // filler), since cursor/scroll pixel math is keyed off it.
-        let slots = slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px, line_spacing);
+        let slots =
+            slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px, line_spacing);
         for _ in 1..slots {
             display_to_wrap.push(None);
         }
@@ -4161,7 +4791,11 @@ fn usable_wrap_width(viewport_width_px: f32) -> f32 {
     // only while the bar is visible would re-wrap the whole document (and
     // invalidate the row cache) the moment a document grew past one screen.
     let usable = viewport_width_px - 2.0 * CONTENT_PADDING_PX - SCROLLBAR_GUTTER_PX;
-    if usable <= 0.0 { f32::MAX } else { usable }
+    if usable <= 0.0 {
+        f32::MAX
+    } else {
+        usable
+    }
 }
 
 pub(crate) fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnMut(char) -> f32 {
@@ -4217,13 +4851,17 @@ pub(crate) fn char_width_fn(cx: &App, font: Font, font_size_px: f32) -> impl FnM
             if let Some(w) = ascii_cache[idx] {
                 return w;
             }
-            let w = text_system.layout_width(font_id, px(font_size_px), c).as_f32();
+            let w = text_system
+                .layout_width(font_id, px(font_size_px), c)
+                .as_f32();
             ascii_cache[idx] = Some(w);
             w
         } else if let Some(&w) = other_cache.get(&c) {
             w
         } else {
-            let w = text_system.layout_width(font_id, px(font_size_px), c).as_f32();
+            let w = text_system
+                .layout_width(font_id, px(font_size_px), c)
+                .as_f32();
             other_cache.insert(c, w);
             w
         }
@@ -4269,7 +4907,10 @@ pub(crate) fn visual_rows_for_viewport(
     // measurement closure is built lazily, the first time a run actually
     // names it, and reused for the rest of this wrap pass.
     let mut measures: HashMap<String, Box<dyn FnMut(char) -> f32>> = HashMap::new();
-    measures.insert(FONT_FAMILY.to_string(), Box::new(char_width_fn(cx, font(FONT_FAMILY), reference_px)));
+    measures.insert(
+        FONT_FAMILY.to_string(),
+        Box::new(char_width_fn(cx, font(FONT_FAMILY), reference_px)),
+    );
     measures.insert(
         CURATED_SERIF_FONT.to_string(),
         Box::new(char_width_fn(cx, font(CURATED_SERIF_FONT), reference_px)),
@@ -4293,19 +4934,30 @@ pub(crate) fn visual_rows_for_viewport(
                 .unwrap_or_default();
             cached_spans = Some((line_idx, spans));
         }
-        let spans = cached_spans.as_ref().map(|(_, s)| s.as_slice()).unwrap_or(&[]);
+        let spans = cached_spans
+            .as_ref()
+            .map(|(_, s)| s.as_slice())
+            .unwrap_or(&[]);
         let para = paragraphs.get(line_idx);
         let size = effective_char_size_px(para, spans, char_idx, normal_size_px, zoom);
         let font_name = effective_char_font(para, spans, char_idx);
-        let measure = measures
-            .entry(font_name.to_string())
-            .or_insert_with(|| Box::new(char_width_fn(cx, font(font_name.into_owned()), reference_px)));
+        let measure = measures.entry(font_name.to_string()).or_insert_with(|| {
+            Box::new(char_width_fn(
+                cx,
+                font(font_name.into_owned()),
+                reference_px,
+            ))
+        });
         let measured = measure(ch);
         // A glyph's advance scales linearly with font size (true of any
         // font, not just a monospace one — vector outlines scale uniformly
         // with point size), so one real glyph measurement at the reference
         // size covers every size on the row.
-        if reference_px > 0.0 { measured * (size / reference_px) } else { measured }
+        if reference_px > 0.0 {
+            measured * (size / reference_px)
+        } else {
+            measured
+        }
     };
 
     build_visual_rows(lines, usable_wrap_width(viewport_width_px), &mut width_at)
@@ -4367,7 +5019,11 @@ fn wrap_line_into_rows(
         rows.push((row_start, row_end));
         // Skip the space itself when we broke on one, so it doesn't reappear
         // as a leading character on the next row.
-        row_start = if last_space.is_some() { row_end + 1 } else { row_end };
+        row_start = if last_space.is_some() {
+            row_end + 1
+        } else {
+            row_end
+        };
     }
     rows
 }
@@ -4396,7 +5052,11 @@ fn build_visual_rows(
     rows
 }
 
-fn visual_row_for_line_col(rows: &[(usize, usize, usize)], logical_line: usize, char_col: usize) -> usize {
+fn visual_row_for_line_col(
+    rows: &[(usize, usize, usize)],
+    logical_line: usize,
+    char_col: usize,
+) -> usize {
     /*
      * Finds the visual row that a (logical_line, char_col) cursor position
      * belongs to.
@@ -4422,13 +5082,16 @@ fn visual_row_for_line_col(rows: &[(usize, usize, usize)], logical_line: usize, 
      */
     let mut last_row_of_line = 0;
     for (idx, &(li, start, end)) in rows.iter().enumerate() {
-        if li != logical_line { continue; }
+        if li != logical_line {
+            continue;
+        }
         last_row_of_line = idx;
         if char_col >= start && char_col < end {
             return idx;
         }
         if char_col == end {
-            let next_is_contiguous = rows.get(idx + 1)
+            let next_is_contiguous = rows
+                .get(idx + 1)
                 .map(|&(next_li, next_start, _)| next_li == li && next_start == end)
                 .unwrap_or(false);
             if !next_is_contiguous {
@@ -4475,12 +5138,34 @@ fn visual_row_step(
         return None;
     }
     let (cur_line, cur_row_start, cur_row_end) = rows[current_row];
-    let cur_spans = paragraphs.get(cur_line).map(paragraph_run_char_spans).unwrap_or_default();
-    let target_x = x_for_col_in_row(col_in_row, paragraphs.get(cur_line), &cur_spans, cur_row_start, cur_row_end, normal_size_px, zoom);
+    let cur_spans = paragraphs
+        .get(cur_line)
+        .map(paragraph_run_char_spans)
+        .unwrap_or_default();
+    let target_x = x_for_col_in_row(
+        col_in_row,
+        paragraphs.get(cur_line),
+        &cur_spans,
+        cur_row_start,
+        cur_row_end,
+        normal_size_px,
+        zoom,
+    );
 
     let (target_line, target_row_start, target_row_end) = rows[target_row as usize];
-    let target_spans = paragraphs.get(target_line).map(paragraph_run_char_spans).unwrap_or_default();
-    let target_col_in_row = column_for_x_in_row(target_x, paragraphs.get(target_line), &target_spans, target_row_start, target_row_end, normal_size_px, zoom);
+    let target_spans = paragraphs
+        .get(target_line)
+        .map(paragraph_run_char_spans)
+        .unwrap_or_default();
+    let target_col_in_row = column_for_x_in_row(
+        target_x,
+        paragraphs.get(target_line),
+        &target_spans,
+        target_row_start,
+        target_row_end,
+        normal_size_px,
+        zoom,
+    );
     Some((target_line, target_row_start + target_col_in_row))
 }
 
@@ -4532,7 +5217,11 @@ fn effective_char_size_px(
 /// `Cow::Borrowed` for the two compile-time-known outcomes (no allocation on
 /// the hot path); `Cow::Owned` only when the run names an imported font,
 /// whose name isn't `'static`.
-fn effective_char_font(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> Cow<'static, str> {
+fn effective_char_font(
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    char_idx: usize,
+) -> Cow<'static, str> {
     let run = spans
         .iter()
         .find(|(start, end, _)| char_idx >= *start && char_idx < *end)
@@ -4553,7 +5242,11 @@ fn effective_char_font(para: Option<&Paragraph>, spans: &[(usize, usize, usize)]
 /// belongs to, even though wrap uses real glyph measurement and this stays
 /// the cheaper ratio approximation — see `SERIF_CHAR_ADVANCE_RATIO`'s doc
 /// comment for why that's an acceptable tradeoff here).
-fn effective_char_advance_ratio(para: Option<&Paragraph>, spans: &[(usize, usize, usize)], char_idx: usize) -> f32 {
+fn effective_char_advance_ratio(
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    char_idx: usize,
+) -> f32 {
     match effective_char_font(para, spans, char_idx).as_ref() {
         CURATED_SERIF_FONT => SERIF_CHAR_ADVANCE_RATIO,
         FONT_FAMILY => CHAR_ADVANCE_RATIO,
@@ -4636,8 +5329,12 @@ fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
      * below the last row still lands on it rather than panicking on an
      * out-of-range row index.
      */
-    if line_height <= 0.0 || num_rows == 0 { return 0; }
-    if y <= 0.0 { return 0; }
+    if line_height <= 0.0 || num_rows == 0 {
+        return 0;
+    }
+    if y <= 0.0 {
+        return 0;
+    }
     ((y / line_height) as usize).min(num_rows - 1)
 }
 
@@ -4666,7 +5363,13 @@ fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
 /// computed value before any layout has run yet (`last_item_size` is
 /// `None` until then) or when `item_count` is 0, same "not laid out yet"
 /// sentinel pattern `usable_wrap_width` already uses.
-pub(crate) fn real_row_height_px(handle: &UniformListScrollHandle, item_count: usize, font_size_px: f32, zoom: f32, line_spacing: f32) -> f32 {
+pub(crate) fn real_row_height_px(
+    handle: &UniformListScrollHandle,
+    item_count: usize,
+    font_size_px: f32,
+    zoom: f32,
+    line_spacing: f32,
+) -> f32 {
     if item_count == 0 {
         return row_slot_px(font_size_px, line_spacing, zoom);
     }
@@ -4730,7 +5433,10 @@ pub(crate) fn line_col_from_mouse_position(
     // Subtract the container's padding (spec: `.p(px(16.0))` in render())
     // so (0, 0) lines up with the first character of the text.
     let local_x = position.x.as_f32() - content_bounds.origin.x.as_f32() - CONTENT_PADDING_PX;
-    let local_y = position.y.as_f32() - content_bounds.origin.y.as_f32() - CONTENT_PADDING_PX - scroll_offset_y;
+    let local_y = position.y.as_f32()
+        - content_bounds.origin.y.as_f32()
+        - CONTENT_PADDING_PX
+        - scroll_offset_y;
     let display_row = line_for_y(local_y, row_height_px, display_to_wrap.len());
 
     // A click landing on a blank spacer slot (the empty space an oversized
@@ -4755,7 +5461,15 @@ pub(crate) fn line_col_from_mouse_position(
     // assumed the row's content fills (`render()`'s `content_el` sits in a
     // `.w_full()` row with the same padding subtracted).
     use crate::docx_parser::Alignment;
-    let text_width = x_for_col_in_row(row_end - row_start, para, &spans, row_start, row_end, font_size_px, zoom);
+    let text_width = x_for_col_in_row(
+        row_end - row_start,
+        para,
+        &spans,
+        row_start,
+        row_end,
+        font_size_px,
+        zoom,
+    );
     let avail_width = usable_wrap_width(content_bounds.size.width.as_f32());
     let indent = match para.map(|p| p.alignment) {
         Some(Alignment::Center) => ((avail_width - text_width) / 2.0).max(0.0),
@@ -4776,13 +5490,24 @@ pub(crate) fn line_col_from_mouse_position(
         _ => 0.0,
     };
     let col_in_row = column_for_x_in_row(
-        local_x - indent - gutter, para, &spans, row_start, row_end, font_size_px, zoom,
+        local_x - indent - gutter,
+        para,
+        &spans,
+        row_start,
+        row_end,
+        font_size_px,
+        zoom,
     );
     let col = row_start + col_in_row.min(row_end - row_start);
     (logical_line, col)
 }
 
-fn selection_span_for_line(line: &str, line_byte_start: usize, sel_start: usize, sel_end: usize) -> Option<(usize, usize)> {
+fn selection_span_for_line(
+    line: &str,
+    line_byte_start: usize,
+    sel_start: usize,
+    sel_end: usize,
+) -> Option<(usize, usize)> {
     /*
      * Maps a selection's document-wide byte range onto the char-column range
      * of a single line, or None if the selection doesn't touch this line at
@@ -4792,9 +5517,13 @@ fn selection_span_for_line(line: &str, line_byte_start: usize, sel_start: usize,
      * this line's visible characters). `sel_start`/`sel_end` must already be
      * normalized so `sel_start <= sel_end`.
      */
-    if sel_start == sel_end { return None; } // nothing selected
+    if sel_start == sel_end {
+        return None;
+    } // nothing selected
     let line_byte_end = line_byte_start + line.len();
-    if sel_end <= line_byte_start || sel_start >= line_byte_end { return None; }
+    if sel_end <= line_byte_start || sel_start >= line_byte_end {
+        return None;
+    }
 
     // Clamp each selection edge into this line's byte range, then convert
     // that relative byte offset into a char column (not byte column).
@@ -4804,7 +5533,9 @@ fn selection_span_for_line(line: &str, line_byte_start: usize, sel_start: usize,
     };
     let start_col = to_col(sel_start.max(line_byte_start));
     let end_col = to_col(sel_end.min(line_byte_end));
-    if start_col == end_col { return None; } // e.g. an empty line fully inside the selection
+    if start_col == end_col {
+        return None;
+    } // e.g. an empty line fully inside the selection
     Some((start_col, end_col))
 }
 
@@ -4842,7 +5573,12 @@ enum SegmentStyle {
 /// row's end column would wrongly also match every *earlier* run, since
 /// `c == row_len` alone says nothing about which run actually reaches that
 /// column.
-fn sub_cursor_for_run(cursor_col: Option<usize>, run_start: usize, run_end: usize, row_len: usize) -> Option<usize> {
+fn sub_cursor_for_run(
+    cursor_col: Option<usize>,
+    run_start: usize,
+    run_end: usize,
+    row_len: usize,
+) -> Option<usize> {
     cursor_col
         .filter(|&c| c >= run_start && (c < run_end || (run_end == row_len && c == row_len)))
         .map(|c| c - run_start)
@@ -4879,7 +5615,9 @@ fn line_segments(
     if let Some(c) = cursor_col {
         let c = c.min(len);
         breaks.push(c);
-        if c < len { breaks.push(c + 1); }
+        if c < len {
+            breaks.push(c + 1);
+        }
     }
     for &(s, e) in selections {
         breaks.push(s.min(len));
@@ -4895,7 +5633,9 @@ fn line_segments(
     let mut segments = Vec::new();
     for w in breaks.windows(2) {
         let (start, end) = (w[0], w[1]);
-        let is_cursor = cursor_col.map(|c| c.min(len) == start && end == start + 1).unwrap_or(false);
+        let is_cursor = cursor_col
+            .map(|c| c.min(len) == start && end == start + 1)
+            .unwrap_or(false);
         let in_selection = selections
             .iter()
             .any(|&(s, e)| start >= s.min(len) && end <= e.min(len));
@@ -4930,28 +5670,27 @@ mod tests {
     // sends the test-attribute expansion into infinite recursion if it's in
     // scope here.
     use super::{
-        column_for_x_in_row, x_for_col_in_row, effective_char_size_px, effective_char_font,
-        effective_char_advance_ratio, line_for_y, selection_span_for_line, row_edge_target_col, RowEdge,
-        nearest_wrap_row_for_display_row,
-        line_segments, sub_cursor_for_run, SegmentStyle, CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO,
-        FONT_FAMILY, CURATED_SERIF_FONT,
-        usable_wrap_width, wrap_line_into_rows, build_visual_rows, visual_row_for_line_col,
-        visual_row_step, document_lines, highlight_color_hex, heading_font_size_px,
-        relative_luminance, is_light_color, darken_for_light_text,
-        hidden_wrap_rows, page_scroll_offset, run_is_hidden, row_cache_is_valid_for, RowCache, slot_count_for_paragraph, expand_rows_for_display,
-        spell_ranges_cached, SpellCache, line_height_px, LINE_HEIGHT_PX, LINE_HEIGHT_RATIO,
-        CARD_BOX_EXTRA_PX, EMPHASIS_BOX_EXTRA_PX, ROW_SUBDIVISIONS, row_slot_px,
-        text_line_box_px, line_font_px, scrollbar_geometry, scrollbar_fade_opacity,
-        SCROLLBAR_MIN_THUMB_PX, SCROLLBAR_GUTTER_PX, SCROLLBAR_IDLE_OPACITY, display_line,
-        line_col_from_mouse_position, real_row_height_px, paints_run_box,
-        list_marker_text, to_roman, to_letter, list_item_ordinal, LIST_GUTTER_PX,
-        list_marker_text_for_level,
+        build_visual_rows, column_for_x_in_row, darken_for_light_text, display_line,
+        document_lines, effective_char_advance_ratio, effective_char_font, effective_char_size_px,
+        expand_rows_for_display, heading_font_size_px, hidden_wrap_rows, highlight_color_hex,
+        is_light_color, line_col_from_mouse_position, line_font_px, line_for_y, line_height_px,
+        line_segments, list_item_ordinal, list_marker_text, list_marker_text_for_level,
+        nearest_wrap_row_for_display_row, page_scroll_offset, paints_run_box, real_row_height_px,
+        relative_luminance, row_cache_is_valid_for, row_edge_target_col, row_slot_px,
+        run_is_hidden, scrollbar_fade_opacity, scrollbar_geometry, selection_span_for_line,
+        slot_count_for_paragraph, spell_ranges_cached, sub_cursor_for_run, text_line_box_px,
+        to_letter, to_roman, usable_wrap_width, visual_row_for_line_col, visual_row_step,
+        wrap_line_into_rows, x_for_col_in_row, RowCache, RowEdge, SegmentStyle, SpellCache,
+        CARD_BOX_EXTRA_PX, CHAR_ADVANCE_RATIO, CURATED_SERIF_FONT, EMPHASIS_BOX_EXTRA_PX,
+        FONT_FAMILY, LINE_HEIGHT_PX, LINE_HEIGHT_RATIO, LIST_GUTTER_PX, ROW_SUBDIVISIONS,
+        SCROLLBAR_GUTTER_PX, SCROLLBAR_IDLE_OPACITY, SCROLLBAR_MIN_THUMB_PX,
+        SERIF_CHAR_ADVANCE_RATIO,
     };
+    use crate::docx_parser::{Alignment, ListItem, ListKind, Paragraph, Run};
+    use crate::state::AppState;
     use std::cell::RefCell;
     use std::collections::HashSet;
     use std::rc::Rc;
-    use crate::state::AppState;
-    use crate::docx_parser::{Paragraph, Run, Alignment, ListItem, ListKind};
     use std::time::Instant;
 
     /// The three run properties that paint a box-shaped visual (background
@@ -4965,11 +5704,24 @@ mod tests {
     fn test_paints_run_box_covers_exactly_box_format_highlight_and_emphasis_boxed() {
         assert!(!paints_run_box(None));
         assert!(!paints_run_box(Some(&Run::default())));
-        assert!(paints_run_box(Some(&Run { box_format: true, ..Run::default() })));
-        assert!(paints_run_box(Some(&Run { highlight: true, ..Run::default() })));
-        assert!(paints_run_box(Some(&Run { emphasis_boxed: true, ..Run::default() })));
+        assert!(paints_run_box(Some(&Run {
+            box_format: true,
+            ..Run::default()
+        })));
+        assert!(paints_run_box(Some(&Run {
+            highlight: true,
+            ..Run::default()
+        })));
+        assert!(paints_run_box(Some(&Run {
+            emphasis_boxed: true,
+            ..Run::default()
+        })));
         // A plain style property (no box shape) must not trip the exclusion.
-        assert!(!paints_run_box(Some(&Run { bold: true, underline: true, ..Run::default() })));
+        assert!(!paints_run_box(Some(&Run {
+            bold: true,
+            underline: true,
+            ..Run::default()
+        })));
     }
 
     /// A plain body-text row: 11px text (settings.conf's `normal_text_size`)
@@ -5002,7 +5754,10 @@ mod tests {
         // And no row may exceed the budget at the larger size.
         for (start, end) in &large_rows {
             let width = (end - start) as f32 * 14.4;
-            assert!(width <= 100.0, "row {start}..{end} is {width}px, over budget");
+            assert!(
+                width <= 100.0,
+                "row {start}..{end} is {width}px, over budget"
+            );
         }
     }
 
@@ -5023,7 +5778,10 @@ mod tests {
         );
         // No tab present: no allocation-worthy change, and (implementation
         // detail worth locking in) no unnecessary copy.
-        assert!(matches!(display_line("plain text"), std::borrow::Cow::Borrowed(_)));
+        assert!(matches!(
+            display_line("plain text"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     /// Bug report: a line was entirely invisible unless the cursor sat on
@@ -5053,14 +5811,21 @@ mod tests {
     #[test]
     fn test_wrap_respects_a_size_change_partway_through_a_row() {
         let chars: Vec<char> = "aaaaaaaaaaaaaaaaaaaa".chars().collect(); // 20
-        // First 10 characters small, the rest large.
+                                                                         // First 10 characters small, the rest large.
         let mut width_of = |i: usize, _: char| if i < 10 { 5.0f32 } else { 20.0 };
         let rows = wrap_line_into_rows(&chars, 100.0, &mut width_of);
 
         // 10 small chars fill exactly 50px, then two large ones reach 90px and
         // a third would overflow — so the first row must stop before char 13.
-        assert!(rows[0].1 <= 13, "first row ran to {} despite the larger tail", rows[0].1);
-        assert!(rows.len() > 1, "the larger tail must be pushed onto another row");
+        assert!(
+            rows[0].1 <= 13,
+            "first row ran to {} despite the larger tail",
+            rows[0].1
+        );
+        assert!(
+            rows.len() > 1,
+            "the larger tail must be pushed onto another row"
+        );
     }
 
     #[test]
@@ -5099,7 +5864,10 @@ mod tests {
     #[test]
     fn line_col_from_mouse_position_accounts_for_center_alignment() {
         use gpui::{point, px, size, Bounds};
-        let para = Paragraph { alignment: Alignment::Center, ..Paragraph::default() };
+        let para = Paragraph {
+            alignment: Alignment::Center,
+            ..Paragraph::default()
+        };
         let paragraphs = vec![para];
         let rows = vec![(0usize, 0usize, 10usize)]; // one row, 10 chars
         let display_to_wrap = vec![Some(0usize)];
@@ -5118,7 +5886,14 @@ mod tests {
         // instead (67 / 6.6 ≈ 10, clamped to row_end - row_start).
         let position = point(px(16.0 + indent), px(0.0));
         let (line, col) = line_col_from_mouse_position(
-            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0, &paragraphs,
+            position,
+            content_bounds,
+            0.0,
+            &rows,
+            &display_to_wrap,
+            1.0,
+            11.0,
+            &paragraphs,
             line_height_px(11.0, 1.0),
         );
         assert_eq!((line, col), (0, 0));
@@ -5138,7 +5913,10 @@ mod tests {
         // Before any layout has run, there's nothing measured yet — falls
         // back to the computed value.
         // One `uniform_list` row is a subdivision of a line, not a whole one.
-        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0), row_slot_px(11.0, 1.0, 1.0));
+        assert_eq!(
+            real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0),
+            row_slot_px(11.0, 1.0, 1.0)
+        );
 
         // `ItemSize.item` is the *viewport's* box (`padded_bounds.size` in
         // GPUI's own `prepaint`, confirmed against the vendored source), not
@@ -5153,14 +5931,21 @@ mod tests {
             item: gpui::size(gpui::px(999.0), gpui::px(524.5)), // a viewport-sized box
             contents: gpui::size(gpui::px(999.0), gpui::px(15.5 * item_count as f32)),
         });
-        assert_eq!(real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0), 15.5);
+        assert_eq!(
+            real_row_height_px(&handle, item_count, 11.0, 1.0, 1.0),
+            15.5
+        );
     }
 
     #[test]
     fn test_column_in_row_tracks_zoom() {
         for zoom in [0.5f32, 1.0, 1.5, 2.0] {
             let w = 11.0 * CHAR_ADVANCE_RATIO * zoom;
-            assert_eq!(column_for_x_in_row(12.0 * w, None, &[], 0, 40, 11.0, zoom), 12, "zoom {zoom}");
+            assert_eq!(
+                column_for_x_in_row(12.0 * w, None, &[], 0, 40, 11.0, zoom),
+                12,
+                "zoom {zoom}"
+            );
         }
     }
 
@@ -5171,14 +5956,26 @@ mod tests {
     #[test]
     fn test_column_in_row_follows_a_run_level_font_size() {
         let para = Paragraph {
-            runs: vec![Run { text: "0123456789abcdef".into(), size: 32, ..Run::default() }],
+            runs: vec![Run {
+                text: "0123456789abcdef".into(),
+                size: 32,
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let spans = crate::document_ops::paragraph_run_char_spans(&para);
         let block_char = 16.0 * CHAR_ADVANCE_RATIO; // 9.6px
         for col in [1usize, 5, 10] {
             assert_eq!(
-                column_for_x_in_row(col as f32 * block_char, Some(&para), &spans, 0, 16, 11.0, 1.0),
+                column_for_x_in_row(
+                    col as f32 * block_char,
+                    Some(&para),
+                    &spans,
+                    0,
+                    16,
+                    11.0,
+                    1.0
+                ),
                 col,
                 "block-sized column {col}",
             );
@@ -5201,19 +5998,29 @@ mod tests {
         }
 
         let para = Paragraph {
-            runs: vec![Run { text: "0123456789abcdef".into(), size: 32, ..Run::default() }],
+            runs: vec![Run {
+                text: "0123456789abcdef".into(),
+                size: 32,
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let spans = crate::document_ops::paragraph_run_char_spans(&para);
         for col in [1usize, 5, 10] {
             let x = x_for_col_in_row(col, Some(&para), &spans, 0, 16, 11.0, 1.0);
-            assert_eq!(column_for_x_in_row(x, Some(&para), &spans, 0, 16, 11.0, 1.0), col);
+            assert_eq!(
+                column_for_x_in_row(x, Some(&para), &spans, 0, 16, 11.0, 1.0),
+                col
+            );
         }
     }
 
     #[test]
     fn test_x_for_col_in_row_clamps_past_the_end() {
-        assert_eq!(x_for_col_in_row(50, None, &[], 0, 10, 11.0, 1.0), x_for_col_in_row(10, None, &[], 0, 10, 11.0, 1.0));
+        assert_eq!(
+            x_for_col_in_row(50, None, &[], 0, 10, 11.0, 1.0),
+            x_for_col_in_row(10, None, &[], 0, 10, 11.0, 1.0)
+        );
     }
 
     /// Bug report: `$`/`0`/`^`/Home/End jumped to the edge of the whole
@@ -5226,9 +6033,21 @@ mod tests {
         // "hello world" wrapped into rows [0,6) ("hello ") and [6,11)
         // ("world") — row 2 is the one under test.
         let chars: Vec<char> = "hello world".chars().collect();
-        assert_eq!(row_edge_target_col(RowEdge::Start, &chars, 6, 11), 6, "row start, not line start (0)");
-        assert_eq!(row_edge_target_col(RowEdge::End, &chars, 6, 11), 11, "row end, not line end");
-        assert_eq!(row_edge_target_col(RowEdge::End, &chars, 0, 6), 6, "the *first* row's own end, not the whole line's");
+        assert_eq!(
+            row_edge_target_col(RowEdge::Start, &chars, 6, 11),
+            6,
+            "row start, not line start (0)"
+        );
+        assert_eq!(
+            row_edge_target_col(RowEdge::End, &chars, 6, 11),
+            11,
+            "row end, not line end"
+        );
+        assert_eq!(
+            row_edge_target_col(RowEdge::End, &chars, 0, 6),
+            6,
+            "the *first* row's own end, not the whole line's"
+        );
     }
 
     #[test]
@@ -5260,7 +6079,11 @@ mod tests {
         // space row 1 paints upward into, so they belong to row 1.
         let display_to_wrap = vec![Some(0), None, None, Some(1)];
         assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 0), 0);
-        assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 1), 1, "spacer slot belongs to the row after it");
+        assert_eq!(
+            nearest_wrap_row_for_display_row(&display_to_wrap, 1),
+            1,
+            "spacer slot belongs to the row after it"
+        );
         assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 2), 1);
         assert_eq!(nearest_wrap_row_for_display_row(&display_to_wrap, 3), 1);
     }
@@ -5280,8 +6103,15 @@ mod tests {
     fn test_column_in_row_handles_mixed_sizes_within_one_row() {
         let para = Paragraph {
             runs: vec![
-                Run { text: "aaaaa".into(), ..Run::default() },          // body 11px
-                Run { text: "bbbbb".into(), size: 26, ..Run::default() }, // 13pt
+                Run {
+                    text: "aaaaa".into(),
+                    ..Run::default()
+                }, // body 11px
+                Run {
+                    text: "bbbbb".into(),
+                    size: 26,
+                    ..Run::default()
+                }, // 13pt
             ],
             ..Paragraph::default()
         };
@@ -5290,26 +6120,62 @@ mod tests {
         let cite = 13.0 * CHAR_ADVANCE_RATIO;
 
         // Boundary between the two runs.
-        assert_eq!(column_for_x_in_row(5.0 * body, Some(&para), &spans, 0, 10, 11.0, 1.0), 5);
+        assert_eq!(
+            column_for_x_in_row(5.0 * body, Some(&para), &spans, 0, 10, 11.0, 1.0),
+            5
+        );
         // Three characters into the larger run.
         let x = 5.0 * body + 3.0 * cite;
-        assert_eq!(column_for_x_in_row(x, Some(&para), &spans, 0, 10, 11.0, 1.0), 8);
+        assert_eq!(
+            column_for_x_in_row(x, Some(&para), &spans, 0, 10, 11.0, 1.0),
+            8
+        );
     }
 
     #[test]
     fn test_effective_char_size_prefers_run_then_heading_then_body() {
-        let body = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], ..Paragraph::default() };
+        let body = Paragraph {
+            runs: vec![Run {
+                text: "ab".into(),
+                ..Run::default()
+            }],
+            ..Paragraph::default()
+        };
         let spans = crate::document_ops::paragraph_run_char_spans(&body);
-        assert_eq!(effective_char_size_px(Some(&body), &spans, 0, 11.0, 1.0), 11.0);
+        assert_eq!(
+            effective_char_size_px(Some(&body), &spans, 0, 11.0, 1.0),
+            11.0
+        );
 
-        let heading = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], heading: 1, ..Paragraph::default() };
+        let heading = Paragraph {
+            runs: vec![Run {
+                text: "ab".into(),
+                ..Run::default()
+            }],
+            heading: 1,
+            ..Paragraph::default()
+        };
         let hspans = crate::document_ops::paragraph_run_char_spans(&heading);
-        assert_eq!(effective_char_size_px(Some(&heading), &hspans, 0, 11.0, 1.0), 24.0);
+        assert_eq!(
+            effective_char_size_px(Some(&heading), &hspans, 0, 11.0, 1.0),
+            24.0
+        );
 
         // A run-level size wins over the heading level.
-        let both = Paragraph { runs: vec![Run { text: "ab".into(), size: 32, ..Run::default() }], heading: 1, ..Paragraph::default() };
+        let both = Paragraph {
+            runs: vec![Run {
+                text: "ab".into(),
+                size: 32,
+                ..Run::default()
+            }],
+            heading: 1,
+            ..Paragraph::default()
+        };
         let bspans = crate::document_ops::paragraph_run_char_spans(&both);
-        assert_eq!(effective_char_size_px(Some(&both), &bspans, 0, 11.0, 1.0), 16.0);
+        assert_eq!(
+            effective_char_size_px(Some(&both), &bspans, 0, 11.0, 1.0),
+            16.0
+        );
 
         // No paragraph data at all falls back to the body size.
         assert_eq!(effective_char_size_px(None, &[], 0, 11.0, 2.0), 22.0);
@@ -5323,26 +6189,49 @@ mod tests {
     /// decisions and what's on screen would disagree.
     #[test]
     fn test_effective_char_font_follows_run_font_only_when_curated() {
-        let none = Paragraph { runs: vec![Run { text: "ab".into(), ..Run::default() }], ..Paragraph::default() };
+        let none = Paragraph {
+            runs: vec![Run {
+                text: "ab".into(),
+                ..Run::default()
+            }],
+            ..Paragraph::default()
+        };
         let none_spans = crate::document_ops::paragraph_run_char_spans(&none);
-        assert_eq!(effective_char_font(Some(&none), &none_spans, 0), FONT_FAMILY);
+        assert_eq!(
+            effective_char_font(Some(&none), &none_spans, 0),
+            FONT_FAMILY
+        );
 
         let serif = Paragraph {
-            runs: vec![Run { text: "ab".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            runs: vec![Run {
+                text: "ab".into(),
+                font: Some(CURATED_SERIF_FONT.to_string()),
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let serif_spans = crate::document_ops::paragraph_run_char_spans(&serif);
-        assert_eq!(effective_char_font(Some(&serif), &serif_spans, 0), CURATED_SERIF_FONT);
+        assert_eq!(
+            effective_char_font(Some(&serif), &serif_spans, 0),
+            CURATED_SERIF_FONT
+        );
 
         // An uncurated font (e.g. read from a real imported .docx naming
         // "Georgia" or "Calibri") must not be applied — falls back to
         // FONT_FAMILY exactly like `apply_run_style` does.
         let uncurated = Paragraph {
-            runs: vec![Run { text: "ab".into(), font: Some("Georgia".to_string()), ..Run::default() }],
+            runs: vec![Run {
+                text: "ab".into(),
+                font: Some("Georgia".to_string()),
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let uncurated_spans = crate::document_ops::paragraph_run_char_spans(&uncurated);
-        assert_eq!(effective_char_font(Some(&uncurated), &uncurated_spans, 0), FONT_FAMILY);
+        assert_eq!(
+            effective_char_font(Some(&uncurated), &uncurated_spans, 0),
+            FONT_FAMILY
+        );
 
         // No paragraph data at all falls back to FONT_FAMILY too.
         assert_eq!(effective_char_font(None, &[], 0), FONT_FAMILY);
@@ -5351,12 +6240,22 @@ mod tests {
     #[test]
     fn test_effective_char_advance_ratio_matches_effective_char_font() {
         let serif = Paragraph {
-            runs: vec![Run { text: "ab".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            runs: vec![Run {
+                text: "ab".into(),
+                font: Some(CURATED_SERIF_FONT.to_string()),
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let spans = crate::document_ops::paragraph_run_char_spans(&serif);
-        assert_eq!(effective_char_advance_ratio(Some(&serif), &spans, 0), SERIF_CHAR_ADVANCE_RATIO);
-        assert_eq!(effective_char_advance_ratio(None, &[], 0), CHAR_ADVANCE_RATIO);
+        assert_eq!(
+            effective_char_advance_ratio(Some(&serif), &spans, 0),
+            SERIF_CHAR_ADVANCE_RATIO
+        );
+        assert_eq!(
+            effective_char_advance_ratio(None, &[], 0),
+            CHAR_ADVANCE_RATIO
+        );
     }
 
     /// `column_for_x_in_row` must resolve a serif-font run at the serif
@@ -5366,14 +6265,26 @@ mod tests {
     #[test]
     fn test_column_in_row_uses_serif_ratio_for_a_serif_run() {
         let para = Paragraph {
-            runs: vec![Run { text: "0123456789".into(), font: Some(CURATED_SERIF_FONT.to_string()), ..Run::default() }],
+            runs: vec![Run {
+                text: "0123456789".into(),
+                font: Some(CURATED_SERIF_FONT.to_string()),
+                ..Run::default()
+            }],
             ..Paragraph::default()
         };
         let spans = crate::document_ops::paragraph_run_char_spans(&para);
         let serif_char = 11.0 * SERIF_CHAR_ADVANCE_RATIO;
         for col in [1usize, 5, 9] {
             assert_eq!(
-                column_for_x_in_row(col as f32 * serif_char, Some(&para), &spans, 0, 10, 11.0, 1.0),
+                column_for_x_in_row(
+                    col as f32 * serif_char,
+                    Some(&para),
+                    &spans,
+                    0,
+                    10,
+                    11.0,
+                    1.0
+                ),
                 col,
             );
         }
@@ -5433,7 +6344,10 @@ mod tests {
 
     #[test]
     fn test_selection_span_within_single_line() {
-        assert_eq!(selection_span_for_line("hello world", 0, 0, 5), Some((0, 5)));
+        assert_eq!(
+            selection_span_for_line("hello world", 0, 0, 5),
+            Some((0, 5))
+        );
     }
 
     #[test]
@@ -5468,7 +6382,10 @@ mod tests {
 
     #[test]
     fn test_line_segments_no_cursor_no_selection() {
-        assert_eq!(line_segments(5, None, &[], &[]), vec![(0, 5, SegmentStyle::Plain, false)]);
+        assert_eq!(
+            line_segments(5, None, &[], &[]),
+            vec![(0, 5, SegmentStyle::Plain, false)]
+        );
     }
 
     #[test]
@@ -5487,7 +6404,10 @@ mod tests {
     fn test_line_segments_cursor_at_line_start() {
         assert_eq!(
             line_segments(5, Some(0), &[], &[]),
-            vec![(0, 1, SegmentStyle::Cursor, false), (1, 5, SegmentStyle::Plain, false)]
+            vec![
+                (0, 1, SegmentStyle::Cursor, false),
+                (1, 5, SegmentStyle::Plain, false)
+            ]
         );
     }
 
@@ -5495,7 +6415,10 @@ mod tests {
     fn test_line_segments_cursor_past_end_of_line() {
         assert_eq!(
             line_segments(5, Some(5), &[], &[]),
-            vec![(0, 5, SegmentStyle::Plain, false), (5, 5, SegmentStyle::Cursor, false)]
+            vec![
+                (0, 5, SegmentStyle::Plain, false),
+                (5, 5, SegmentStyle::Cursor, false)
+            ]
         );
     }
 
@@ -5544,7 +6467,10 @@ mod tests {
     fn test_line_segments_misspelled_range_splits_and_flags() {
         assert_eq!(
             line_segments(9, None, &[], &[(4, 9)]),
-            vec![(0, 4, SegmentStyle::Plain, false), (4, 9, SegmentStyle::Plain, true)]
+            vec![
+                (0, 4, SegmentStyle::Plain, false),
+                (4, 9, SegmentStyle::Plain, true)
+            ]
         );
     }
 
@@ -5592,7 +6518,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cursor_segments, 1, "exactly one run must claim a boundary cursor, not both");
+        assert_eq!(
+            cursor_segments, 1,
+            "exactly one run must claim a boundary cursor, not both"
+        );
     }
 
     #[test]
@@ -5614,7 +6543,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(cursor_segments, 1, "end-of-row cursor must still be claimed exactly once");
+        assert_eq!(
+            cursor_segments, 1,
+            "end-of-row cursor must still be claimed exactly once"
+        );
     }
 
     // ── usable_wrap_width ────────────────────────────────────────────────────
@@ -5640,13 +6572,19 @@ mod tests {
 
     #[test]
     fn test_wrap_line_into_rows_empty_line_is_one_row() {
-        assert_eq!(wrap_line_into_rows(&[], 80.0, &mut |_, _| 8.0), vec![(0, 0)]);
+        assert_eq!(
+            wrap_line_into_rows(&[], 80.0, &mut |_, _| 8.0),
+            vec![(0, 0)]
+        );
     }
 
     #[test]
     fn test_wrap_line_into_rows_fits_in_one_row() {
         let chars: Vec<char> = "hello".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 80.0, &mut |_, _| 8.0), vec![(0, 5)]);
+        assert_eq!(
+            wrap_line_into_rows(&chars, 80.0, &mut |_, _| 8.0),
+            vec![(0, 5)]
+        );
     }
 
     #[test]
@@ -5655,7 +6593,10 @@ mod tests {
         // (8 chars); last space within budget is at index 5, so row 1 is
         // [0,5)="hello", the space at 5 is consumed, row 2 starts at 6: "world".
         let chars: Vec<char> = "hello world".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 64.0, &mut |_, _| 8.0), vec![(0, 5), (6, 11)]);
+        assert_eq!(
+            wrap_line_into_rows(&chars, 64.0, &mut |_, _| 8.0),
+            vec![(0, 5), (6, 11)]
+        );
     }
 
     #[test]
@@ -5663,13 +6604,19 @@ mod tests {
         // No spaces at all within budget -> hard break exactly at the pixel
         // budget (32px / 8px-per-char = 4 chars per row).
         let chars: Vec<char> = "abcdefghij".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0), vec![(0, 4), (4, 8), (8, 10)]);
+        assert_eq!(
+            wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0),
+            vec![(0, 4), (4, 8), (8, 10)]
+        );
     }
 
     #[test]
     fn test_wrap_line_into_rows_exact_multiple_of_width() {
         let chars: Vec<char> = "abcdefgh".chars().collect();
-        assert_eq!(wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0), vec![(0, 4), (4, 8)]);
+        assert_eq!(
+            wrap_line_into_rows(&chars, 32.0, &mut |_, _| 8.0),
+            vec![(0, 4), (4, 8)]
+        );
     }
 
     #[test]
@@ -5813,25 +6760,37 @@ mod tests {
         // identically here — this is exercising the row-boundary logic, not
         // the font-size-aware column math (covered separately below).
         let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 2, 0, -1, &[], 11.0, 1.0), Some((0, 6)));
+        assert_eq!(
+            visual_row_step(&rows, 2, 0, -1, &[], 11.0, 1.0),
+            Some((0, 6))
+        );
     }
 
     #[test]
     fn test_visual_row_step_down_into_wrapped_continuation_row() {
         let rows = vec![(0, 0, 5), (0, 6, 11), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 0, 3, 1, &[], 11.0, 1.0), Some((0, 9)));
+        assert_eq!(
+            visual_row_step(&rows, 0, 3, 1, &[], 11.0, 1.0),
+            Some((0, 9))
+        );
     }
 
     #[test]
     fn test_visual_row_step_preserves_screen_column() {
         let rows = vec![(0, 0, 10), (1, 0, 10)];
-        assert_eq!(visual_row_step(&rows, 0, 4, 1, &[], 11.0, 1.0), Some((1, 4)));
+        assert_eq!(
+            visual_row_step(&rows, 0, 4, 1, &[], 11.0, 1.0),
+            Some((1, 4))
+        );
     }
 
     #[test]
     fn test_visual_row_step_clamps_to_shorter_target_row() {
         let rows = vec![(0, 0, 10), (1, 0, 3)];
-        assert_eq!(visual_row_step(&rows, 0, 8, 1, &[], 11.0, 1.0), Some((1, 3)));
+        assert_eq!(
+            visual_row_step(&rows, 0, 8, 1, &[], 11.0, 1.0),
+            Some((1, 3))
+        );
     }
 
     #[test]
@@ -5852,11 +6811,18 @@ mod tests {
     fn test_visual_row_step_lands_on_pixel_equivalent_column_across_a_font_size_change() {
         let paragraphs = vec![
             Paragraph {
-                runs: vec![Run { text: "0123456789abcdefghij".into(), size: 32, ..Run::default() }],
+                runs: vec![Run {
+                    text: "0123456789abcdefghij".into(),
+                    size: 32,
+                    ..Run::default()
+                }],
                 ..Paragraph::default()
             },
             Paragraph {
-                runs: vec![Run { text: "0123456789abcdefghij".into(), ..Run::default() }],
+                runs: vec![Run {
+                    text: "0123456789abcdefghij".into(),
+                    ..Run::default()
+                }],
                 ..Paragraph::default()
             },
         ];
@@ -6048,19 +7014,22 @@ mod tests {
     // numbers; not a pass/fail regression test.
     #[test]
     fn bench_diagnostic_large_document_per_keystroke_costs() {
-        let big_text: String = "the quick brown fox jumps over the lazy dog "
-            .repeat(340); // ~15,300 chars, one giant paragraph
-        let paragraphs = vec![Paragraph { list: None,
-            runs: vec![Run { text: big_text.clone(), ..Run::default() }],
+        let big_text: String = "the quick brown fox jumps over the lazy dog ".repeat(340); // ~15,300 chars, one giant paragraph
+        let paragraphs = vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: big_text.clone(),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
             unsupported_xml: None,
         }];
 
         let mut state = AppState::new();
-        state.tabs[0].content = big_text.clone();
-        state.tabs[0].paragraphs = paragraphs;
-        state.tabs[0].cursor = big_text.len();
+        state.workspace.tabs[0].document.content = big_text.clone();
+        state.workspace.tabs[0].document.paragraphs = paragraphs;
+        state.workspace.tabs[0].cursor = big_text.len();
 
         // (1) 100x insert_char: covers push_undo_snapshot + sync_insert_char
         //     (which calls resolve_position) — the whole mutation path.
@@ -6074,14 +7043,14 @@ mod tests {
         //     TextEditor::render() both pay on every non-coalesced keystroke
         //     and every frame respectively.
         let t1 = Instant::now();
-        let _cloned = state.tabs[0].paragraphs.clone();
+        let _cloned = state.workspace.tabs[0].document.paragraphs.clone();
         let clone_elapsed = t1.elapsed();
 
         // (3) build_visual_rows over the full document with a synthetic,
         //     branch-free width closure — isolates the wrap algorithm's own
         //     cost from real font-shaping cost (which this headless sandbox
         //     cannot measure without a live GPUI App).
-        let lines = document_lines(&state.tabs[0].content);
+        let lines = document_lines(&state.workspace.tabs[0].document.content);
         let mut synthetic_width_of = |_: usize, _: usize, c: char| if c == ' ' { 4.0 } else { 8.4 };
         let t2 = Instant::now();
         let _rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
@@ -6145,12 +7114,22 @@ mod tests {
                     bold: r % 2 == 0,
                     italic: r % 3 == 0,
                     highlight: r % 4 == 0,
-                    highlight_color: if r % 4 == 0 { "yellow".to_string() } else { String::new() },
+                    highlight_color: if r % 4 == 0 {
+                        "yellow".to_string()
+                    } else {
+                        String::new()
+                    },
                     size: 24,
                     ..Run::default()
                 });
             }
-            paragraphs.push(Paragraph { list: None, runs, heading: 0, alignment: Alignment::default(), unsupported_xml: None });
+            paragraphs.push(Paragraph {
+                list: None,
+                runs,
+                heading: 0,
+                alignment: Alignment::default(),
+                unsupported_xml: None,
+            });
         }
         let content: String = paragraphs
             .iter()
@@ -6166,15 +7145,21 @@ mod tests {
         let t0 = Instant::now();
         let _miss_paragraphs = paragraphs.clone();
         let _miss_line_chars: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
-        let _miss_rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
+        let _miss_rows =
+            build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);
         let miss_elapsed = t0.elapsed();
 
         // (2) Cache HIT: the same data, but already `Rc`-wrapped the way
         // `RowCache` stores it — a hit is just cloning these 5 handles.
         let rc_paragraphs = Rc::new(paragraphs.clone());
         let rc_lines = Rc::new(lines.clone());
-        let rc_line_chars: Rc<Vec<Vec<char>>> = Rc::new(lines.iter().map(|l| l.chars().collect()).collect());
-        let rc_rows = Rc::new(build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of));
+        let rc_line_chars: Rc<Vec<Vec<char>>> =
+            Rc::new(lines.iter().map(|l| l.chars().collect()).collect());
+        let rc_rows = Rc::new(build_visual_rows(
+            &lines,
+            usable_wrap_width(800.0),
+            &mut synthetic_width_of,
+        ));
         let t1 = Instant::now();
         let _hit_paragraphs = rc_paragraphs.clone();
         let _hit_lines = rc_lines.clone();
@@ -6196,12 +7181,20 @@ mod tests {
         // The actual diagnostic signal is the printed numbers above; this is
         // just a sanity bound confirming the cache is doing its job at all,
         // not a specific performance target.
-        assert!(hit_elapsed < miss_elapsed, "a cache hit must be cheaper than a full rebuild");
+        assert!(
+            hit_elapsed < miss_elapsed,
+            "a cache hit must be cheaper than a full rebuild"
+        );
     }
 
     // ── row_cache_is_valid (uniform_list_plan.md Part 1) ─────────────────────
 
-    fn test_row_cache(tab_id: usize, content_version: u64, viewport_width: f32, zoom: f32) -> RowCache {
+    fn test_row_cache(
+        tab_id: usize,
+        content_version: u64,
+        viewport_width: f32,
+        zoom: f32,
+    ) -> RowCache {
         RowCache {
             invisibility: false,
             fold_version: 0,
@@ -6239,7 +7232,10 @@ mod tests {
 
         // Pocket/Hat/Block/Tag are heading levels 1..4 — all stay, whole line.
         for heading in 1..=4 {
-            assert!(!run_is_hidden(true, heading, false, false, 0, CITE), "heading {heading} hidden");
+            assert!(
+                !run_is_hidden(true, heading, false, false, 0, CITE),
+                "heading {heading} hidden"
+            );
         }
 
         // Cite: bold at the configured cite size.
@@ -6253,11 +7249,15 @@ mod tests {
     }
 
     fn run_plain(text: &str) -> Run {
-        Run { text: text.into(), ..Run::default() }
+        Run {
+            text: text.into(),
+            ..Run::default()
+        }
     }
 
     fn para_plain(text: &str) -> Paragraph {
-        Paragraph { list: None,
+        Paragraph {
+            list: None,
             runs: vec![run_plain(text)],
             heading: 0,
             alignment: Alignment::default(),
@@ -6266,7 +7266,12 @@ mod tests {
     }
 
     fn hl_run(text: &str) -> Run {
-        Run { text: text.into(), highlight: true, highlight_color: "yellow".into(), ..Run::default() }
+        Run {
+            text: text.into(),
+            highlight: true,
+            highlight_color: "yellow".into(),
+            ..Run::default()
+        }
     }
 
     fn no_folds(paragraphs: &[Paragraph]) -> Vec<bool> {
@@ -6279,7 +7284,8 @@ mod tests {
     }
 
     fn card_para(text: &str, heading: u8) -> Paragraph {
-        Paragraph { list: None,
+        Paragraph {
+            list: None,
             runs: vec![run_plain(text)],
             heading,
             alignment: Alignment::default(),
@@ -6307,14 +7313,18 @@ mod tests {
         assert_eq!(hidden, vec![false, true, false, true, false, false, true]);
 
         // Off, nothing folds.
-        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)), vec![false; 7]);
+        assert_eq!(
+            hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)),
+            vec![false; 7]
+        );
     }
 
     /// Fold is the coarser rule: a folded body row goes even if it holds
     /// highlighted text that invisibility mode would have kept.
     #[test]
     fn test_fold_hides_body_rows_that_invisibility_would_keep() {
-        let paragraphs = vec![Paragraph { list: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
             runs: vec![hl_run("highlighted body")],
             heading: 0,
             alignment: Alignment::default(),
@@ -6323,16 +7333,23 @@ mod tests {
         let rows = vec![(0usize, 0usize, 16usize)];
 
         // Invisibility alone keeps it (it is highlighted)...
-        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)), vec![false]);
+        assert_eq!(
+            hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)),
+            vec![false]
+        );
         // ...but folding hides it regardless.
-        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &all_body_folded(&paragraphs)), vec![true]);
+        assert_eq!(
+            hidden_wrap_rows(&rows, &paragraphs, true, 26, &all_body_folded(&paragraphs)),
+            vec![true]
+        );
     }
 
     #[test]
     fn test_hidden_wrap_rows_marks_only_fully_hidden_rows() {
         let paragraphs = vec![
             // 0: body text with a highlight in it — stays.
-            Paragraph { list: None,
+            Paragraph {
+                list: None,
                 runs: vec![run_plain("plain "), hl_run("read this")],
                 heading: 0,
                 alignment: Alignment::default(),
@@ -6341,7 +7358,8 @@ mod tests {
             // 1: body text with nothing marked — goes.
             para_plain("unread body text"),
             // 2: a Tag line — stays whole.
-            Paragraph { list: None,
+            Paragraph {
+                list: None,
                 runs: vec![run_plain("a tag")],
                 heading: 4,
                 alignment: Alignment::default(),
@@ -6354,14 +7372,18 @@ mod tests {
         assert_eq!(hidden, vec![false, true, false]);
 
         // Off, nothing hides.
-        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)), vec![false; 3]);
+        assert_eq!(
+            hidden_wrap_rows(&rows, &paragraphs, false, 26, &no_folds(&paragraphs)),
+            vec![false; 3]
+        );
     }
 
     /// Only the runs actually on a row decide it: a highlight later in a
     /// wrapped paragraph must not keep an earlier all-plain row visible.
     #[test]
     fn test_hidden_wrap_rows_judges_each_wrapped_row_separately() {
-        let paragraphs = vec![Paragraph { list: None,
+        let paragraphs = vec![Paragraph {
+            list: None,
             runs: vec![run_plain("aaaaa"), hl_run("bbbbb")],
             heading: 0,
             alignment: Alignment::default(),
@@ -6369,7 +7391,10 @@ mod tests {
         }];
         // Row 0 covers only the plain run, row 1 only the highlighted one.
         let rows = vec![(0usize, 0usize, 5usize), (0, 5, 10)];
-        assert_eq!(hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)), vec![true, false]);
+        assert_eq!(
+            hidden_wrap_rows(&rows, &paragraphs, true, 26, &no_folds(&paragraphs)),
+            vec![true, false]
+        );
     }
 
     #[test]
@@ -6385,7 +7410,14 @@ mod tests {
         // slots (blanks first, content last).
         let n = ROW_SUBDIVISIONS;
         assert_eq!(display_to_wrap.len(), 2 * n);
-        assert_eq!(display_to_wrap.iter().flatten().copied().collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(
+            display_to_wrap
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
         assert_eq!(display_to_wrap[n - 1], Some(0));
         assert_eq!(display_to_wrap[2 * n - 1], Some(2));
         // ...and the hidden row points at where the next visible one landed,
@@ -6401,9 +7433,15 @@ mod tests {
     #[test]
     fn test_page_scroll_advances_by_whole_rows() {
         // 100px viewport, 24px rows -> 4 whole rows fit (96px), not 100.
-        assert_eq!(page_scroll_offset(0.0, 100.0, 24.0, 1000.0, true), Some(-96.0));
+        assert_eq!(
+            page_scroll_offset(0.0, 100.0, 24.0, 1000.0, true),
+            Some(-96.0)
+        );
         // ...and back up by the same amount.
-        assert_eq!(page_scroll_offset(-96.0, 100.0, 24.0, 1000.0, false), Some(0.0));
+        assert_eq!(
+            page_scroll_offset(-96.0, 100.0, 24.0, 1000.0, false),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -6414,13 +7452,19 @@ mod tests {
         assert_eq!(page_scroll_offset(-1000.0, 100.0, 24.0, 1000.0, true), None);
         // A partial page remaining still moves, clamped to the end rather
         // than overshooting into blank space.
-        assert_eq!(page_scroll_offset(-950.0, 100.0, 24.0, 1000.0, true), Some(-1000.0));
+        assert_eq!(
+            page_scroll_offset(-950.0, 100.0, 24.0, 1000.0, true),
+            Some(-1000.0)
+        );
     }
 
     /// A viewport shorter than one row must still advance, or the keys lock up.
     #[test]
     fn test_page_scroll_advances_at_least_one_row() {
-        assert_eq!(page_scroll_offset(0.0, 10.0, 24.0, 1000.0, true), Some(-24.0));
+        assert_eq!(
+            page_scroll_offset(0.0, 10.0, 24.0, 1000.0, true),
+            Some(-24.0)
+        );
     }
 
     /// Rows scale with zoom, so a page must too — otherwise zoomed-in text
@@ -6428,7 +7472,10 @@ mod tests {
     #[test]
     fn test_page_scroll_follows_zoom() {
         let zoomed_row = 24.0 * 2.0;
-        assert_eq!(page_scroll_offset(0.0, 100.0, zoomed_row, 1000.0, true), Some(-96.0));
+        assert_eq!(
+            page_scroll_offset(0.0, 100.0, zoomed_row, 1000.0, true),
+            Some(-96.0)
+        );
     }
 
     // ── spell cache ──────────────────────────────────────────────────────────
@@ -6471,13 +7518,18 @@ mod tests {
 
         dict.insert("wrold".to_string());
         let after = spell_ranges_cached(&cache, "hello wrold", &dict);
-        assert!(after.is_empty(), "squiggle should clear after Add to Dictionary");
+        assert!(
+            after.is_empty(),
+            "squiggle should clear after Add to Dictionary"
+        );
     }
 
     #[test]
     fn test_row_cache_is_valid_when_everything_matches() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0));
+        assert!(row_cache_is_valid_for(
+            &cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0
+        ));
     }
 
     #[test]
@@ -6486,13 +7538,17 @@ mod tests {
         // content_version/width/zoom — tab_id must be checked, or a tab
         // switch could serve another tab's stale wrapped rows.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 800.0, 1.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(
+            &cache, 2, 5, 800.0, 1.0, 1.0, false, false, 0
+        ));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_content_version_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 800.0, 1.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(
+            &cache, 1, 6, 800.0, 1.0, 1.0, false, false, 0
+        ));
     }
 
     /// The divider-drag freeze fix: a width change normally invalidates, but
@@ -6501,8 +7557,12 @@ mod tests {
     #[test]
     fn test_row_cache_survives_a_width_change_while_the_divider_is_dragging() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, 1.0, false, false, 0));
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.0, 1.0, true, false, 0));
+        assert!(!row_cache_is_valid_for(
+            &cache, 1, 5, 640.0, 1.0, 1.0, false, false, 0
+        ));
+        assert!(row_cache_is_valid_for(
+            &cache, 1, 5, 640.0, 1.0, 1.0, true, false, 0
+        ));
     }
 
     /// Dragging must not make the cache accept a *different document* or a
@@ -6510,9 +7570,18 @@ mod tests {
     #[test]
     fn test_dragging_still_invalidates_on_content_or_tab_change() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, 1.0, true, false, 0), "wrong tab accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, 1.0, true, false, 0), "stale content accepted");
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, 1.0, true, false, 0), "stale zoom accepted");
+        assert!(
+            !row_cache_is_valid_for(&cache, 2, 5, 640.0, 1.0, 1.0, true, false, 0),
+            "wrong tab accepted"
+        );
+        assert!(
+            !row_cache_is_valid_for(&cache, 1, 6, 640.0, 1.0, 1.0, true, false, 0),
+            "stale content accepted"
+        );
+        assert!(
+            !row_cache_is_valid_for(&cache, 1, 5, 640.0, 1.25, 1.0, true, false, 0),
+            "stale zoom accepted"
+        );
     }
 
     #[test]
@@ -6520,27 +7589,43 @@ mod tests {
         // A window resize must invalidate the cache — the old wrap width no
         // longer matches where lines should actually break.
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 801.0, 1.0, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(
+            &cache, 1, 5, 801.0, 1.0, 1.0, false, false, 0
+        ));
     }
 
     #[test]
     fn test_row_cache_is_valid_false_when_zoom_differs() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.25, 1.0, false, false, 0));
+        assert!(!row_cache_is_valid_for(
+            &cache, 1, 5, 800.0, 1.25, 1.0, false, false, 0
+        ));
     }
 
     // ── slot_count_for_paragraph / expand_rows_for_display ────────────────────
     // (card-style row-overlap fix — handoff.md)
 
     fn plain_paragraph() -> Paragraph {
-        Paragraph { list: None, runs: vec![Run::default()], heading: 0, alignment: Alignment::default(), unsupported_xml: None }
+        Paragraph {
+            list: None,
+            runs: vec![Run::default()],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }
     }
 
     fn pocket_paragraph() -> Paragraph {
         // Mirrors AppState::apply_card_style(CardStyleKind::Pocket): bold +
         // FontSize(52 half-points = 26px) + Box(true), heading level 1.
-        Paragraph { list: None,
-            runs: vec![Run { size: 52, bold: true, box_format: true, ..Run::default() }],
+        Paragraph {
+            list: None,
+            runs: vec![Run {
+                size: 52,
+                bold: true,
+                box_format: true,
+                ..Run::default()
+            }],
             heading: 1,
             alignment: Alignment::default(),
             unsupported_xml: None,
@@ -6568,14 +7653,20 @@ mod tests {
     // against — see `line_height_px`/`LINE_HEIGHT_RATIO`.
     #[test]
     fn test_slot_count_plain_paragraph_is_one_slot() {
-        assert_eq!(slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
+        assert_eq!(
+            slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0, 1.0),
+            ROW_SUBDIVISIONS
+        );
     }
 
     #[test]
     fn test_slot_count_no_paragraph_data_is_one_slot() {
         // A brand-new tab has no parsed paragraphs yet — must not panic or
         // under/over-count when formatting data is simply absent.
-        assert_eq!(slot_count_for_paragraph(None, 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
+        assert_eq!(
+            slot_count_for_paragraph(None, 1.0, 14.0, 1.0),
+            ROW_SUBDIVISIONS
+        );
     }
 
     #[test]
@@ -6583,7 +7674,10 @@ mod tests {
         // 26px font (~1.86x LINE_HEIGHT_PX/FONT_SIZE_PX ratio) plus the box's
         // padding/border comfortably needs more than one 20px slot.
         let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0, 1.0);
-        assert!(slots > ROW_SUBDIVISIONS, "expected Pocket line to need more than one line, got {slots}");
+        assert!(
+            slots > ROW_SUBDIVISIONS,
+            "expected Pocket line to need more than one line, got {slots}"
+        );
     }
 
     #[test]
@@ -6602,13 +7696,21 @@ mod tests {
         // now (`para.heading == 4` short-circuits before the size math runs)
         // — see the function's own doc comment for why, confirmed against a
         // real Verbatim reference file.
-        let para = Paragraph { list: None,
-            runs: vec![Run { size: 26, bold: true, ..Run::default() }],
+        let para = Paragraph {
+            list: None,
+            runs: vec![Run {
+                size: 26,
+                bold: true,
+                ..Run::default()
+            }],
             heading: 4,
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 14.0, 1.0), ROW_SUBDIVISIONS);
+        assert_eq!(
+            slot_count_for_paragraph(Some(&para), 1.0, 14.0, 1.0),
+            ROW_SUBDIVISIONS
+        );
     }
 
     /// Bug report: "Tags and Cites increase line spacing in vimbatim far
@@ -6623,13 +7725,21 @@ mod tests {
     /// real relative size.
     #[test]
     fn test_slot_count_tag_needs_only_one_slot_at_the_real_default_normal_size() {
-        let para = Paragraph { list: None,
-            runs: vec![Run { size: 26, bold: true, ..Run::default() }],
+        let para = Paragraph {
+            list: None,
+            runs: vec![Run {
+                size: 26,
+                bold: true,
+                ..Run::default()
+            }],
             heading: 4,
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0), ROW_SUBDIVISIONS);
+        assert_eq!(
+            slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0),
+            ROW_SUBDIVISIONS
+        );
     }
 
     #[test]
@@ -6639,15 +7749,22 @@ mod tests {
         // (Cite is inline, not a whole-line card style), so this exercises
         // the `r.style != Some(CardStyle::Cite)` run filter specifically,
         // not the heading==4 short-circuit Tag uses.
-        let para = Paragraph { list: None,
-            runs: vec![
-                Run { size: 26, bold: true, style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() },
-            ],
+        let para = Paragraph {
+            list: None,
+            runs: vec![Run {
+                size: 26,
+                bold: true,
+                style: Some(crate::docx_parser::CardStyle::Cite),
+                ..Run::default()
+            }],
             heading: 0,
             alignment: Alignment::default(),
             unsupported_xml: None,
         };
-        assert_eq!(slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0), ROW_SUBDIVISIONS);
+        assert_eq!(
+            slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0),
+            ROW_SUBDIVISIONS
+        );
     }
 
     #[test]
@@ -6655,9 +7772,18 @@ mod tests {
         // heading_font_size_px(1, 1.0) == 24px, no box — 24 * 20/14 == 34.3px
         // against a 20px line, so it still needs more than one line's worth
         // of slots (and less than two full lines').
-        let para = Paragraph { list: None, runs: vec![Run::default()], heading: 1, alignment: Alignment::default(), unsupported_xml: None };
+        let para = Paragraph {
+            list: None,
+            runs: vec![Run::default()],
+            heading: 1,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
         let slots = slot_count_for_paragraph(Some(&para), 1.0, 14.0, 1.0);
-        assert!(slots > ROW_SUBDIVISIONS && slots <= 2 * ROW_SUBDIVISIONS, "got {slots}");
+        assert!(
+            slots > ROW_SUBDIVISIONS && slots <= 2 * ROW_SUBDIVISIONS,
+            "got {slots}"
+        );
     }
 
     #[test]
@@ -6666,17 +7792,31 @@ mod tests {
         // clearance so the ring cannot touch the one on the line above — but
         // that is a fraction of a line, never a whole extra line the way the
         // old whole-line quantum forced.
-        let para = Paragraph { list: None,
+        let para = Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { text: "word".into(), emphasis: true, emphasis_boxed: true, ..Run::default() },
+                Run {
+                    text: "word".into(),
+                    emphasis: true,
+                    emphasis_boxed: true,
+                    ..Run::default()
+                },
                 Run::default(),
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
         let slots = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0);
-        assert!(slots > ROW_SUBDIVISIONS, "the box needs clearance, got {slots}");
-        assert!(slots < 2 * ROW_SUBDIVISIONS, "but never a whole extra line, got {slots}");
+        assert!(
+            slots > ROW_SUBDIVISIONS,
+            "the box needs clearance, got {slots}"
+        );
+        assert!(
+            slots < 2 * ROW_SUBDIVISIONS,
+            "but never a whole extra line, got {slots}"
+        );
     }
 
     /// Bug report: applying Emphasis to one word increased the line spacing
@@ -6690,13 +7830,21 @@ mod tests {
     /// paragraph.
     #[test]
     fn test_slot_count_emphasis_size_bump_does_not_inflate_paragraph_slots() {
-        let para = Paragraph { list: None,
+        let para = Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { text: "word".into(), emphasis: true, size: 24, ..Run::default() },
+                Run {
+                    text: "word".into(),
+                    emphasis: true,
+                    size: 24,
+                    ..Run::default()
+                },
                 Run::default(),
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
         // The original report was that this cost the paragraph a *whole* extra
         // line, which was true while a line was the smallest unit of
@@ -6706,22 +7854,29 @@ mod tests {
         // which is what the report was really objecting to.
         let plain = slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 11.0, 1.0);
         let slots = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0);
-        assert!(slots < plain + ROW_SUBDIVISIONS,
-            "one emphasized word must not cost a whole line: {slots} vs plain {plain}");
+        assert!(
+            slots < plain + ROW_SUBDIVISIONS,
+            "one emphasized word must not cost a whole line: {slots} vs plain {plain}"
+        );
     }
 
     #[test]
     fn test_expand_rows_for_display_plain_rows_are_untouched() {
         let rows = vec![(0, 0, 5), (1, 0, 5)];
         let paragraphs = vec![plain_paragraph(), plain_paragraph()];
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
+        let (display_to_wrap, wrap_to_display) =
+            expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
         // Two ordinary lines, each one line tall — ROW_SUBDIVISIONS slots
         // apiece, content in the last slot of its own group.
         let n = ROW_SUBDIVISIONS;
         assert_eq!(display_to_wrap.len(), 2 * n);
         assert_eq!(display_to_wrap[n - 1], Some(0));
         assert_eq!(display_to_wrap[2 * n - 1], Some(1));
-        assert_eq!(display_to_wrap.iter().flatten().count(), 2, "no extra content rows");
+        assert_eq!(
+            display_to_wrap.iter().flatten().count(),
+            2,
+            "no extra content rows"
+        );
         assert_eq!(wrap_to_display, vec![n - 1, 2 * n - 1]);
     }
 
@@ -6731,7 +7886,8 @@ mod tests {
         let paragraphs = vec![pocket_paragraph(), plain_paragraph()];
         let slots = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 14.0, 1.0);
         let plain = slot_count_for_paragraph(Some(&plain_paragraph()), 1.0, 14.0, 1.0);
-        let (display_to_wrap, wrap_to_display) = expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
+        let (display_to_wrap, wrap_to_display) =
+            expand_rows_for_display(&rows, &paragraphs, 1.0, &vec![false; rows.len()], 14.0, 1.0);
 
         // Row 0 (Pocket) occupies `slots` display rows: blanks first, so the
         // box's real overflow direction (upward, out of a bottom-aligned
@@ -6742,7 +7898,10 @@ mod tests {
         expected.extend(std::iter::repeat(None).take(plain - 1));
         expected.push(Some(1));
         assert_eq!(display_to_wrap, expected);
-        assert!(slots > plain, "the Pocket line must reserve more than a plain one");
+        assert!(
+            slots > plain,
+            "the Pocket line must reserve more than a plain one"
+        );
 
         // Each row's content sits in the last of its own reserved slots.
         assert_eq!(wrap_to_display, vec![slots - 1, slots + plain - 1]);
@@ -6766,10 +7925,16 @@ mod tests {
     #[test]
     fn tighter_line_spacing_reserves_more_slots_for_an_oversized_line() {
         let single = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 1.0);
-        let tight  = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 0.5);
-        let loose  = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 2.0);
-        assert!(tight > single, "half spacing must need more slots, got {tight} vs {single}");
-        assert!(loose < single, "double spacing must need fewer slots, got {loose} vs {single}");
+        let tight = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 0.5);
+        let loose = slot_count_for_paragraph(Some(&pocket_paragraph()), 1.0, 11.0, 2.0);
+        assert!(
+            tight > single,
+            "half spacing must need more slots, got {tight} vs {single}"
+        );
+        assert!(
+            loose < single,
+            "double spacing must need fewer slots, got {loose} vs {single}"
+        );
     }
 
     /// Spacing changes `display_to_wrap`, so it must be part of the row
@@ -6779,8 +7944,12 @@ mod tests {
     #[test]
     fn row_cache_invalidates_when_line_spacing_changes() {
         let cache = test_row_cache(1, 5, 800.0, 1.0);
-        assert!(row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0));
-        assert!(!row_cache_is_valid_for(&cache, 1, 5, 800.0, 1.0, 1.5, false, false, 0));
+        assert!(row_cache_is_valid_for(
+            &cache, 1, 5, 800.0, 1.0, 1.0, false, false, 0
+        ));
+        assert!(!row_cache_is_valid_for(
+            &cache, 1, 5, 800.0, 1.0, 1.5, false, false, 0
+        ));
     }
 
     // ── document scrollbar ──────────────────────────────────────────────────
@@ -6797,9 +7966,12 @@ mod tests {
         assert_eq!(top.thumb_top, 0.0);
 
         let bottom = scrollbar_geometry(viewport, content, max_scroll);
-        assert!((bottom.thumb_top + bottom.thumb_h - viewport).abs() < 0.01,
+        assert!(
+            (bottom.thumb_top + bottom.thumb_h - viewport).abs() < 0.01,
             "fully scrolled thumb must end at the track's bottom: {} + {} vs {viewport}",
-            bottom.thumb_top, bottom.thumb_h);
+            bottom.thumb_top,
+            bottom.thumb_h
+        );
 
         let middle = scrollbar_geometry(viewport, content, max_scroll / 2.0);
         assert!((middle.thumb_top - bottom.thumb_top / 2.0).abs() < 0.01);
@@ -6812,7 +7984,11 @@ mod tests {
         let long = scrollbar_geometry(400.0, 8000.0, 0.0);
         assert!(short.thumb_h > long.thumb_h);
         // Half the document visible -> half the track.
-        assert!((short.thumb_h - 200.0).abs() < 0.01, "got {}", short.thumb_h);
+        assert!(
+            (short.thumb_h - 200.0).abs() < 0.01,
+            "got {}",
+            short.thumb_h
+        );
     }
 
     /// A very long document must not shrink the thumb to something
@@ -6820,11 +7996,22 @@ mod tests {
     #[test]
     fn scrollbar_thumb_is_clamped_at_both_ends() {
         let huge = scrollbar_geometry(400.0, 1_000_000.0, 0.0);
-        assert!(huge.thumb_h >= SCROLLBAR_MIN_THUMB_PX, "got {}", huge.thumb_h);
-        assert!(huge.travel > 0.0, "a floored thumb must still have room to move");
+        assert!(
+            huge.thumb_h >= SCROLLBAR_MIN_THUMB_PX,
+            "got {}",
+            huge.thumb_h
+        );
+        assert!(
+            huge.travel > 0.0,
+            "a floored thumb must still have room to move"
+        );
 
         let barely = scrollbar_geometry(400.0, 401.0, 0.0);
-        assert!(barely.thumb_h <= 400.0, "thumb overflowed the track: {}", barely.thumb_h);
+        assert!(
+            barely.thumb_h <= 400.0,
+            "thumb overflowed the track: {}",
+            barely.thumb_h
+        );
     }
 
     /// Guards the degenerate frames: an unmeasured viewport, and a document
@@ -6843,7 +8030,10 @@ mod tests {
     #[test]
     fn wrap_width_reserves_a_gutter_for_the_scrollbar() {
         let laid_out = usable_wrap_width(500.0);
-        assert!((laid_out - (500.0 - 32.0 - SCROLLBAR_GUTTER_PX)).abs() < 0.01, "got {laid_out}");
+        assert!(
+            (laid_out - (500.0 - 32.0 - SCROLLBAR_GUTTER_PX)).abs() < 0.01,
+            "got {laid_out}"
+        );
         // Still unbounded before first layout, and the gutter must not push a
         // narrow-but-real viewport into the sentinel by accident.
         assert_eq!(usable_wrap_width(0.0), f32::MAX);
@@ -6861,7 +8051,10 @@ mod tests {
         for i in 0..=100 {
             let v = scrollbar_fade_opacity(i as f32 / 100.0);
             assert!((0.0..=1.0).contains(&v), "opacity {v} out of range");
-            assert!(v <= prev + 0.001, "fade must not brighten: {v} after {prev}");
+            assert!(
+                v <= prev + 0.001,
+                "fade must not brighten: {v} after {prev}"
+            );
             prev = v;
         }
     }
@@ -6882,12 +8075,16 @@ mod tests {
         for &font_px in &[8.0f32, 9.0, 11.0, 12.0, 14.0, 16.0, 24.0, 26.0] {
             let pitch = line_height_px(font_px, 1.0);
             let painted = text_line_box_px(font_px);
-            assert!(painted <= pitch,
-                "{font_px}px: painted {painted}px must fit the {pitch}px row");
+            assert!(
+                painted <= pitch,
+                "{font_px}px: painted {painted}px must fit the {pitch}px row"
+            );
             // GPUI rounds the resolved line height to whole pixels; the value
             // we hand it must still fit after that rounding.
-            assert!(painted.round() <= pitch,
-                "{font_px}px: {painted}px rounds past the {pitch}px row");
+            assert!(
+                painted.round() <= pitch,
+                "{font_px}px: {painted}px rounds past the {pitch}px row"
+            );
         }
     }
 
@@ -6898,29 +8095,76 @@ mod tests {
     /// above, whatever the line contains.
     #[test]
     fn every_paragraph_shape_paints_inside_its_reserved_row() {
-        let highlighted = |size: u16| Paragraph { list: None,
+        let highlighted = |size: u16| Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { text: "X".into(), size, highlight: true, ..Run::default() },
+                Run {
+                    text: "X".into(),
+                    size,
+                    highlight: true,
+                    ..Run::default()
+                },
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
 
         let cases: Vec<(&str, Paragraph)> = vec![
             // Highlight_Cover.docx itself: plain default-size text, one
             // highlighted run, no sizes anywhere.
             ("plain highlighted", highlighted(0)),
             ("manually enlarged highlight", highlighted(52)),
-            ("emphasis box", Paragraph { list: None,
-                runs: vec![Run::default(), Run { emphasis: true, emphasis_boxed: true, size: 24, ..Run::default() }],
-                heading: 0, alignment: Alignment::default(), unsupported_xml: None }),
+            (
+                "emphasis box",
+                Paragraph {
+                    list: None,
+                    runs: vec![
+                        Run::default(),
+                        Run {
+                            emphasis: true,
+                            emphasis_boxed: true,
+                            size: 24,
+                            ..Run::default()
+                        },
+                    ],
+                    heading: 0,
+                    alignment: Alignment::default(),
+                    unsupported_xml: None,
+                },
+            ),
             ("pocket", pocket_paragraph()),
-            ("tag", Paragraph { list: None,
-                runs: vec![Run { size: 26, bold: true, ..Run::default() }],
-                heading: 4, alignment: Alignment::default(), unsupported_xml: None }),
-            ("cite", Paragraph { list: None,
-                runs: vec![Run { size: 26, bold: true, highlight: true,
-                                 style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() }],
-                heading: 0, alignment: Alignment::default(), unsupported_xml: None }),
+            (
+                "tag",
+                Paragraph {
+                    list: None,
+                    runs: vec![Run {
+                        size: 26,
+                        bold: true,
+                        ..Run::default()
+                    }],
+                    heading: 4,
+                    alignment: Alignment::default(),
+                    unsupported_xml: None,
+                },
+            ),
+            (
+                "cite",
+                Paragraph {
+                    list: None,
+                    runs: vec![Run {
+                        size: 26,
+                        bold: true,
+                        highlight: true,
+                        style: Some(crate::docx_parser::CardStyle::Cite),
+                        ..Run::default()
+                    }],
+                    heading: 0,
+                    alignment: Alignment::default(),
+                    unsupported_xml: None,
+                },
+            ),
             ("plain", plain_paragraph()),
         ];
 
@@ -6928,8 +8172,10 @@ mod tests {
             let pitch = slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0) as f32
                 * row_slot_px(11.0, 1.0, 1.0);
             let painted = text_line_box_px(line_font_px(Some(&para), 1.0, 11.0));
-            assert!(painted <= pitch,
-                "{name}: paints {painted}px into a {pitch}px row");
+            assert!(
+                painted <= pitch,
+                "{name}: paints {painted}px into a {pitch}px row"
+            );
         }
 
         // A row with no paragraph data must still resolve to one ordinary line.
@@ -6944,9 +8190,14 @@ mod tests {
         const GPUI_DEFAULT_LINE_HEIGHT: f32 = 1.618_034; // gpui `phi()`
         let pitch = line_height_px(11.0, 1.0);
         let gpui_default = (11.0 * GPUI_DEFAULT_LINE_HEIGHT).round();
-        assert!(gpui_default > pitch + 2.0,
-            "expected the untamed default to overflow by >2px, got {gpui_default} vs {pitch}");
-        assert!(text_line_box_px(11.0) < gpui_default, "the fix must shrink it");
+        assert!(
+            gpui_default > pitch + 2.0,
+            "expected the untamed default to overflow by >2px, got {gpui_default} vs {pitch}"
+        );
+        assert!(
+            text_line_box_px(11.0) < gpui_default,
+            "the fix must shrink it"
+        );
     }
 
     // ── line-spacing continuity and overlap ─────────────────────────────────
@@ -6967,13 +8218,19 @@ mod tests {
          * and `reserved_height_px` is exactly the space a run can paint into
          * but was never given.
          */
-        let run_max_px = para.runs.iter()
+        let run_max_px = para
+            .runs
+            .iter()
             .filter(|r| r.size > 0)
             .map(|r| r.size as f32 / 2.0 * zoom)
             .fold(0.0_f32, f32::max);
         let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-        let font_px = if run_max_px > 0.0 { run_max_px } else { heading_px }
-            .max(normal_size_px * zoom);
+        let font_px = if run_max_px > 0.0 {
+            run_max_px
+        } else {
+            heading_px
+        }
+        .max(normal_size_px * zoom);
         let has_box = para.runs.iter().any(|r| r.box_format);
         font_px * LINE_HEIGHT_RATIO + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 }
     }
@@ -6996,21 +8253,35 @@ mod tests {
     fn font_sizes_twelve_to_twentytwo_no_longer_all_get_the_same_line_height() {
         let heights: Vec<usize> = (12..=22)
             .map(|pt| {
-                let para = Paragraph { list: None,
-                    runs: vec![Run { size: pt * 2, ..Run::default() }],
-                    heading: 0, alignment: Alignment::default(), unsupported_xml: None };
+                let para = Paragraph {
+                    list: None,
+                    runs: vec![Run {
+                        size: pt * 2,
+                        ..Run::default()
+                    }],
+                    heading: 0,
+                    alignment: Alignment::default(),
+                    unsupported_xml: None,
+                };
                 slot_count_for_paragraph(Some(&para), 1.0, 11.0, 1.0)
             })
             .collect();
 
         let distinct: std::collections::BTreeSet<_> = heights.iter().copied().collect();
-        assert!(distinct.len() >= 4,
-            "12-22pt must span several row heights, got {distinct:?} from {heights:?}");
+        assert!(
+            distinct.len() >= 4,
+            "12-22pt must span several row heights, got {distinct:?} from {heights:?}"
+        );
         // Monotonic: a bigger font never reserves less room than a smaller one.
-        assert!(heights.windows(2).all(|w| w[0] <= w[1]), "not monotonic: {heights:?}");
+        assert!(
+            heights.windows(2).all(|w| w[0] <= w[1]),
+            "not monotonic: {heights:?}"
+        );
         // And no single step may be a whole line — that is the "harsh" jump.
-        assert!(heights.windows(2).all(|w| w[1] - w[0] < ROW_SUBDIVISIONS),
-            "a step of a full line remains: {heights:?}");
+        assert!(
+            heights.windows(2).all(|w| w[1] - w[0] < ROW_SUBDIVISIONS),
+            "a step of a full line remains: {heights:?}"
+        );
     }
 
     /// Bug report: "the Emphasis boxes on size 12 font overlap such that the
@@ -7023,30 +8294,49 @@ mod tests {
     /// pitch has to exceed the painted height or consecutive boxes touch.
     #[test]
     fn emphasis_box_at_size_twelve_has_clearance_from_the_line_above() {
-        let para = Paragraph { list: None,
+        let para = Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { text: "word".into(), emphasis: true, emphasis_boxed: true, size: 24, ..Run::default() },
+                Run {
+                    text: "word".into(),
+                    emphasis: true,
+                    emphasis_boxed: true,
+                    size: 24,
+                    ..Run::default()
+                },
                 Run::default(),
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
         let pitch = reserved_height_px(&para, 1.0, 11.0);
         let painted = painted_height_px(&para, 1.0, 11.0);
-        assert!(pitch >= painted + EMPHASIS_BOX_EXTRA_PX,
-            "box needs {EMPHASIS_BOX_EXTRA_PX}px clearance: pitch {pitch}px vs painted {painted}px");
+        assert!(
+            pitch >= painted + EMPHASIS_BOX_EXTRA_PX,
+            "box needs {EMPHASIS_BOX_EXTRA_PX}px clearance: pitch {pitch}px vs painted {painted}px"
+        );
     }
 
     /// The same run without a box: no longer excluded from the reservation,
     /// so its glyphs stay inside the row reserved for them.
     #[test]
     fn emphasis_run_no_longer_paints_past_the_row_reserved_for_it() {
-        let para = Paragraph { list: None,
+        let para = Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { size: 52, emphasis: true, highlight: true, ..Run::default() },
+                Run {
+                    size: 52,
+                    emphasis: true,
+                    highlight: true,
+                    ..Run::default()
+                },
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
         assert!(reserved_height_px(&para, 1.0, 11.0) >= painted_height_px(&para, 1.0, 11.0));
     }
@@ -7060,24 +8350,45 @@ mod tests {
     /// stays a deliberate decision rather than a side effect of this fix.
     #[test]
     fn cite_and_boxed_tag_still_paint_past_their_reservation() {
-        let cite = Paragraph { list: None,
+        let cite = Paragraph {
+            list: None,
             runs: vec![
                 Run::default(),
-                Run { size: 26, bold: true, highlight: true,
-                      style: Some(crate::docx_parser::CardStyle::Cite), ..Run::default() },
+                Run {
+                    size: 26,
+                    bold: true,
+                    highlight: true,
+                    style: Some(crate::docx_parser::CardStyle::Cite),
+                    ..Run::default()
+                },
             ],
-            heading: 0, alignment: Alignment::default(), unsupported_xml: None,
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
-        assert!(painted_height_px(&cite, 1.0, 11.0) > reserved_height_px(&cite, 1.0, 11.0),
-            "Cite exclusion still lets the run overflow");
+        assert!(
+            painted_height_px(&cite, 1.0, 11.0) > reserved_height_px(&cite, 1.0, 11.0),
+            "Cite exclusion still lets the run overflow"
+        );
 
-        let boxed_tag = Paragraph { list: None,
-            runs: vec![Run { size: 26, bold: true, box_format: true, ..Run::default() }],
-            heading: 4, alignment: Alignment::default(), unsupported_xml: None,
+        let boxed_tag = Paragraph {
+            list: None,
+            runs: vec![Run {
+                size: 26,
+                bold: true,
+                box_format: true,
+                ..Run::default()
+            }],
+            heading: 4,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
         };
-        let overflow = painted_height_px(&boxed_tag, 1.0, 11.0) - reserved_height_px(&boxed_tag, 1.0, 11.0);
-        assert!(overflow > CARD_BOX_EXTRA_PX - 1.0,
-            "the whole box inset is still unreserved, got {overflow}px");
+        let overflow =
+            painted_height_px(&boxed_tag, 1.0, 11.0) - reserved_height_px(&boxed_tag, 1.0, 11.0);
+        assert!(
+            overflow > CARD_BOX_EXTRA_PX - 1.0,
+            "the whole box inset is still unreserved, got {overflow}px"
+        );
     }
 
     // ── list marker rendering (non-GPUI pure logic only) ─────────────────────
@@ -7109,13 +8420,46 @@ mod tests {
     #[test]
     fn test_list_item_ordinal_counts_within_contiguous_run() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
-            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
-            Paragraph { runs: vec![Run { text: "not a list".into(), ..Run::default() }], ..Paragraph::default() },
-            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }), ..Paragraph::default() },
+            Paragraph {
+                runs: vec![Run {
+                    text: "a".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "b".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "not a list".into(),
+                    ..Run::default()
+                }],
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "c".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
         ];
         assert_eq!(list_item_ordinal(&paragraphs, 0), 1);
         assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
@@ -7134,14 +8478,41 @@ mod tests {
     #[test]
     fn test_list_item_ordinal_restarts_on_list_kind_change_with_no_break_between() {
         let paragraphs = vec![
-            Paragraph { runs: vec![Run { text: "a".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), ..Paragraph::default() },
-            Paragraph { runs: vec![Run { text: "b".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::NumberDecimalDot, level: 0 }), ..Paragraph::default() },
+            Paragraph {
+                runs: vec![Run {
+                    text: "a".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "b".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::NumberDecimalDot,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
             // Different kind, immediately adjacent — no non-list paragraph
             // between them, but this must still be a fresh run.
-            Paragraph { runs: vec![Run { text: "c".into(), ..Run::default() }],
-                list: Some(ListItem { kind: ListKind::NumberUpperRoman, level: 0 }), ..Paragraph::default() },
+            Paragraph {
+                runs: vec![Run {
+                    text: "c".into(),
+                    ..Run::default()
+                }],
+                list: Some(ListItem {
+                    kind: ListKind::NumberUpperRoman,
+                    level: 0,
+                }),
+                ..Paragraph::default()
+            },
         ];
         assert_eq!(list_item_ordinal(&paragraphs, 0), 1);
         assert_eq!(list_item_ordinal(&paragraphs, 1), 2);
@@ -7152,8 +8523,14 @@ mod tests {
 
     #[test]
     fn test_list_marker_text_for_level_0_matches_the_picked_style() {
-        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 0, 1), list_marker_text(ListKind::BulletSolid, 1));
-        assert_eq!(list_marker_text_for_level(ListKind::NumberUpperRoman, 0, 4), list_marker_text(ListKind::NumberUpperRoman, 4));
+        assert_eq!(
+            list_marker_text_for_level(ListKind::BulletSolid, 0, 1),
+            list_marker_text(ListKind::BulletSolid, 1)
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberUpperRoman, 0, 4),
+            list_marker_text(ListKind::NumberUpperRoman, 4)
+        );
     }
 
     #[test]
@@ -7178,8 +8555,14 @@ mod tests {
         // specifically is what an earlier, ilvl-0/1/2-only version of this
         // cascade got wrong (it repeated level 2's filled square instead).
         assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 1, 1), "o");
-        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 2, 1), "\u{25aa}");
-        assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 3, 1), "\u{2022}");
+        assert_eq!(
+            list_marker_text_for_level(ListKind::BulletSolid, 2, 1),
+            "\u{25aa}"
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::BulletSolid, 3, 1),
+            "\u{2022}"
+        );
         assert_eq!(list_marker_text_for_level(ListKind::BulletSolid, 4, 1), "o");
     }
 
@@ -7189,10 +8572,22 @@ mod tests {
         // again, repeating every 3 — independent of the level-0 format
         // (confirmed against NumberUpperRoman's own real-Word cascade,
         // whose level 3 is also plain decimal, not upperRoman again).
-        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 1, 3), "c.");
-        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 2, 3), "iii.");
-        assert_eq!(list_marker_text_for_level(ListKind::NumberDecimalDot, 3, 3), "3.");
-        assert_eq!(list_marker_text_for_level(ListKind::NumberUpperRoman, 3, 3), "3.");
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberDecimalDot, 1, 3),
+            "c."
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberDecimalDot, 2, 3),
+            "iii."
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberDecimalDot, 3, 3),
+            "3."
+        );
+        assert_eq!(
+            list_marker_text_for_level(ListKind::NumberUpperRoman, 3, 3),
+            "3."
+        );
     }
 
     #[test]
@@ -7202,11 +8597,23 @@ mod tests {
         // is a list paragraph's first row, since the gutter eats into the
         // available text width before any character starts.
         let list_para = Paragraph {
-            runs: vec![Run { text: "hello".into(), ..Run::default() }],
-            list: Some(ListItem { kind: ListKind::BulletSolid, level: 0 }),
+            runs: vec![Run {
+                text: "hello".into(),
+                ..Run::default()
+            }],
+            list: Some(ListItem {
+                kind: ListKind::BulletSolid,
+                level: 0,
+            }),
             ..Paragraph::default()
         };
-        let plain_para = Paragraph { runs: vec![Run { text: "hello".into(), ..Run::default() }], ..Paragraph::default() };
+        let plain_para = Paragraph {
+            runs: vec![Run {
+                text: "hello".into(),
+                ..Run::default()
+            }],
+            ..Paragraph::default()
+        };
         let rows = vec![(0usize, 0usize, 5usize)];
         let display_to_wrap = vec![Some(0usize)];
         let content_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(1000.0)));
@@ -7216,13 +8623,30 @@ mod tests {
         let position = point(px(x), px(0.0));
 
         let (_line, col_list) = line_col_from_mouse_position(
-            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
-            &[list_para], line_height_px(11.0, 1.0),
+            position,
+            content_bounds,
+            0.0,
+            &rows,
+            &display_to_wrap,
+            1.0,
+            11.0,
+            &[list_para],
+            line_height_px(11.0, 1.0),
         );
         let (_line, col_plain) = line_col_from_mouse_position(
-            position, content_bounds, 0.0, &rows, &display_to_wrap, 1.0, 11.0,
-            &[plain_para], line_height_px(11.0, 1.0),
+            position,
+            content_bounds,
+            0.0,
+            &rows,
+            &display_to_wrap,
+            1.0,
+            11.0,
+            &[plain_para],
+            line_height_px(11.0, 1.0),
         );
-        assert!(col_list < col_plain, "list col {col_list} should be earlier than plain col {col_plain}");
+        assert!(
+            col_list < col_plain,
+            "list col {col_list} should be earlier than plain col {col_plain}"
+        );
     }
 }

@@ -3,7 +3,10 @@ use gpui::*;
 
 use crate::keybinds::{rebuild_keymap, KeyCombo, KeybindAction, KeybindCategory, Keybinds};
 use crate::state::{bundled_default_settings_path, settings_conf_path, AppState, CardStyleKind};
-use crate::theme::{palette, save_theme, save_theme_color_mode, save_theme_mode, ThemeColorMode, ThemeKind, ThemeMode};
+use crate::theme::{
+    palette, save_theme, save_theme_color_mode, save_theme_mode, ThemeColorMode, ThemeKind,
+    ThemeMode,
+};
 
 /// Where this modal *writes* every setting it changes.
 ///
@@ -90,7 +93,11 @@ impl SettingsSection {
 /// read off exactly what build a bug report came from
 /// (`closed_beta_plan.md` §3).
 fn build_version_string() -> String {
-    format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("VIMBATIM_GIT_SHA"))
+    format!(
+        "{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("VIMBATIM_GIT_SHA")
+    )
 }
 
 /// The floating settings modal. Renders as a centred overlay on top of the
@@ -204,7 +211,12 @@ impl SettingsModal {
     /// Every edit writes straight through to `AppState` (and the word-list
     /// file), so there is no unsaved-buffer state to lose and an open Search
     /// From List panel's readout follows the typing live.
-    fn handle_word_list_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_word_list_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         match ks.key.as_str() {
             "escape" | "tab" => {
@@ -217,8 +229,11 @@ impl SettingsModal {
                 self.word_list_buffer.pop();
             }
             key => {
-                let Some(c) = crate::state::vim_find_target_char(key, ks.modifiers.shift, ks.key_char.as_deref())
-                else {
+                let Some(c) = crate::state::vim_find_target_char(
+                    key,
+                    ks.modifiers.shift,
+                    ks.key_char.as_deref(),
+                ) else {
                     return;
                 };
                 self.word_list_buffer.push(c);
@@ -269,7 +284,13 @@ impl SettingsModal {
     /// Clearing the keymap outright sidesteps both problems: with nothing
     /// registered, there's nothing for any keystroke to match, regardless
     /// of focus or context.
-    fn start_capture(&mut self, action: KeybindAction, slot: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_capture(
+        &mut self,
+        action: KeybindAction,
+        slot: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_word_list_edit();
         self.capturing = Some((action, slot));
         self.conflict_message = None;
@@ -296,7 +317,12 @@ impl SettingsModal {
     /// defaults call sites cancel all three — so this ordered fall-through is
     /// unambiguous. **Any future mode must be cancelled in those same places**;
     /// that invariant is the only thing keeping this router honest.
-    fn handle_capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_capture_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.editing_word_list {
             self.handle_word_list_key(event, window, cx);
             return;
@@ -312,8 +338,15 @@ impl SettingsModal {
     /// it (and persisting + rebuilding the live keymap) if it doesn't
     /// collide with another action, or showing an inline conflict message
     /// and staying in capture mode if it does.
-    fn handle_ctrl_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some((action, slot)) = self.capturing else { return };
+    fn handle_ctrl_capture_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((action, slot)) = self.capturing else {
+            return;
+        };
         let ks = &event.keystroke;
 
         let Some(combo) = KeyCombo::from_capture(&ks.modifiers, &ks.key) else {
@@ -323,7 +356,11 @@ impl SettingsModal {
             return;
         };
 
-        let conflict = self.state.read(cx).keybinds.find_conflict(&combo, (action, slot));
+        let conflict = self
+            .state
+            .read(cx)
+            .keybinds
+            .find_conflict(&combo, (action, slot));
         if let Some(other) = conflict {
             self.conflict_message = Some(format!(
                 "{} is already used by \"{}\". Press a different combination, or Esc to keep the current binding.",
@@ -353,7 +390,13 @@ impl SettingsModal {
     /// `existing` is the sequence being replaced, if any — `None` means
     /// adding a fresh one via the "+" button, same distinction
     /// `start_capture`'s `slot` makes for the Ctrl+key system.
-    fn start_vim_capture(&mut self, action: KeybindAction, existing: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_vim_capture(
+        &mut self,
+        action: KeybindAction,
+        existing: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_word_list_edit();
         self.vim_capturing = Some((action, existing));
         self.vim_capture_buffer.clear();
@@ -374,8 +417,15 @@ impl SettingsModal {
     /// Escape cancels. Unlike `handle_capture_key`'s single-keystroke
     /// combo, a vim sequence is typed over several keystrokes, so this
     /// can't resolve on the first one.
-    fn handle_vim_capture_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some((action, existing)) = self.vim_capturing.clone() else { return };
+    fn handle_vim_capture_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((action, existing)) = self.vim_capturing.clone() else {
+            return;
+        };
         let ks = &event.keystroke;
 
         match ks.key.as_str() {
@@ -405,7 +455,11 @@ impl SettingsModal {
                     cx.notify();
                     return;
                 }
-                let conflict = self.state.read(cx).vim_keybinds.find_overlap_conflict(&candidate, exclude);
+                let conflict = self
+                    .state
+                    .read(cx)
+                    .vim_keybinds
+                    .find_overlap_conflict(&candidate, exclude);
                 if let Some((other, other_seq)) = conflict {
                     self.vim_conflict_message = Some(format!(
                         "{candidate:?} overlaps with {other_seq:?}, already used by \"{}\". Try a different sequence, or Esc to keep the current binding.",
@@ -415,7 +469,9 @@ impl SettingsModal {
                     cx.notify();
                     return;
                 }
-                if let Some(native) = crate::vim_keybinds::VimKeybinds::find_native_vim_conflict(&candidate) {
+                if let Some(native) =
+                    crate::vim_keybinds::VimKeybinds::find_native_vim_conflict(&candidate)
+                {
                     self.vim_conflict_message = Some(format!(
                         "{candidate:?} overlaps with {native:?}, which is vim's own scroll command. Try a different sequence, or Esc to keep the current binding."
                     ));
@@ -439,7 +495,11 @@ impl SettingsModal {
                 // normalization the real vim dispatcher uses, so what's
                 // typed here matches exactly what `VimKeybinds` will later
                 // be asked to look up at runtime.
-                if let Some(c) = crate::state::vim_find_target_char(&ks.key, ks.modifiers.shift, ks.key_char.as_deref()) {
+                if let Some(c) = crate::state::vim_find_target_char(
+                    &ks.key,
+                    ks.modifiers.shift,
+                    ks.key_char.as_deref(),
+                ) {
                     self.vim_capture_buffer.push(c);
                     self.vim_conflict_message = None;
                     cx.notify();
@@ -490,14 +550,21 @@ impl SettingsModal {
     /// built the same way every other text input in this app is (no GPUI text
     /// input exists — see `find_bar.rs`'s own note), with the panel's shared
     /// `focus_handle` and `handle_word_list_key` doing the typing.
-    fn render_word_list_box(&self, p: crate::theme::Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_word_list_box(
+        &self,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let words = self.state.read(cx).search_word_list.clone();
         let editing = self.editing_word_list;
         // While editing, paint the live buffer (which can hold a trailing
         // blank line the saved list deliberately drops); otherwise the saved
         // list, so the box still shows its contents after focus moves away.
         let lines: Vec<String> = if editing {
-            self.word_list_buffer.split('\n').map(ToString::to_string).collect()
+            self.word_list_buffer
+                .split('\n')
+                .map(ToString::to_string)
+                .collect()
         } else {
             words.clone()
         };
@@ -531,9 +598,12 @@ impl SettingsModal {
                     .cursor_pointer()
                     .text_sm()
                     .text_color(rgb(p.text))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, window, cx| {
-                        this.start_word_list_edit(window, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev, window, cx| {
+                            this.start_word_list_edit(window, cx);
+                        }),
+                    )
                     .when(lines.iter().all(|l| l.is_empty()) && !editing, |d| {
                         d.child(
                             div()
@@ -602,12 +672,18 @@ impl SettingsModal {
     /// One stepper click on a card style's size. `None` means Cite, which
     /// isn't a `CardStyleKind` (it targets the selection, not the whole line)
     /// and so has its own setter — see `AppState::set_cite_size_points`.
-    fn adjust_card_size(&mut self, kind: Option<CardStyleKind>, delta: i32, cx: &mut Context<Self>) {
+    fn adjust_card_size(
+        &mut self,
+        kind: Option<CardStyleKind>,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |s, cx| {
             let current = match kind {
                 Some(kind) => s.card_size_half_points(kind),
                 None => s.cite_size_half_points,
-            } as i32 / 2;
+            } as i32
+                / 2;
             let points = (current + delta).max(0) as u16;
             match kind {
                 Some(kind) => s.set_card_size_points(kind, points),
@@ -629,9 +705,8 @@ impl SettingsModal {
 
     fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let next = crate::state::clamp_spreading_wpm(
-                (s.spreading_wpm as i32 + delta).max(0) as u32,
-            );
+            let next =
+                crate::state::clamp_spreading_wpm((s.spreading_wpm as i32 + delta).max(0) as u32);
             s.spreading_wpm = next;
             let _ = crate::theme::save_setting_line(
                 &settings_path(),
@@ -651,10 +726,14 @@ impl SettingsModal {
         let dir = self.state.read(cx).working_directory.clone();
         let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
         cx.spawn_in(window, async move |_this, cx| {
-            let Ok(Ok(Some(path))) = path_rx.await else { return };
-            let _ = cx.background_spawn(async move {
-                std::fs::write(path, crate::theme::custom_theme_template())
-            }).await;
+            let Ok(Ok(Some(path))) = path_rx.await else {
+                return;
+            };
+            let _ = cx
+                .background_spawn(async move {
+                    std::fs::write(path, crate::theme::custom_theme_template())
+                })
+                .await;
         })
         .detach();
     }
@@ -663,10 +742,17 @@ impl SettingsModal {
     /// `AppState::import_custom_theme` parses+adopts it. Invalid TOML shows
     /// `theme_import_error` inline rather than silently doing nothing.
     fn import_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths_rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
         let state = self.state.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(mut paths))) = paths_rx.await else { return };
+            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
+                return;
+            };
             let Some(path) = paths.pop() else { return };
             let Ok(content) = std::fs::read_to_string(&path) else {
                 let _ = this.update(cx, |this, cx| {
@@ -677,14 +763,19 @@ impl SettingsModal {
             };
             let ok = state.update(cx, |s, cx| {
                 let ok = s.import_custom_theme(&content);
-                if ok { cx.notify(); }
+                if ok {
+                    cx.notify();
+                }
                 ok
             });
             let _ = this.update(cx, |this, cx| {
                 this.theme_import_error = if ok {
                     None
                 } else {
-                    Some("Not a valid theme file — missing a [dark]/[light] section or a color.".to_string())
+                    Some(
+                        "Not a valid theme file — missing a [dark]/[light] section or a color."
+                            .to_string(),
+                    )
                 };
                 cx.notify();
             });
@@ -837,9 +928,12 @@ impl SettingsModal {
                     .cursor_pointer()
                     .text_xs()
                     .text_color(rgb(p.accent))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
-                        this.start_capture(action, Some(index), window, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, window, cx| {
+                            this.start_capture(action, Some(index), window, cx);
+                        }),
+                    )
                     .child("Change"),
             )
             .child(
@@ -849,14 +943,17 @@ impl SettingsModal {
                     .text_xs()
                     .text_color(rgb(p.text_faint))
                     .hover(move |s| s.text_color(rgb(p.text)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        this.state.update(cx, |s, _cx| {
-                            s.keybinds.remove_at(action, index);
-                            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
-                        });
-                        this.cancel_capture(cx); // rebuilds the keymap without the removed combo
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.state.update(cx, |s, _cx| {
+                                s.keybinds.remove_at(action, index);
+                                let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+                            });
+                            this.cancel_capture(cx); // rebuilds the keymap without the removed combo
+                            cx.notify();
+                        }),
+                    )
                     .child("×"),
             )
             .into_any_element()
@@ -925,9 +1022,12 @@ impl SettingsModal {
                 .text_color(rgb(p.text_faint))
                 .bg(rgb(p.chrome_active))
                 .hover(move |s| s.text_color(rgb(p.text)).bg(rgb(p.chrome_hover)))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
-                    this.start_capture(action, None, window, cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, window, cx| {
+                        this.start_capture(action, None, window, cx);
+                    }),
+                )
                 .child("+")
                 .into_any_element()
         });
@@ -945,7 +1045,12 @@ impl SettingsModal {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().text_sm().text_color(rgb(p.text)).child(action.label()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(p.text))
+                            .child(action.label()),
+                    )
                     .when(action.is_stub(), |d| {
                         d.child(
                             div()
@@ -954,11 +1059,26 @@ impl SettingsModal {
                                 .child("(not yet implemented)"),
                         )
                     })
-                    .when(combos.is_empty() && self.capturing != Some((action, None)), |d| {
-                        d.child(div().text_xs().text_color(rgb(p.text_faint)).child("Unbound"))
-                    }),
+                    .when(
+                        combos.is_empty() && self.capturing != Some((action, None)),
+                        |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(p.text_faint))
+                                    .child("Unbound"),
+                            )
+                        },
+                    ),
             )
-            .child(div().flex().flex_row().items_center().gap(px(8.0)).children(slots))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(slots),
+            )
     }
 
     /// Renders one collapsible category section (its header + every action
@@ -984,7 +1104,10 @@ impl SettingsModal {
             .border_color(rgb(p.border_subtle))
             .child(
                 div()
-                    .id(ElementId::named_usize("keybind-category", category as u8 as usize))
+                    .id(ElementId::named_usize(
+                        "keybind-category",
+                        category as u8 as usize,
+                    ))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -993,11 +1116,14 @@ impl SettingsModal {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(p.text))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        let collapsed = this.collapsed.get(&category).copied().unwrap_or(false);
-                        this.collapsed.insert(category, !collapsed);
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            let collapsed = this.collapsed.get(&category).copied().unwrap_or(false);
+                            this.collapsed.insert(category, !collapsed);
+                            cx.notify();
+                        }),
+                    )
                     .child(if is_collapsed { "▶" } else { "▼" })
                     .child(category.label()),
             )
@@ -1008,7 +1134,13 @@ impl SettingsModal {
                         .flex_col()
                         .px(px(16.0))
                         .children(actions.into_iter().map(|action| {
-                            self.render_action_row(action, keybinds.get_all(action), p, theme_mode, cx)
+                            self.render_action_row(
+                                action,
+                                keybinds.get_all(action),
+                                p,
+                                theme_mode,
+                                cx,
+                            )
                         })),
                 )
             })
@@ -1029,7 +1161,11 @@ impl SettingsModal {
         theme_mode: ThemeMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.vim_capturing.as_ref().is_some_and(|(a, s)| *a == action && s.as_deref() == Some(sequence)) {
+        if self
+            .vim_capturing
+            .as_ref()
+            .is_some_and(|(a, s)| *a == action && s.as_deref() == Some(sequence))
+        {
             return self.vim_capture_prompt(p, theme_mode).into_any_element();
         }
         let base_id = format!("{action:?}-{sequence}");
@@ -1058,7 +1194,12 @@ impl SettingsModal {
                     .on_mouse_down(MouseButton::Left, {
                         let sequence_owned = sequence_owned.clone();
                         cx.listener(move |this, _ev, window, cx| {
-                            this.start_vim_capture(action, Some(sequence_owned.clone()), window, cx);
+                            this.start_vim_capture(
+                                action,
+                                Some(sequence_owned.clone()),
+                                window,
+                                cx,
+                            );
                         })
                     })
                     .child("Change"),
@@ -1070,14 +1211,17 @@ impl SettingsModal {
                     .text_xs()
                     .text_color(rgb(p.text_faint))
                     .hover(move |s| s.text_color(rgb(p.text)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        this.state.update(cx, |s, _cx| {
-                            s.vim_keybinds.remove(&sequence_owned);
-                            let _ = s.vim_keybinds.save_to(&settings_path());
-                        });
-                        this.cancel_vim_capture();
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.state.update(cx, |s, _cx| {
+                                s.vim_keybinds.remove(&sequence_owned);
+                                let _ = s.vim_keybinds.save_to(&settings_path());
+                            });
+                            this.cancel_vim_capture();
+                            cx.notify();
+                        }),
+                    )
                     .child("×"),
             )
             .into_any_element()
@@ -1100,7 +1244,11 @@ impl SettingsModal {
                 .max_w(px(180.0))
                 .child(format!(
                     "Type a sequence, Enter to save ({}), Esc to cancel",
-                    if self.vim_capture_buffer.is_empty() { "…".to_string() } else { self.vim_capture_buffer.clone() }
+                    if self.vim_capture_buffer.is_empty() {
+                        "…".to_string()
+                    } else {
+                        self.vim_capture_buffer.clone()
+                    }
                 ))
                 .into_any_element(),
         }
@@ -1119,7 +1267,10 @@ impl SettingsModal {
             .map(|seq| self.render_vim_combo_chip(action, seq, p, theme_mode, cx))
             .collect();
 
-        let is_adding = self.vim_capturing.as_ref().is_some_and(|(a, s)| *a == action && s.is_none());
+        let is_adding = self
+            .vim_capturing
+            .as_ref()
+            .is_some_and(|(a, s)| *a == action && s.is_none());
         slots.push(if is_adding {
             self.vim_capture_prompt(p, theme_mode)
         } else {
@@ -1136,9 +1287,12 @@ impl SettingsModal {
                 .text_color(rgb(p.text_faint))
                 .bg(rgb(p.chrome_active))
                 .hover(move |s| s.text_color(rgb(p.text)).bg(rgb(p.chrome_hover)))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, window, cx| {
-                    this.start_vim_capture(action, None, window, cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, window, cx| {
+                        this.start_vim_capture(action, None, window, cx);
+                    }),
+                )
                 .child("+")
                 .into_any_element()
         });
@@ -1156,12 +1310,29 @@ impl SettingsModal {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().text_sm().text_color(rgb(p.text)).child(action.label()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(p.text))
+                            .child(action.label()),
+                    )
                     .when(sequences.is_empty() && !is_adding, |d| {
-                        d.child(div().text_xs().text_color(rgb(p.text_faint)).child("Unbound"))
+                        d.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.text_faint))
+                                .child("Unbound"),
+                        )
                     }),
             )
-            .child(div().flex().flex_row().items_center().gap(px(8.0)).children(slots))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(slots),
+            )
     }
 
     fn render_vim_category(
@@ -1184,7 +1355,10 @@ impl SettingsModal {
             .border_color(rgb(p.border_subtle))
             .child(
                 div()
-                    .id(ElementId::named_usize("vim-keybind-category", category as u8 as usize))
+                    .id(ElementId::named_usize(
+                        "vim-keybind-category",
+                        category as u8 as usize,
+                    ))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -1193,11 +1367,15 @@ impl SettingsModal {
                     .text_sm()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(p.text))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        let collapsed = this.vim_collapsed.get(&category).copied().unwrap_or(false);
-                        this.vim_collapsed.insert(category, !collapsed);
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            let collapsed =
+                                this.vim_collapsed.get(&category).copied().unwrap_or(false);
+                            this.vim_collapsed.insert(category, !collapsed);
+                            cx.notify();
+                        }),
+                    )
                     .child(if is_collapsed { "▶" } else { "▼" })
                     .child(category.label()),
             )
@@ -1208,7 +1386,13 @@ impl SettingsModal {
                         .flex_col()
                         .px(px(16.0))
                         .children(actions.into_iter().map(|action| {
-                            self.render_vim_action_row(action, vim_keybinds.get_all(action), p, theme_mode, cx)
+                            self.render_vim_action_row(
+                                action,
+                                vim_keybinds.get_all(action),
+                                p,
+                                theme_mode,
+                                cx,
+                            )
                         })),
                 )
             })
@@ -1301,34 +1485,40 @@ impl SettingsModal {
                         d.text_color(rgb(p.text_muted))
                             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                     })
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _ev, _window, cx| {
-                        this.section = section;
-                        this.cancel_capture(cx);
-                        this.cancel_vim_capture();
-                        this.cancel_word_list_edit();
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            this.section = section;
+                            this.cancel_capture(cx);
+                            this.cancel_vim_capture();
+                            this.cancel_word_list_edit();
+                            cx.notify();
+                        }),
+                    )
                     .child(section.label())
             }))
     }
 
     /// The actions a keybind list shows for `category`.
-///
-/// Shared by both the Ctrl-combo list and the Vim Keybinds list so the two
-/// can't drift on what's visible. `CommandPalette` is hidden while its Toggle
-/// Features switch is off — the same "only show it once the feature is on"
-/// rule the Vim Keybinds section itself follows — so a disabled feature
-/// doesn't leave a bindable-looking dead row behind.
-fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> Vec<KeybindAction> {
-    KeybindAction::all()
-        .iter()
-        .copied()
-        .filter(|a| a.category() == category)
-        .filter(|a| *a != KeybindAction::CommandPalette || command_palette_enabled)
-        .collect()
-}
+    ///
+    /// Shared by both the Ctrl-combo list and the Vim Keybinds list so the two
+    /// can't drift on what's visible. `CommandPalette` is hidden while its Toggle
+    /// Features switch is off — the same "only show it once the feature is on"
+    /// rule the Vim Keybinds section itself follows — so a disabled feature
+    /// doesn't leave a bindable-looking dead row behind.
+    fn listed_actions(
+        category: KeybindCategory,
+        command_palette_enabled: bool,
+    ) -> Vec<KeybindAction> {
+        KeybindAction::all()
+            .iter()
+            .copied()
+            .filter(|a| a.category() == category)
+            .filter(|a| *a != KeybindAction::CommandPalette || command_palette_enabled)
+            .collect()
+    }
 
-/// A labelled on/off row with a description — the shared shape of every
+    /// A labelled on/off row with a description — the shared shape of every
     /// entry in the Toggle Features pane.
     fn toggle_row(
         id: &'static str,
@@ -1589,7 +1779,11 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
     }
 
     /// One −/+ button of a numeric stepper.
-    fn stepper_btn(id: &'static str, label: &'static str, p: crate::theme::Palette) -> Stateful<Div> {
+    fn stepper_btn(
+        id: &'static str,
+        label: &'static str,
+        p: crate::theme::Palette,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .w(px(24.0))
@@ -1677,17 +1871,46 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                 .child(text)
         };
         let note = |text: &'static str| {
-            div().text_xs().text_color(rgb(p.text_muted)).max_w(px(420.0)).child(text)
+            div()
+                .text_xs()
+                .text_color(rgb(p.text_muted))
+                .max_w(px(420.0))
+                .child(text)
         };
 
         // One stepper row per card style. Built as a loop rather than five
         // copy-pasted blocks: the only thing that varies is the label, the
         // element ids, and which size it writes.
-        let card_rows: [(&'static str, &'static str, &'static str, Option<CardStyleKind>); 5] = [
-            ("card-size-pocket-down", "card-size-pocket-up", "Pocket", Some(CardStyleKind::Pocket)),
-            ("card-size-hat-down", "card-size-hat-up", "Hat", Some(CardStyleKind::Hat)),
-            ("card-size-block-down", "card-size-block-up", "Block", Some(CardStyleKind::Block)),
-            ("card-size-tag-down", "card-size-tag-up", "Tag", Some(CardStyleKind::Tag)),
+        let card_rows: [(
+            &'static str,
+            &'static str,
+            &'static str,
+            Option<CardStyleKind>,
+        ); 5] = [
+            (
+                "card-size-pocket-down",
+                "card-size-pocket-up",
+                "Pocket",
+                Some(CardStyleKind::Pocket),
+            ),
+            (
+                "card-size-hat-down",
+                "card-size-hat-up",
+                "Hat",
+                Some(CardStyleKind::Hat),
+            ),
+            (
+                "card-size-block-down",
+                "card-size-block-up",
+                "Block",
+                Some(CardStyleKind::Block),
+            ),
+            (
+                "card-size-tag-down",
+                "card-size-tag-up",
+                "Tag",
+                Some(CardStyleKind::Tag),
+            ),
             ("card-size-cite-down", "card-size-cite-up", "Cite", None),
         ];
 
@@ -2049,56 +2272,69 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(px(6.0))
-                            .children(ThemeKind::all().iter().map(|theme| {
-                                let theme = *theme;
-                                let is_current = theme == current_theme;
-                                let theme_palette = palette(theme, current_theme_mode);
-                                div()
-                                    .id(ElementId::named_usize("theme-choice", theme as usize))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .cursor_pointer()
-                                    .pl(px(6.0))
-                                    .pr(px(10.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .text_xs()
-                                    .border_1()
-                                    .when(is_current, |d| {
-                                        d.bg(rgb(p.accent_wash))
-                                            .border_color(rgb(p.accent_muted))
-                                            .text_color(rgb(p.text))
-                                    })
-                                    .when(!is_current, |d| {
-                                        d.bg(rgb(p.chrome_active))
-                                            .border_color(rgb(p.border_subtle))
-                                            .text_color(rgb(p.text_muted))
-                                    })
-                                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
-                                    .active(move |s| s.bg(rgb(p.chrome_active)))
-                                    .on_click(cx.listener(move |this, _ev, _window, cx| {
-                                        this.set_theme(theme, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .gap(px(2.0))
-                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.accent)))
-                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.accent_alt)))
-                                            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(theme_palette.highlight))),
-                                    )
-                                    .child(theme.label())
-                            })),
-                    ),
+                    .child(div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
+                        ThemeKind::all().iter().map(|theme| {
+                            let theme = *theme;
+                            let is_current = theme == current_theme;
+                            let theme_palette = palette(theme, current_theme_mode);
+                            div()
+                                .id(ElementId::named_usize("theme-choice", theme as usize))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .cursor_pointer()
+                                .pl(px(6.0))
+                                .pr(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .text_xs()
+                                .border_1()
+                                .when(is_current, |d| {
+                                    d.bg(rgb(p.accent_wash))
+                                        .border_color(rgb(p.accent_muted))
+                                        .text_color(rgb(p.text))
+                                })
+                                .when(!is_current, |d| {
+                                    d.bg(rgb(p.chrome_active))
+                                        .border_color(rgb(p.border_subtle))
+                                        .text_color(rgb(p.text_muted))
+                                })
+                                .hover(move |s| s.bg(rgb(p.chrome_hover)))
+                                .active(move |s| s.bg(rgb(p.chrome_active)))
+                                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                    this.set_theme(theme, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(2.0))
+                                        .child(
+                                            div()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .rounded(px(2.0))
+                                                .bg(rgb(theme_palette.accent)),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .rounded(px(2.0))
+                                                .bg(rgb(theme_palette.accent_alt)),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(8.0))
+                                                .h(px(8.0))
+                                                .rounded(px(2.0))
+                                                .bg(rgb(theme_palette.highlight)),
+                                        ),
+                                )
+                                .child(theme.label())
+                        }),
+                    )),
             )
             // ── Theme Color │ Mode ────────────────────────────────────────
             // Two labelled groups side by side, split by a thin vertical rule.
@@ -2120,24 +2356,20 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                                     .text_color(rgb(p.text))
                                     .child("Theme Color"),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap(px(6.0))
-                                    .children(ThemeColorMode::all().iter().map(|mode| {
-                                        let mode = *mode;
-                                        Self::mode_pill(
-                                            ElementId::named_usize("theme-color-mode", mode as usize),
-                                            mode.label(),
-                                            mode == current_theme_color_mode,
-                                            p,
-                                            cx.listener(move |this, _ev, _window, cx| {
-                                                this.set_theme_color_mode(mode, cx);
-                                            }),
-                                        )
-                                    })),
-                            ),
+                            .child(div().flex().flex_row().gap(px(6.0)).children(
+                                ThemeColorMode::all().iter().map(|mode| {
+                                    let mode = *mode;
+                                    Self::mode_pill(
+                                        ElementId::named_usize("theme-color-mode", mode as usize),
+                                        mode.label(),
+                                        mode == current_theme_color_mode,
+                                        p,
+                                        cx.listener(move |this, _ev, _window, cx| {
+                                            this.set_theme_color_mode(mode, cx);
+                                        }),
+                                    )
+                                }),
+                            )),
                     )
                     // The separating rule. Height is fixed rather than
                     // stretched so it spans the label+buttons pair without
@@ -2155,24 +2387,20 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                                     .text_color(rgb(p.text))
                                     .child("Mode"),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .gap(px(6.0))
-                                    .children(ThemeMode::all().iter().map(|mode| {
-                                        let mode = *mode;
-                                        Self::mode_pill(
-                                            ElementId::named_usize("theme-mode", mode as usize),
-                                            mode.label(),
-                                            mode == current_theme_mode,
-                                            p,
-                                            cx.listener(move |this, _ev, _window, cx| {
-                                                this.set_theme_mode(mode, cx);
-                                            }),
-                                        )
-                                    })),
-                            ),
+                            .child(div().flex().flex_row().gap(px(6.0)).children(
+                                ThemeMode::all().iter().map(|mode| {
+                                    let mode = *mode;
+                                    Self::mode_pill(
+                                        ElementId::named_usize("theme-mode", mode as usize),
+                                        mode.label(),
+                                        mode == current_theme_mode,
+                                        p,
+                                        cx.listener(move |this, _ev, _window, cx| {
+                                            this.set_theme_mode(mode, cx);
+                                        }),
+                                    )
+                                }),
+                            )),
                     ),
             )
             // ── Custom Theme (TOML) ──────────────────────────────────────
@@ -2262,7 +2490,12 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                 }),
             ))
             .when(names.is_empty(), |d| {
-                d.child(div().text_xs().text_color(rgb(p.text_faint)).child("No fonts imported yet."))
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.text_faint))
+                        .child("No fonts imported yet."),
+                )
             })
             .children(names.into_iter().enumerate().map(|(idx, name)| {
                 let remove_name = name.clone();
@@ -2276,7 +2509,13 @@ fn listed_actions(category: KeybindCategory, command_palette_enabled: bool) -> V
                     .py(px(4.0))
                     .bg(rgb(p.chrome_active))
                     .rounded(px(4.0))
-                    .child(div().text_sm().font_family(name.clone()).text_color(rgb(p.text)).child(name))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family(name.clone())
+                            .text_color(rgb(p.text))
+                            .child(name),
+                    )
                     .child(
                         div()
                             .id(ElementId::named_usize("imported-font-remove", idx))
@@ -2356,7 +2595,13 @@ impl Render for SettingsModal {
                 st.cite_size_half_points / 2,
             ]
         };
-        let (emphasis, emphasis_change_size, emphasis_size_points, paste_condense, paste_condense_pilcrow) = {
+        let (
+            emphasis,
+            emphasis_change_size,
+            emphasis_size_points,
+            paste_condense,
+            paste_condense_pilcrow,
+        ) = {
             let st = self.state.read(cx);
             (
                 (st.emphasis_bold, st.emphasis_underline, st.emphasis_box),
@@ -2385,9 +2630,12 @@ impl Render for SettingsModal {
             .items_center()
             .justify_center()
             .bg(black().opacity(if theme_preview { 0.0 } else { 0.55 }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, window, cx| {
-                this.close(window, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.close(window, cx);
+                }),
+            )
             // Stops wheel events over the modal (including its padding, not
             // just the inner scrollable list) from bubbling to the document
             // editor underneath.
@@ -2451,7 +2699,10 @@ impl Render for SettingsModal {
                                                 .bg(rgb(p.chrome_active))
                                                 .border_1()
                                                 .border_color(rgb(p.border_subtle))
-                                                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                                .hover(move |s| {
+                                                    s.bg(rgb(p.chrome_hover))
+                                                        .text_color(rgb(p.text))
+                                                })
                                                 .active(move |s| s.bg(rgb(p.chrome_active)))
                                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                                     this.exit_theme_preview(cx);
@@ -2485,7 +2736,9 @@ impl Render for SettingsModal {
                                         .cursor_pointer()
                                         .text_color(rgb(p.text_muted))
                                         .bg(rgb(p.chrome_active))
-                                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                        .hover(move |s| {
+                                            s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
+                                        })
                                         .on_click(cx.listener(|this, _ev, window, cx| {
                                             this.close(window, cx);
                                         }))
@@ -2514,57 +2767,87 @@ impl Render for SettingsModal {
                                     .overflow_y_scroll()
                                     // Theme Preview is Appearance-only, with
                                     // no sidebar to choose anything else.
-                                    .when(theme_preview || section == SettingsSection::Appearance, |d| {
-                                        d.child(self.render_appearance(
-                                            current_theme,
-                                            current_theme_mode,
-                                            current_theme_color_mode,
-                                            theme_preview,
-                                            p,
-                                            cx,
-                                        ))
-                                    })
-                                    .when(!theme_preview && section == SettingsSection::TextSettings, |d| {
-                                        d.child(self.render_text_settings(
-                                            emphasis,
-                                            emphasis_change_size,
-                                            emphasis_size_points,
-                                            shrink_points,
-                                            card_size_points,
-                                            exception.clone(),
-                                            custom_highlights.clone(),
-                                            analytic_color.clone(),
-                                            paste_condense,
-                                            paste_condense_pilcrow,
-                                            p,
-                                            cx,
-                                        ))
-                                    })
-                                    .when(!theme_preview && section == SettingsSection::Fonts, |d| {
-                                        d.child(self.render_fonts(p, cx))
-                                    })
-                                    .when(!theme_preview && section == SettingsSection::Keybindings, |d| {
-                                        d.children(KeybindCategory::all().iter().map(|category| {
-                                            self.render_category(*category, &keybinds, p, current_theme_mode, cx)
-                                        }))
-                                        .when(vim_enabled, |d| {
-                                            d.child(self.render_vim_keybinds_section(&vim_keybinds, p, current_theme_mode, cx))
-                                        })
-                                    })
-                                    .when(!theme_preview && section == SettingsSection::ToggleFeatures, |d| {
-                                        d.child(self.render_toggle_features(
-                                            vim_enabled,
-                                            spellcheck_enabled,
-                                            spellcheck_color.clone(),
-                                            spreading_wpm,
-                                            nav_fold_buttons,
-                                            search_from_list_enabled,
-                                            search_list_whole_words,
-                                            command_palette_enabled,
-                                            p,
-                                            cx,
-                                        ))
-                                    }),
+                                    .when(
+                                        theme_preview || section == SettingsSection::Appearance,
+                                        |d| {
+                                            d.child(self.render_appearance(
+                                                current_theme,
+                                                current_theme_mode,
+                                                current_theme_color_mode,
+                                                theme_preview,
+                                                p,
+                                                cx,
+                                            ))
+                                        },
+                                    )
+                                    .when(
+                                        !theme_preview && section == SettingsSection::TextSettings,
+                                        |d| {
+                                            d.child(self.render_text_settings(
+                                                emphasis,
+                                                emphasis_change_size,
+                                                emphasis_size_points,
+                                                shrink_points,
+                                                card_size_points,
+                                                exception.clone(),
+                                                custom_highlights.clone(),
+                                                analytic_color.clone(),
+                                                paste_condense,
+                                                paste_condense_pilcrow,
+                                                p,
+                                                cx,
+                                            ))
+                                        },
+                                    )
+                                    .when(
+                                        !theme_preview && section == SettingsSection::Fonts,
+                                        |d| d.child(self.render_fonts(p, cx)),
+                                    )
+                                    .when(
+                                        !theme_preview && section == SettingsSection::Keybindings,
+                                        |d| {
+                                            d.children(KeybindCategory::all().iter().map(
+                                                |category| {
+                                                    self.render_category(
+                                                        *category,
+                                                        &keybinds,
+                                                        p,
+                                                        current_theme_mode,
+                                                        cx,
+                                                    )
+                                                },
+                                            ))
+                                            .when(
+                                                vim_enabled,
+                                                |d| {
+                                                    d.child(self.render_vim_keybinds_section(
+                                                        &vim_keybinds,
+                                                        p,
+                                                        current_theme_mode,
+                                                        cx,
+                                                    ))
+                                                },
+                                            )
+                                        },
+                                    )
+                                    .when(
+                                        !theme_preview
+                                            && section == SettingsSection::ToggleFeatures,
+                                        |d| {
+                                            d.child(self.render_toggle_features(
+                                                vim_enabled,
+                                                spellcheck_enabled,
+                                                spellcheck_color.clone(),
+                                                spreading_wpm,
+                                                nav_fold_buttons,
+                                                search_from_list_enabled,
+                                                search_list_whole_words,
+                                                command_palette_enabled,
+                                                p,
+                                                cx,
+                                            ))
+                                        },
+                                    ),
                             ),
                     )
                     // ── Bottom button row ────────────────────────────────────

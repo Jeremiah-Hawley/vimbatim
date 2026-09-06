@@ -45,14 +45,23 @@ fn test_keybinds_section() {
 #[test]
 fn test_parsing_dict() {
     let map = vimbatim::config_parsing::parsing_dict(FIXTURE);
-    assert_eq!(map.get("highlight_color").map(String::as_str), Some("yellow"));
-    assert_eq!(map.get("small_size").map(String::as_str),      Some("6"));
-    assert_eq!(map.get("large_size").map(String::as_str),      Some("11"));
-    assert_eq!(map.get("paragraph_integrity").map(String::as_str), Some("true"));
-    assert_eq!(map.get("pilcrows").map(String::as_str),        Some("false"));
-    assert_eq!(map.get("vim").map(String::as_str),             Some("false"));
-    assert_eq!(map.get("paste").map(String::as_str),           Some("f2"));
-    assert_eq!(map.get("wikifi").map(String::as_str),          Some("CTRL SHFT ALT w"));
+    assert_eq!(
+        map.get("highlight_color").map(String::as_str),
+        Some("yellow")
+    );
+    assert_eq!(map.get("small_size").map(String::as_str), Some("6"));
+    assert_eq!(map.get("large_size").map(String::as_str), Some("11"));
+    assert_eq!(
+        map.get("paragraph_integrity").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(map.get("pilcrows").map(String::as_str), Some("false"));
+    assert_eq!(map.get("vim").map(String::as_str), Some("false"));
+    assert_eq!(map.get("paste").map(String::as_str), Some("f2"));
+    assert_eq!(
+        map.get("wikifi").map(String::as_str),
+        Some("CTRL SHFT ALT w")
+    );
 }
 
 #[test]

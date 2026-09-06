@@ -1,10 +1,10 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::docx_parser::Alignment;
 use crate::document_ops::FormatOp;
-use crate::state::AppState;
-use crate::theme::{palette, radius, space, Palette, ThemeColorMode, ThemeMode};
+use crate::docx_parser::Alignment;
+use crate::theme::{radius, space, Palette, ThemeColorMode, ThemeMode};
+use crate::{document::TabId, state::AppState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -419,13 +419,18 @@ impl FormattingRibbon {
                 justify(div().flex().flex_col())
                     .w(px(14.0))
                     .gap(px(2.0))
-                    .children([14.0_f32, 9.0, 14.0, 9.0].into_iter().enumerate().map(|(i, w)| {
-                        div()
-                            .id(ElementId::named_usize("align-icon-bar", i))
-                            .h(px(2.0))
-                            .w(px(w))
-                            .bg(rgb(color))
-                    }))
+                    .children(
+                        [14.0_f32, 9.0, 14.0, 9.0]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, w)| {
+                                div()
+                                    .id(ElementId::named_usize("align-icon-bar", i))
+                                    .h(px(2.0))
+                                    .w(px(w))
+                                    .bg(rgb(color))
+                            }),
+                    )
                     .into_any_element()
             }
             RibbonIcon::Bold
@@ -450,14 +455,18 @@ impl FormattingRibbon {
                     // that constant keeps the choice in one place. Applied to
                     // all four letters so the row doesn't mix typefaces.
                     .font_family(crate::text_editor::FONT_FAMILY)
-                    .when(matches!(icon, RibbonIcon::Bold), |d| d.font_weight(FontWeight::BOLD))
+                    .when(matches!(icon, RibbonIcon::Bold), |d| {
+                        d.font_weight(FontWeight::BOLD)
+                    })
                     .when(matches!(icon, RibbonIcon::Italic), |d| d.italic())
                     .when(matches!(icon, RibbonIcon::Underline), |d| d.underline())
                     // GPUI does paint this (`text_system/line.rs` calls
                     // `window.paint_strikethrough`) — see the note in
                     // `text_editor.rs::apply_run_style`, which still claims
                     // otherwise for document text.
-                    .when(matches!(icon, RibbonIcon::Strikethrough), |d| d.line_through())
+                    .when(matches!(icon, RibbonIcon::Strikethrough), |d| {
+                        d.line_through()
+                    })
                     .child(letter)
                     .into_any_element()
             }
@@ -534,10 +543,19 @@ impl FormattingRibbon {
                         .child(div().w(px(4.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(color)))
                         .into_any_element()
                 } else {
-                    div().w(px(16.0)).h(px(2.0)).rounded(px(1.0)).bg(rgb(color)).into_any_element()
+                    div()
+                        .w(px(16.0))
+                        .h(px(2.0))
+                        .rounded(px(1.0))
+                        .bg(rgb(color))
+                        .into_any_element()
                 }
             }
-            RibbonIcon::Fold => div().text_size(px(10.0)).text_color(rgb(color)).child("▼").into_any_element(),
+            RibbonIcon::Fold => div()
+                .text_size(px(10.0))
+                .text_color(rgb(color))
+                .child("▼")
+                .into_any_element(),
             RibbonIcon::Split => div()
                 .flex()
                 .flex_row()
@@ -831,8 +849,12 @@ impl FormattingRibbon {
                             // its mode while it might be collapsed.
                             st.update(cx, |state, _cx| {
                                 state.sidebar_mode = match state.sidebar_mode {
-                                    crate::state::SidebarMode::Files => crate::state::SidebarMode::Nav,
-                                    crate::state::SidebarMode::Nav => crate::state::SidebarMode::Files,
+                                    crate::state::SidebarMode::Files => {
+                                        crate::state::SidebarMode::Nav
+                                    }
+                                    crate::state::SidebarMode::Nav => {
+                                        crate::state::SidebarMode::Files
+                                    }
                                 };
                                 state.sidebar_visible = true;
                             });
@@ -852,7 +874,7 @@ impl FormattingRibbon {
                         }
                         FormatAction::WindowSplit => {
                             st.update(cx, |state, _cx| {
-                                if state.split_view {
+                                if state.workspace.split_view {
                                     state.close_split();
                                 } else {
                                     state.open_split();
@@ -978,7 +1000,10 @@ impl FormattingRibbon {
         // of the two this button's popup (if any) actually keys off.
         let gallery_caret = gallery.map(|gallery_action| {
             div()
-                .id(ElementId::named_usize("ribbon-btn-gallery-caret", gallery_action as usize))
+                .id(ElementId::named_usize(
+                    "ribbon-btn-gallery-caret",
+                    gallery_action as usize,
+                ))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -997,7 +1022,9 @@ impl FormattingRibbon {
                     gpui::MouseButton::Left,
                     cx.listener(move |this, _ev, _window, cx| {
                         cx.stop_propagation();
-                        if this.open_menu == Some(gallery_action) || this.dismissed == Some(gallery_action) {
+                        if this.open_menu == Some(gallery_action)
+                            || this.dismissed == Some(gallery_action)
+                        {
                             this.open_menu = None;
                         } else {
                             this.open_menu = Some(gallery_action);
@@ -1013,7 +1040,13 @@ impl FormattingRibbon {
         let wrapper = div().relative();
         let wrapper = match gallery_caret {
             Some(caret) => wrapper.child(
-                div().flex().flex_row().items_center().gap(px(1.0)).child(button).child(caret),
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(1.0))
+                    .child(button)
+                    .child(caret),
             ),
             None => wrapper.child(button),
         };
@@ -1045,7 +1078,11 @@ impl FormattingRibbon {
             let state = self.state.read(cx);
             let default_points = state.normal_text_size_half_points as f32 / 2.0;
             state.selection_font_size_half_points().map(|half| {
-                if half == 0 { default_points } else { half as f32 / 2.0 }
+                if half == 0 {
+                    default_points
+                } else {
+                    half as f32 / 2.0
+                }
             })
         };
 
@@ -1058,32 +1095,33 @@ impl FormattingRibbon {
             },
         };
 
-        let stepper = |id: &'static str, glyph: &'static str, delta: i32, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(14.0))
-                .h(px(11.0))
-                .rounded(px(radius::XS))
-                .bg(rgb(p.chrome_elevated))
-                .text_color(rgb(p.text_muted))
-                .text_xs()
-                .cursor_pointer()
-                .border_1()
-                .border_color(rgb(p.border_subtle))
-                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
-                .active(move |s| s.bg(rgb(p.chrome_active)))
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |this, _ev, _window, cx| {
-                        cx.stop_propagation();
-                        this.step_font_size(delta, cx);
-                    }),
-                )
-                .child(glyph)
-        };
+        let stepper =
+            |id: &'static str, glyph: &'static str, delta: i32, cx: &mut Context<Self>| {
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(14.0))
+                    .h(px(11.0))
+                    .rounded(px(radius::XS))
+                    .bg(rgb(p.chrome_elevated))
+                    .text_color(rgb(p.text_muted))
+                    .text_xs()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(p.border_subtle))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .active(move |s| s.bg(rgb(p.chrome_active)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.step_font_size(delta, cx);
+                        }),
+                    )
+                    .child(glyph)
+            };
 
         div()
             .flex()
@@ -1164,7 +1202,9 @@ impl FormattingRibbon {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(buffer) = self.font_size_buffer.as_mut() else { return };
+        let Some(buffer) = self.font_size_buffer.as_mut() else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "backspace" => {
                 buffer.pop();
@@ -1182,10 +1222,7 @@ impl FormattingRibbon {
                 }
             }
             // Three digits is enough for Word's 409pt ceiling.
-            k if k.len() == 1
-                && buffer.len() < 3
-                && k.chars().next().unwrap().is_ascii_digit() =>
-            {
+            k if k.len() == 1 && buffer.len() < 3 && k.chars().next().unwrap().is_ascii_digit() => {
                 buffer.push_str(k);
             }
             _ => return,
@@ -1283,7 +1320,10 @@ impl FormattingRibbon {
                     ("Condense, no pilcrows", Some(AppState::condense_selection)),
                     ("Condense, pilcrows", Some(AppState::condense_with_pilcrows)),
                     ("Uncondensed", Some(AppState::uncondense_selection)),
-                    ("Standardize highlighting", Some(AppState::standardize_highlighting)),
+                    (
+                        "Standardize highlighting",
+                        Some(AppState::standardize_highlighting),
+                    ),
                     (
                         "Standardize highlighting with exception",
                         Some(AppState::standardize_highlighting_with_exception),
@@ -1349,8 +1389,11 @@ impl FormattingRibbon {
                         )
                     })
                     .collect();
-                swatches
-                    .extend(self.custom_color_swatches(FormatAction::HighlightColorSelect, p, cx));
+                swatches.extend(self.custom_color_swatches(
+                    FormatAction::HighlightColorSelect,
+                    p,
+                    cx,
+                ));
                 vec![
                     Self::color_grid(swatches),
                     self.render_custom_color_row(FormatAction::HighlightColorSelect, p, cx),
@@ -1367,62 +1410,63 @@ impl FormattingRibbon {
                 // (`font_import::install_from_path`), so offering anything
                 // else here would let a selection look like it worked while
                 // never actually changing what's painted.
-                let mut rows = vec![
-                    div()
-                        .id("font-family-add")
-                        .px(px(space::SM))
-                        .py(px(space::XXS))
-                        .rounded(px(radius::SM))
-                        .text_color(rgb(p.accent))
-                        .font_weight(FontWeight::BOLD)
-                        .text_sm()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(p.chrome_hover)))
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _ev, _window, cx| {
-                                cx.stop_propagation();
-                                this.state.update(cx, |state, cx| {
-                                    state.open_font_import_modal();
-                                    cx.notify();
-                                });
-                                this.open_menu = None;
+                let mut rows = vec![div()
+                    .id("font-family-add")
+                    .px(px(space::SM))
+                    .py(px(space::XXS))
+                    .rounded(px(radius::SM))
+                    .text_color(rgb(p.accent))
+                    .font_weight(FontWeight::BOLD)
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(p.chrome_hover)))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _ev, _window, cx| {
+                            cx.stop_propagation();
+                            this.state.update(cx, |state, cx| {
+                                state.open_font_import_modal();
                                 cx.notify();
-                            }),
-                        )
-                        .child("+ Add Font")
-                        .into_any_element(),
-                ];
-                rows.extend(crate::text_editor::all_curated_font_names().into_iter().enumerate().map(
-                    |(idx, name)| {
-                        let applied_name = name.clone();
-                        div()
-                            .id(ElementId::named_usize("font-family-choice", idx))
-                            .px(px(space::SM))
-                            .py(px(space::XXS))
-                            .rounded(px(radius::SM))
-                            .text_color(rgb(p.text))
-                            .text_sm()
-                            .font_family(name.clone())
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(p.chrome_hover)))
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |this, _ev, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.state.update(cx, |state, _cx| {
-                                        state.apply_formatting_to_selection(FormatOp::FontFamily(
-                                            Some(applied_name.clone()),
-                                        ));
-                                    });
-                                    this.open_menu = None;
-                                    cx.notify();
-                                }),
-                            )
-                            .child(name)
-                            .into_any_element()
-                    },
-                ));
+                            });
+                            this.open_menu = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child("+ Add Font")
+                    .into_any_element()];
+                rows.extend(
+                    crate::text_editor::all_curated_font_names()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, name)| {
+                            let applied_name = name.clone();
+                            div()
+                                .id(ElementId::named_usize("font-family-choice", idx))
+                                .px(px(space::SM))
+                                .py(px(space::XXS))
+                                .rounded(px(radius::SM))
+                                .text_color(rgb(p.text))
+                                .text_sm()
+                                .font_family(name.clone())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(p.chrome_hover)))
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.state.update(cx, |state, _cx| {
+                                            state.apply_formatting_to_selection(
+                                                FormatOp::FontFamily(Some(applied_name.clone())),
+                                            );
+                                        });
+                                        this.open_menu = None;
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(name)
+                                .into_any_element()
+                        }),
+                );
                 rows
             }
             FormatAction::BulletGallery => Self::list_gallery_rows(
@@ -1444,12 +1488,30 @@ impl FormattingRibbon {
             FormatAction::NumberGallery => Self::list_gallery_rows(
                 &[
                     (crate::docx_parser::ListKind::NumberDecimalDot, "One Dot"),
-                    (crate::docx_parser::ListKind::NumberDecimalParen, "One Parenthesis"),
-                    (crate::docx_parser::ListKind::NumberUpperRoman, "Roman Numeral One"),
-                    (crate::docx_parser::ListKind::NumberUpperLetter, "Capital A Dot"),
-                    (crate::docx_parser::ListKind::NumberLowerLetterParen, "Lowercase A Parenthesis"),
-                    (crate::docx_parser::ListKind::NumberLowerLetterDot, "Lowercase A Dot"),
-                    (crate::docx_parser::ListKind::NumberLowerRoman, "Roman Numeral Lowercase One"),
+                    (
+                        crate::docx_parser::ListKind::NumberDecimalParen,
+                        "One Parenthesis",
+                    ),
+                    (
+                        crate::docx_parser::ListKind::NumberUpperRoman,
+                        "Roman Numeral One",
+                    ),
+                    (
+                        crate::docx_parser::ListKind::NumberUpperLetter,
+                        "Capital A Dot",
+                    ),
+                    (
+                        crate::docx_parser::ListKind::NumberLowerLetterParen,
+                        "Lowercase A Parenthesis",
+                    ),
+                    (
+                        crate::docx_parser::ListKind::NumberLowerLetterDot,
+                        "Lowercase A Dot",
+                    ),
+                    (
+                        crate::docx_parser::ListKind::NumberLowerRoman,
+                        "Roman Numeral Lowercase One",
+                    ),
                 ],
                 false,
                 p,
@@ -1500,14 +1562,14 @@ impl FormattingRibbon {
         let query = self.tab_search_buffer.to_lowercase();
         let (tabs, active_tab) = {
             let state = self.state.read(cx);
-            let tabs: Vec<(usize, usize, String)> = state
+            let tabs: Vec<(usize, TabId, String)> = state
                 .tabs
                 .iter()
                 .enumerate()
                 .map(|(idx, t)| (idx, t.id, t.title.clone()))
                 .filter(|(_, _, title)| query.is_empty() || title.to_lowercase().contains(&query))
                 .collect();
-            (tabs, state.active_tab)
+            (tabs, state.workspace.active_tab)
         };
 
         let typed = self.tab_search_buffer.clone();
@@ -1526,8 +1588,16 @@ impl FormattingRibbon {
             .border_1()
             .border_color(rgb(p.accent))
             .text_sm()
-            .text_color(rgb(if typed.is_empty() { p.text_faint } else { p.text }))
-            .child(if typed.is_empty() { "Search tabs…".to_string() } else { typed })
+            .text_color(rgb(if typed.is_empty() {
+                p.text_faint
+            } else {
+                p.text
+            }))
+            .child(if typed.is_empty() {
+                "Search tabs…".to_string()
+            } else {
+                typed
+            })
             .into_any_element();
 
         let mut rows = vec![search_box];
@@ -1556,17 +1626,20 @@ impl FormattingRibbon {
             .children(tabs.into_iter().map(|(idx, id, title)| {
                 let is_active = idx == active_tab;
                 div()
-                    .id(ElementId::named_usize("switch-tab-row", id))
+                    .id(ElementId::named_usize("switch-tab-row", id.0))
                     .px(px(space::SM))
                     .py(px(space::XXS))
                     .rounded(px(radius::SM))
                     .text_sm()
                     .cursor_pointer()
                     .when(is_active, |d| {
-                        d.bg(rgb(p.accent_wash)).text_color(rgb(p.text)).font_weight(FontWeight::BOLD)
+                        d.bg(rgb(p.accent_wash))
+                            .text_color(rgb(p.text))
+                            .font_weight(FontWeight::BOLD)
                     })
                     .when(!is_active, |d| {
-                        d.text_color(rgb(p.text)).hover(move |s| s.bg(rgb(p.chrome_hover)))
+                        d.text_color(rgb(p.text))
+                            .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     })
                     .on_mouse_down(
                         gpui::MouseButton::Left,
@@ -1576,7 +1649,9 @@ impl FormattingRibbon {
                                 // Re-resolve by id: the list was built on a
                                 // previous frame and a tab could have closed
                                 // since, which would shift every later index.
-                                if let Some(pos) = state.tabs.iter().position(|t| t.id == id) {
+                                if let Some(pos) =
+                                    state.workspace.tabs.iter().position(|t| t.id == id)
+                                {
                                     state.set_active_tab(pos);
                                 }
                                 cx.notify();
@@ -1670,7 +1745,11 @@ impl FormattingRibbon {
             .map(|(idx, &(kind, label))| {
                 div()
                     .id(ElementId::named_usize(
-                        if is_bullet_gallery { "bullet-gallery-item" } else { "number-gallery-item" },
+                        if is_bullet_gallery {
+                            "bullet-gallery-item"
+                        } else {
+                            "number-gallery-item"
+                        },
                         idx,
                     ))
                     .px(px(space::SM))
@@ -1746,7 +1825,11 @@ impl FormattingRibbon {
                     .px(px(space::SM))
                     .py(px(space::XXS))
                     .rounded(px(radius::SM))
-                    .text_color(rgb(if action.is_some() { p.text } else { not_implemented }))
+                    .text_color(rgb(if action.is_some() {
+                        p.text
+                    } else {
+                        not_implemented
+                    }))
                     .text_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(p.chrome_hover)))
@@ -1916,7 +1999,9 @@ impl FormattingRibbon {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.editing_custom else { return };
+        let Some(target) = self.editing_custom else {
+            return;
+        };
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
 
@@ -1969,15 +2054,16 @@ impl FormattingRibbon {
     /// color list, so it comes back as its own row next time — and after a
     /// restart, since `add_custom_color` persists to settings.conf.
     fn apply_custom_color(&mut self, target: FormatAction, hex: u32, cx: &mut Context<Self>) {
-        let Some(storage) = Self::custom_color_target(target) else { return };
+        let Some(storage) = Self::custom_color_target(target) else {
+            return;
+        };
         self.state.update(cx, |state, _cx| {
             match target {
                 FormatAction::FontColor => {
                     // Same path the built-in swatches take — `Run.color` is a
                     // bare 6-digit hex either way.
-                    state.apply_formatting_to_selection(FormatOp::Color(Some(format!(
-                        "{hex:06x}"
-                    ))));
+                    state
+                        .apply_formatting_to_selection(FormatOp::Color(Some(format!("{hex:06x}"))));
                 }
                 FormatAction::HighlightColorSelect => {
                     // `highlight_color_hex` parses a bare 6-digit hex, so a
@@ -1993,7 +2079,12 @@ impl FormattingRibbon {
         });
     }
 
-    fn render_custom_color_row(&self, target: FormatAction, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_custom_color_row(
+        &self,
+        target: FormatAction,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let editing = self.editing_custom == Some(target);
         if !editing {
             return div()
@@ -2326,17 +2417,38 @@ impl Render for FormattingRibbon {
                     vec![
                         RibbonBtn::icon("Bold", FormatAction::Bold, RibbonIcon::Bold),
                         RibbonBtn::icon("Italics", FormatAction::Italics, RibbonIcon::Italic),
-                        RibbonBtn::icon("Underline", FormatAction::Underline, RibbonIcon::Underline),
-                        RibbonBtn::icon("Strike", FormatAction::Strikethrough, RibbonIcon::Strikethrough),
+                        RibbonBtn::icon(
+                            "Underline",
+                            FormatAction::Underline,
+                            RibbonIcon::Underline,
+                        ),
+                        RibbonBtn::icon(
+                            "Strike",
+                            FormatAction::Strikethrough,
+                            RibbonIcon::Strikethrough,
+                        ),
                         RibbonBtn::secondary("Font Size", FormatAction::FontSize),
                     ],
                     vec![
-                        RibbonBtn::icon("Font Family", FormatAction::FontFamily, RibbonIcon::FontFamily).wide(),
-                        RibbonBtn::icon("Font Color", FormatAction::FontColor, RibbonIcon::FontColor),
-                        RibbonBtn::icon("HL Color", FormatAction::HighlightColorSelect, RibbonIcon::HighlightBucket)
+                            RibbonBtn::icon(
+                                "Font Family",
+                                FormatAction::FontFamily,
+                                RibbonIcon::FontFamily,
+                            )
+                            .wide(),
+                            RibbonBtn::icon(
+                                "Font Color",
+                                FormatAction::FontColor,
+                                RibbonIcon::FontColor,
+                            ),
+                            RibbonBtn::icon(
+                                "HL Color",
+                                FormatAction::HighlightColorSelect,
+                                RibbonIcon::HighlightBucket,
+                            )
                             .tint(highlight_tint),
-                        RibbonBtn::icon("Case", FormatAction::ChangeCase, RibbonIcon::Case),
-                    ],
+                            RibbonBtn::icon("Case", FormatAction::ChangeCase, RibbonIcon::Case),
+                        ],
                 ],
                 *self.collapsed.get("text").unwrap_or(&false),
                 p,
@@ -2354,14 +2466,34 @@ impl Render for FormattingRibbon {
                     // DOCUMENT — the only four-row group — to three, which is
                     // what sets the ribbon's height.
                     vec![
-                        RibbonBtn::icon("Bullets", FormatAction::BulletList, RibbonIcon::BulletList)
+                            RibbonBtn::icon(
+                                "Bullets",
+                                FormatAction::BulletList,
+                                RibbonIcon::BulletList,
+                            )
                             .gallery(FormatAction::BulletGallery),
-                        RibbonBtn::icon("Numbered", FormatAction::NumberedList, RibbonIcon::NumberedList)
+                            RibbonBtn::icon(
+                                "Numbered",
+                                FormatAction::NumberedList,
+                                RibbonIcon::NumberedList,
+                            )
                             .gallery(FormatAction::NumberGallery),
-                        RibbonBtn::icon("Align Left", FormatAction::AlignLeft, RibbonIcon::Align(Alignment::Left)),
-                        RibbonBtn::icon("Align Center", FormatAction::AlignCenter, RibbonIcon::Align(Alignment::Center)),
-                        RibbonBtn::icon("Align Right", FormatAction::AlignRight, RibbonIcon::Align(Alignment::Right)),
-                    ],
+                            RibbonBtn::icon(
+                                "Align Left",
+                                FormatAction::AlignLeft,
+                                RibbonIcon::Align(Alignment::Left),
+                            ),
+                            RibbonBtn::icon(
+                                "Align Center",
+                                FormatAction::AlignCenter,
+                                RibbonIcon::Align(Alignment::Center),
+                            ),
+                            RibbonBtn::icon(
+                                "Align Right",
+                                FormatAction::AlignRight,
+                                RibbonIcon::Align(Alignment::Right),
+                            ),
+                        ],
                     // Para Integrity / Pilcrows buttons removed per checklist
                     // — Settings -> Text Settings already has the equivalent
                     // controls ("Condense by default" / "Mark collapsed
@@ -2386,25 +2518,30 @@ impl Render for FormattingRibbon {
                 "VIEW",
                 &[
                     vec![
-                        RibbonBtn::secondary("Nav", FormatAction::Nav),
-                        RibbonBtn::icon("Invisibility", FormatAction::InvisibilityMode, RibbonIcon::Eye(!invisibility_mode))
+                            RibbonBtn::secondary("Nav", FormatAction::Nav),
+                            RibbonBtn::icon(
+                                "Invisibility",
+                                FormatAction::InvisibilityMode,
+                                RibbonIcon::Eye(!invisibility_mode),
+                            )
                             .engaged(invisibility_mode),
-                        RibbonBtn::secondary("Timer", FormatAction::Timer)
-                            .engaged(timer_visible),
-                    ],
+                            RibbonBtn::secondary("Timer", FormatAction::Timer)
+                                .engaged(timer_visible),
+                        ],
                     vec![
-                        RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
-                        RibbonBtn::icon("Split", FormatAction::WindowSplit, RibbonIcon::Split),
-                        RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold).engaged(any_folded),
-                        // Print Layout: deferred (checklist) — the toggle/state
-                        // (AppState.print_layout, toggle_print_layout) and this
-                        // action's click-handler arm are left in place, inert,
-                        // for whenever the real wrap-width/hit-testing rework
-                        // lands. No button until then — one that visibly does
-                        // nothing is worse than no button.
-                        // RibbonBtn::secondary("Print Layout", FormatAction::PrintLayout)
-                        //     .engaged(print_layout),
-                    ],
+                            RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
+                            RibbonBtn::icon("Split", FormatAction::WindowSplit, RibbonIcon::Split),
+                            RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold)
+                                .engaged(any_folded),
+                            // Print Layout: deferred (checklist) — the toggle/state
+                            // (AppState.print_layout, toggle_print_layout) and this
+                            // action's click-handler arm are left in place, inert,
+                            // for whenever the real wrap-width/hit-testing rework
+                            // lands. No button until then — one that visibly does
+                            // nothing is worse than no button.
+                            // RibbonBtn::secondary("Print Layout", FormatAction::PrintLayout)
+                            //     .engaged(print_layout),
+                        ],
                 ],
                 *self.collapsed.get("view").unwrap_or(&false),
                 p,

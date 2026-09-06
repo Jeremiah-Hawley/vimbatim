@@ -65,9 +65,16 @@ fn decode_alignment(v: u8) -> Option<Alignment> {
 fn encode_fields(r: &Run) -> String {
     format!(
         "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
-        r.bold, r.italic, r.underline, r.double_underline, r.strikethrough,
-        r.highlight, r.highlight_color, r.size,
-        r.font.as_deref().unwrap_or(""), r.color.as_deref().unwrap_or(""),
+        r.bold,
+        r.italic,
+        r.underline,
+        r.double_underline,
+        r.strikethrough,
+        r.highlight,
+        r.highlight_color,
+        r.size,
+        r.font.as_deref().unwrap_or(""),
+        r.color.as_deref().unwrap_or(""),
         r.box_format,
         // Carried so a copied Cite or Analytic is still one after pasting —
         // the marker is what every command identifying them reads.
@@ -76,7 +83,8 @@ fn encode_fields(r: &Run) -> String {
         // from a build predating these two fields fails the field-count
         // check cleanly (falls back to plain-text paste) instead of
         // misreading a field.
-        r.emphasis, r.emphasis_boxed,
+        r.emphasis,
+        r.emphasis_boxed,
     )
 }
 
@@ -110,9 +118,12 @@ pub fn decode(metadata: &str, plain_text: &str) -> Option<(Vec<Run>, Vec<Paragra
     let mut offset = 0usize;
     for record in run_section.split('\x1e') {
         let fields: Vec<&str> = record.split('\x1f').collect();
-        if fields.len() != 15 { return None; }
+        if fields.len() != 15 {
+            return None;
+        }
         let len: usize = fields[14].parse().ok()?;
-        if offset + len > plain_text.len() || !plain_text.is_char_boundary(offset)
+        if offset + len > plain_text.len()
+            || !plain_text.is_char_boundary(offset)
             || !plain_text.is_char_boundary(offset + len)
         {
             return None;
@@ -146,7 +157,12 @@ mod tests {
 
     #[test]
     fn round_trips_single_run() {
-        let run = Run { text: "hello".into(), bold: true, size: 24, ..Run::default() };
+        let run = Run {
+            text: "hello".into(),
+            bold: true,
+            size: 24,
+            ..Run::default()
+        };
         let encoded = encode_with_lengths(&[run.clone()], &[(0, Alignment::Left)]);
         let (decoded, paras) = decode(&encoded, "hello").unwrap();
         assert_eq!(decoded, vec![run]);
@@ -156,8 +172,16 @@ mod tests {
     #[test]
     fn round_trips_multiple_runs_with_multibyte_text() {
         let runs = vec![
-            Run { text: "héllo ".into(), bold: true, ..Run::default() },
-            Run { text: "world".into(), italic: true, ..Run::default() },
+            Run {
+                text: "héllo ".into(),
+                bold: true,
+                ..Run::default()
+            },
+            Run {
+                text: "world".into(),
+                italic: true,
+                ..Run::default()
+            },
         ];
         let encoded = encode_with_lengths(&runs, &[(0, Alignment::Left)]);
         let plain = "héllo world";
@@ -172,7 +196,12 @@ mod tests {
 
     #[test]
     fn round_trips_emphasis_markers() {
-        let run = Run { text: "hi".into(), emphasis: true, emphasis_boxed: true, ..Run::default() };
+        let run = Run {
+            text: "hi".into(),
+            emphasis: true,
+            emphasis_boxed: true,
+            ..Run::default()
+        };
         let encoded = encode_with_lengths(&[run.clone()], &[]);
         let (decoded, _) = decode(&encoded, "hi").unwrap();
         assert_eq!(decoded, vec![run]);
@@ -184,7 +213,9 @@ mod tests {
     /// misread of the two appended fields.
     #[test]
     fn rejects_pre_emphasis_field_run_record() {
-        let legacy_fields = ["true", "false", "false", "false", "false", "false", "", "0", "", "", "false", ""];
+        let legacy_fields = [
+            "true", "false", "false", "false", "false", "false", "", "0", "", "", "false", "",
+        ];
         let legacy = format!("{}\x1f{}", legacy_fields.join("\x1f"), 2);
         assert_eq!(decode(&legacy, "hi"), None);
     }
@@ -195,7 +226,11 @@ mod tests {
     /// clipboard, silently degrades to plain text.
     #[test]
     fn decodes_legacy_metadata_with_no_paragraph_section() {
-        let run = Run { text: "hello".into(), bold: true, ..Run::default() };
+        let run = Run {
+            text: "hello".into(),
+            bold: true,
+            ..Run::default()
+        };
         let legacy = format!("{}\x1f{}", encode_fields(&run), run.text.len());
         let (runs, paras) = decode(&legacy, "hello").unwrap();
         assert_eq!(runs, vec![run]);
@@ -204,7 +239,10 @@ mod tests {
 
     #[test]
     fn round_trips_paragraph_attrs_for_every_alignment() {
-        let run = Run { text: "x".into(), ..Run::default() };
+        let run = Run {
+            text: "x".into(),
+            ..Run::default()
+        };
         let attrs = vec![
             (1, Alignment::Center),
             (2, Alignment::Right),
@@ -222,7 +260,10 @@ mod tests {
         // total length, not content, so a same-length swap would slip
         // through undetected — that's an inherent, documented limitation,
         // not what this test is exercising).
-        let run = Run { text: "hello".into(), ..Run::default() };
+        let run = Run {
+            text: "hello".into(),
+            ..Run::default()
+        };
         let encoded = encode_with_lengths(&[run], &[(0, Alignment::Left)]);
         assert_eq!(decode(&encoded, "hi"), None);
     }

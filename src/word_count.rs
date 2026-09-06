@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::state::AppState;
-use crate::theme::{palette, radius, space, Palette};
+use crate::theme::{radius, space, Palette};
 
 /// The word-count panel: a centred dialog showing the active document's word
 /// counts and an estimated speech time, opened from the toolbar's Word Count
@@ -23,7 +23,12 @@ impl WordCount {
 
     /// One label/value row. `detail` is the optional smaller line underneath,
     /// used to break the spoken-word figure into its two sources.
-    fn row(label: &'static str, value: String, detail: Option<String>, p: Palette) -> impl IntoElement {
+    fn row(
+        label: &'static str,
+        value: String,
+        detail: Option<String>,
+        p: Palette,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
@@ -69,12 +74,15 @@ impl Render for WordCount {
             .justify_center()
             .bg(black().opacity(0.55))
             // Clicking the backdrop closes, matching the settings modal.
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, _window, cx| {
-                this.state.update(cx, |s, cx| {
-                    s.word_count_visible = false;
-                    cx.notify();
-                });
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.word_count_visible = false;
+                        cx.notify();
+                    });
+                }),
+            )
             .child(
                 div()
                     .w(px(360.0))
@@ -118,7 +126,9 @@ impl Render for WordCount {
                                     .cursor_pointer()
                                     .text_color(rgb(p.text_muted))
                                     .bg(rgb(p.chrome_active))
-                                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                    .hover(move |s| {
+                                        s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text))
+                                    })
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.state.update(cx, |s, cx| {
                                             s.word_count_visible = false;
@@ -135,7 +145,12 @@ impl Render for WordCount {
                             .flex_col()
                             .gap(px(space::MD))
                             .p(px(16.0))
-                            .child(Self::row("Total words", stats.total_words.to_string(), None, p))
+                            .child(Self::row(
+                                "Total words",
+                                stats.total_words.to_string(),
+                                None,
+                                p,
+                            ))
                             .child(Self::row(
                                 "Words read aloud",
                                 stats.spoken_words.to_string(),

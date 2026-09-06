@@ -36,7 +36,9 @@ fn dict() -> Option<&'static Dictionary> {
         // A corrupt vendored dictionary shouldn't take the editor down with
         // it — spellcheck just goes quiet.
         Err(e) => {
-            crate::state::log_line(&format!("[spellcheck] failed to parse bundled en_US dictionary: {e}"));
+            crate::state::log_line(&format!(
+                "[spellcheck] failed to parse bundled en_US dictionary: {e}"
+            ));
             None
         }
     })
@@ -49,12 +51,12 @@ fn dict() -> Option<&'static Dictionary> {
 /// `render_line`/`line_segments` already work in — converting at the render
 /// boundary instead would mean doing it per row, per frame.
 pub fn misspelled_ranges(text: &str, user_dict: &HashSet<String>) -> Vec<(usize, usize)> {
-    let Some(dict) = dict() else { return Vec::new() };
+    let Some(dict) = dict() else {
+        return Vec::new();
+    };
     tokenize(text)
         .into_iter()
-        .filter(|tok| {
-            !user_dict.contains(&tok.text.to_lowercase()) && !dict.check(&tok.text)
-        })
+        .filter(|tok| !user_dict.contains(&tok.text.to_lowercase()) && !dict.check(&tok.text))
         .map(|tok| (tok.start, tok.end))
         .collect()
 }
@@ -66,7 +68,9 @@ pub fn misspelled_ranges(text: &str, user_dict: &HashSet<String>) -> Vec<(usize,
 /// `suggest` is a dictionary *search* and is orders of magnitude slower than
 /// `check`, so it must stay off the frame budget.
 pub fn suggest(word: &str) -> Vec<String> {
-    let Some(dict) = dict() else { return Vec::new() };
+    let Some(dict) = dict() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     dict.suggest(word, &mut out);
     out.truncate(MAX_SUGGESTIONS);
@@ -123,8 +127,12 @@ fn tokenize(text: &str) -> Vec<Token> {
         // letters.
         let mut s = start;
         let mut e = i;
-        while s < e && !chars[s].is_alphabetic() { s += 1; }
-        while e > s && !chars[e - 1].is_alphabetic() { e -= 1; }
+        while s < e && !chars[s].is_alphabetic() {
+            s += 1;
+        }
+        while e > s && !chars[e - 1].is_alphabetic() {
+            e -= 1;
+        }
         if s == e {
             continue;
         }
@@ -134,7 +142,11 @@ fn tokenize(text: &str) -> Vec<Token> {
         sentence_initial = false;
 
         if is_checkable(&word, was_sentence_initial) {
-            tokens.push(Token { text: word, start: s, end: e });
+            tokens.push(Token {
+                text: word,
+                start: s,
+                end: e,
+            });
         }
     }
     tokens
@@ -165,7 +177,10 @@ fn is_checkable(word: &str, sentence_initial: bool) -> bool {
     // too, so without it this rule would silently stop checking every tag
     // line — the opposite of what's wanted, since tags are short and
     // hand-typed and that's exactly where typos live.
-    let all_upper = word.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+    let all_upper = word
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .all(|c| c.is_uppercase());
     if first_upper && !all_upper && !sentence_initial {
         return false;
     }
@@ -184,15 +199,15 @@ mod tests {
         // (word, sentence_initial, expected)
         let cases = [
             ("hello", false, true),
-            ("a", true, false),                 // too short
-            ("I", true, false),                 // too short
-            ("covid19", false, false),          // has a digit
-            ("me@example", false, false),       // has an @
-            ("NATO", false, true),              // ALL-CAPS is still checked
-            ("AFF", false, true),               // ...including short tags
-            ("Kagan", false, false),            // capitalized mid-sentence
-            ("Kagan", true, true),              // ...but not at sentence start
-            ("Teh", true, true),                // sentence-start typo survives
+            ("a", true, false),           // too short
+            ("I", true, false),           // too short
+            ("covid19", false, false),    // has a digit
+            ("me@example", false, false), // has an @
+            ("NATO", false, true),        // ALL-CAPS is still checked
+            ("AFF", false, true),         // ...including short tags
+            ("Kagan", false, false),      // capitalized mid-sentence
+            ("Kagan", true, true),        // ...but not at sentence start
+            ("Teh", true, true),          // sentence-start typo survives
             ("cost-benefit", false, true),
         ];
         for (word, initial, expected) in cases {
@@ -246,4 +261,3 @@ mod tests {
         );
     }
 }
-

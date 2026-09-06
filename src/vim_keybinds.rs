@@ -104,7 +104,10 @@ impl VimKeybinds {
             // "m" for menu — `zp`/`zP` are already Paste/PasteWithoutFormatting.
             (CommandPalette, "zm"),
         ];
-        let bindings = table.iter().map(|(action, seq)| (seq.to_string(), *action)).collect();
+        let bindings = table
+            .iter()
+            .map(|(action, seq)| (seq.to_string(), *action))
+            .collect();
         VimKeybinds { bindings }
     }
 
@@ -136,7 +139,11 @@ impl VimKeybinds {
         if let Some(action) = self.bindings.get(sequence) {
             return VimLookup::Exact(*action);
         }
-        if self.bindings.keys().any(|bound| bound.starts_with(sequence)) {
+        if self
+            .bindings
+            .keys()
+            .any(|bound| bound.starts_with(sequence))
+        {
             return VimLookup::Prefix;
         }
         VimLookup::None
@@ -151,12 +158,19 @@ impl VimKeybinds {
     /// `exclude` is the sequence currently being re-captured, if any — the
     /// same "don't conflict with yourself" exemption
     /// `Keybinds::find_conflict` gives its own `(action, slot)` exclusion.
-    pub fn find_overlap_conflict(&self, candidate: &str, exclude: Option<&str>) -> Option<(KeybindAction, String)> {
+    pub fn find_overlap_conflict(
+        &self,
+        candidate: &str,
+        exclude: Option<&str>,
+    ) -> Option<(KeybindAction, String)> {
         for (existing, action) in &self.bindings {
             if Some(existing.as_str()) == exclude {
                 continue;
             }
-            if existing == candidate || existing.starts_with(candidate) || candidate.starts_with(existing.as_str()) {
+            if existing == candidate
+                || existing.starts_with(candidate)
+                || candidate.starts_with(existing.as_str())
+            {
                 return Some((*action, existing.clone()));
             }
         }
@@ -170,7 +184,11 @@ impl VimKeybinds {
     pub fn find_native_vim_conflict(candidate: &str) -> Option<&'static str> {
         NATIVE_VIM_SEQUENCES
             .iter()
-            .find(|&&native| native == candidate || native.starts_with(candidate) || candidate.starts_with(native))
+            .find(|&&native| {
+                native == candidate
+                    || native.starts_with(candidate)
+                    || candidate.starts_with(native)
+            })
             .copied()
     }
 
@@ -180,7 +198,9 @@ impl VimKeybinds {
     /// system's own sequence buffer before it could ever reach the native
     /// dispatcher (see the module doc comment).
     pub fn is_reserved_first_key(candidate: &str) -> bool {
-        let Some(c) = candidate.chars().next() else { return true };
+        let Some(c) = candidate.chars().next() else {
+            return true;
+        };
         let (key, shift) = char_to_key_and_shift(c);
         is_vim_reserved_normal_key(&key, shift, None)
     }
@@ -193,7 +213,9 @@ impl VimKeybinds {
     /// should still get sensible bindings, not silently end up unbound.
     pub fn load(path: &Path) -> VimKeybinds {
         let mut vim_keybinds = VimKeybinds::defaults();
-        let Ok(content) = fs::read_to_string(path) else { return vim_keybinds };
+        let Ok(content) = fs::read_to_string(path) else {
+            return vim_keybinds;
+        };
 
         let mut values: HashMap<&str, Vec<String>> = HashMap::new();
         for line in content.lines() {
@@ -202,13 +224,18 @@ impl VimKeybinds {
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
-                values.entry(key.trim()).or_default().push(value.trim().to_string());
+                values
+                    .entry(key.trim())
+                    .or_default()
+                    .push(value.trim().to_string());
             }
         }
 
         for action in KeybindAction::all() {
             let conf_key = format!("vim_{}", action.conf_key());
-            let Some(raws) = values.get(conf_key.as_str()) else { continue };
+            let Some(raws) = values.get(conf_key.as_str()) else {
+                continue;
+            };
             vim_keybinds.bindings.retain(|_, a| a != action);
             for raw in raws {
                 // Skips a saved sequence that now collides with vim's own
@@ -319,7 +346,11 @@ mod tests {
             .iter()
             .filter(|a| !defaults.get_all(**a).is_empty())
             .count();
-        assert_eq!(defaults.bindings.len(), action_count, "a default sequence was silently overwritten by another");
+        assert_eq!(
+            defaults.bindings.len(),
+            action_count,
+            "a default sequence was silently overwritten by another"
+        );
     }
 
     /// Bug report: after the user added a custom vim keybind under the `z`
@@ -349,7 +380,8 @@ mod tests {
     fn find_native_vim_conflict_catches_exact_and_either_prefix_direction() {
         assert_eq!(VimKeybinds::find_native_vim_conflict("zt"), Some("zt"));
         // A shorter candidate that would swallow every native sequence.
-        assert!(VimKeybinds::find_native_vim_conflict("z").is_some_and(|n| NATIVE_VIM_SEQUENCES.contains(&n)));
+        assert!(VimKeybinds::find_native_vim_conflict("z")
+            .is_some_and(|n| NATIVE_VIM_SEQUENCES.contains(&n)));
         // A longer candidate a native sequence would swallow instead.
         assert!(VimKeybinds::find_native_vim_conflict("ztx").is_some());
         // Unrelated sequence: no conflict.
@@ -373,7 +405,10 @@ mod tests {
     #[test]
     fn defaults_first_keys_are_all_unreserved() {
         for seq in VimKeybinds::defaults().bindings.keys() {
-            assert!(!VimKeybinds::is_reserved_first_key(seq), "default {seq} starts with a reserved key");
+            assert!(
+                !VimKeybinds::is_reserved_first_key(seq),
+                "default {seq} starts with a reserved key"
+            );
         }
     }
 
@@ -397,7 +432,10 @@ mod tests {
     fn overlap_conflict_catches_exact_duplicate() {
         let mut vk = VimKeybinds::default();
         vk.add(KeybindAction::Save, "zs".to_string());
-        assert_eq!(vk.find_overlap_conflict("zs", None), Some((KeybindAction::Save, "zs".to_string())));
+        assert_eq!(
+            vk.find_overlap_conflict("zs", None),
+            Some((KeybindAction::Save, "zs".to_string()))
+        );
     }
 
     #[test]
@@ -439,7 +477,10 @@ mod tests {
     /// the new default the user never chose.
     #[test]
     fn load_drops_a_saved_sequence_that_now_collides_with_a_native_vim_sequence() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_vim_keybinds_native_conflict_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_vim_keybinds_native_conflict_test_{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("settings.conf");
         fs::write(&path, "[VIM_KEYBINDS]\nvim_sidebar=zb\n").unwrap();
@@ -455,7 +496,8 @@ mod tests {
 
     #[test]
     fn round_trips_through_settings_conf_without_corrupting_keybinds() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_vim_keybinds_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vimbatim_vim_keybinds_test_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("settings.conf");
 
@@ -468,7 +510,10 @@ mod tests {
         vk.save_to(&path).unwrap();
 
         let reloaded = VimKeybinds::load(&path);
-        assert_eq!(reloaded.get_all(KeybindAction::Save), vec!["zs".to_string()]);
+        assert_eq!(
+            reloaded.get_all(KeybindAction::Save),
+            vec!["zs".to_string()]
+        );
 
         // The namespacing is what's actually under test: a bare `save=`
         // line here would have been picked up by `Keybinds::load`'s own
@@ -485,7 +530,10 @@ mod tests {
 
     #[test]
     fn save_then_load_preserves_an_explicitly_emptied_action() {
-        let dir = std::env::temp_dir().join(format!("vimbatim_vim_keybinds_empty_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "vimbatim_vim_keybinds_empty_test_{}",
+            std::process::id()
+        ));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("settings.conf");
 
