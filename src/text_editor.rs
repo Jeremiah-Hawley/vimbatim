@@ -2042,11 +2042,10 @@ impl Render for TextEditor {
             .get(idx.unwrap_or(usize::MAX))
             .map(|t| t.is_blank_new_tab())
             .unwrap_or(true);
-        let show_unsupported_banner = state
+        let banner_message = state
             .tabs
             .get(idx.unwrap_or(usize::MAX))
-            .map(|t| t.has_unsupported_blocks && !t.unsupported_banner_dismissed)
-            .unwrap_or(false);
+            .and_then(|t| t.banner_message());
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         // Normalise (anchor, focus) into (min, max) once so per-line lookups
         // below don't each have to re-derive the ordering.
@@ -2235,7 +2234,7 @@ impl Render for TextEditor {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .when(show_unsupported_banner, |d| {
+            .when_some(banner_message, |d, message| {
                 d.child(
                     div()
                         .flex()
@@ -2257,7 +2256,7 @@ impl Render for TextEditor {
                             ThemeMode::Light => 0x6b4e10,
                         }))
                         .text_sm()
-                        .child("This document contains a table — Vimbatim can't edit or preserve it; saving will remove it.")
+                        .child(message)
                         .child(
                             div()
                                 .id("dismiss-unsupported-banner")
@@ -2272,7 +2271,7 @@ impl Render for TextEditor {
                                     this.state.update(cx, |s, cx| {
                                         let i = s.pane_tab_index(pane);
                                         if let Some(tab) = i.and_then(|i| s.tabs.get_mut(i)) {
-                                            tab.unsupported_banner_dismissed = true;
+                                            tab.banner_dismissed = true;
                                         }
                                         cx.notify();
                                     });

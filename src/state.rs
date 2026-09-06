@@ -274,10 +274,18 @@ pub struct Tab {
     /// render path can check it directly without unwrapping
     /// `Option<Arc<DocxOrigin>>` on every frame.
     pub has_unsupported_blocks: bool,
-    /// True once the user has dismissed the "this document has content we
-    /// can't preserve" banner for this tab. View-level UI state, same as
-    /// every other per-tab boolean already in this struct.
-    pub unsupported_banner_dismissed: bool,
+    /// True when this tab was opened from a `.docx` that held bytes this build
+    /// couldn't parse, so `tab_from_docx` detached it from its path rather than
+    /// let the first Ctrl+S replace the original with a blank document.
+    ///
+    /// The detachment on its own was a silent trap: the tab is still titled
+    /// after the file and still looks like it opened it, but Save is the no-op
+    /// every path-less tab is. This is what puts a warning strip on it saying
+    /// so, and pointing at Save As.
+    pub opened_detached: bool,
+    /// True once the user has dismissed this tab's warning strip. View-level UI
+    /// state, same as every other per-tab boolean already in this struct.
+    pub banner_dismissed: bool,
     /// A formatting toggle (spec 7) armed with no active selection, per
     /// spec 7's own intro: "or (if no selection) toggles the property for
     /// subsequent typing". Consumed by `insert_char`, which applies it to
@@ -559,8 +567,33 @@ impl Tab {
             fold_version: 0,
             similar_ranges: Vec::new(),
             has_unsupported_blocks: false,
-            unsupported_banner_dismissed: false,
+            opened_detached: false,
+            banner_dismissed: false,
         }
+    }
+
+    /// The warning strip this tab should show, or `None`.
+    ///
+    /// One slot, not one per condition: a tab that failed to parse has no
+    /// origin and therefore no unsupported blocks either, so the two cases are
+    /// mutually exclusive by construction.
+    pub fn banner_message(&self) -> Option<&'static str> {
+        if self.banner_dismissed {
+            return None;
+        }
+        if self.opened_detached {
+            return Some(
+                "Vimbatim couldn't read this file, so this tab isn't linked to it — \
+                 Save will do nothing. Use Save As to write your changes somewhere else.",
+            );
+        }
+        if self.has_unsupported_blocks {
+            return Some(
+                "This document contains a table — Vimbatim can't edit or preserve it; \
+                 saving will remove it.",
+            );
+        }
+        None
     }
 
     pub fn from_path(id: usize, path: PathBuf) -> Self {
@@ -611,7 +644,8 @@ impl Tab {
             fold_version: 0,
             similar_ranges: Vec::new(),
             has_unsupported_blocks: false,
-            unsupported_banner_dismissed: false,
+            opened_detached: false,
+            banner_dismissed: false,
         }
     }
 }
@@ -2844,7 +2878,19 @@ impl AppState {
         let tab = self.tabs.get(idx).ok_or("No active tab")?;
         let path = match &tab.file_path {
             Some(p) => p.clone(),
-            None    => return Ok(()), // nothing to save yet
+            None => {
+                // A detached tab looks file-backed but has nowhere to write, so
+                // a silent `Ok` here is the exact trap the banner exists to
+                // warn about. Bring the warning back if it was dismissed:
+                // pressing Save is the moment the user needs to read it, and
+                // `SaveAction` only logs to stderr otherwise.
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    if tab.opened_detached {
+                        tab.banner_dismissed = false;
+                    }
+                }
+                return Ok(()); // nothing to save yet
+            }
         };
         if !tab.is_modified {
             return Ok(());
@@ -6330,10 +6376,29 @@ impl AppState {
     pub fn paste_file_into(&mut self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         let (src, is_cut) = self.copied_file.clone().ok_or("nothing copied")?;
         let is_dir = src.is_dir();
-        // A folder can't be moved inside itself: `fs::rename` would either
-        // fail obscurely or, worse, succeed and strand the subtree.
-        if is_cut && is_dir && dir.starts_with(&src) {
-            return Err("can't move a folder into itself".into());
+        if is_cut {
+            // Pasting a cut back into the folder it came from means "leave it
+            // where it is". Without this it fell through to `unique_path_in`,
+            // which sees the name taken — by the very file being moved — and
+            // renames it: `Case.docx` became `Case 1.docx`, `Round 3` became
+            // `Round 3 1`. A no-op gesture that silently renames the user's
+            // work is worse than one that does nothing.
+            if src.parent() == Some(dir) {
+                self.copied_file = None;
+                return Ok(());
+            }
+            // A folder can't be moved inside itself: `fs::rename` would either
+            // fail obscurely or, worse, succeed and strand the subtree.
+            //
+            // Compared on canonical paths so a symlinked destination pointing
+            // into `src` is caught here, with a message that says what
+            // happened, rather than reaching the filesystem and coming back as
+            // "Invalid argument (os error 22)". The lexical fallback covers a
+            // path that can't be canonicalised (it may not exist yet).
+            let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            if is_dir && canon(dir).starts_with(canon(&src)) {
+                return Err("can't move a folder into itself".into());
+            }
         }
         let stem = src.file_stem().and_then(|s| s.to_str()).ok_or("file has no name")?;
         let dest = if is_dir {
@@ -6431,6 +6496,19 @@ impl AppState {
             return Err(format!("{} already exists", new.display()).into());
         }
         std::fs::rename(old, &new)?;
+        // The reopen stack (Shift+Ctrl+W) holds paths of tabs closed earlier in
+        // the session. They have to move with the file too: left stale, "reopen
+        // last closed tab" pointed at a path that no longer exists, and — since
+        // a *missing* file stays attached to its tab by design (`tab_from_docx`)
+        // — the next save would recreate an empty document back at the old
+        // location. Prefix-swapped for both branches: `strip_prefix` on a file
+        // path against a file path yields an empty remainder, so `new.join("")`
+        // is `new` and the same expression covers the single-file case.
+        for path in self.closed_tabs.iter_mut() {
+            if let Ok(rest) = path.strip_prefix(old) {
+                *path = new.join(rest);
+            }
+        }
         if is_dir {
             // Files nested inside the renamed folder didn't rename
             // themselves — only prefix-swap `file_path`, never `title`.
@@ -8749,6 +8827,9 @@ fn tab_from_docx(id: usize, path: &std::path::Path) -> Tab {
             let holds_content = std::fs::metadata(path).is_ok_and(|m| m.len() > 0);
             if holds_content {
                 tab.file_path = None;
+                // Say so on screen. Detaching alone left the tab looking like it
+                // had opened the file while Save silently did nothing.
+                tab.opened_detached = true;
             }
             // stderr, matching how every other non-fatal file error in this
             // file reports itself — there's no in-app notification surface.
@@ -9992,7 +10073,8 @@ mod tests {
             fold_version: 0,
                 similar_ranges: Vec::new(),
                 has_unsupported_blocks: false,
-                unsupported_banner_dismissed: false,
+                opened_detached: false,
+            banner_dismissed: false,
             }],
             active_tab: 0,
             pending_focus_editor: None,
@@ -11568,6 +11650,182 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before, "the unreadable original was overwritten");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Detaching an unreadable file from its tab stops the overwrite, but on
+    /// its own it is a silent trap: the tab is still titled after the file and
+    /// still looks like it opened it, while Ctrl+S quietly does nothing. The
+    /// tab has to say so.
+    #[test]
+    fn an_unreadable_file_puts_a_warning_banner_on_its_tab() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_banner_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.docx");
+        std::fs::write(&path, b"not a zip").unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path);
+        let tab = state.tabs.iter().find(|t| t.title == "corrupt.docx").unwrap();
+        assert!(tab.opened_detached);
+        let message = tab.banner_message().expect("a warning is shown");
+        assert!(message.contains("Save As"), "it has to point somewhere: {message}");
+
+        // Dismissible, like the unsupported-content banner it shares a slot with.
+        let idx = state.tabs.iter().position(|t| t.title == "corrupt.docx").unwrap();
+        state.tabs[idx].banner_dismissed = true;
+        assert_eq!(state.tabs[idx].banner_message(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dismissing the warning must not make Save silent again. Pressing Save is
+    /// exactly when the user needs to know the tab has nowhere to write, and
+    /// `SaveAction` only logs to stderr — so the banner comes back.
+    #[test]
+    fn saving_a_detached_tab_brings_its_warning_back() {
+        let dir = std::env::temp_dir().join(format!("vimbatim_resave_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corrupt.docx");
+        std::fs::write(&path, b"not a zip").unwrap();
+
+        let mut state = make_state("hello", 0, None);
+        state.open_file(path);
+        let idx = state.tabs.iter().position(|t| t.title == "corrupt.docx").unwrap();
+        state.active_tab = idx;
+
+        state.tabs[idx].banner_dismissed = true;
+        assert_eq!(state.tabs[idx].banner_message(), None);
+
+        state.insert_str("work worth keeping");
+        state.save_active_tab().unwrap();
+        assert!(
+            state.tabs[idx].banner_message().is_some(),
+            "Save on a detached tab re-shows the warning it can't act on",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tab that opened its file cleanly says nothing.
+    #[test]
+    fn a_normal_tab_shows_no_banner() {
+        let state = make_state("hello", 0, None);
+        assert_eq!(state.tabs[0].banner_message(), None);
+    }
+
+    /// Pasting a cut back into the folder it came from means "leave it where it
+    /// is". It used to fall through to `unique_path_in`, which sees the name
+    /// taken — by the very file being moved — and renamed it: `Case.docx`
+    /// became `Case 1.docx`, `Round 3` became `Round 3 1`. A no-op gesture must
+    /// not silently rename the user's work.
+    #[test]
+    fn cutting_and_pasting_into_the_same_folder_leaves_it_alone() {
+        let dir = temp_test_dir("cut_same_parent");
+        let file = dir.join("Case.docx");
+        std::fs::write(&file, b"contents").unwrap();
+        let folder = dir.join("Round 3");
+        std::fs::create_dir(&folder).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+
+        state.cut_file(file.clone());
+        state.paste_file_into(&dir).unwrap();
+        assert!(file.exists(), "the file kept its name");
+        assert!(!dir.join("Case 1.docx").exists(), "and gained no duplicate");
+        assert!(state.copied_file.is_none(), "the cut is spent either way");
+
+        state.cut_file(folder.clone());
+        state.paste_file_into(&dir).unwrap();
+        assert!(folder.is_dir(), "the folder kept its name");
+        assert!(!dir.join("Round 3 1").exists());
+    }
+
+    /// A moved file's *closed* tabs follow it too. The reopen stack
+    /// (Shift+Ctrl+W) is the one other place a document path is held, and left
+    /// stale it pointed at a path that no longer exists — which, since a
+    /// missing file stays attached to its tab by design, meant the next save
+    /// recreated an empty document back at the old location.
+    #[test]
+    fn moving_a_file_also_moves_it_on_the_reopen_stack() {
+        let dir = temp_test_dir("move_reopen_stack");
+        let target = dir.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let src = dir.join("Case.docx");
+        crate::docx_parser::create_new_docx(&default_paragraphs(), &src, Default::default()).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.open_file(src.clone());
+        // `close_tab` always keeps one tab open, and `open_file` reused the
+        // blank starting tab — so give it a second one to close from.
+        state.new_tab();
+        let idx = state.tabs.iter().position(|t| t.file_path.as_ref() == Some(&src)).unwrap();
+        state.close_tab(idx);
+        assert_eq!(state.closed_tabs, vec![src.clone()], "closing stacked its path");
+
+        state.cut_file(src.clone());
+        state.paste_file_into(&target).unwrap();
+
+        let moved = target.join("Case.docx");
+        assert_eq!(state.closed_tabs, vec![moved.clone()], "the stacked path followed the move");
+
+        state.reopen_closed_tab();
+        assert!(
+            state.tabs.iter().any(|t| t.file_path.as_ref() == Some(&moved)),
+            "reopening lands on the file where it now lives",
+        );
+    }
+
+    /// The same for a whole folder: every closed tab that lived inside it is
+    /// prefix-swapped, exactly as the open ones are.
+    #[test]
+    fn moving_a_folder_also_moves_its_files_on_the_reopen_stack() {
+        let dir = temp_test_dir("move_folder_reopen_stack");
+        let src = dir.join("Round 3");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        let inner = src.join("nested").join("Case.docx");
+        std::fs::write(&inner, b"x").unwrap();
+        let target = dir.join("Archive");
+        std::fs::create_dir(&target).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.closed_tabs.push(inner.clone());
+
+        state.cut_file(src.clone());
+        state.paste_file_into(&target).unwrap();
+
+        assert_eq!(
+            state.closed_tabs,
+            vec![target.join("Round 3").join("nested").join("Case.docx")],
+        );
+    }
+
+    /// The self-move guard compares canonical paths, so a symlinked
+    /// destination pointing inside the folder being moved is caught here with a
+    /// message that says what happened — rather than reaching the filesystem
+    /// and coming back as "Invalid argument (os error 22)".
+    #[cfg(unix)]
+    #[test]
+    fn moving_a_folder_into_itself_through_a_symlink_is_refused_by_name() {
+        let dir = temp_test_dir("cut_symlink");
+        let src = dir.join("Src");
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        let link = dir.join("link_to_inner");
+        std::os::unix::fs::symlink(src.join("inner"), &link).unwrap();
+
+        let mut state = make_state("", 0, None);
+        state.working_directory = dir.clone();
+        state.cut_file(src.clone());
+
+        let err = state.paste_file_into(&link).expect_err("refused");
+        assert!(
+            err.to_string().contains("into itself"),
+            "the message should name the cause, got: {err}",
+        );
+        assert!(src.is_dir(), "and the folder is untouched");
+        assert!(state.copied_file.is_some(), "a refused paste keeps the cut");
     }
 
     /// The other half of the rule: a missing or zero-length file has no
