@@ -4908,6 +4908,14 @@ impl AppState {
                 }
                 for run in &mut para.runs {
                     run.color = None;
+                    // The marker has to follow the heading. Leaving it at
+                    // `Analytic` produced a line that was a Tag structurally
+                    // (heading 4, so the Nav outline and the fold hierarchy
+                    // treat it as one) but still answered "Analytic" to
+                    // `tag_paragraph_test`, which prefers the marker over the
+                    // heading — so Doc Menu -> Delete tags skipped every line
+                    // this command had just converted.
+                    run.style = Some(CardStyle::Tag);
                 }
                 para.heading = tag_heading;
                 crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
@@ -11650,6 +11658,227 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Doc Menu / Card Menu after a real save + reload ─────────────────────
+    //
+    // These commands identify a card by `run.style`, which used to be written
+    // into the file as `<w:rStyle w:val="VimbatimTag"/>` and friends. Those
+    // four markers are no longer written (Verbatim writes none either), so the
+    // marker now has to be re-derived from the paragraph's heading level at
+    // parse. Exercising them in memory, where the marker is set directly, would
+    // no longer prove they work on a document that has been through a file.
+
+    /// Round-trips a document through a real `.docx` and hands back what a
+    /// fresh open would see.
+    fn through_a_real_docx(paragraphs: Vec<Paragraph>, label: &str) -> AppState {
+        let dir = std::env::temp_dir().join(format!("vimbatim_menu_{}_{}", std::process::id(), label));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doc.docx");
+        let mut source = make_state_with_paragraphs(paragraphs, 0);
+        source.save_active_tab_as(path.clone()).unwrap();
+        let (reloaded, _) = crate::docx_parser::parse_docx(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        make_state_with_paragraphs(reloaded, 0)
+    }
+
+    fn menu_fixture() -> Vec<Paragraph> {
+        let styled = |text: &str, heading: u8, size: u16, style: Option<CardStyle>| Paragraph {
+            list: None,
+            runs: vec![Run { text: text.into(), bold: true, size, style, ..Run::default() }],
+            heading,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        };
+        vec![
+            styled("Pocket", 1, 52, Some(CardStyle::Pocket)),
+            styled("Hat", 2, 44, Some(CardStyle::Hat)),
+            styled("Block", 3, 32, Some(CardStyle::Block)),
+            styled("Tag line", 4, 26, Some(CardStyle::Tag)),
+            styled("Analytic line", 0, 26, Some(CardStyle::Analytic)),
+            Paragraph { list: None,
+                runs: vec![
+                    Run { text: "Cite".into(), bold: true, size: 26, style: Some(CardStyle::Cite), ..Run::default() },
+                    Run { text: " body text".into(), ..Run::default() },
+                ],
+                heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+            Paragraph { list: None,
+                runs: vec![Run { text: "emphasized".into(), emphasis: true, emphasis_boxed: true, ..Run::default() }],
+                heading: 0, alignment: Alignment::default(), unsupported_xml: None },
+        ]
+    }
+
+    /// Every card marker survives a real save + reload, which is what all the
+    /// menu commands below depend on.
+    #[test]
+    fn card_markers_survive_a_real_docx_round_trip_without_rstyle_markers() {
+        let state = through_a_real_docx(menu_fixture(), "markers");
+        let paras = &state.tabs[0].paragraphs;
+        let marker = |i: usize| paras[i].runs[0].style;
+        assert_eq!(marker(0), Some(CardStyle::Pocket));
+        assert_eq!(marker(1), Some(CardStyle::Hat));
+        assert_eq!(marker(2), Some(CardStyle::Block));
+        assert_eq!(marker(3), Some(CardStyle::Tag));
+        assert_eq!(marker(4), Some(CardStyle::Analytic), "Analytic keeps its own rStyle");
+        assert_eq!(marker(5), Some(CardStyle::Cite), "Cite rides on Verbatim's Style13ptBold");
+        assert!(paras[6].runs[0].emphasis && paras[6].runs[0].emphasis_boxed);
+        // A Cite inside a plain paragraph must not have bled onto its neighbour.
+        assert_eq!(paras[5].runs[1].style, None);
+    }
+
+    /// Doc Menu -> Delete tags, on a reloaded document.
+    #[test]
+    fn doc_menu_delete_tags_works_after_a_round_trip() {
+        let mut state = through_a_real_docx(menu_fixture(), "deltags");
+        state.delete_tags();
+        let paras = &state.tabs[0].paragraphs;
+        assert_eq!(paras[3].heading, 0, "the Tag line lost its heading");
+        assert!(!paras[3].runs[0].bold, "and its formatting");
+        assert_eq!(paras[3].runs[0].style, None);
+        // Nothing else touched.
+        assert_eq!(paras[0].heading, 1);
+        assert_eq!(paras[4].runs[0].style, Some(CardStyle::Analytic));
+    }
+
+    /// Doc Menu -> Delete analytics, on a reloaded document.
+    #[test]
+    fn doc_menu_delete_analytics_works_after_a_round_trip() {
+        let mut state = through_a_real_docx(menu_fixture(), "delanalytics");
+        let before = state.tabs[0].paragraphs.len();
+        state.delete_analytics();
+        let paras = &state.tabs[0].paragraphs;
+        // "Delete analytics" removes the lines outright, unlike "Delete tags"
+        // which strips a Tag back to body text in place.
+        assert_eq!(paras.len(), before - 1);
+        assert!(
+            !paras.iter().any(|p| p.runs.iter().any(|r| r.style == Some(CardStyle::Analytic))),
+            "no analytic survived",
+        );
+        assert_eq!(paras[3].runs[0].style, Some(CardStyle::Tag), "Tags untouched");
+    }
+
+    /// Doc Menu -> Convert analytics to tags, on a reloaded document. Reads one
+    /// marker and writes the other, so it depends on both directions.
+    #[test]
+    fn doc_menu_convert_analytics_to_tags_works_after_a_round_trip() {
+        let mut state = through_a_real_docx(menu_fixture(), "convert");
+        state.convert_analytics_to_tags();
+        let paras = &state.tabs[0].paragraphs;
+        assert_eq!(paras[4].heading, CardStyleKind::Tag.heading_level());
+        assert_eq!(paras[4].runs[0].style, Some(CardStyle::Tag));
+    }
+
+    /// Doc Menu -> Remove emphasis, on a reloaded document. Emphasis now also
+    /// writes Verbatim's `Emphasis` character style, so this proves the flag
+    /// still round-trips and still clears.
+    #[test]
+    fn doc_menu_remove_emphasis_works_after_a_round_trip() {
+        let mut state = through_a_real_docx(menu_fixture(), "emphasis");
+        assert!(state.tabs[0].paragraphs[6].runs[0].emphasis, "it survived the file");
+        state.select_all();
+        state.remove_emphasis();
+        let run = &state.tabs[0].paragraphs[6].runs[0];
+        assert!(!run.emphasis && !run.emphasis_boxed, "emphasis cleared");
+    }
+
+    /// Doc Menu -> Select similar formatting, across a card line whose runs are
+    /// split by a whitespace-only run.
+    ///
+    /// `from_heading` used to skip blank runs when restoring the marker, so the
+    /// space came back unmarked between two marked neighbours —
+    /// `ranges_matching_format` compares on `format_key`, which includes
+    /// `style` (and deliberately ignores `whitespace_preserve`), so the line
+    /// matched as two ranges with a hole rather than one.
+    #[test]
+    fn doc_menu_select_similar_formatting_spans_a_whitespace_run_in_a_card_line() {
+        let run = |text: &str| Run {
+            text: text.into(), bold: true, size: 52,
+            style: Some(CardStyle::Pocket), ..Run::default()
+        };
+        let mut state = through_a_real_docx(
+            vec![Paragraph { list: None,
+                runs: vec![run("Poc"), run(" "), run("ket")],
+                heading: 1, alignment: Alignment::Center, unsupported_xml: None }],
+            "similar",
+        );
+        assert!(
+            state.tabs[0].paragraphs[0].runs.iter().all(|r| r.style == Some(CardStyle::Pocket)),
+            "every run in the line carries the marker: {:?}",
+            state.tabs[0].paragraphs[0].runs.iter().map(|r| (&r.text, r.style)).collect::<Vec<_>>(),
+        );
+
+        state.tabs[0].cursor = 0;
+        state.tabs[0].selection = Some((0, 3)); // "Poc"
+        state.select_similar_formatting();
+        assert_eq!(
+            state.tabs[0].similar_ranges,
+            vec![(0, "Poc ket".len())],
+            "the whole line matches as one range, space included",
+        );
+    }
+
+    /// Doc Menu -> Remove blank lines, on a document whose blank lines only
+    /// exist because Phase 1 stopped dropping self-closing `<w:p/>`.
+    #[test]
+    fn doc_menu_remove_blank_lines_works_on_recovered_blank_lines() {
+        let mut state = through_a_real_docx(
+            vec![
+                para_plain("first"),
+                para_plain(""),
+                para_plain(""),
+                para_plain("second"),
+            ],
+            "blanklines",
+        );
+        assert_eq!(state.tabs[0].paragraphs.len(), 4, "the blank lines survived the file");
+        state.remove_blank_lines();
+        assert_eq!(
+            state.tabs[0].paragraphs.iter()
+                .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"],
+        );
+    }
+
+    /// Card Menu -> Condense / Uncondensed, on a reloaded document — they work
+    /// on text rather than markers, so this is a guard that the marker changes
+    /// didn't disturb them.
+    #[test]
+    fn card_menu_condense_and_uncondense_work_after_a_round_trip() {
+        let mut state = through_a_real_docx(
+            vec![para_plain("one"), para_plain("two"), para_plain("three")],
+            "condense",
+        );
+        let len = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, len));
+        state.condense_selection();
+        assert!(!state.tabs[0].content.contains('\n'), "condensed to one line: {:?}", state.tabs[0].content);
+
+        let len = state.tabs[0].content.len();
+        state.tabs[0].selection = Some((0, len));
+        state.uncondense_selection();
+        assert!(state.tabs[0].content.contains('\n'), "and back: {:?}", state.tabs[0].content);
+    }
+
+    /// Card Menu -> Standardize highlighting, on a reloaded document.
+    #[test]
+    fn card_menu_standardize_highlighting_works_after_a_round_trip() {
+        let mut state = through_a_real_docx(
+            vec![Paragraph { list: None,
+                runs: vec![
+                    Run { text: "one".into(), highlight: true, highlight_color: "green".into(), ..Run::default() },
+                    Run { text: "two".into(), highlight: true, highlight_color: "cyan".into(), ..Run::default() },
+                ],
+                heading: 0, alignment: Alignment::default(), unsupported_xml: None }],
+            "highlight",
+        );
+        state.highlight_color = "yellow".to_string();
+        state.standardize_highlighting();
+        assert!(
+            state.tabs[0].paragraphs[0].runs.iter().all(|r| !r.highlight || r.highlight_color == "yellow"),
+            "got: {:?}",
+            state.tabs[0].paragraphs[0].runs.iter().map(|r| r.highlight_color.clone()).collect::<Vec<_>>(),
+        );
     }
 
     /// A blank document created in Verbatim used to parse to *zero*

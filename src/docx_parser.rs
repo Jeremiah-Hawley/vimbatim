@@ -1077,7 +1077,24 @@ fn parse_document_xml(
                             // marker (a document this app saved) keep it.
                             if let Some(style) = CardStyle::from_heading(para.heading) {
                                 for run in &mut para.runs {
-                                    if run.style.is_none() && !run.text.trim().is_empty() {
+                                    // Every run in the line, whitespace
+                                    // included — `apply_card_style` marks the
+                                    // whole line via `apply_formatting_to_line`,
+                                    // so this has to reproduce that exactly.
+                                    // Skipping blank runs left a whitespace run
+                                    // between two marked ones unmarked, which
+                                    // `format_key` counts as different
+                                    // formatting: the merge below then couldn't
+                                    // fuse the line back together, and "Select
+                                    // similar formatting" treated the space as
+                                    // unlike its own neighbours. The paragraph
+                                    // tests that read this
+                                    // (`tag_paragraph_test`,
+                                    // `analytic_paragraph_test`) filter to runs
+                                    // with real text anyway, so a blank line
+                                    // still isn't a Tag however its runs are
+                                    // marked.
+                                    if run.style.is_none() {
                                         run.style = Some(style);
                                     }
                                 }
