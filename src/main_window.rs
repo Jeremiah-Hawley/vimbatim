@@ -344,7 +344,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ToggleSidebarAction, cx| {
             s.update(cx, |st, cx| {
-                st.ui.sidebar_visible = !st.ui.sidebar_visible;
+                for effect in st.execute(crate::app::command::AppCommand::ToggleSidebar) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
@@ -579,7 +581,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &UndoAction, cx| {
             s.update(cx, |st, cx| {
-                st.undo();
+                for effect in st.execute(crate::app::command::AppCommand::Undo) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
@@ -587,7 +591,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &RedoAction, cx| {
             s.update(cx, |st, cx| {
-                st.redo();
+                for effect in st.execute(crate::app::command::AppCommand::Redo) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
@@ -611,7 +617,11 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &BoldAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_selection(FormatOp::Bold(true));
+                for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
+                    crate::document_ops::FormatOp::Bold(true),
+                )) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
@@ -619,7 +629,11 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &UnderlineAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_formatting_to_selection(FormatOp::Underline(true));
+                for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
+                    crate::document_ops::FormatOp::Underline(true),
+                )) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
@@ -719,7 +733,11 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &BlockAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_card_style(CardStyleKind::Block);
+                for effect in st.execute(crate::app::command::AppCommand::ApplyCardStyle(
+                    crate::state::CardStyleKind::Block,
+                )) {
+                    // apply effects
+                }
                 cx.notify();
             });
         });
