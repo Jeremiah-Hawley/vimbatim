@@ -21644,6 +21644,12 @@ impl AppState {
         }
     }
 
+    pub fn dispatch(&mut self, command: crate::app::command::AppCommand) {
+        for effect in self.execute(command) {
+            self.apply_effect(effect);
+        }
+    }
+
     pub fn apply_effect(&mut self, effect: crate::app::command::AppEffect) {
         match effect {
             crate::app::command::AppEffect::ShowError(message) => {

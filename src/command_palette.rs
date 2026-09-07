@@ -127,11 +127,15 @@ pub fn registry() -> Vec<PaletteCommand> {
     // ── 3. Ribbon commands with no keybind of their own ────────────────────
     let ribbon: &[(&'static str, fn(&mut AppState))] = &[
         ("Italics", |s| {
-            s.apply_formatting_to_selection(FormatOp::Italic(true))
+            s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                FormatOp::Italic(true),
+            ));
         }),
         ("Strikethrough", AppState::toggle_strikethrough),
         ("Normal Size", |s| {
-            s.apply_formatting_to_selection(FormatOp::FontSize(24))
+            s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                FormatOp::FontSize(24),
+            ));
         }),
         ("Change Case: Sentence", |s| {
             s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
@@ -154,13 +158,19 @@ pub fn registry() -> Vec<PaletteCommand> {
         }),
         ("Align Right", |s| s.apply_line_alignment(Alignment::Right)),
         ("Highlight Yellow", |s| {
-            s.apply_formatting_to_selection(FormatOp::Highlight(Some("yellow".to_string())))
+            s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                FormatOp::Highlight(Some("yellow".to_string())),
+            ));
         }),
         ("Highlight Green", |s| {
-            s.apply_formatting_to_selection(FormatOp::Highlight(Some("green".to_string())))
+            s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                FormatOp::Highlight(Some("green".to_string())),
+            ));
         }),
         ("Remove Highlight", |s| {
-            s.apply_formatting_to_selection(FormatOp::Highlight(None))
+            s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                FormatOp::Highlight(None),
+            ));
         }),
         ("Fold / Unfold All", AppState::toggle_fold),
         (
