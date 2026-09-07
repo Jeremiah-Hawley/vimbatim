@@ -1801,7 +1801,7 @@ impl TextEditor {
                     let zoom = self.state.read(cx).zoom;
                     let normal_size_px =
                         self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                    let line_spacing = self.state.read(cx).line_spacing;
+                    let line_spacing = self.state.read(cx).preferences.line_spacing;
                     let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
                     let (rows, display_to_wrap, _) =
                         self.cached_or_fresh_row_tables(cx, viewport_width);
@@ -2663,7 +2663,7 @@ impl Render for TextEditor {
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
-                            let line_spacing = this.state.read(cx).line_spacing;
+                            let line_spacing = this.state.read(cx).preferences.line_spacing;
                             let paragraphs = {
                                 let st = this.state.read(cx);
                                 pane_idx
@@ -2762,7 +2762,7 @@ impl Render for TextEditor {
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
-                            let line_spacing = this.state.read(cx).line_spacing;
+                            let line_spacing = this.state.read(cx).preferences.line_spacing;
                             let paragraphs = {
                                 let st = this.state.read(cx);
                                 pane_idx
@@ -2883,7 +2883,7 @@ impl Render for TextEditor {
                         let zoom = this.state.read(cx).zoom;
                         let font_size_px =
                             this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                        let line_spacing = this.state.read(cx).line_spacing;
+                        let line_spacing = this.state.read(cx).preferences.line_spacing;
                         let paragraphs = {
                             let st = this.state.read(cx);
                             pane_idx
@@ -2990,11 +2990,12 @@ impl Render for TextEditor {
                             // Spellcheck inputs, read once per frame rather than per
                             // row. `user_dictionary` is `Rc` in `AppState` precisely
                             // so this is a refcount bump, not a deep clone.
-                            let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
+                            let spellcheck_enabled =
+                                self.state.read(cx).preferences.spellcheck_enabled;
                             let user_dictionary = self.state.read(cx).user_dictionary.clone();
                             let spell_cache = self.spell_cache.clone();
                             let spellcheck_color = highlight_color_hex(
-                                &self.state.read(cx).spellcheck_underline_color,
+                                &self.state.read(cx).preferences.spellcheck_underline_color,
                             );
                             let invisibility_mode = self.state.read(cx).invisibility_mode;
                             let cite_size_half_points = self.state.read(cx).cite_size_half_points;
