@@ -336,7 +336,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ToggleSettingsAction, cx| {
             s.update(cx, |st, cx| {
-                st.settings_visible = !st.settings_visible;
+                st.ui.settings_visible = !st.ui.settings_visible;
                 cx.notify();
             });
         });
@@ -500,7 +500,7 @@ impl MainWindow {
         cx.on_action(move |_: &FindReplaceAction, cx| {
             s.update(cx, |st, cx| {
                 st.open_find_bar();
-                if let Some(bar) = st.find_bar.as_mut() {
+                if let Some(bar) = st.ui.find_bar.as_mut() {
                     bar.focus = crate::state::FindField::Replace;
                 }
                 cx.notify();
@@ -833,17 +833,17 @@ impl Render for MainWindow {
          * scoped to this window rather than the display.
          */
         let sidebar_visible = self.state.read(cx).sidebar_visible;
-        let settings_visible = self.state.read(cx).settings_visible;
-        let pending_close = self.state.read(cx).pending_close;
-        let font_import_modal_open = self.state.read(cx).font_import_modal_open;
+        let settings_visible = self.state.read(cx).ui.settings_visible;
+        let pending_close = self.state.read(cx).ui.pending_close;
+        let font_import_modal_open = self.state.read(cx).ui.font_import_modal_open;
         let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
         let word_count_visible = self.state.read(cx).word_count_visible;
         let timer_visible = self.state.read(cx).timer.visible;
         let split_view = self.state.read(cx).split_view;
         let split_ratio = self.state.read(cx).split_ratio;
         let sidebar_width = self.state.read(cx).sidebar_width;
-        let find_bar_visible = self.state.read(cx).find_bar.is_some();
-        let command_palette_visible = self.state.read(cx).command_palette.is_some();
+        let find_bar_visible = self.state.read(cx).ui.find_bar.is_some();
+        let command_palette_visible = self.state.read(cx).ui.command_palette.is_some();
         let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();
@@ -878,13 +878,13 @@ impl Render for MainWindow {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
                 ctx_menu_state.update(cx, |s, cx| {
-                    if s.file_context_menu.is_some()
-                        || s.nav_context_menu.is_some()
-                        || s.editor_context_menu.is_some()
+                    if s.ui.file_context_menu.is_some()
+                        || s.ui.nav_context_menu.is_some()
+                        || s.ui.editor_context_menu.is_some()
                     {
                         s.close_file_context_menu();
                         s.close_nav_context_menu();
-                        s.editor_context_menu = None;
+                        s.ui.editor_context_menu = None;
                         cx.notify();
                     }
                 });

@@ -259,7 +259,7 @@ impl SettingsModal {
         self.cancel_word_list_edit();
         self.theme_preview = false;
         self.state.update(cx, |s, cx| {
-            s.settings_visible = false;
+            s.ui.settings_visible = false;
             cx.notify();
         });
         cx.notify();
@@ -376,7 +376,9 @@ impl SettingsModal {
                 Some(index) => s.keybinds.set_at(action, index, combo.clone()),
                 None => s.keybinds.add(action, combo.clone()),
             }
-            let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+            let _ = s
+                .keybinds
+                .save_to(&settings_path(), s.global_vim.vim_enabled, &[]);
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
         cx.notify();
@@ -458,6 +460,7 @@ impl SettingsModal {
                 let conflict = self
                     .state
                     .read(cx)
+                    .global_vim
                     .vim_keybinds
                     .find_overlap_conflict(&candidate, exclude);
                 if let Some((other, other_seq)) = conflict {
@@ -482,10 +485,10 @@ impl SettingsModal {
 
                 self.state.update(cx, |s, _cx| {
                     if let Some(old) = &existing {
-                        s.vim_keybinds.remove(old);
+                        s.global_vim.vim_keybinds.remove(old);
                     }
-                    s.vim_keybinds.add(action, candidate.clone());
-                    let _ = s.vim_keybinds.save_to(&settings_path());
+                    s.global_vim.vim_keybinds.add(action, candidate.clone());
+                    let _ = s.global_vim.vim_keybinds.save_to(&settings_path());
                 });
                 self.cancel_vim_capture();
                 cx.notify();
@@ -875,8 +878,8 @@ impl SettingsModal {
 
         self.state.update(cx, |s, _cx| {
             s.keybinds = keybinds;
-            s.vim_keybinds = vim_keybinds;
-            s.vim_enabled = vim_enabled;
+            s.global_vim.vim_keybinds = vim_keybinds;
+            s.global_vim.vim_enabled = vim_enabled;
             s.theme = theme;
             s.theme_mode = theme_mode;
             s.theme_color_mode = theme_color_mode;
@@ -948,7 +951,11 @@ impl SettingsModal {
                         cx.listener(move |this, _ev, _window, cx| {
                             this.state.update(cx, |s, _cx| {
                                 s.keybinds.remove_at(action, index);
-                                let _ = s.keybinds.save_to(&settings_path(), s.vim_enabled, &[]);
+                                let _ = s.keybinds.save_to(
+                                    &settings_path(),
+                                    s.global_vim.vim_enabled,
+                                    &[],
+                                );
                             });
                             this.cancel_capture(cx); // rebuilds the keymap without the removed combo
                             cx.notify();
@@ -1215,8 +1222,8 @@ impl SettingsModal {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, _window, cx| {
                             this.state.update(cx, |s, _cx| {
-                                s.vim_keybinds.remove(&sequence_owned);
-                                let _ = s.vim_keybinds.save_to(&settings_path());
+                                s.global_vim.vim_keybinds.remove(&sequence_owned);
+                                let _ = s.global_vim.vim_keybinds.save_to(&settings_path());
                             });
                             this.cancel_vim_capture();
                             cx.notify();
@@ -2566,7 +2573,7 @@ impl Render for SettingsModal {
          * receives the very next keystroke, regardless of which button was
          * clicked to arm capture.
          */
-        let vim_enabled = self.state.read(cx).vim_enabled;
+        let vim_enabled = self.state.read(cx).global_vim.vim_enabled;
         let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
         let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
         let spreading_wpm = self.state.read(cx).spreading_wpm;
@@ -2615,7 +2622,7 @@ impl Render for SettingsModal {
         let current_theme_mode = self.state.read(cx).theme_mode;
         let current_theme_color_mode = self.state.read(cx).theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
-        let vim_keybinds = self.state.read(cx).vim_keybinds.clone();
+        let vim_keybinds = self.state.read(cx).global_vim.vim_keybinds.clone();
         let p = self.state.read(cx).current_palette();
         let theme_preview = self.theme_preview;
         let section = self.section;

@@ -824,6 +824,60 @@ pub enum PendingClose {
     App,
 }
 
+/// Transient UI overlays and menus.
+#[derive(Default)]
+pub struct UiState {
+    pub file_context_menu: Option<FileContextMenu>,
+    pub nav_context_menu: Option<NavContextMenu>,
+    pub editor_context_menu: Option<EditorContextMenu>,
+    pub find_bar: Option<FindBar>,
+    pub command_palette: Option<CommandPaletteState>,
+    pub settings_visible: bool,
+    pub font_import_modal_open: bool,
+    pub pending_close: Option<PendingClose>,
+}
+
+/// Vim state shared across tabs: registers, macros, searches, and repeat state.
+pub struct GlobalVimState {
+    pub vim_enabled: bool,
+    pub vim_keybinds: crate::vim_keybinds::VimKeybinds,
+    pub pending_vim_action: Option<crate::keybinds::KeybindAction>,
+    pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
+    vim_macro_recording: Option<(char, Vec<RecordedVimKey>)>,
+    vim_macro_record_pending: bool,
+    pub vim_last_macro_register: Option<char>,
+    pub registers: HashMap<char, String>,
+    pub register_formats: HashMap<char, String>,
+    pub pending_clipboard_sync: Option<(String, String)>,
+    pub last_search: Option<(String, bool)>,
+    pub last_change: Option<VimChange>,
+    pub(crate) vim_change_recording: Option<Vec<RecordedVimKey>>,
+    vim_insertion_recording: Option<String>,
+    vim_pending_change_before_insert: Option<(char, Vec<RecordedVimKey>)>,
+}
+
+impl Default for GlobalVimState {
+    fn default() -> Self {
+        Self {
+            vim_enabled: false,
+            vim_keybinds: crate::vim_keybinds::VimKeybinds::defaults(),
+            pending_vim_action: None,
+            vim_macros: HashMap::new(),
+            vim_macro_recording: None,
+            vim_macro_record_pending: false,
+            vim_last_macro_register: None,
+            registers: HashMap::new(),
+            register_formats: HashMap::new(),
+            pending_clipboard_sync: None,
+            last_search: None,
+            last_change: None,
+            vim_change_recording: None,
+            vim_insertion_recording: None,
+            vim_pending_change_before_insert: None,
+        }
+    }
+}
+
 /// Tab, pane, and filesystem-navigation state.
 pub struct WorkspaceState {
     pub tabs: Vec<Tab>,
@@ -846,6 +900,8 @@ pub struct AppState {
     /// Temporary compatibility forwarding keeps existing callers mechanical
     /// while workspace commands and selectors are extracted.
     pub workspace: WorkspaceState,
+    pub ui: UiState,
+    pub global_vim: GlobalVimState,
     pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
@@ -853,10 +909,10 @@ pub struct AppState {
     pub sidebar_width: f32,
     /// Open state of the file explorer's right-click menu, `None` when
     /// closed. See `FileContextMenu`.
-    pub file_context_menu: Option<FileContextMenu>,
+
     /// Open state of the Nav outline's right-click menu, `None` when closed.
     /// See `NavContextMenu`.
-    pub nav_context_menu: Option<NavContextMenu>,
+
     /// The file most recently picked by the explorer's "Copy File", ready
     /// for "Paste File" to drop into a folder. Deliberately not persisted —
     /// a copy is a within-session gesture, and a stale path would only make
@@ -874,9 +930,9 @@ pub struct AppState {
     pub nav_fold_buttons: bool,
     /// Open state of the text editor's right-click menu, `None` when closed.
     /// See `EditorContextMenu`.
-    pub editor_context_menu: Option<EditorContextMenu>,
+
     /// Open state of the find/replace bar, `None` when closed. See `FindBar`.
-    pub find_bar: Option<FindBar>,
+
     /// Settings → Toggle Features "Search From List": gates the toolbar button
     /// and the word-list editor. Off by default.
     pub search_from_list_enabled: bool,
@@ -898,7 +954,7 @@ pub struct AppState {
     pub command_palette_enabled: bool,
     /// Open state of the command palette, `None` when closed. Shares its slot
     /// under the ribbon with `find_bar` — see `open_command_palette`.
-    pub command_palette: Option<CommandPaletteState>,
+
     /// Whether the word-count panel (`src/word_count.rs`) is showing.
     pub word_count_visible: bool,
     /// The speech timer popup and its clock (`src/timer.rs`). Lives here
@@ -922,20 +978,20 @@ pub struct AppState {
     /// Toggled from two places that both flip the same field: the ribbon's
     /// Nav button, and a Files/Nav button pair in the sidebar's own header.
     pub sidebar_mode: SidebarMode,
-    pub settings_visible: bool,
+
     /// Mounts `font_import_modal.rs`'s "Add Font" popup — opened from the
     /// Font Family dropdown's "+ Add Font" row (`formatting_ribbon.rs`) or
     /// the Fonts settings section, closed by Cancel or a successful import.
-    pub font_import_modal_open: bool,
+
     /// Set while a tab-close or app-close is waiting on the user's
     /// save/discard/cancel answer (`close_confirm.rs`). See `PendingClose`.
-    pub pending_close: Option<PendingClose>,
+
     /// Crash-recovery queue; `RecoveryPrompt` consumes one entry at a time.
     pub recovery: RecoveryState,
     /// Whether vim keybindings are active, loaded from settings.conf's
     /// `[KEYBINDS] vim` flag (see `keybinds::load_vim_enabled`) and toggled
     /// live from the settings modal's Vim Mode switch.
-    pub vim_enabled: bool,
+
     /// Every configurable, non-vim keybinding (see `src/keybinds.rs`),
     /// loaded from settings.conf at startup. Owned here (rather than a
     /// standalone global) so the settings modal can mutate it through the
@@ -947,13 +1003,12 @@ pub struct AppState {
     /// and the active tab's `vim_mode == VimMode::Normal` — see
     /// `handle_vim_normal_key`'s sequence-continuation check and its
     /// modified final catch-all.
-    pub vim_keybinds: crate::vim_keybinds::VimKeybinds,
+
     /// A vim-keybind's resolved action, staged here because `state.rs` has
     /// no `cx`/`window` to actually dispatch it — same mailbox pattern as
     /// `pending_clipboard_sync` below. Drained by `text_editor.rs`'s
     /// `process_key_plain`, immediately after a vim keystroke is handled,
     /// via `take_pending_vim_action` + `window.dispatch_action`.
-    pub pending_vim_action: Option<crate::keybinds::KeybindAction>,
     pub theme: crate::theme::ThemeKind,
     /// Light or dark variant of `theme`. Orthogonal to the theme itself —
     /// every `ThemeKind` ships both, so this only swaps the palette's
@@ -1015,23 +1070,23 @@ pub struct AppState {
     /// how a fresh Word session doesn't remember its last zoom level either.
     pub zoom: f32,
     /// Saved macro recordings, keyed by register (user-requested, not in editor_instructions.md).
-    pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
+
     /// The register currently being recorded into and its keystrokes so
     /// far; `None` when not recording.
-    vim_macro_recording: Option<(char, Vec<RecordedVimKey>)>,
+
     /// True right after a bare `q` (with nothing already recording), while
     /// waiting for the register character that completes `q<register>`.
-    vim_macro_record_pending: bool,
+
     /// The register most recently replayed via `@<register>`, so a
     /// following `@@` can repeat it without re-specifying.
-    pub vim_last_macro_register: Option<char>,
+
     /// Vim registers (spec 5.8), keyed by name. `d`/`c` write the deleted
     /// text to `'"'` (plus the selected named register, if any); `y` also
     /// writes to `'0'` (the yank register). `'+'` is stored here like any
     /// other named register — `text_editor.rs` mirrors it to/from the OS
     /// clipboard around dispatch, since that needs a GPUI `cx` this file
     /// doesn't have.
-    pub registers: HashMap<char, String>,
+
     /// The formatting for each entry in `registers`, in exactly the encoding
     /// `rich_clipboard` writes for Ctrl+C — so a yanked card puts its
     /// fonts, sizes, underlines, boxes *and* its paragraph headings and
@@ -1043,24 +1098,24 @@ pub struct AppState {
     /// another app, and every existing caller read it as such), and a
     /// register with no entry here simply pastes plain — which is exactly
     /// what an external clipboard's contents should do.
-    pub register_formats: HashMap<char, String>,
+
     /// Mailbox for the `'+'` register: set to the `(text, formatting)` just
     /// written to it (by a `"+y`/`"+d`/`"+c`), drained by `text_editor.rs`
     /// right after dispatch to push it onto the real OS clipboard. `None`
     /// means no pending clipboard write. The formatting rides along as
     /// clipboard *metadata*, the same way `CopyAction` sends it, so `"+y`
     /// then Ctrl+V keeps its formatting.
-    pub pending_clipboard_sync: Option<(String, String)>,
+
     /// The last `/`/`?` search dispatched, or the last `*`/`#` word-search
     /// (spec 5.5) — (pattern, is_forward). Not per-tab: real vim shares
     /// the search register across buffers, same reasoning `registers`/
     /// `vim_macros` use. `n`/`N` repeat it (`N` reverses the direction).
-    pub last_search: Option<(String, bool)>,
+
     /// The last repeatable change (spec 5.5's `.`), scoped to operator +
     /// motion/text-object changes and `i`/`a`/`c`-style insertions per
     /// `vim_todo.md`'s explicit guidance — not arbitrary multi-command
     /// sequences. `None` until the first repeatable change happens.
-    pub last_change: Option<VimChange>,
+
     /// While a change-recordable operator (`d`/`c`/`>`/`<`/`gU`/`gu` — not
     /// `y`, which isn't a "change") is pending: the completion keystrokes
     /// fed to it so far, mirroring `RecordedVimKey` so `.` can replay them
@@ -1068,7 +1123,7 @@ pub struct AppState {
     /// `text_editor.rs` appends to this (mirroring macro recording's own
     /// capture site) *before* dispatching each keystroke while it's
     /// `Some`, so the completing keystroke itself is captured too.
-    pub(crate) vim_change_recording: Option<Vec<RecordedVimKey>>,
+
     /// While in an Insert-mode session that should be captured for `.`:
     /// the text typed so far. Started unconditionally by
     /// `vim_enter_insert_before_cursor` (so `i`/`a`/`I`/`A`/`c` all cover
@@ -1076,13 +1131,12 @@ pub struct AppState {
     /// documented scope, replaying it back will insert the text inline
     /// rather than reopening a new line, a known simplification).
     /// Committed to `last_change` when Insert mode exits.
-    vim_insertion_recording: Option<String>,
+
     /// Set by `execute_vim_operator_range`'s `'c'` case: the operator +
     /// completion keystrokes that ran just before entering Insert, held
     /// until that Insert session ends so the two can be combined into one
     /// `VimChange::OperatorInsert` — real vim's `.` after `cw<text><Esc>`
     /// repeats both the deletion and the retyped text.
-    vim_pending_change_before_insert: Option<(char, Vec<RecordedVimKey>)>,
     pub paragraph_integrity: bool,
     pub pilcrows: bool,
     /// settings.conf `highlight_color` — the color the Highlight button and

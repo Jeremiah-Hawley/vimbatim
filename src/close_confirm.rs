@@ -28,7 +28,7 @@ impl Render for CloseConfirm {
         let state = self.state.read(cx);
         let p = state.current_palette();
 
-        let Some(pending) = state.pending_close else {
+        let Some(pending) = state.ui.pending_close else {
             return div();
         };
 
@@ -118,7 +118,7 @@ impl Render for CloseConfirm {
                                     // cx.quit() itself, so the GPUI view here is the
                                     // one place that does it once the state settles.
                                     let was_app = matches!(
-                                        this.state.read(cx).pending_close,
+                                        this.state.read(cx).ui.pending_close,
                                         Some(PendingClose::App)
                                     );
                                     this.state.update(cx, |s, cx| {
@@ -137,7 +137,7 @@ impl Render for CloseConfirm {
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
                                     let was_app = matches!(
-                                        this.state.read(cx).pending_close,
+                                        this.state.read(cx).ui.pending_close,
                                         Some(PendingClose::App)
                                     );
                                     // confirm_close_save reports whether everything

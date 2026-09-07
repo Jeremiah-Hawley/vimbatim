@@ -64,37 +64,32 @@ impl AppState {
                 split_ratio: 0.5,
                 split_dragging: false,
             },
+            ui: UiState::default(),
+            global_vim: GlobalVimState {
+                vim_enabled,
+                vim_keybinds,
+                ..Default::default()
+            },
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            file_context_menu: None,
-            nav_context_menu: None,
             copied_file: None,
             nav_fold_buttons: preferences.nav_fold_buttons,
-            editor_context_menu: None,
-            find_bar: None,
             search_from_list_enabled: preferences.search_from_list_enabled,
             search_word_list: load_word_list(&search_word_list_path()),
             search_list_whole_words: preferences.search_list_whole_words,
             command_palette_enabled: preferences.command_palette_enabled,
-            command_palette: None,
             word_count_visible: false,
             timer: crate::timer::TimerState::default(),
             spreading_wpm: preferences.spreading_wpm,
             custom_font_colors: preferences.custom_font_colors,
             custom_highlight_colors: preferences.custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
-            settings_visible: false,
-            font_import_modal_open: false,
-            pending_close: None,
             recovery: RecoveryState {
                 pending_entries: crate::recovery::scan_recovery_dir(
                     &crate::recovery::recovery_dir(),
                 ),
             },
-            vim_enabled,
             keybinds,
-            vim_keybinds,
-            pending_vim_action: None,
             theme,
             theme_mode,
             theme_color_mode,
@@ -108,18 +103,6 @@ impl AppState {
             cite_size_half_points,
             small_size_half_points,
             zoom: 1.0,
-            vim_macros: HashMap::new(),
-            vim_macro_recording: None,
-            vim_macro_record_pending: false,
-            vim_last_macro_register: None,
-            registers: HashMap::new(),
-            register_formats: HashMap::new(),
-            pending_clipboard_sync: None,
-            last_search: None,
-            last_change: None,
-            vim_change_recording: None,
-            vim_insertion_recording: None,
-            vim_pending_change_before_insert: None,
             paragraph_integrity: preferences.paragraph_integrity,
             pilcrows: preferences.pilcrows,
             highlight_color: preferences.highlight_color,
@@ -330,9 +313,9 @@ impl AppState {
         // Mutually exclusive with the command palette — see
         // `open_command_palette` for why this lives here and not at the call
         // sites.
-        self.command_palette = None;
+        self.ui.command_palette = None;
         let selected = self.copy_selection().filter(|s| !s.contains('\n'));
-        let bar = self.find_bar.get_or_insert_with(FindBar::default);
+        let bar = self.ui.find_bar.get_or_insert_with(FindBar::default);
         if let Some(text) = selected {
             bar.query = text;
         }
@@ -351,15 +334,15 @@ impl AppState {
     /// the user the list lives in Settings, so refusing to open would hide the
     /// only signpost the feature has.
     pub fn open_search_from_list(&mut self) {
-        self.command_palette = None;
-        let bar = self.find_bar.get_or_insert_with(FindBar::default);
+        self.ui.command_palette = None;
+        let bar = self.ui.find_bar.get_or_insert_with(FindBar::default);
         bar.list_mode = true;
         bar.focus = FindField::Query;
         self.refresh_find_matches();
     }
 
     pub fn close_find_bar(&mut self) {
-        self.find_bar = None;
+        self.ui.find_bar = None;
         self.workspace.pending_focus_editor = Some(self.workspace.focused_pane);
     }
 
@@ -382,11 +365,11 @@ impl AppState {
     // beside the flip is what makes a toggle correct from any caller.
 
     pub fn toggle_vim(&mut self) {
-        self.vim_enabled = !self.vim_enabled;
+        self.global_vim.vim_enabled = !self.global_vim.vim_enabled;
         // Vim's flag rides in the keybinds file, not as a standalone setting.
         let _ = self
             .keybinds
-            .save_to(&self.settings_path, self.vim_enabled, &[]);
+            .save_to(&self.settings_path, self.global_vim.vim_enabled, &[]);
     }
 
     pub fn toggle_spellcheck(&mut self) {
@@ -418,7 +401,7 @@ impl AppState {
         // Turning the feature off closes an already-open palette, rather than
         // leaving a panel up that its keybind can no longer reopen.
         if !self.command_palette_enabled {
-            self.command_palette = None;
+            self.ui.command_palette = None;
         }
     }
 
@@ -443,12 +426,12 @@ impl AppState {
     /// symmetrically in `open_find_bar`) rather than at the call sites, so a
     /// future third opener can't forget it.
     pub fn open_command_palette(&mut self) {
-        self.find_bar = None;
-        self.command_palette = Some(CommandPaletteState::default());
+        self.ui.find_bar = None;
+        self.ui.command_palette = Some(CommandPaletteState::default());
     }
 
     pub fn close_command_palette(&mut self) {
-        self.command_palette = None;
+        self.ui.command_palette = None;
         self.workspace.pending_focus_editor = Some(self.workspace.focused_pane);
     }
 
@@ -463,7 +446,7 @@ impl AppState {
     /// keystroke: it is one pass over the document with a byte comparison per
     /// candidate position.
     pub fn refresh_find_matches(&mut self) {
-        let Some(bar) = self.find_bar.as_ref() else {
+        let Some(bar) = self.ui.find_bar.as_ref() else {
             return;
         };
         let query = bar.query.clone();
@@ -507,7 +490,7 @@ impl AppState {
             }
             _ => (0, 0),
         };
-        if let Some(bar) = self.find_bar.as_mut() {
+        if let Some(bar) = self.ui.find_bar.as_mut() {
             bar.match_count = count;
             bar.current_match = current;
         }
@@ -517,7 +500,7 @@ impl AppState {
     /// document like the vim `/` search this shares its wraparound semantics
     /// with. Returns false when there's nothing to find.
     pub fn find_next(&mut self, forward: bool) -> bool {
-        let Some(bar) = self.find_bar.as_ref() else {
+        let Some(bar) = self.ui.find_bar.as_ref() else {
             return false;
         };
         let (query, list_mode) = (bar.query.clone(), bar.list_mode);
@@ -581,7 +564,7 @@ impl AppState {
     /// A no-op unless the selection actually *is* a match — otherwise Replace
     /// pressed straight after opening the bar would overwrite arbitrary text.
     pub fn replace_current(&mut self) {
-        let Some(bar) = self.find_bar.as_ref() else {
+        let Some(bar) = self.ui.find_bar.as_ref() else {
             return;
         };
         let (query, replacement) = (bar.query.clone(), bar.replacement.clone());
@@ -612,7 +595,7 @@ impl AppState {
     /// replacement containing the query (find "a", replace with "aa") can't
     /// loop forever.
     pub fn replace_all(&mut self) -> usize {
-        let Some(bar) = self.find_bar.as_ref() else {
+        let Some(bar) = self.ui.find_bar.as_ref() else {
             return 0;
         };
         let (query, replacement) = (bar.query.clone(), bar.replacement.clone());
@@ -1102,7 +1085,7 @@ impl AppState {
             .map(|t| t.document.is_modified)
             .unwrap_or(false)
         {
-            self.pending_close = self
+            self.ui.pending_close = self
                 .workspace
                 .tabs
                 .get(idx)
@@ -1158,7 +1141,7 @@ impl AppState {
     /// returns" as its own signal to call `cx.quit()` immediately, since
     /// this GPUI-free layer has no way to quit the app itself.
     pub fn request_close_app(&mut self) {
-        self.pending_close = Some(PendingClose::App);
+        self.ui.pending_close = Some(PendingClose::App);
         if !self.workspace.tabs.iter().any(|t| t.document.is_modified) {
             self.confirm_close_discard();
         }
@@ -1177,7 +1160,7 @@ impl AppState {
     /// `cx.quit()`): `false` means at least one tab is still dirty and was
     /// deliberately left open rather than silently discarded.
     pub fn confirm_close_save(&mut self) -> bool {
-        match self.pending_close.take() {
+        match self.ui.pending_close.take() {
             Some(PendingClose::Tab(id)) => {
                 let Some(idx) = self.workspace.tabs.iter().position(|tab| tab.id == id) else {
                     return true;
@@ -1207,7 +1190,7 @@ impl AppState {
     /// target tab without saving (or, for an app-close, just clears
     /// `pending_close` — no tabs to remove, the caller quits).
     pub fn confirm_close_discard(&mut self) {
-        match self.pending_close.take() {
+        match self.ui.pending_close.take() {
             Some(PendingClose::Tab(id)) => {
                 if let Some(idx) = self.workspace.tabs.iter().position(|tab| tab.id == id) {
                     self.close_tab(idx);
@@ -1228,19 +1211,19 @@ impl AppState {
     /// Backs out of a pending close (Cancel button, or the confirm dialog's
     /// backdrop click) — leaves everything untouched.
     pub fn cancel_close(&mut self) {
-        self.pending_close = None;
+        self.ui.pending_close = None;
     }
 
     /// Opens the "Add Font" popup (`font_import_modal.rs`) — the Font
     /// Family dropdown's "+ Add Font" row and the Fonts settings section
     /// both call this.
     pub fn open_font_import_modal(&mut self) {
-        self.font_import_modal_open = true;
+        self.ui.font_import_modal_open = true;
     }
 
     /// Cancel button, or backdrop click, on the "Add Font" popup.
     pub fn close_font_import_modal(&mut self) {
-        self.font_import_modal_open = false;
+        self.ui.font_import_modal_open = false;
     }
 
     /// Deletes a previously-imported font (Fonts settings section's remove
@@ -1584,7 +1567,7 @@ impl AppState {
                 }
             }
         }
-        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+        if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
             rec.push(ch);
         }
     }
@@ -1655,7 +1638,7 @@ impl AppState {
             tab.cursor = prev;
             tab.document.is_modified = true;
         }
-        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+        if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
             rec.pop();
         }
     }
@@ -1765,7 +1748,7 @@ impl AppState {
         // where the current insertion segment started, into text that was
         // never part of this recording (same as `backspace`'s `pop()`
         // being a no-op once `rec` runs out).
-        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+        if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
             let rec_chars = rec.chars().count();
             let new_len = rec_chars.saturating_sub(deleted_chars);
             let byte_idx = rec
@@ -3639,7 +3622,7 @@ impl AppState {
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.document.is_modified = true;
         }
-        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+        if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
             rec.push_str(text);
         }
     }
@@ -3719,7 +3702,7 @@ impl AppState {
                 dest_attrs,
             );
         }
-        if let Some(rec) = self.vim_insertion_recording.as_mut() {
+        if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
             rec.push_str(text);
         }
     }
@@ -4679,7 +4662,7 @@ impl AppState {
          * right-click while a delete confirmation is showing starts over
          * rather than carrying the old confirmation state to a new target.
          */
-        self.file_context_menu = Some(FileContextMenu {
+        self.ui.file_context_menu = Some(FileContextMenu {
             position,
             target,
             confirming_delete: false,
@@ -4688,17 +4671,17 @@ impl AppState {
     }
 
     pub fn close_file_context_menu(&mut self) {
-        self.file_context_menu = None;
+        self.ui.file_context_menu = None;
     }
 
     // ── Nav outline right-click menu ────────────────────────────────────────
 
     pub fn open_nav_context_menu(&mut self, position: (f32, f32), target: NavContextMenuTarget) {
-        self.nav_context_menu = Some(NavContextMenu { position, target });
+        self.ui.nav_context_menu = Some(NavContextMenu { position, target });
     }
 
     pub fn close_nav_context_menu(&mut self) {
-        self.nav_context_menu = None;
+        self.ui.nav_context_menu = None;
     }
 
     pub fn custom_colors(&self, target: CustomColorTarget) -> &[u32] {
@@ -4759,7 +4742,7 @@ impl AppState {
          * `FileContextMenu.confirming_delete`'s doc comment for why deletion
          * isn't one click.
          */
-        if let Some(menu) = self.file_context_menu.as_mut() {
+        if let Some(menu) = self.ui.file_context_menu.as_mut() {
             menu.confirming_delete = true;
         }
     }
@@ -4772,7 +4755,8 @@ impl AppState {
          * deleting a whole directory tree needs stronger confirmation than
          * this menu offers. Closes the menu either way.
          */
-        let result: Result<(), Box<dyn std::error::Error>> = match self.file_context_menu.take() {
+        let result: Result<(), Box<dyn std::error::Error>> = match self.ui.file_context_menu.take()
+        {
             Some(FileContextMenu {
                 target: FileContextMenuTarget::File(path),
                 ..
@@ -4794,7 +4778,7 @@ impl AppState {
          * (`create_new_docx_in`), just targeting wherever was clicked
          * instead of always the tree's root.
          */
-        let Some(menu) = self.file_context_menu.take() else {
+        let Some(menu) = self.ui.file_context_menu.take() else {
             return Ok(());
         };
         let dir = match menu.target {
@@ -5195,7 +5179,7 @@ impl AppState {
         // Insert session — every entry point (`i`/`I`/`a`/`A`/`o`/`O`, and
         // `c`'s operator-to-Insert transition) funnels through here.
         // Committed to `last_change` when Insert exits (`vim_exit_to_normal`).
-        self.vim_insertion_recording = Some(String::new());
+        self.global_vim.vim_insertion_recording = Some(String::new());
     }
 
     pub fn vim_enter_insert_line_start(&mut self) {
@@ -5383,11 +5367,14 @@ impl AppState {
         // what was typed, combining it with the operator that led into it
         // (`c`) if there was one.
         if was_insert {
-            if let Some(text) = self.vim_insertion_recording.take() {
-                self.last_change = match self.vim_pending_change_before_insert.take() {
-                    Some((operator, keys)) => Some(VimChange::OperatorInsert(operator, keys, text)),
-                    None => Some(VimChange::Insertion(text)),
-                };
+            if let Some(text) = self.global_vim.vim_insertion_recording.take() {
+                self.global_vim.last_change =
+                    match self.global_vim.vim_pending_change_before_insert.take() {
+                        Some((operator, keys)) => {
+                            Some(VimChange::OperatorInsert(operator, keys, text))
+                        }
+                        None => Some(VimChange::Insertion(text)),
+                    };
             }
         }
     }
@@ -5425,7 +5412,7 @@ impl AppState {
          * `handle_vim_normal_key` to decide whether a bare `q` should stop
          * the recording rather than start a new one.
          */
-        self.vim_macro_recording.is_some()
+        self.global_vim.vim_macro_recording.is_some()
     }
 
     pub fn vim_recording_register(&self) -> Option<char> {
@@ -5437,7 +5424,8 @@ impl AppState {
          * a recording is in progress at all until the user presses `q`
          * again to stop it.
          */
-        self.vim_macro_recording
+        self.global_vim
+            .vim_macro_recording
             .as_ref()
             .map(|(register, _)| *register)
     }
@@ -5451,7 +5439,7 @@ impl AppState {
          * `vim_command_buf`, so the existing pending-command echo
          * (Task E pass 2) can't see it without this accessor.
          */
-        self.vim_macro_record_pending
+        self.global_vim.vim_macro_record_pending
     }
 
     pub fn vim_selected_register(&self) -> Option<char> {
@@ -5481,13 +5469,13 @@ impl AppState {
          * absent when another app wrote the clipboard, in which case the
          * register pastes plain.
          */
-        self.registers.insert(register, text);
+        self.global_vim.registers.insert(register, text);
         match metadata {
             Some(meta) => {
-                self.register_formats.insert(register, meta);
+                self.global_vim.register_formats.insert(register, meta);
             }
             None => {
-                self.register_formats.remove(&register);
+                self.global_vim.register_formats.remove(&register);
             }
         }
     }
@@ -5499,7 +5487,7 @@ impl AppState {
          * returns `Some`, pushes the text onto the real OS clipboard via
          * `cx.write_to_clipboard` — the one step this file can't do itself.
          */
-        self.pending_clipboard_sync.take()
+        self.global_vim.pending_clipboard_sync.take()
     }
 
     /// Drains the vim-keybind mailbox. `text_editor.rs` calls this right
@@ -5508,7 +5496,7 @@ impl AppState {
     /// the action via `window.dispatch_action` — the one step this file
     /// can't do itself (no `window`/`cx` here).
     pub fn take_pending_vim_action(&mut self) -> Option<crate::keybinds::KeybindAction> {
-        self.pending_vim_action.take()
+        self.global_vim.pending_vim_action.take()
     }
 
     fn start_macro_recording(&mut self, register: char) {
@@ -5518,7 +5506,7 @@ impl AppState {
          * `q<register>` always overwrites, never appends — appending needs
          * the uppercase-register form, out of scope here).
          */
-        self.vim_macro_recording = Some((register, Vec::new()));
+        self.global_vim.vim_macro_recording = Some((register, Vec::new()));
     }
 
     pub fn record_macro_key(&mut self, key: &str, shift: bool, key_char: Option<&str>) {
@@ -5529,7 +5517,7 @@ impl AppState {
          * method), so it's a no-op rather than a panic when nothing is
          * being recorded.
          */
-        if let Some((_, keys)) = self.vim_macro_recording.as_mut() {
+        if let Some((_, keys)) = self.global_vim.vim_macro_recording.as_mut() {
             keys.push(RecordedVimKey {
                 key: key.to_string(),
                 shift,
@@ -5543,8 +5531,8 @@ impl AppState {
          * Ends the in-progress recording (if any) and saves it into
          * `vim_macros` under its register, overwriting whatever was there.
          */
-        if let Some((register, keys)) = self.vim_macro_recording.take() {
-            self.vim_macros.insert(register, keys);
+        if let Some((register, keys)) = self.global_vim.vim_macro_recording.take() {
+            self.global_vim.vim_macros.insert(register, keys);
         }
     }
 
@@ -5557,7 +5545,7 @@ impl AppState {
          * recording — is still captured, since it's part of what `.`
          * needs to replay.
          */
-        self.vim_change_recording.is_some()
+        self.global_vim.vim_change_recording.is_some()
     }
 
     pub fn record_change_key(&mut self, key: &str, shift: bool, key_char: Option<&str>) {
@@ -5566,7 +5554,7 @@ impl AppState {
          * recording, if any — the `.`-repeat counterpart to
          * `record_macro_key`.
          */
-        if let Some(keys) = self.vim_change_recording.as_mut() {
+        if let Some(keys) = self.global_vim.vim_change_recording.as_mut() {
             keys.push(RecordedVimKey {
                 key: key.to_string(),
                 shift,
@@ -5581,7 +5569,7 @@ impl AppState {
          * nothing has ever been recorded into it. Used by
          * `text_editor.rs`'s `@<register>` replay.
          */
-        self.vim_macros.get(&register).cloned()
+        self.global_vim.vim_macros.get(&register).cloned()
     }
 
     pub fn take_vim_count(&mut self) -> Option<usize> {
@@ -5784,8 +5772,8 @@ impl AppState {
             if self.try_handle_vim_register_prefix(key, shift, key_char) {
                 return true;
             }
-            if self.vim_macro_record_pending {
-                self.vim_macro_record_pending = false;
+            if self.global_vim.vim_macro_record_pending {
+                self.global_vim.vim_macro_record_pending = false;
                 if let Some(register) = vim_find_target_char(key, shift, key_char) {
                     self.start_macro_recording(register);
                 }
@@ -5795,7 +5783,7 @@ impl AppState {
                 if self.vim_is_recording_macro() {
                     self.stop_macro_recording();
                 } else {
-                    self.vim_macro_record_pending = true;
+                    self.global_vim.vim_macro_record_pending = true;
                 }
                 return true;
             }
@@ -5991,12 +5979,12 @@ impl AppState {
             tab.vim_keybind_seq.push(c);
             tab.vim_keybind_seq.clone()
         };
-        match self.vim_keybinds.lookup(&seq) {
+        match self.global_vim.vim_keybinds.lookup(&seq) {
             crate::vim_keybinds::VimLookup::Exact(action) => {
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                     tab.vim_keybind_seq.clear();
                 }
-                self.pending_vim_action = Some(action);
+                self.global_vim.pending_vim_action = Some(action);
             }
             crate::vim_keybinds::VimLookup::Prefix => {}
             crate::vim_keybinds::VimLookup::None => {
@@ -6018,9 +6006,9 @@ impl AppState {
     /// continue.
     fn dispatch_fresh_vim_keybind_key(&mut self, c: char) {
         let seq = c.to_string();
-        match self.vim_keybinds.lookup(&seq) {
+        match self.global_vim.vim_keybinds.lookup(&seq) {
             crate::vim_keybinds::VimLookup::Exact(action) => {
-                self.pending_vim_action = Some(action);
+                self.global_vim.pending_vim_action = Some(action);
             }
             crate::vim_keybinds::VimLookup::Prefix => {
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
@@ -6640,17 +6628,23 @@ impl AppState {
          * rather than letting the pasted text inherit the run it lands in.
          */
         let selected = self.take_vim_selected_register();
-        self.registers.insert('"', text.clone());
-        self.register_formats.insert('"', metadata.clone());
+        self.global_vim.registers.insert('"', text.clone());
+        self.global_vim
+            .register_formats
+            .insert('"', metadata.clone());
         if also_yank {
-            self.registers.insert('0', text.clone());
-            self.register_formats.insert('0', metadata.clone());
+            self.global_vim.registers.insert('0', text.clone());
+            self.global_vim
+                .register_formats
+                .insert('0', metadata.clone());
         }
         if selected != '"' {
-            self.registers.insert(selected, text.clone());
-            self.register_formats.insert(selected, metadata.clone());
+            self.global_vim.registers.insert(selected, text.clone());
+            self.global_vim
+                .register_formats
+                .insert(selected, metadata.clone());
             if selected == '+' {
-                self.pending_clipboard_sync = Some((text, metadata));
+                self.global_vim.pending_clipboard_sync = Some((text, metadata));
             }
         }
     }
@@ -6669,7 +6663,7 @@ impl AppState {
          * cursor, landing on the last pasted character.
          */
         let register = self.take_vim_selected_register();
-        let Some(text) = self.registers.get(&register).cloned() else {
+        let Some(text) = self.global_vim.registers.get(&register).cloned() else {
             return;
         };
         if text.is_empty() {
@@ -6682,6 +6676,7 @@ impl AppState {
         // `sync_insert_str`, and empty attrs leave paragraphs as the split
         // left them.
         let (runs, attrs) = self
+            .global_vim
             .register_formats
             .get(&register)
             .and_then(|meta| crate::rich_clipboard::decode(meta, &text))
@@ -6949,7 +6944,7 @@ impl AppState {
         // completion keystrokes, unless it's `y` — yanking doesn't modify
         // the document, so it isn't a "change" `.` should repeat.
         if operator != 'y' {
-            self.vim_change_recording = Some(Vec::new());
+            self.global_vim.vim_change_recording = Some(Vec::new());
         }
     }
 
@@ -7090,7 +7085,7 @@ impl AppState {
                 // An invalid/unsupported motion abandons the operator
                 // (spec 5.3) — nothing ran, so there's no change for `.`
                 // to remember.
-                self.vim_change_recording = None;
+                self.global_vim.vim_change_recording = None;
                 true
             }
         }
@@ -7164,11 +7159,11 @@ impl AppState {
         // (`vim_exit_to_normal`) finish the commit once that text exists.
         // `y` never started a recording (see `start_vim_operator`), so
         // there's nothing to commit here for it.
-        if let Some(keys) = self.vim_change_recording.take() {
+        if let Some(keys) = self.global_vim.vim_change_recording.take() {
             if operator == 'c' {
-                self.vim_pending_change_before_insert = Some((operator, keys));
+                self.global_vim.vim_pending_change_before_insert = Some((operator, keys));
             } else {
-                self.last_change = Some(VimChange::Operator(operator, keys));
+                self.global_vim.last_change = Some(VimChange::Operator(operator, keys));
             }
         }
     }
@@ -7704,8 +7699,8 @@ impl AppState {
                 }
                 self.close_tab(self.workspace.active_tab);
             }
-            "set vim" => self.vim_enabled = true,
-            "set novim" => self.vim_enabled = false,
+            "set vim" => self.global_vim.vim_enabled = true,
+            "set novim" => self.global_vim.vim_enabled = false,
             "noh" => {} // nothing to clear yet — Task I adds search highlighting
             _ => {
                 if let Some(path) = line.strip_prefix("e ") {
@@ -7739,7 +7734,7 @@ impl AppState {
          * `execute_vim_operator_range` don't know they're being replayed)
          * — harmless, since it just re-commits the same content.
          */
-        let Some(change) = self.last_change.clone() else {
+        let Some(change) = self.global_vim.last_change.clone() else {
             return;
         };
         match change {
@@ -7775,7 +7770,7 @@ impl AppState {
         if pattern.is_empty() {
             return;
         }
-        self.last_search = Some((pattern.to_string(), forward));
+        self.global_vim.last_search = Some((pattern.to_string(), forward));
         let cursor = self
             .tabs
             .get(self.workspace.active_tab)
@@ -7818,7 +7813,7 @@ impl AppState {
          * `N` (`reverse`) searches the opposite direction from the one
          * originally used, matching real vim.
          */
-        let Some((pattern, forward)) = self.last_search.clone() else {
+        let Some((pattern, forward)) = self.global_vim.last_search.clone() else {
             return;
         };
         let effective_forward = if reverse { !forward } else { forward };
@@ -7845,7 +7840,7 @@ impl AppState {
             return;
         }
         let word = tab.document.content[start..end].to_string();
-        self.last_search = Some((word.clone(), forward));
+        self.global_vim.last_search = Some((word.clone(), forward));
         let from = if forward { end } else { start };
         self.jump_to_search_match_from(&word, forward, from);
     }
@@ -9482,33 +9477,27 @@ mod tests {
                 split_ratio: 0.5,
                 split_dragging: false,
             },
+            ui: UiState::default(),
+            global_vim: GlobalVimState {
+                vim_enabled: true,
+                ..Default::default()
+            },
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            file_context_menu: None,
-            nav_context_menu: None,
             copied_file: None,
             nav_fold_buttons: false,
-            editor_context_menu: None,
-            find_bar: None,
             search_from_list_enabled: false,
             search_word_list: Vec::new(),
             search_list_whole_words: true,
             command_palette_enabled: false,
-            command_palette: None,
             word_count_visible: false,
             timer: crate::timer::TimerState::default(),
             spreading_wpm: DEFAULT_SPREADING_WPM,
             custom_font_colors: Vec::new(),
             custom_highlight_colors: Vec::new(),
             sidebar_mode: SidebarMode::default(),
-            settings_visible: false,
-            font_import_modal_open: false,
-            pending_close: None,
             recovery: RecoveryState::default(),
-            vim_enabled: true,
             keybinds: crate::keybinds::Keybinds::defaults(),
-            vim_keybinds: crate::vim_keybinds::VimKeybinds::defaults(),
-            pending_vim_action: None,
             theme: crate::theme::ThemeKind::WorkbenchDark,
             theme_mode: crate::theme::ThemeMode::Dark,
             theme_color_mode: crate::theme::ThemeColorMode::Minimal,
@@ -9522,18 +9511,6 @@ mod tests {
             cite_size_half_points: 26,
             small_size_half_points: 12,
             zoom: 1.0,
-            vim_macros: HashMap::new(),
-            vim_macro_recording: None,
-            vim_macro_record_pending: false,
-            vim_last_macro_register: None,
-            registers: HashMap::new(),
-            register_formats: HashMap::new(),
-            pending_clipboard_sync: None,
-            last_search: None,
-            last_change: None,
-            vim_change_recording: None,
-            vim_insertion_recording: None,
-            vim_pending_change_before_insert: None,
             paragraph_integrity: false,
             pilcrows: false,
             highlight_color: "yellow".to_string(),
@@ -12055,7 +12032,7 @@ mod tests {
 
         state.request_close_tab(0);
 
-        assert_eq!(state.pending_close, Some(PendingClose::Tab(TabId(0))));
+        assert_eq!(state.ui.pending_close, Some(PendingClose::Tab(TabId(0))));
         assert_eq!(state.workspace.tabs.len(), 1); // not yet closed
     }
 
@@ -12081,7 +12058,7 @@ mod tests {
 
         state.request_close_tab(0);
 
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
         assert_eq!(state.workspace.tabs.len(), 1); // closed immediately
     }
 
@@ -12094,7 +12071,7 @@ mod tests {
 
         state.confirm_close_discard();
 
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
         assert_eq!(state.workspace.tabs.len(), 1);
     }
 
@@ -12106,7 +12083,7 @@ mod tests {
         state.request_close_tab(0);
         state.cancel_close();
 
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
         assert_eq!(state.workspace.tabs.len(), 1);
     }
 
@@ -12118,7 +12095,7 @@ mod tests {
 
         state.request_close_app();
 
-        assert_eq!(state.pending_close, Some(PendingClose::App));
+        assert_eq!(state.ui.pending_close, Some(PendingClose::App));
     }
 
     #[test]
@@ -12131,7 +12108,7 @@ mod tests {
 
         state.request_close_app();
 
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
     }
 
     #[test]
@@ -12158,7 +12135,7 @@ mod tests {
         let persisted = state.confirm_close_save();
 
         assert!(persisted);
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
         assert_eq!(state.workspace.tabs.len(), 1);
     }
 
@@ -12180,7 +12157,7 @@ mod tests {
         let persisted = state.confirm_close_save();
 
         assert!(!persisted);
-        assert_eq!(state.pending_close, None); // dialog still resolves/closes
+        assert_eq!(state.ui.pending_close, None); // dialog still resolves/closes
         assert_eq!(state.workspace.tabs.len(), 2); // but the tab itself was NOT closed
         assert_eq!(
             state.workspace.tabs[0].document.content,
@@ -12195,7 +12172,7 @@ mod tests {
         state.new_tab();
         state.workspace.tabs[0].document.is_modified = true;
         state.request_close_app();
-        assert_eq!(state.pending_close, Some(PendingClose::App));
+        assert_eq!(state.ui.pending_close, Some(PendingClose::App));
 
         let persisted = state.confirm_close_save();
 
@@ -12203,7 +12180,7 @@ mod tests {
         // the caller (close_confirm.rs) reads this `false` as "don't
         // cx.quit(), a dirty tab is still unsaved".
         assert!(!persisted);
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
         assert_eq!(state.workspace.tabs.len(), 2); // saving the app doesn't remove tabs
     }
 
@@ -12211,7 +12188,7 @@ mod tests {
     fn cancel_close_is_a_no_op_when_nothing_pending() {
         let mut state = make_state("hello", 0, None);
         state.cancel_close();
-        assert_eq!(state.pending_close, None);
+        assert_eq!(state.ui.pending_close, None);
     }
 
     // ── clamp_sidebar_width ──────────────────────────────────────────────────
@@ -12862,7 +12839,7 @@ mod tests {
             unsupported_xml: None,
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        state.registers.insert('"', "XY".to_string());
+        state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
         assert_eq!(
@@ -15217,15 +15194,15 @@ mod tests {
     fn test_dispatch_vim_command_set_novim_disables_vim() {
         let mut state = make_state("hello", 0, None);
         state.dispatch_vim_command("set novim");
-        assert!(!state.vim_enabled);
+        assert!(!state.global_vim.vim_enabled);
     }
 
     #[test]
     fn test_dispatch_vim_command_set_vim_reenables_vim() {
         let mut state = make_state("hello", 0, None);
-        state.vim_enabled = false;
+        state.global_vim.vim_enabled = false;
         state.dispatch_vim_command("set vim");
-        assert!(state.vim_enabled);
+        assert!(state.global_vim.vim_enabled);
     }
 
     #[test]
@@ -15363,11 +15340,11 @@ mod tests {
         state.handle_vim_key("d", false, None); // dd
         state.handle_vim_key("d", false, None);
         assert_eq!(
-            state.registers.get(&'a'),
+            state.global_vim.registers.get(&'a'),
             Some(&"hello world\n".to_string())
         );
         assert_eq!(
-            state.registers.get(&'"'),
+            state.global_vim.registers.get(&'"'),
             Some(&"hello world\n".to_string())
         );
     }
@@ -15380,11 +15357,11 @@ mod tests {
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("y", false, None);
         assert_eq!(
-            state.registers.get(&'b'),
+            state.global_vim.registers.get(&'b'),
             Some(&"hello world\n".to_string())
         );
         assert_eq!(
-            state.registers.get(&'0'),
+            state.global_vim.registers.get(&'0'),
             Some(&"hello world\n".to_string())
         );
     }
@@ -15398,8 +15375,14 @@ mod tests {
         state.handle_vim_key("d", false, None); // "add -> register a
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("d", false, None); // plain dd -> default only
-        assert_eq!(state.registers.get(&'a'), Some(&"one\n".to_string()));
-        assert_eq!(state.registers.get(&'"'), Some(&"two\n".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'a'),
+            Some(&"one\n".to_string())
+        );
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"two\n".to_string())
+        );
     }
 
     #[test]
@@ -15409,13 +15392,16 @@ mod tests {
         state.handle_vim_key("=", true, Some("+"));
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("y", false, None);
-        assert_eq!(state.registers.get(&'+'), Some(&"hello\n".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'+'),
+            Some(&"hello\n".to_string())
+        );
         // The formatting rides along so `text_editor.rs` can put it on the
         // clipboard as metadata; only the text half is asserted here — the
         // encoding itself is `rich_clipboard`'s own round-trip tests.
-        let (text, metadata) = state.pending_clipboard_sync.clone().unwrap();
+        let (text, metadata) = state.global_vim.pending_clipboard_sync.clone().unwrap();
         assert_eq!(text, "hello\n");
-        assert_eq!(Some(&metadata), state.register_formats.get(&'+'));
+        assert_eq!(Some(&metadata), state.global_vim.register_formats.get(&'+'));
     }
 
     // ── Task H.5: p/P paste ──────────────────────────────────────────────────
@@ -15423,7 +15409,7 @@ mod tests {
     #[test]
     fn test_paste_charwise_after_cursor() {
         let mut state = make_state("abc", 0, None);
-        state.registers.insert('"', "XY".to_string());
+        state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
         assert_eq!(state.workspace.tabs[0].cursor, 2); // lands on last pasted char 'Y'
@@ -15432,7 +15418,7 @@ mod tests {
     #[test]
     fn test_paste_charwise_before_cursor_capital_p() {
         let mut state = make_state("abc", 1, None);
-        state.registers.insert('"', "XY".to_string());
+        state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", true, None);
         assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
     }
@@ -15440,7 +15426,10 @@ mod tests {
     #[test]
     fn test_paste_linewise_inserts_as_new_line_below() {
         let mut state = make_state("one\ntwo", 0, None);
-        state.registers.insert('"', "middle\n".to_string());
+        state
+            .global_vim
+            .registers
+            .insert('"', "middle\n".to_string());
         state.handle_vim_key("p", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "one\nmiddle\ntwo");
     }
@@ -15448,7 +15437,10 @@ mod tests {
     #[test]
     fn test_paste_linewise_capital_p_inserts_above() {
         let mut state = make_state("one\ntwo", 4, None); // cursor on "two"
-        state.registers.insert('"', "middle\n".to_string());
+        state
+            .global_vim
+            .registers
+            .insert('"', "middle\n".to_string());
         state.handle_vim_key("p", true, None);
         assert_eq!(state.workspace.tabs[0].document.content, "one\nmiddle\ntwo");
     }
@@ -15463,7 +15455,7 @@ mod tests {
     #[test]
     fn test_paste_named_register_after_quote_prefix() {
         let mut state = make_state("abc", 0, None);
-        state.registers.insert('a', "Z".to_string());
+        state.global_vim.registers.insert('a', "Z".to_string());
         state.handle_vim_key("'", true, Some("\""));
         state.handle_vim_key("a", false, None);
         state.handle_vim_key("p", false, None);
@@ -15478,7 +15470,7 @@ mod tests {
         state.handle_vim_key("x", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "ac");
         assert_eq!(state.workspace.tabs[0].cursor, 1);
-        assert_eq!(state.registers.get(&'"'), Some(&"b".to_string()));
+        assert_eq!(state.global_vim.registers.get(&'"'), Some(&"b".to_string()));
     }
 
     #[test]
@@ -15592,10 +15584,16 @@ mod tests {
     #[test]
     fn test_r_does_not_write_register() {
         let mut state = make_state("abc", 1, None);
-        state.registers.insert('"', "unchanged".to_string());
+        state
+            .global_vim
+            .registers
+            .insert('"', "unchanged".to_string());
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", false, None);
-        assert_eq!(state.registers.get(&'"'), Some(&"unchanged".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"unchanged".to_string())
+        );
     }
 
     #[test]
@@ -15698,7 +15696,7 @@ mod tests {
             tab.vim_pending_replace,
             tab.vim_pending_text_object_prefix,
             tab.last_find,
-            state.registers,
+            state.global_vim.registers,
         )
     }
 
@@ -16049,7 +16047,7 @@ mod tests {
         let mut state = make_state("foo bar", 0, None);
         vim_key_recorded(&mut state, "y", false, None);
         vim_key_recorded(&mut state, "w", false, None);
-        assert_eq!(state.last_change, None);
+        assert_eq!(state.global_vim.last_change, None);
     }
 
     #[test]
@@ -16100,7 +16098,7 @@ mod tests {
         let mut state = make_state("abc", 0, None);
         vim_key_recorded(&mut state, "d", false, None);
         vim_key_recorded(&mut state, "up", false, None); // invalid motion for d: abandons
-        assert_eq!(state.last_change, None);
+        assert_eq!(state.global_vim.last_change, None);
     }
 
     // ── split_vim_command_buf / take_vim_count / vim_pending_trigger (Task E) ───
@@ -17260,7 +17258,10 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].document.content, "two three");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
-        assert_eq!(state.registers.get(&'"'), Some(&"one ".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"one ".to_string())
+        );
     }
 
     #[test]
@@ -17302,7 +17303,10 @@ mod tests {
         state.handle_vim_key("d", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "two\nthree");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
-        assert_eq!(state.registers.get(&'"'), Some(&"one\n".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"one\n".to_string())
+        );
     }
 
     #[test]
@@ -17329,8 +17333,14 @@ mod tests {
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("y", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo"); // unchanged
-        assert_eq!(state.registers.get(&'"'), Some(&"one\n".to_string()));
-        assert_eq!(state.registers.get(&'0'), Some(&"one\n".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"one\n".to_string())
+        );
+        assert_eq!(
+            state.global_vim.registers.get(&'0'),
+            Some(&"one\n".to_string())
+        );
         assert_eq!(state.workspace.tabs[0].cursor, 0);
     }
 
@@ -17340,7 +17350,10 @@ mod tests {
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("w", false, None);
         assert_eq!(state.workspace.tabs[0].document.content, "one two");
-        assert_eq!(state.registers.get(&'"'), Some(&"one ".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"one ".to_string())
+        );
         assert_eq!(state.workspace.tabs[0].cursor, 0);
     }
 
@@ -17352,7 +17365,10 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].document.content, "\ntwo"); // line kept, just emptied
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
-        assert_eq!(state.registers.get(&'"'), Some(&"one".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"one".to_string())
+        );
     }
 
     #[test]
@@ -17590,7 +17606,10 @@ mod tests {
         state.handle_vim_key("\"", true, Some("\""));
         assert_eq!(state.workspace.tabs[0].document.content, "say \"\" now");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
-        assert_eq!(state.registers.get(&'"'), Some(&"hello world".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"hello world".to_string())
+        );
     }
 
     #[test]
@@ -17727,7 +17746,10 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].document.content, "e two three");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
         assert_eq!(state.workspace.tabs[0].selection, None);
-        assert_eq!(state.registers.get(&'"'), Some(&"on".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"on".to_string())
+        );
     }
 
     #[test]
@@ -17747,8 +17769,14 @@ mod tests {
         assert!(state.handle_vim_key("y", false, None));
         assert_eq!(state.workspace.tabs[0].document.content, "one two three");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
-        assert_eq!(state.registers.get(&'"'), Some(&"on".to_string()));
-        assert_eq!(state.registers.get(&'0'), Some(&"on".to_string()));
+        assert_eq!(
+            state.global_vim.registers.get(&'"'),
+            Some(&"on".to_string())
+        );
+        assert_eq!(
+            state.global_vim.registers.get(&'0'),
+            Some(&"on".to_string())
+        );
     }
 
     #[test]
@@ -19904,7 +19932,7 @@ mod tests {
     fn find_next_selects_the_match_and_wraps_around() {
         let mut state = make_state("one two one", 0, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
 
         assert!(state.find_next(true));
         assert_eq!(state.workspace.tabs[0].selection, Some((0, 3)));
@@ -19921,7 +19949,7 @@ mod tests {
     fn find_next_backward_walks_in_reverse() {
         let mut state = make_state("one two one", 11, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
 
         assert!(state.find_next(false));
         assert_eq!(state.workspace.tabs[0].selection, Some((8, 11)));
@@ -19937,8 +19965,8 @@ mod tests {
         let mut state = make_state("one two", 0, None);
         state.workspace.tabs[0].selection = Some((4, 7)); // "two"
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
-        state.find_bar.as_mut().unwrap().replacement = "X".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().replacement = "X".to_string();
 
         state.replace_current();
         assert!(
@@ -19951,8 +19979,8 @@ mod tests {
     fn replace_current_swaps_the_found_match_then_advances() {
         let mut state = make_state("one two one", 0, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
-        state.find_bar.as_mut().unwrap().replacement = "X".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().replacement = "X".to_string();
 
         state.find_next(true);
         state.replace_current();
@@ -19965,8 +19993,8 @@ mod tests {
     fn replace_all_replaces_every_match_case_insensitively() {
         let mut state = make_state("One one ONE", 0, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
-        state.find_bar.as_mut().unwrap().replacement = "two".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().replacement = "two".to_string();
 
         assert_eq!(state.replace_all(), 3);
         assert_eq!(state.workspace.tabs[0].document.content, "two two two");
@@ -19978,8 +20006,8 @@ mod tests {
     fn replace_all_terminates_when_the_replacement_contains_the_query() {
         let mut state = make_state("a a a", 0, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "a".to_string();
-        state.find_bar.as_mut().unwrap().replacement = "aa".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "a".to_string();
+        state.ui.find_bar.as_mut().unwrap().replacement = "aa".to_string();
 
         assert_eq!(state.replace_all(), 3);
         assert_eq!(state.workspace.tabs[0].document.content, "aa aa aa");
@@ -19990,21 +20018,21 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.workspace.tabs[0].selection = Some((6, 11));
         state.open_find_bar();
-        assert_eq!(state.find_bar.as_ref().unwrap().query, "world");
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().query, "world");
     }
 
     #[test]
     fn refresh_find_matches_counts_every_occurrence() {
         let mut state = make_state("one one one", 0, None);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "one".to_string();
+        state.ui.find_bar.as_mut().unwrap().query = "one".to_string();
         state.refresh_find_matches();
-        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 3);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().match_count, 3);
 
         state.find_next(true);
-        assert_eq!(state.find_bar.as_ref().unwrap().current_match, 1);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().current_match, 1);
         state.find_next(true);
-        assert_eq!(state.find_bar.as_ref().unwrap().current_match, 2);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().current_match, 2);
     }
 
     // ── Spellcheck ────────────────────────────────────────────────────────
@@ -20074,7 +20102,7 @@ mod tests {
         let mut state = make_state("", 0, None);
         state.open_file_context_menu((10.0, 20.0), FileContextMenuTarget::Background);
 
-        let menu = state.file_context_menu.as_ref().unwrap();
+        let menu = state.ui.file_context_menu.as_ref().unwrap();
         assert_eq!(menu.position, (10.0, 20.0));
         assert_eq!(menu.target, FileContextMenuTarget::Background);
         assert!(!menu.confirming_delete);
@@ -20085,7 +20113,7 @@ mod tests {
         let mut state = make_state("", 0, None);
         state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::Background);
         state.close_file_context_menu();
-        assert!(state.file_context_menu.is_none());
+        assert!(state.ui.file_context_menu.is_none());
     }
 
     #[test]
@@ -20098,7 +20126,14 @@ mod tests {
         state.open_file_context_menu((0.0, 0.0), FileContextMenuTarget::File(path.clone()));
         state.request_context_menu_delete_confirmation();
 
-        assert!(state.file_context_menu.as_ref().unwrap().confirming_delete);
+        assert!(
+            state
+                .ui
+                .file_context_menu
+                .as_ref()
+                .unwrap()
+                .confirming_delete
+        );
         assert!(path.exists(), "delete must not happen until confirmed");
     }
 
@@ -20116,7 +20151,7 @@ mod tests {
         state.confirm_context_menu_delete().unwrap();
 
         assert!(!path.exists());
-        assert!(state.file_context_menu.is_none());
+        assert!(state.ui.file_context_menu.is_none());
     }
 
     #[test]
@@ -20203,21 +20238,21 @@ mod tests {
         state.open_find_bar();
         state.open_command_palette();
         assert!(
-            state.find_bar.is_none(),
+            state.ui.find_bar.is_none(),
             "opening the palette must close the find bar"
         );
-        assert!(state.command_palette.is_some());
+        assert!(state.ui.command_palette.is_some());
 
         state.open_find_bar();
         assert!(
-            state.command_palette.is_none(),
+            state.ui.command_palette.is_none(),
             "opening the find bar must close the palette"
         );
 
         state.open_command_palette();
         state.open_search_from_list();
         assert!(
-            state.command_palette.is_none(),
+            state.ui.command_palette.is_none(),
             "Search From List must close the palette too"
         );
     }
@@ -20233,7 +20268,7 @@ mod tests {
 
         assert!(!state.command_palette_enabled);
         assert!(
-            state.command_palette.is_none(),
+            state.ui.command_palette.is_none(),
             "a panel its keybind can't reopen must not be left up"
         );
     }
@@ -20295,11 +20330,11 @@ mod tests {
 
         let mut state = make_state("", 0, None);
         state.settings_path = conf.clone();
-        let before = state.vim_enabled;
+        let before = state.global_vim.vim_enabled;
 
         state.toggle_vim();
 
-        assert_eq!(state.vim_enabled, !before);
+        assert_eq!(state.global_vim.vim_enabled, !before);
         assert_eq!(crate::keybinds::load_vim_enabled(&conf), !before);
     }
 
@@ -20475,16 +20510,16 @@ mod tests {
         // `FindBar` is app-wide and reused, so Ctrl+F after a list search must
         // not land the user in a panel with no query field.
         let mut state = make_list_search_state("war", &["war"], true);
-        assert!(state.find_bar.as_ref().unwrap().list_mode);
+        assert!(state.ui.find_bar.as_ref().unwrap().list_mode);
 
         state.open_find_bar();
-        assert!(!state.find_bar.as_ref().unwrap().list_mode);
+        assert!(!state.ui.find_bar.as_ref().unwrap().list_mode);
     }
 
     #[test]
     fn test_list_mode_counts_every_match_of_every_word() {
         let state = make_list_search_state("war peace war", &["war", "peace"], true);
-        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 3);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().match_count, 3);
     }
 
     #[test]
@@ -20492,17 +20527,17 @@ mod tests {
         // "warming" (7) and "war" (3) in one list — the case the old
         // single-needle `query.len()` arithmetic could not express.
         let mut state = make_list_search_state("warming and war", &["warming", "war"], true);
-        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 2);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().match_count, 2);
 
         // Step onto the first match: the readout must say "1 of 2", proving
         // the count loop and `find_next` agree about where matches start/end.
         state.find_next(true);
-        let bar = state.find_bar.as_ref().unwrap();
+        let bar = state.ui.find_bar.as_ref().unwrap();
         assert_eq!((bar.current_match, bar.match_count), (1, 2));
         assert_eq!(state.workspace.tabs[0].selection, Some((0, 7)));
 
         state.find_next(true);
-        let bar = state.find_bar.as_ref().unwrap();
+        let bar = state.ui.find_bar.as_ref().unwrap();
         assert_eq!((bar.current_match, bar.match_count), (2, 2));
         assert_eq!(state.workspace.tabs[0].selection, Some((12, 15)));
     }
@@ -20528,9 +20563,9 @@ mod tests {
         // The panel opening on an empty list is deliberate — its readout is
         // what tells the user where to write one.
         let mut state = make_list_search_state("war peace", &[], true);
-        assert!(state.find_bar.is_some());
+        assert!(state.ui.find_bar.is_some());
         assert!(!state.find_next(true));
-        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 0);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().match_count, 0);
     }
 
     #[test]
@@ -20540,10 +20575,10 @@ mod tests {
         let mut state = make_state("war peace", 0, None);
         state.search_word_list = words(&["peace"]);
         state.open_find_bar();
-        state.find_bar.as_mut().unwrap().query = "war".into();
+        state.ui.find_bar.as_mut().unwrap().query = "war".into();
         state.refresh_find_matches();
 
-        assert_eq!(state.find_bar.as_ref().unwrap().match_count, 1);
+        assert_eq!(state.ui.find_bar.as_ref().unwrap().match_count, 1);
         state.find_next(true);
         assert_eq!(state.workspace.tabs[0].selection, Some((0, 3)));
     }

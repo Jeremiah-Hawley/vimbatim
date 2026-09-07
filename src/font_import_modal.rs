@@ -96,7 +96,7 @@ impl Render for FontImportModal {
         let p = state.current_palette();
         let theme_mode = state.theme_mode;
 
-        if !state.font_import_modal_open {
+        if !state.ui.font_import_modal_open {
             return div();
         }
 

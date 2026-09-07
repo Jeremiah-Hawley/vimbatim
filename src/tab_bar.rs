@@ -842,7 +842,7 @@ impl Render for TabBar {
                 let should_quit = this.state.update(cx, |s, cx| {
                     s.request_close_app();
                     cx.notify();
-                    s.pending_close.is_none()
+                    s.ui.pending_close.is_none()
                 });
                 cx.notify();
                 if should_quit {

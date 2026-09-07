@@ -228,7 +228,7 @@ fn main() {
                     let quit_now = state.update(cx, |s, cx| {
                         s.request_close_app();
                         cx.notify();
-                        s.pending_close.is_none()
+                        s.ui.pending_close.is_none()
                     });
                     // Returning true only tells the platform not to veto the
                     // close — it does not terminate the app. GPUI's default

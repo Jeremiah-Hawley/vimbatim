@@ -383,7 +383,7 @@ impl Render for AppToolbar {
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(cx.listener(|this, _ev, _window, cx| {
                         this.state.update(cx, |s, cx| {
-                            s.settings_visible = !s.settings_visible;
+                            s.ui.settings_visible = !s.ui.settings_visible;
                             cx.notify();
                         });
                         cx.notify();

@@ -1440,9 +1440,9 @@ impl TextEditor {
         // Here rather than in `process_key`: that one is also the macro-replay
         // path (`@<register>`), which has no live menu to dismiss and
         // shouldn't pay for the check per replayed keystroke.
-        if self.state.read(cx).editor_context_menu.is_some() {
+        if self.state.read(cx).ui.editor_context_menu.is_some() {
             self.state.update(cx, |s, cx| {
-                s.editor_context_menu = None;
+                s.ui.editor_context_menu = None;
                 cx.notify();
             });
         }
@@ -1600,7 +1600,7 @@ impl TextEditor {
                         .and_then(|i| state.workspace.tabs.get(i))
                         .map(|t| t.vim_mode)
                         .unwrap_or(VimMode::Insert);
-                    (state.vim_enabled, mode)
+                    (state.global_vim.vim_enabled, mode)
                 };
                 if vim_enabled && vim_mode == VimMode::Normal {
                     self.state.update(cx, |state, _cx| state.redo());
@@ -1718,7 +1718,7 @@ impl TextEditor {
                 .and_then(|i| state.workspace.tabs.get(i))
                 .map(|t| t.vim_mode)
                 .unwrap_or_default();
-            (state.vim_enabled, mode)
+            (state.global_vim.vim_enabled, mode)
         };
         if vim_enabled {
             if vim_mode == VimMode::Insert {
@@ -1973,7 +1973,7 @@ impl TextEditor {
                         self.macro_at_pending = false;
                         if let Some(register) = vim_find_target_char(key, shift, key_char) {
                             let register = if register == '@' {
-                                self.state.read(cx).vim_last_macro_register
+                                self.state.read(cx).global_vim.vim_last_macro_register
                             } else {
                                 Some(register)
                             };
@@ -2187,7 +2187,7 @@ impl TextEditor {
          * a `self.state.update(...)` closure instead.
          */
         self.state.update(cx, |state, _cx| {
-            state.vim_last_macro_register = Some(register);
+            state.global_vim.vim_last_macro_register = Some(register);
         });
         let Some(keys) = self.state.read(cx).macro_keys(register) else {
             return;
@@ -2299,7 +2299,7 @@ impl Render for TextEditor {
         // surface too, not just the frame around it.
         let p = state.current_palette();
         let theme_mode = state.theme_mode;
-        let cursor_style = if state.vim_enabled {
+        let cursor_style = if state.global_vim.vim_enabled {
             CursorStyle::Block
         } else {
             CursorStyle::Line
@@ -2410,7 +2410,7 @@ impl Render for TextEditor {
         // between "vim is on and in Normal mode" and "vim mode is off
         // entirely", both of which otherwise render an identical blank
         // indicator strip.
-        let mode_indicator_text: Option<&'static str> = if state.vim_enabled {
+        let mode_indicator_text: Option<&'static str> = if state.global_vim.vim_enabled {
             idx.and_then(|i| state.workspace.tabs.get(i))
                 .map(|t| match t.vim_mode {
                     VimMode::Normal => "-- NORMAL --",
@@ -2694,7 +2694,7 @@ impl Render for TextEditor {
                             let click_count = ev.click_count;
                             let shift_click = ev.modifiers.shift && click_count == 1;
                             this.state.update(cx, |state, cx| {
-                                state.editor_context_menu = None;
+                                state.ui.editor_context_menu = None;
                                 state.clear_similar_selection();
                                 if shift_click {
                                     // Shift+Click: extend the selection from wherever the
@@ -2838,7 +2838,7 @@ impl Render for TextEditor {
                             };
 
                             this.state.update(cx, |state, cx| {
-                                state.editor_context_menu = Some(EditorContextMenu {
+                                state.ui.editor_context_menu = Some(EditorContextMenu {
                                     position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
                                     spell_target,
                                 });
@@ -3455,7 +3455,7 @@ impl Render for TextEditor {
                     .child(line)
             })
             .when_some(
-                self.state.read(cx).editor_context_menu.clone(),
+                self.state.read(cx).ui.editor_context_menu.clone(),
                 |el, menu| {
                     let has_selection = self
                         .state
@@ -3519,7 +3519,7 @@ fn render_context_menu(
         row(id.into(), label.to_string(), enabled, p.text).when(enabled, |d| {
             d.on_click(move |_ev, window, cx| {
                 state.update(cx, |s, cx| {
-                    s.editor_context_menu = None;
+                    s.ui.editor_context_menu = None;
                     cx.notify();
                 });
                 window.dispatch_action(action(), cx);
@@ -3574,7 +3574,7 @@ fn render_context_menu(
                     .on_click(move |_ev, _window, cx| {
                         state.update(cx, |s, cx| {
                             s.replace_spell_target(&target, &replacement);
-                            s.editor_context_menu = None;
+                            s.ui.editor_context_menu = None;
                             cx.notify();
                         });
                     }),
@@ -3622,7 +3622,7 @@ fn render_context_menu(
             .on_click(move |_ev, _window, cx| {
                 state.update(cx, |s, cx| {
                     s.add_to_user_dictionary(&word);
-                    s.editor_context_menu = None;
+                    s.ui.editor_context_menu = None;
                     cx.notify();
                 });
             }),
@@ -3639,8 +3639,8 @@ fn render_context_menu(
                     .id("editor-context-menu-dismiss")
                     .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                         dismiss_state.update(cx, |s, cx| {
-                            if s.editor_context_menu.is_some() {
-                                s.editor_context_menu = None;
+                            if s.ui.editor_context_menu.is_some() {
+                                s.ui.editor_context_menu = None;
                                 cx.notify();
                             }
                         });

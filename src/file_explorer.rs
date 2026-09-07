@@ -101,7 +101,7 @@ impl FileExplorer {
     ) {
         let ks = &event.keystroke;
         self.state.update(cx, |s, cx| {
-            let Some(menu) = s.file_context_menu.as_mut() else {
+            let Some(menu) = s.ui.file_context_menu.as_mut() else {
                 return;
             };
             let Some(buffer) = menu.rename_buffer.as_mut() else {
@@ -669,7 +669,7 @@ impl FileExplorer {
                         p,
                         move |_, window, cx| {
                             rename.update(cx, |s, cx| {
-                                if let Some(menu) = s.file_context_menu.as_mut() {
+                                if let Some(menu) = s.ui.file_context_menu.as_mut() {
                                     menu.rename_buffer = Some(dir_name.clone());
                                 }
                                 cx.notify();
@@ -747,7 +747,7 @@ impl FileExplorer {
                         p,
                         move |_, window, cx| {
                             rename.update(cx, |s, cx| {
-                                if let Some(menu) = s.file_context_menu.as_mut() {
+                                if let Some(menu) = s.ui.file_context_menu.as_mut() {
                                     menu.rename_buffer = Some(stem.clone());
                                 }
                                 cx.notify();
@@ -813,7 +813,7 @@ impl FileExplorer {
                     let new_folder_state = state_handle.clone();
                     Self::menu_item("ctx-new-folder", "New Folder", false, p, move |_, _, cx| {
                         new_folder_state.update(cx, |s, cx| {
-                            let dir = match s.file_context_menu.take().map(|m| m.target) {
+                            let dir = match s.ui.file_context_menu.take().map(|m| m.target) {
                                 Some(FileContextMenuTarget::File(path)) => path
                                     .parent()
                                     .map(|p| p.to_path_buf())
@@ -863,7 +863,7 @@ impl FileExplorer {
                         .id("file-context-menu-dismiss")
                         .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                             dismiss_state.update(cx, |s, cx| {
-                                if s.file_context_menu.is_some() {
+                                if s.ui.file_context_menu.is_some() {
                                     s.close_file_context_menu();
                                     cx.notify();
                                 }
@@ -1014,7 +1014,7 @@ impl FileExplorer {
                         .id("nav-context-menu-dismiss")
                         .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                             dismiss_state.update(cx, |s, cx| {
-                                if s.nav_context_menu.is_some() {
+                                if s.ui.nav_context_menu.is_some() {
                                     s.close_nav_context_menu();
                                     cx.notify();
                                 }
@@ -1630,20 +1630,24 @@ impl Render for FileExplorer {
                 }
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
-            .when_some(self.state.read(cx).file_context_menu.clone(), |el, menu| {
-                el.child(Self::render_context_menu(
-                    menu,
-                    has_copied_file,
-                    pending_cut,
-                    &rename_focus,
-                    p,
-                    &state_handle,
-                    cx,
-                ))
-            })
-            .when_some(self.state.read(cx).nav_context_menu.clone(), |el, menu| {
-                el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx))
-            })
+            .when_some(
+                self.state.read(cx).ui.file_context_menu.clone(),
+                |el, menu| {
+                    el.child(Self::render_context_menu(
+                        menu,
+                        has_copied_file,
+                        pending_cut,
+                        &rename_focus,
+                        p,
+                        &state_handle,
+                        cx,
+                    ))
+                },
+            )
+            .when_some(
+                self.state.read(cx).ui.nav_context_menu.clone(),
+                |el, menu| el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx)),
+            )
             // ── Resize handle ────────────────────────────────────────────────
             // A thin strip on the sidebar's right edge (the border shared
             // with the text editor). Dragging it fires MainWindow's
