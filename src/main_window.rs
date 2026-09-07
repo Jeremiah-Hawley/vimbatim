@@ -429,8 +429,16 @@ impl MainWindow {
                 let Some(file) = paths.pop() else {
                     return;
                 };
+                let load_path = file.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        use crate::app::repository::DocumentRepository;
+                        crate::app::store::DocumentStore.load_document(&load_path)
+                    })
+                    .await;
                 let _ = state.update(cx, |st, cx| {
-                    st.open_file(file);
+                    st.complete_open_file(file, result);
                     cx.notify();
                 });
             })

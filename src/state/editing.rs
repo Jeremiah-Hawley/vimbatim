@@ -830,7 +830,18 @@ impl AppState {
         self.focus_pane(other);
     }
 
+    /// Synchronous compatibility path for tests and non-GPUI callers.
     pub fn open_file(&mut self, path: PathBuf) {
+        let result = DocumentStore.load_document(&path);
+        self.complete_open_file(path, result);
+    }
+
+    /// Applies a document load result on the UI thread.
+    pub fn complete_open_file(
+        &mut self,
+        path: PathBuf,
+        result: Result<(Vec<Paragraph>, DocxOrigin), crate::app::error::AppError>,
+    ) {
         /*
          * Opens a file in a new tab, parsing its docx content immediately.
          * If the file is already open, switches to the existing tab instead.
@@ -872,7 +883,7 @@ impl AppState {
             }
             return;
         }
-        let tab = tab_from_docx(TabId(self.workspace.next_tab_id), &path);
+        let tab = tab_from_loaded_docx(TabId(self.workspace.next_tab_id), &path, result);
         self.workspace.next_tab_id += 1;
         if tab.opened_detached {
             self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
@@ -4922,7 +4933,11 @@ impl AppState {
             ));
             return;
         }
-        let tab = tab_from_docx(TabId(self.workspace.next_tab_id), &path);
+        let tab = tab_from_loaded_docx(
+            TabId(self.workspace.next_tab_id),
+            &path,
+            DocumentStore.load_document(&path),
+        );
         self.workspace.next_tab_id += 1;
         // The outgoing tab's recovery snapshot goes with it — it was clean,
         // so there is nothing left to recover. Its path still goes on the
@@ -8068,9 +8083,13 @@ impl AppState {
 /// start a document here, and a tab reopened after its file was deleted
 /// should still be able to write itself back. Neither can lose content that
 /// isn't there. Only the silent overwrite of real bytes goes away.
-fn tab_from_docx(id: TabId, path: &std::path::Path) -> Tab {
+fn tab_from_loaded_docx(
+    id: TabId,
+    path: &std::path::Path,
+    result: Result<(Vec<Paragraph>, DocxOrigin), crate::app::error::AppError>,
+) -> Tab {
     let mut tab = Tab::from_path(id, path.to_path_buf());
-    match DocumentStore.load_document(path) {
+    match result {
         Ok((paragraphs, origin)) => {
             tab.document.paragraphs = paragraphs;
             tab.has_unsupported_blocks = origin.has_unsupported_blocks;
