@@ -21538,3 +21538,39 @@ mod tests {
         assert!(state.dirty_tab_snapshots().is_empty());
     }
 }
+
+impl AppState {
+    pub fn execute(
+        &mut self,
+        command: crate::app::command::AppCommand,
+    ) -> Vec<crate::app::command::AppEffect> {
+        use crate::app::command::{AppCommand, AppEffect};
+
+        match command {
+            AppCommand::ApplyFormatting(op) => {
+                self.apply_formatting_to_selection(op);
+                vec![]
+            }
+            AppCommand::ApplyCardStyle(kind) => {
+                self.apply_card_style(kind);
+                vec![]
+            }
+            AppCommand::ToggleSidebar => {
+                self.ui.sidebar_visible = !self.ui.sidebar_visible;
+                vec![]
+            }
+            AppCommand::SwitchTab(idx) => {
+                self.set_active_tab(idx);
+                vec![]
+            }
+            AppCommand::Undo => {
+                self.undo();
+                vec![]
+            }
+            AppCommand::Redo => {
+                self.redo();
+                vec![]
+            }
+        }
+    }
+}

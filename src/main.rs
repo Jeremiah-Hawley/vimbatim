@@ -6,6 +6,7 @@
 // placed after any item is a compile error, not a silent no-op.
 #![windows_subsystem = "windows"]
 
+mod app;
 mod app_toolbar;
 mod auto_scroll;
 mod case_converter;
