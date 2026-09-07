@@ -2779,7 +2779,7 @@ impl Render for TextEditor {
                                 } else {
                                     let content = pane_idx
                                         .and_then(|i| st.workspace.tabs.get(i))
-                                        .map(|t| t.document.content.clone())
+                                        .map(|t| t.document.content())
                                         .unwrap_or_default();
                                     let lines = document_lines(&content);
                                     lines.get(line).and_then(|text| {
@@ -3633,7 +3633,7 @@ fn render_context_menu(
 /// the bundled fonts) and why swapping it for a space here can't desync any
 /// offset-based computation downstream (cursor/selection/misspelled ranges
 /// all index by position, not content). Never touches the actual document
-/// model — callers pass in a line already read out of `tab.document.content`/
+/// model — callers pass in a line already read out of `tab.document.content()`/
 /// `paragraphs`, which still holds the real character for undo/.docx
 /// export/Verbatim round-trip fidelity.
 ///
@@ -6963,7 +6963,6 @@ mod tests {
         }];
 
         let mut state = AppState::new();
-        state.workspace.tabs[0].document.content = big_text.clone();
         state.workspace.tabs[0].document.paragraphs = paragraphs;
         state.workspace.tabs[0].cursor = big_text.len();
 
@@ -6986,7 +6985,7 @@ mod tests {
         //     branch-free width closure — isolates the wrap algorithm's own
         //     cost from real font-shaping cost (which this headless sandbox
         //     cannot measure without a live GPUI App).
-        let lines = document_lines(&state.workspace.tabs[0].document.content);
+        let lines = document_lines(&state.workspace.tabs[0].document.content());
         let mut synthetic_width_of = |_: usize, _: usize, c: char| if c == ' ' { 4.0 } else { 8.4 };
         let t2 = Instant::now();
         let _rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);

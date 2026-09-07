@@ -484,7 +484,7 @@ pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usiz
 /// byte range `[start, end)` across `paragraphs`, in document order. A
 /// paragraph-separating `'\n'` crossed by the range is itself emitted as its
 /// own unformatted `Run` (text `"\n"`) — the plain text this is meant to
-/// pair with (e.g. `AppState::copy_selection`'s `tab.document.content[start..end]`)
+/// pair with (e.g. `AppState::copy_selection`'s `tab.document.content()[start..end]`)
 /// contains that literal byte for any multi-paragraph selection, and
 /// `rich_clipboard::decode` requires the returned runs' lengths to sum to
 /// exactly that text's length, so omitting it silently broke every

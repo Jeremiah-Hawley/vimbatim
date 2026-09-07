@@ -109,7 +109,7 @@ impl DocxOrigin {
 }
 
 /// Returns all paragraph text joined by newlines. This is the plain-text
-/// content loaded into `tab.document.content` so the text editor can display it.
+/// content loaded into `tab.document.content()` so the text editor can display it.
 pub fn paragraphs_to_plain_text(paragraphs: &[Paragraph]) -> String {
     /*
      * Each paragraph becomes one line.  Runs within a paragraph are

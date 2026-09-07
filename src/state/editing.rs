@@ -191,7 +191,7 @@ impl AppState {
         };
 
         let mut stats = DocumentStats {
-            total_words: count_words(&tab.document.content),
+            total_words: count_words(&tab.document.content()),
             ..DocumentStats::default()
         };
         for para in &tab.document.paragraphs {
@@ -465,7 +465,7 @@ impl AppState {
             // list matches have differing lengths, which is exactly what the
             // single-needle arithmetic below can't express.
             Some(tab) if list_mode && !words.is_empty() => {
-                let matches = list_matches(&tab.document.content, &words, whole_words);
+                let matches = list_matches(&tab.document.content(), &words, whole_words);
                 let cursor = tab.cursor;
                 // 1-based, like the single-needle branch; 0 means "the cursor
                 // isn't sitting on a match".
@@ -480,7 +480,7 @@ impl AppState {
                 let mut count = 0;
                 let mut current = 0;
                 let mut at = 0;
-                while let Some(pos) = find_from(&tab.document.content, &query, at) {
+                while let Some(pos) = find_from(&tab.document.content(), &query, at) {
                     count += 1;
                     // The match the cursor currently sits on or just past —
                     // `find_next` leaves the caret at the match's end.
@@ -532,22 +532,28 @@ impl AppState {
         // carries each match's own end, since a list's matches differ in
         // length and `query.len()` can't stand in for them.
         let found = match (list_mode, forward) {
-            (true, true) => find_list_from(&tab.document.content, &words, whole_words, from)
-                .or_else(|| find_list_from(&tab.document.content, &words, whole_words, 0)),
-            (true, false) => rfind_list_before(&tab.document.content, &words, whole_words, from)
+            (true, true) => find_list_from(&tab.document.content(), &words, whole_words, from)
+                .or_else(|| find_list_from(&tab.document.content(), &words, whole_words, 0)),
+            (true, false) => rfind_list_before(&tab.document.content(), &words, whole_words, from)
                 .or_else(|| {
                     rfind_list_before(
-                        &tab.document.content,
+                        &tab.document.content(),
                         &words,
                         whole_words,
-                        tab.document.content.len(),
+                        tab.document.content().len(),
                     )
                 }),
-            (false, true) => find_from(&tab.document.content, &query, from)
-                .or_else(|| find_from(&tab.document.content, &query, 0))
+            (false, true) => find_from(&tab.document.content(), &query, from)
+                .or_else(|| find_from(&tab.document.content(), &query, 0))
                 .map(|pos| (pos, pos + query.len())),
-            (false, false) => rfind_before(&tab.document.content, &query, from)
-                .or_else(|| rfind_before(&tab.document.content, &query, tab.document.content.len()))
+            (false, false) => rfind_before(&tab.document.content(), &query, from)
+                .or_else(|| {
+                    rfind_before(
+                        &tab.document.content(),
+                        &query,
+                        tab.document.content().len(),
+                    )
+                })
                 .map(|pos| (pos, pos + query.len())),
         };
 
@@ -581,9 +587,9 @@ impl AppState {
             .get(self.workspace.active_tab)
             .and_then(|t| t.selection.map(|(a, f)| (t, a.min(f), a.max(f))))
             .is_some_and(|(tab, start, end)| {
-                end <= tab.document.content.len()
+                end <= tab.document.content().len()
                     && end - start == query.len()
-                    && tab.document.content[start..end].eq_ignore_ascii_case(&query)
+                    && tab.document.content()[start..end].eq_ignore_ascii_case(&query)
             });
 
         if selection_is_match {
@@ -613,7 +619,7 @@ impl AppState {
             let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
                 break;
             };
-            let Some(pos) = find_from(&tab.document.content, &query, at) else {
+            let Some(pos) = find_from(&tab.document.content(), &query, at) else {
                 break;
             };
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
@@ -1329,7 +1335,6 @@ impl AppState {
             // Never-saved tab: reopen untitled, exactly as it was pre-crash.
             None => Tab::new_empty(TabId(self.workspace.next_tab_id)),
         };
-        tab.document.content = paragraphs_to_plain_text(&paragraphs);
         tab.document.paragraphs = paragraphs;
         tab.has_unsupported_blocks = origin.has_unsupported_blocks;
         tab.docx_origin = Some(Arc::new(origin));
@@ -1499,12 +1504,11 @@ impl AppState {
         if within_coalesce_window {
             return;
         }
-        tab.document.undo_stack.push((
-            tab.document.content.clone(),
-            tab.document.paragraphs.clone(),
-        ));
+        tab.document
+            .undo_stack
+            .push(tab.document.paragraphs.clone());
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
-            &tab.document.content,
+            &tab.document.content(),
             &tab.document.paragraphs,
         ));
         while tab.document.undo_stack.len() > cap {
@@ -1527,7 +1531,6 @@ impl AppState {
             if let Some((a, f)) = tab.selection.take() {
                 let (start, end) = (a.min(f), a.max(f));
                 sync_delete_range(&mut tab.document.paragraphs, start, end);
-                tab.document.content.drain(start..end);
                 tab.cursor = start;
                 tab.document.is_modified = true;
             }
@@ -1555,7 +1558,6 @@ impl AppState {
         let mut inserted_range = None;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             sync_insert_char(&mut tab.document.paragraphs, tab.cursor, ch);
-            tab.document.content.insert(tab.cursor, ch);
             let start = tab.cursor;
             tab.cursor += ch.len_utf8();
             tab.document.is_modified = true;
@@ -1639,13 +1641,12 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             // Walk back one char boundary
-            let prev = tab.document.content[..tab.cursor]
+            let prev = tab.document.content()[..tab.cursor]
                 .char_indices()
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             sync_delete_range(&mut tab.document.paragraphs, prev, tab.cursor);
-            tab.document.content.remove(prev);
             tab.cursor = prev;
             tab.document.is_modified = true;
         }
@@ -1675,16 +1676,15 @@ impl AppState {
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.cursor >= t.document.content.len())
+            .map(|t| t.cursor >= t.document.content().len())
             .unwrap_or(true);
         if at_document_end {
             return;
         }
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let next = char_right(&tab.document.content, tab.cursor);
+            let next = char_right(&tab.document.content(), tab.cursor);
             sync_delete_range(&mut tab.document.paragraphs, tab.cursor, next);
-            tab.document.content.remove(tab.cursor);
             tab.document.is_modified = true;
         }
     }
@@ -1739,7 +1739,7 @@ impl AppState {
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| (word_backward(&t.document.content, t.cursor), t.cursor))
+            .map(|t| (word_backward(&t.document.content(), t.cursor), t.cursor))
         else {
             return;
         };
@@ -1749,9 +1749,8 @@ impl AppState {
         self.push_undo_snapshot();
         let mut deleted_chars = 0;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            deleted_chars = tab.document.content[start..cursor].chars().count();
+            deleted_chars = tab.document.content()[start..cursor].chars().count();
             sync_delete_range(&mut tab.document.paragraphs, start, cursor);
-            tab.document.content.replace_range(start..cursor, "");
             tab.cursor = start;
             tab.selection = None;
             tab.document.is_modified = true;
@@ -1793,16 +1792,16 @@ impl AppState {
             let cursor = tab.cursor;
 
             // Find the start of the current line (after previous newline)
-            let line_start = tab.document.content[..cursor]
+            let line_start = tab.document.content()[..cursor]
                 .rfind('\n')
                 .map(|pos| pos + 1)
                 .unwrap_or(0);
 
             // Find the end of the current line (next newline or end of content)
-            let line_end = tab.document.content[cursor..]
+            let line_end = tab.document.content()[cursor..]
                 .find('\n')
                 .map(|pos| cursor + pos)
-                .unwrap_or(tab.document.content.len());
+                .unwrap_or(tab.document.content().len());
 
             (line_start, line_end)
         };
@@ -1964,7 +1963,20 @@ impl AppState {
                         // through an active selection silently kept a card-styled
                         // paragraph boxed/centered while only stripping bold/size.
                         if let FormatOp::ClearAll { .. } = effective_op {
+                            let (first, _, _) = resolve_position(&tab.document.paragraphs, start);
+                            let (last, _, _) = resolve_position(&tab.document.paragraphs, end);
+                            // A card's heading and alignment apply to its whole
+                            // paragraph, so clearing any part of one clears its
+                            // remaining run-level card formatting too.
+                            let card_paragraphs: Vec<_> = (first..=last)
+                                .filter(|&i| tab.document.paragraphs[i].heading != 0)
+                                .collect();
                             reset_card_style_in_range(&mut tab.document.paragraphs, start, end);
+                            for i in card_paragraphs {
+                                for run in &mut tab.document.paragraphs[i].runs {
+                                    apply_format_op(run, &effective_op);
+                                }
+                            }
                             tab.pending_format = None;
                         }
                     }
@@ -1976,14 +1988,14 @@ impl AppState {
                     return;
                 };
                 let cursor = tab.cursor;
-                let content_len = tab.document.content.len();
+                let content_len = tab.document.content().len();
 
                 // Check if pending format matches current op to decide toggle behavior
                 let should_toggle_off = tab.pending_format.as_ref() == Some(&op);
 
                 // Apply to character under cursor if not at end of document
                 if cursor < content_len {
-                    let next_char_boundary = char_right(&tab.document.content, cursor);
+                    let next_char_boundary = char_right(&tab.document.content(), cursor);
                     let effective_op = if should_toggle_off {
                         toggled_off(&op)
                     } else {
@@ -2192,7 +2204,7 @@ impl AppState {
             return;
         }
 
-        let selected_text = tab.document.content[start..end].to_string();
+        let selected_text = tab.document.content()[start..end].to_string();
         let condensed = selected_text.replace('\n', replacement);
 
         if condensed == selected_text {
@@ -2215,14 +2227,12 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             sync_delete_range(&mut tab.document.paragraphs, start, end);
-            tab.document.content.drain(start..end);
             sync_insert_str_with_runs(
                 &mut tab.document.paragraphs,
                 start,
                 &condensed,
                 &condensed_runs,
             );
-            tab.document.content.insert_str(start, &condensed);
             tab.cursor = start;
             tab.selection = Some((start, start + condensed.len()));
             tab.document.is_modified = true;
@@ -2246,7 +2256,7 @@ impl AppState {
             return;
         }
 
-        let selected_text = tab.document.content[start..end].to_string();
+        let selected_text = tab.document.content()[start..end].to_string();
         let uncondensed = uncondense_markers(&selected_text);
 
         if uncondensed == selected_text {
@@ -2264,14 +2274,12 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             sync_delete_range(&mut tab.document.paragraphs, start, end);
-            tab.document.content.drain(start..end);
             sync_insert_str_with_runs(
                 &mut tab.document.paragraphs,
                 start,
                 &uncondensed,
                 &uncondensed_runs,
             );
-            tab.document.content.insert_str(start, &uncondensed);
             tab.cursor = start;
             tab.selection = Some((start, start + uncondensed.len()));
             tab.document.is_modified = true;
@@ -2668,7 +2676,6 @@ impl AppState {
                     }
                     tab.document.is_modified = true;
                     // Update content to match
-                    tab.document.content = paragraphs_to_plain_text(&tab.document.paragraphs);
                 }
             }
             None => {}
@@ -3075,7 +3082,7 @@ impl AppState {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No active tab"))?;
 
         let markdown =
-            wikifi_export::export_to_markdown(&tab.document.paragraphs, &tab.document.content);
+            wikifi_export::export_to_markdown(&tab.document.paragraphs, &tab.document.content());
 
         if let Some(path) = &tab.file_path {
             wikifi_export::save_markdown_file(path, &markdown)?;
@@ -3141,14 +3148,14 @@ impl AppState {
             return;
         };
         let cursor = tab.cursor;
-        let line_start = tab.document.content[..cursor]
+        let line_start = tab.document.content()[..cursor]
             .rfind('\n')
             .map(|pos| pos + 1)
             .unwrap_or(0);
-        let line_end = tab.document.content[cursor..]
+        let line_end = tab.document.content()[cursor..]
             .find('\n')
             .map(|pos| cursor + pos)
-            .unwrap_or(tab.document.content.len());
+            .unwrap_or(tab.document.content().len());
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
@@ -3206,7 +3213,7 @@ impl AppState {
         // CT_PPrBase, and Word dropped the card style's own formatting on
         // reopen (bug report: "headings... worked in Word, but no longer").
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-            let line_idx = tab.document.content[..tab.cursor].matches('\n').count();
+            let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                 if let Some(para) = tab.document.paragraphs.get_mut(line_idx) {
                     para.heading = kind.heading_level();
@@ -3219,14 +3226,14 @@ impl AppState {
             let tab = self.workspace.tabs.get_mut(self.workspace.active_tab);
             if let Some(t) = tab {
                 let cursor = t.cursor;
-                let line_start = t.document.content[..cursor]
+                let line_start = t.document.content()[..cursor]
                     .rfind('\n')
                     .map(|pos| pos + 1)
                     .unwrap_or(0);
-                let line_end = t.document.content[cursor..]
+                let line_end = t.document.content()[cursor..]
                     .find('\n')
                     .map(|pos| cursor + pos)
-                    .unwrap_or(t.document.content.len());
+                    .unwrap_or(t.document.content().len());
                 self.apply_center_alignment_with_selection(Some((line_start, line_end)));
             }
         }
@@ -3256,7 +3263,7 @@ impl AppState {
         self.apply_formatting_to_line(FormatOp::Style(Some(CardStyle::Analytic)));
 
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-            let line_idx = tab.document.content[..tab.cursor].matches('\n').count();
+            let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                 if let Some(para) = tab.document.paragraphs.get_mut(line_idx) {
                     para.heading = 0;
@@ -3331,11 +3338,10 @@ impl AppState {
             if tab.document.paragraphs.is_empty() {
                 tab.document.paragraphs = default_paragraphs();
             }
-            tab.document.content = paragraphs_to_plain_text(&tab.document.paragraphs);
             // The cursor and any selection pointed into text that is gone.
             tab.cursor = clamp_to_char_boundary(
-                &tab.document.content,
-                tab.cursor.min(tab.document.content.len()),
+                &tab.document.content(),
+                tab.cursor.min(tab.document.content().len()),
             );
             tab.selection = None;
             tab.document.is_modified = true;
@@ -3472,9 +3478,9 @@ impl AppState {
                     return;
                 };
                 let cursor = tab.cursor;
-                let content_len = tab.document.content.len();
+                let content_len = tab.document.content().len();
                 if cursor < content_len {
-                    let next_char_boundary = char_right(&tab.document.content, cursor);
+                    let next_char_boundary = char_right(&tab.document.content(), cursor);
                     self.push_undo_snapshot();
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                         apply_all(&mut tab.document.paragraphs, cursor, next_char_boundary);
@@ -3511,23 +3517,21 @@ impl AppState {
             return;
         };
         tab.document.content_version += 1;
-        let current_content = std::mem::replace(&mut tab.document.content, previous.0);
-        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, previous.1);
-        tab.document
-            .redo_stack
-            .push((current_content, current_paragraphs));
+
+        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, previous);
+        tab.document.redo_stack.push(current_paragraphs);
         // Same size-aware cap as `push_undo_snapshot` — repeatedly undoing
         // a huge document without any new edit would otherwise let
         // `redo_stack` grow past what `undo_stack` was ever bounded to.
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
-            &tab.document.content,
+            &tab.document.content(),
             &tab.document.paragraphs,
         ));
         while tab.document.redo_stack.len() > cap {
             tab.document.redo_stack.remove(0);
         }
         tab.selection = None;
-        tab.cursor = clamp_to_char_boundary(&tab.document.content, tab.cursor);
+        tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
         tab.document.is_modified = true;
         // Break the coalescing window so the next edit doesn't merge into
         // whatever was on top of the undo stack before this undo.
@@ -3548,20 +3552,18 @@ impl AppState {
             return;
         };
         tab.document.content_version += 1;
-        let current_content = std::mem::replace(&mut tab.document.content, next.0);
-        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, next.1);
-        tab.document
-            .undo_stack
-            .push((current_content, current_paragraphs));
+
+        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, next);
+        tab.document.undo_stack.push(current_paragraphs);
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
-            &tab.document.content,
+            &tab.document.content(),
             &tab.document.paragraphs,
         ));
         while tab.document.undo_stack.len() > cap {
             tab.document.undo_stack.remove(0);
         }
         tab.selection = None;
-        tab.cursor = clamp_to_char_boundary(&tab.document.content, tab.cursor);
+        tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
         tab.document.is_modified = true;
         tab.document.last_edit_at = None;
     }
@@ -3574,7 +3576,7 @@ impl AppState {
         let tab = self.workspace.tabs.get(self.workspace.active_tab)?;
         let (a, f) = tab.selection?;
         let (start, end) = (a.min(f), a.max(f));
-        Some(tab.document.content[start..end].to_string())
+        Some(tab.document.content()[start..end].to_string())
     }
 
     /// Sibling of `copy_selection` that also returns the selection's
@@ -3626,7 +3628,7 @@ impl AppState {
         let tab = self.workspace.tabs.get(self.workspace.active_tab)?;
         let (a, f) = tab.selection?;
         let (start, end) = (a.min(f), a.max(f));
-        let text = tab.document.content[start..end].to_string();
+        let text = tab.document.content()[start..end].to_string();
         self.delete_selection();
         Some(text)
     }
@@ -3663,9 +3665,8 @@ impl AppState {
             self.delete_selection_raw();
         }
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.cursor = clamp_to_char_boundary(&tab.document.content, tab.cursor);
+            tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
             sync_insert_str(&mut tab.document.paragraphs, tab.cursor, text);
-            tab.document.content.insert_str(tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.document.is_modified = true;
         }
@@ -3720,7 +3721,7 @@ impl AppState {
             self.delete_selection_raw();
         }
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.cursor = clamp_to_char_boundary(&tab.document.content, tab.cursor);
+            tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
             // Which paragraph the paste starts in, and what that paragraph's
             // own attributes are — both resolved *before* the insert, which
             // moves every offset and clears the attributes off the tail it
@@ -3738,7 +3739,6 @@ impl AppState {
                 text,
                 runs,
             );
-            tab.document.content.insert_str(tab.cursor, text);
             tab.cursor += text.len();
             tab.document.is_modified = true;
 
@@ -3764,7 +3764,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = char_left(&tab.document.content, tab.cursor);
+            tab.cursor = char_left(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3775,7 +3775,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = char_right(&tab.document.content, tab.cursor);
+            tab.cursor = char_right(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3788,7 +3788,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = line_down(&tab.document.content, tab.cursor);
+            tab.cursor = line_down(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3800,7 +3800,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = line_up(&tab.document.content, tab.cursor);
+            tab.cursor = line_up(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3810,7 +3810,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = line_start(&tab.document.content, tab.cursor);
+            tab.cursor = line_start(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3822,7 +3822,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = first_nonblank(&tab.document.content, tab.cursor);
+            tab.cursor = first_nonblank(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3834,7 +3834,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = line_end(&tab.document.content, tab.cursor);
+            tab.cursor = line_end(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3848,7 +3848,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_forward(&tab.document.content, tab.cursor);
+            tab.cursor = word_forward(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3860,7 +3860,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_end(&tab.document.content, tab.cursor);
+            tab.cursor = word_end(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3871,7 +3871,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_backward(&tab.document.content, tab.cursor);
+            tab.cursor = word_backward(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3884,7 +3884,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_forward_big(&tab.document.content, tab.cursor);
+            tab.cursor = word_forward_big(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3895,7 +3895,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_end_big(&tab.document.content, tab.cursor);
+            tab.cursor = word_end_big(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3906,7 +3906,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = word_backward_big(&tab.document.content, tab.cursor);
+            tab.cursor = word_backward_big(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3920,7 +3920,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = paragraph_forward(&tab.document.content, tab.cursor);
+            tab.cursor = paragraph_forward(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -3931,7 +3931,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = paragraph_backward(&tab.document.content, tab.cursor);
+            tab.cursor = paragraph_backward(&tab.document.content(), tab.cursor);
         }
     }
 
@@ -4015,9 +4015,13 @@ impl AppState {
          * needed — see that function's doc comment).
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            if let Some(new_pos) =
-                resolve_find_with_nudge(&tab.document.content, tab.cursor, kind, target, !remember)
-            {
+            if let Some(new_pos) = resolve_find_with_nudge(
+                &tab.document.content(),
+                tab.cursor,
+                kind,
+                target,
+                !remember,
+            ) {
                 tab.selection = None;
                 tab.cursor = new_pos;
                 if remember {
@@ -4043,7 +4047,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = tab.document.content.len();
+            tab.cursor = tab.document.content().len();
         }
     }
 
@@ -4056,7 +4060,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = line_offset(&tab.document.content, line.saturating_sub(1));
+            tab.cursor = line_offset(&tab.document.content(), line.saturating_sub(1));
         }
     }
 
@@ -4067,7 +4071,7 @@ impl AppState {
          * `extend_selection` for how the anchor is chosen.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = char_left(&tab.document.content, tab.cursor);
+            let new_cursor = char_left(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4077,7 +4081,7 @@ impl AppState {
          * Shift+Right: the extending counterpart to move_right.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = char_right(&tab.document.content, tab.cursor);
+            let new_cursor = char_right(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4087,7 +4091,7 @@ impl AppState {
          * Shift+Up: the extending counterpart to move_up.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = line_up(&tab.document.content, tab.cursor);
+            let new_cursor = line_up(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4097,7 +4101,7 @@ impl AppState {
          * Shift+Down: the extending counterpart to move_down.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = line_down(&tab.document.content, tab.cursor);
+            let new_cursor = line_down(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4107,7 +4111,7 @@ impl AppState {
          * Shift+Ctrl+Right: the extending counterpart to move_word_forward.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = word_forward(&tab.document.content, tab.cursor);
+            let new_cursor = word_forward(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4117,7 +4121,7 @@ impl AppState {
          * Shift+Ctrl+Left: the extending counterpart to move_word_backward.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = word_backward(&tab.document.content, tab.cursor);
+            let new_cursor = word_backward(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4127,7 +4131,7 @@ impl AppState {
          * Shift+Home: the extending counterpart to move_line_start.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = line_start(&tab.document.content, tab.cursor);
+            let new_cursor = line_start(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4137,7 +4141,7 @@ impl AppState {
          * Shift+End: the extending counterpart to move_line_end.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = line_end(&tab.document.content, tab.cursor);
+            let new_cursor = line_end(&tab.document.content(), tab.cursor);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4156,7 +4160,7 @@ impl AppState {
          * Shift+Ctrl+End: the extending counterpart to move_doc_end.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = tab.document.content.len();
+            let new_cursor = tab.document.content().len();
             extend_selection(tab, new_cursor);
         }
     }
@@ -4167,8 +4171,8 @@ impl AppState {
          * end, matching standard (non-vim) editor behaviour.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.selection = Some((0, tab.document.content.len()));
-            tab.cursor = tab.document.content.len();
+            tab.selection = Some((0, tab.document.content().len()));
+            tab.cursor = tab.document.content().len();
         }
     }
 
@@ -4220,7 +4224,7 @@ impl AppState {
         let tab = self.workspace.tabs.get(self.workspace.active_tab)?;
         Some(match tab.selection {
             Some((a, f)) => (a.min(f), a.max(f)),
-            None => (0, tab.document.content.len()),
+            None => (0, tab.document.content().len()),
         })
     }
 
@@ -4379,8 +4383,8 @@ impl AppState {
         let line_range = tab.selection.map(|(a, f)| {
             let (start, end) = (a.min(f), a.max(f));
             (
-                tab.document.content[..start].matches('\n').count(),
-                tab.document.content[..end].matches('\n').count(),
+                tab.document.content()[..start].matches('\n').count(),
+                tab.document.content()[..end].matches('\n').count(),
             )
         });
         let in_scope =
@@ -4408,10 +4412,9 @@ impl AppState {
             if tab.document.paragraphs.is_empty() {
                 tab.document.paragraphs = default_paragraphs();
             }
-            tab.document.content = paragraphs_to_plain_text(&tab.document.paragraphs);
             tab.cursor = clamp_to_char_boundary(
-                &tab.document.content,
-                tab.cursor.min(tab.document.content.len()),
+                &tab.document.content(),
+                tab.cursor.min(tab.document.content().len()),
             );
             tab.selection = None;
             tab.document.is_modified = true;
@@ -4436,11 +4439,11 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        if !tab.document.content[start..end].contains('¶') {
+        if !tab.document.content()[start..end].contains('¶') {
             return;
         }
 
-        let stripped = tab.document.content[start..end].replace('¶', "");
+        let stripped = tab.document.content()[start..end].replace('¶', "");
         // Mirrors `condense_selection_with`: capture the range's own runs
         // first, strip `¶` out of each run's text, then delete-and-reinsert
         // so every surviving character keeps its original formatting. A run
@@ -4458,14 +4461,12 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             sync_delete_range(&mut tab.document.paragraphs, start, end);
-            tab.document.content.drain(start..end);
             sync_insert_str_with_runs(
                 &mut tab.document.paragraphs,
                 start,
                 &stripped,
                 &stripped_runs,
             );
-            tab.document.content.insert_str(start, &stripped);
             tab.cursor = start + stripped.len();
             tab.selection = None;
             tab.document.is_modified = true;
@@ -4516,19 +4517,19 @@ impl AppState {
         if !(1..=4).contains(&level) {
             return None;
         }
-        let line_count = tab.document.content.split('\n').count();
+        let line_count = tab.document.content().split('\n').count();
         let end_line = (line + 1..line_count).find(|&i| {
             tab.document
                 .paragraphs
                 .get(i)
                 .is_some_and(|p| (1..=level).contains(&p.heading))
         });
-        let start = byte_offset_for_line_col(&tab.document.content, line, 0);
+        let start = byte_offset_for_line_col(&tab.document.content(), line, 0);
         let end = match end_line {
             // The next section's first byte — which sits just past the '\n'
             // that terminates ours, so that newline is included.
-            Some(i) => byte_offset_for_line_col(&tab.document.content, i, 0),
-            None => tab.document.content.len(),
+            Some(i) => byte_offset_for_line_col(&tab.document.content(), i, 0),
+            None => tab.document.content().len(),
         };
         Some((start, end.max(start)))
     }
@@ -4559,7 +4560,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = None;
-            tab.cursor = byte_offset_for_line_col(&tab.document.content, line, col);
+            tab.cursor = byte_offset_for_line_col(&tab.document.content(), line, col);
         }
     }
 
@@ -4575,7 +4576,7 @@ impl AppState {
          * falls back to the current cursor when there's no selection yet.
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let new_cursor = byte_offset_for_line_col(&tab.document.content, line, col);
+            let new_cursor = byte_offset_for_line_col(&tab.document.content(), line, col);
             extend_selection(tab, new_cursor);
         }
     }
@@ -4591,7 +4592,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let (start, end) = text_object_word(&tab.document.content, byte_pos, true);
+        let (start, end) = text_object_word(&tab.document.content(), byte_pos, true);
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.selection = Some((start, end));
             tab.cursor = end;
@@ -4608,7 +4609,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        if let Some((start, end)) = text_object_paragraph(&tab.document.content, byte_pos, true) {
+        if let Some((start, end)) = text_object_paragraph(&tab.document.content(), byte_pos, true) {
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                 tab.selection = Some((start, end));
                 tab.cursor = end;
@@ -4627,20 +4628,20 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return (0, 0);
         };
-        let start = line_start(&tab.document.content, tab.cursor);
-        let col = tab.document.content[start..tab.cursor].chars().count();
-        let line_idx = tab.document.content[..start].matches('\n').count();
+        let start = line_start(&tab.document.content(), tab.cursor);
+        let col = tab.document.content()[start..tab.cursor].chars().count();
+        let line_idx = tab.document.content()[..start].matches('\n').count();
         (line_idx, col)
     }
 
     /// `active_content` for a specific pane. The secondary pane is showing a
     /// different document than `active_tab` names, so it cannot go through the
     /// `active_*` helpers — those all mean "the focused pane's tab".
-    pub fn pane_content(&self, pane: Pane) -> &str {
+    pub fn pane_content(&self, pane: Pane) -> String {
         self.pane_tab_index(pane)
             .and_then(|i| self.workspace.tabs.get(i))
-            .map(|t| t.document.content.as_str())
-            .unwrap_or("")
+            .map(|t| t.document.content().to_owned())
+            .unwrap_or_default()
     }
 
     /// `cursor_line_col` for a specific pane — see `pane_content`.
@@ -4651,13 +4652,13 @@ impl AppState {
         else {
             return (0, 0);
         };
-        let start = line_start(&tab.document.content, tab.cursor);
-        let col = tab.document.content[start..tab.cursor].chars().count();
-        let line_idx = tab.document.content[..start].matches('\n').count();
+        let start = line_start(&tab.document.content(), tab.cursor);
+        let col = tab.document.content()[start..tab.cursor].chars().count();
+        let line_idx = tab.document.content()[..start].matches('\n').count();
         (line_idx, col)
     }
 
-    pub fn active_content(&self) -> &str {
+    pub fn active_content(&self) -> String {
         /*
          * Returns the text content of the currently active tab, or an empty
          * string if there are no tabs.
@@ -4665,8 +4666,8 @@ impl AppState {
         self.workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.document.content.as_str())
-            .unwrap_or("")
+            .map(|t| t.document.content().to_owned())
+            .unwrap_or_default()
     }
 
     pub fn refresh_file_tree(&mut self) {
@@ -5306,7 +5307,7 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.vim_mode = VimMode::Visual;
-            let end = char_right(&tab.document.content, tab.cursor);
+            let end = char_right(&tab.document.content(), tab.cursor);
             tab.selection = Some((tab.cursor, end));
             tab.cursor = end;
             tab.vim_command_buf.clear(); // see vim_enter_insert_before_cursor
@@ -5329,9 +5330,9 @@ impl AppState {
          */
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.vim_mode = VimMode::VisualLine;
-            let start = line_start(&tab.document.content, tab.cursor);
-            let end = line_end(&tab.document.content, tab.cursor);
-            let end_with_newline = if end < tab.document.content.len() {
+            let start = line_start(&tab.document.content(), tab.cursor);
+            let end = line_end(&tab.document.content(), tab.cursor);
+            let end_with_newline = if end < tab.document.content().len() {
                 end + 1
             } else {
                 end
@@ -5411,7 +5412,7 @@ impl AppState {
             // In vim, exiting Insert mode moves cursor back one char to land
             // ON the last character, not after it
             if was_insert && tab.cursor > 0 {
-                tab.cursor = char_left(&tab.document.content, tab.cursor);
+                tab.cursor = char_left(&tab.document.content(), tab.cursor);
             }
         }
         // `.` repeat (spec 5.5): an Insert session just ended — commit
@@ -6180,8 +6181,9 @@ impl AppState {
                     if key == "g" && !shift {
                         let line = pending_count.unwrap_or(1);
                         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-                            let start = line_offset(&tab.document.content, line.saturating_sub(1));
-                            let target = first_nonblank(&tab.document.content, start);
+                            let start =
+                                line_offset(&tab.document.content(), line.saturating_sub(1));
+                            let target = first_nonblank(&tab.document.content(), start);
                             return MotionResolution::Resolved {
                                 target,
                                 kind: MotionKind::Linewise,
@@ -6203,7 +6205,7 @@ impl AppState {
                             .workspace
                             .tabs
                             .get(self.workspace.active_tab)
-                            .map(|tab| line_end(&tab.document.content, tab.cursor))
+                            .map(|tab| line_end(&tab.document.content(), tab.cursor))
                             .unwrap_or(0);
                         return MotionResolution::Resolved {
                             target,
@@ -6214,7 +6216,7 @@ impl AppState {
                             .workspace
                             .tabs
                             .get(self.workspace.active_tab)
-                            .map(|tab| line_start(&tab.document.content, tab.cursor))
+                            .map(|tab| line_start(&tab.document.content(), tab.cursor))
                             .unwrap_or(0);
                         return MotionResolution::Resolved {
                             target,
@@ -6225,7 +6227,7 @@ impl AppState {
                             .workspace
                             .tabs
                             .get(self.workspace.active_tab)
-                            .map(|tab| first_nonblank(&tab.document.content, tab.cursor))
+                            .map(|tab| first_nonblank(&tab.document.content(), tab.cursor))
                             .unwrap_or(0);
                         return MotionResolution::Resolved {
                             target,
@@ -6251,7 +6253,12 @@ impl AppState {
                                     .tabs
                                     .get(self.workspace.active_tab)
                                     .and_then(|t| {
-                                        resolve_find(&t.document.content, pos, trigger, target_char)
+                                        resolve_find(
+                                            &t.document.content(),
+                                            pos,
+                                            trigger,
+                                            target_char,
+                                        )
                                     });
                             match next {
                                 Some(p) => {
@@ -6286,7 +6293,7 @@ impl AppState {
                 .workspace
                 .tabs
                 .get(self.workspace.active_tab)
-                .map(|tab| line_end(&tab.document.content, tab.cursor))
+                .map(|tab| line_end(&tab.document.content(), tab.cursor))
                 .unwrap_or(0);
             return MotionResolution::Resolved {
                 target,
@@ -6299,7 +6306,7 @@ impl AppState {
                 .workspace
                 .tabs
                 .get(self.workspace.active_tab)
-                .map(|tab| first_nonblank(&tab.document.content, tab.cursor))
+                .map(|tab| first_nonblank(&tab.document.content(), tab.cursor))
                 .unwrap_or(0);
             return MotionResolution::Resolved {
                 target,
@@ -6420,7 +6427,7 @@ impl AppState {
                     .workspace
                     .tabs
                     .get(self.workspace.active_tab)
-                    .map(|tab| line_start(&tab.document.content, tab.cursor))
+                    .map(|tab| line_start(&tab.document.content(), tab.cursor))
                     .unwrap_or(0);
                 MotionResolution::Resolved {
                     target: t,
@@ -6433,7 +6440,7 @@ impl AppState {
                     .workspace
                     .tabs
                     .get(self.workspace.active_tab)
-                    .map(|tab| underscore_motion(&tab.document.content, tab.cursor, c))
+                    .map(|tab| underscore_motion(&tab.document.content(), tab.cursor, c))
                     .unwrap_or(0);
                 MotionResolution::Resolved {
                     target: t,
@@ -6446,8 +6453,8 @@ impl AppState {
                 // unlike `gg`'s "no count means line 1" above.
                 let line = count.unwrap_or(usize::MAX);
                 if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-                    let start = line_offset(&tab.document.content, line.saturating_sub(1));
-                    let target = first_nonblank(&tab.document.content, start);
+                    let start = line_offset(&tab.document.content(), line.saturating_sub(1));
+                    let target = first_nonblank(&tab.document.content(), start);
                     MotionResolution::Resolved {
                         target,
                         kind: MotionKind::Linewise,
@@ -6495,7 +6502,7 @@ impl AppState {
                     .workspace
                     .tabs
                     .get(self.workspace.active_tab)
-                    .map(|tab| line_start(&tab.document.content, tab.cursor))
+                    .map(|tab| line_start(&tab.document.content(), tab.cursor))
                     .unwrap_or(0);
                 MotionResolution::Resolved {
                     target: t,
@@ -6507,7 +6514,7 @@ impl AppState {
                     .workspace
                     .tabs
                     .get(self.workspace.active_tab)
-                    .map(|tab| line_end(&tab.document.content, tab.cursor))
+                    .map(|tab| line_end(&tab.document.content(), tab.cursor))
                     .unwrap_or(0);
                 MotionResolution::Resolved {
                     target: t,
@@ -6544,8 +6551,8 @@ impl AppState {
             if extend {
                 extend_selection(tab, target);
             } else {
-                if line_index_for(&tab.document.content, target)
-                    .abs_diff(line_index_for(&tab.document.content, tab.cursor))
+                if line_index_for(&tab.document.content(), target)
+                    .abs_diff(line_index_for(&tab.document.content(), tab.cursor))
                     > 1
                 {
                     let old_cursor = tab.cursor;
@@ -6571,7 +6578,7 @@ impl AppState {
         };
         if let Some(pos) = tab.vim_jump_back.pop() {
             tab.vim_jump_forward.push(tab.cursor);
-            tab.cursor = pos.min(tab.document.content.len());
+            tab.cursor = pos.min(tab.document.content().len());
             tab.selection = None;
         }
     }
@@ -6585,7 +6592,7 @@ impl AppState {
         };
         if let Some(pos) = tab.vim_jump_forward.pop() {
             tab.vim_jump_back.push(tab.cursor);
-            tab.cursor = pos.min(tab.document.content.len());
+            tab.cursor = pos.min(tab.document.content().len());
             tab.selection = None;
         }
     }
@@ -6753,18 +6760,18 @@ impl AppState {
         };
         if text.ends_with('\n') {
             let insert_at = if before {
-                line_start(&tab.document.content, tab.cursor)
+                line_start(&tab.document.content(), tab.cursor)
             } else {
-                let end = line_end(&tab.document.content, tab.cursor);
-                if end < tab.document.content.len() {
+                let end = line_end(&tab.document.content(), tab.cursor);
+                if end < tab.document.content().len() {
                     end + 1
                 } else {
-                    tab.document.content.len()
+                    tab.document.content().len()
                 }
             };
-            let needs_leading_newline = insert_at == tab.document.content.len()
-                && !tab.document.content.is_empty()
-                && !tab.document.content.ends_with('\n');
+            let needs_leading_newline = insert_at == tab.document.content().len()
+                && !tab.document.content().is_empty()
+                && !tab.document.content().ends_with('\n');
             let first_para =
                 crate::document_ops::resolve_position(&tab.document.paragraphs, insert_at).0;
             // With a leading newline the paste appends a line instead of
@@ -6800,7 +6807,6 @@ impl AppState {
                 &insertion,
                 &runs,
             );
-            tab.document.content.insert_str(insert_at, &insertion);
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
             crate::document_ops::apply_pasted_paragraph_attrs(
                 &mut tab.document.paragraphs,
@@ -6809,12 +6815,12 @@ impl AppState {
                 &attrs,
                 dest_attrs,
             );
-            tab.cursor = first_nonblank(&tab.document.content, landing_start);
+            tab.cursor = first_nonblank(&tab.document.content(), landing_start);
         } else {
             let at = if before {
                 tab.cursor
             } else {
-                char_right(&tab.document.content, tab.cursor)
+                char_right(&tab.document.content(), tab.cursor)
             };
             let first_para = crate::document_ops::resolve_position(&tab.document.paragraphs, at).0;
             let dest_attrs = tab
@@ -6828,7 +6834,6 @@ impl AppState {
                 &text,
                 &runs,
             );
-            tab.document.content.insert_str(at, &text);
             crate::document_ops::apply_pasted_paragraph_attrs(
                 &mut tab.document.paragraphs,
                 first_para,
@@ -6853,8 +6858,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let end = char_right(&tab.document.content, tab.cursor)
-            .min(line_end(&tab.document.content, tab.cursor));
+        let end = char_right(&tab.document.content(), tab.cursor)
+            .min(line_end(&tab.document.content(), tab.cursor));
         if end == tab.cursor {
             return;
         }
@@ -6872,8 +6877,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let start = char_left(&tab.document.content, tab.cursor)
-            .max(line_start(&tab.document.content, tab.cursor));
+        let start = char_left(&tab.document.content(), tab.cursor)
+            .max(line_start(&tab.document.content(), tab.cursor));
         if start == tab.cursor {
             return;
         }
@@ -6892,8 +6897,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let end = char_right(&tab.document.content, tab.cursor)
-            .min(line_end(&tab.document.content, tab.cursor));
+        let end = char_right(&tab.document.content(), tab.cursor)
+            .min(line_end(&tab.document.content(), tab.cursor));
         let start = tab.cursor;
         let meta = self.vim_range_metadata(start, end);
         let text = self.delete_vim_range(start, end);
@@ -6909,8 +6914,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let start = line_start(&tab.document.content, tab.cursor);
-        let end = line_end(&tab.document.content, tab.cursor);
+        let start = line_start(&tab.document.content(), tab.cursor);
+        let end = line_end(&tab.document.content(), tab.cursor);
         let meta = self.vim_range_metadata(start, end);
         let text = self.delete_vim_range(start, end);
         self.write_vim_register(text, meta, false);
@@ -6927,8 +6932,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let end = char_right(&tab.document.content, tab.cursor)
-            .min(line_end(&tab.document.content, tab.cursor));
+        let end = char_right(&tab.document.content(), tab.cursor)
+            .min(line_end(&tab.document.content(), tab.cursor));
         if end == tab.cursor {
             return;
         }
@@ -6951,8 +6956,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let end = char_right(&tab.document.content, tab.cursor)
-            .min(line_end(&tab.document.content, tab.cursor));
+        let end = char_right(&tab.document.content(), tab.cursor)
+            .min(line_end(&tab.document.content(), tab.cursor));
         if end == tab.cursor {
             return;
         }
@@ -6974,13 +6979,13 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let line_end_pos = line_end(&tab.document.content, tab.cursor);
-        if line_end_pos >= tab.document.content.len() {
+        let line_end_pos = line_end(&tab.document.content(), tab.cursor);
+        if line_end_pos >= tab.document.content().len() {
             return;
         }
         let next_line_start = line_end_pos + 1;
-        let next_line_end = line_end(&tab.document.content, next_line_start);
-        let trimmed_start = tab.document.content[next_line_start..next_line_end]
+        let next_line_end = line_end(&tab.document.content(), next_line_start);
+        let trimmed_start = tab.document.content()[next_line_start..next_line_end]
             .char_indices()
             .find(|(_, c)| *c != ' ' && *c != '\t')
             .map(|(i, _)| next_line_start + i)
@@ -7087,7 +7092,7 @@ impl AppState {
                     return true;
                 };
                 if let Some((start, end)) =
-                    resolve_vim_text_object(&tab.document.content, tab.cursor, object_char, inner)
+                    resolve_vim_text_object(&tab.document.content(), tab.cursor, object_char, inner)
                 {
                     self.execute_vim_operator_range(
                         operator,
@@ -7117,7 +7122,7 @@ impl AppState {
                 return true;
             };
             let (start, end) =
-                vim_operator_doubled_range(operator, tab.cursor, count, &tab.document.content);
+                vim_operator_doubled_range(operator, tab.cursor, count, &tab.document.content());
             self.execute_vim_operator_range(operator, start, end, MotionKind::Linewise);
             return true;
         }
@@ -7141,7 +7146,7 @@ impl AppState {
                     tab.cursor,
                     target,
                     kind,
-                    &tab.document.content,
+                    &tab.document.content(),
                 );
                 self.execute_vim_operator_range(operator, start, end, kind);
                 true
@@ -7194,9 +7199,9 @@ impl AppState {
                 let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
                     return;
                 };
-                let text = tab.document.content[start..end].to_string();
+                let text = tab.document.content()[start..end].to_string();
                 let landing = if kind == MotionKind::Linewise {
-                    first_nonblank(&tab.document.content, start)
+                    first_nonblank(&tab.document.content(), start)
                 } else {
                     start
                 };
@@ -7257,7 +7262,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) else {
             return String::new();
         };
-        let original = tab.document.content[start..end].to_string();
+        let original = tab.document.content()[start..end].to_string();
         let replacement = transform(&original);
         // Every operator that rewrites a range this way (d/c/x/s/>/</gU/gu/
         // ~/r/J) gets its formatting kept in sync for free via this one
@@ -7265,7 +7270,6 @@ impl AppState {
         // other mutation site uses.
         sync_delete_range(&mut tab.document.paragraphs, start, end);
         sync_insert_str(&mut tab.document.paragraphs, start, &replacement);
-        tab.document.content.replace_range(start..end, &replacement);
         tab.selection = None;
         tab.document.is_modified = true;
         original
@@ -7311,7 +7315,7 @@ impl AppState {
             parts.join("\n")
         });
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.cursor = first_nonblank(&tab.document.content, start);
+            tab.cursor = first_nonblank(&tab.document.content(), start);
         }
     }
 
@@ -7362,8 +7366,8 @@ impl AppState {
          * division of labour as `j`/`k`'s `take_vim_count()`.
          */
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-            let start = line_offset(&tab.document.content, line);
-            let target = first_nonblank(&tab.document.content, start);
+            let start = line_offset(&tab.document.content(), line);
+            let target = first_nonblank(&tab.document.content(), start);
             self.apply_vim_motion(extend, target);
         }
     }
@@ -7384,7 +7388,7 @@ impl AppState {
         };
         let mut pos = tab.cursor;
         for _ in 0..count {
-            pos = motion(&tab.document.content, pos);
+            pos = motion(&tab.document.content(), pos);
         }
         pos
     }
@@ -7416,7 +7420,7 @@ impl AppState {
         } else {
             kind
         };
-        resolve_find_with_nudge(&tab.document.content, tab.cursor, kind, target_char, true)
+        resolve_find_with_nudge(&tab.document.content(), tab.cursor, kind, target_char, true)
             .map(|pos| (pos, kind))
     }
 
@@ -7545,10 +7549,10 @@ impl AppState {
             return Some((min, max, MotionKind::ExclusiveChar));
         }
         let last_included = if max > min { max - 1 } else { min };
-        let start = line_start(&tab.document.content, min);
-        let line_end_pos = line_end(&tab.document.content, last_included);
+        let start = line_start(&tab.document.content(), min);
+        let line_end_pos = line_end(&tab.document.content(), last_included);
         let (start, end) =
-            linewise_bounds_for_operator(operator, start, line_end_pos, &tab.document.content);
+            linewise_bounds_for_operator(operator, start, line_end_pos, &tab.document.content());
         Some((start, end, MotionKind::Linewise))
     }
 
@@ -7860,7 +7864,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let content = &tab.document.content;
+        let content = &tab.document.content();
         let found = if forward {
             let start = char_right(content, from);
             content[start..]
@@ -7906,11 +7910,11 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let (start, end) = text_object_word(&tab.document.content, tab.cursor, true);
+        let (start, end) = text_object_word(&tab.document.content(), tab.cursor, true);
         if start == end {
             return;
         }
-        let word = tab.document.content[start..end].to_string();
+        let word = tab.document.content()[start..end].to_string();
         self.global_vim.last_search = Some((word.clone(), forward));
         let from = if forward { end } else { start };
         self.jump_to_search_match_from(&word, forward, from);
@@ -7945,7 +7949,7 @@ impl AppState {
         };
         let old_lines: Vec<String> = tab
             .document
-            .content
+            .content()
             .split('\n')
             .map(|l| l.to_string())
             .collect();
@@ -7961,7 +7965,7 @@ impl AppState {
             .collect();
         let new_content = new_lines.join("\n");
 
-        if new_content != tab.document.content {
+        if new_content != tab.document.content() {
             self.push_undo_snapshot();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                 // Formatting sync scope limit (rich-text formatting plan,
@@ -7980,9 +7984,8 @@ impl AppState {
                         }
                     }
                 }
-                tab.document.content = new_content;
                 tab.document.is_modified = true;
-                tab.cursor = tab.cursor.min(tab.document.content.len());
+                tab.cursor = tab.cursor.min(tab.document.content().len());
                 tab.selection = None;
             }
         }
@@ -8005,7 +8008,7 @@ impl AppState {
         }
         if key == "backspace" {
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                tab.cursor = char_left(&tab.document.content, tab.cursor);
+                tab.cursor = char_left(&tab.document.content(), tab.cursor);
             }
             return;
         }
@@ -8025,8 +8028,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        if tab.cursor < line_end(&tab.document.content, tab.cursor) {
-            let end = char_right(&tab.document.content, tab.cursor);
+        if tab.cursor < line_end(&tab.document.content(), tab.cursor) {
+            let end = char_right(&tab.document.content(), tab.cursor);
             let cursor = tab.cursor;
             self.replace_vim_range(cursor, end, |_| c.to_string());
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
@@ -8071,7 +8074,6 @@ fn tab_from_docx(id: TabId, path: &std::path::Path) -> Tab {
     let mut tab = Tab::from_path(id, path.to_path_buf());
     match parse_docx(path) {
         Ok((paragraphs, origin)) => {
-            tab.document.content = paragraphs_to_plain_text(&paragraphs);
             tab.document.paragraphs = paragraphs;
             tab.has_unsupported_blocks = origin.has_unsupported_blocks;
             tab.docx_origin = Some(Arc::new(origin));
@@ -9495,6 +9497,19 @@ mod tests {
         assert!(state.custom_font_colors.is_empty());
     }
 
+    fn plain_paragraphs(content: &str) -> Vec<Paragraph> {
+        content
+            .split('\n')
+            .map(|text| Paragraph {
+                runs: vec![Run {
+                    text: text.into(),
+                    ..Run::default()
+                }],
+                ..Paragraph::default()
+            })
+            .collect()
+    }
+
     /// Build a minimal AppState with one tab whose content, cursor, and
     /// selection are set to the given values. Avoids touching the filesystem
     /// or GPUI context.
@@ -9505,7 +9520,7 @@ mod tests {
                     id: TabId(0),
                     title: "test".into(),
                     file_path: None,
-                    document: DocumentBuffer::new(content.to_string(), default_paragraphs()),
+                    document: DocumentBuffer::new(plain_paragraphs(content)),
                     docx_origin: None,
                     pending_format: None,
                     cursor,
@@ -9681,7 +9696,7 @@ mod tests {
             2,
             "unsaved work was overwritten"
         );
-        assert_eq!(state.workspace.tabs[0].document.content, "draft");
+        assert_eq!(state.workspace.tabs[0].document.content(), "draft");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9694,7 +9709,7 @@ mod tests {
         state.insert_str("typed");
         state.undo();
 
-        assert!(state.workspace.tabs[0].document.content.is_empty());
+        assert!(state.workspace.tabs[0].document.content().is_empty());
         assert!(
             !state.workspace.tabs[0].is_blank_new_tab(),
             "undo-emptied tab looked pristine"
@@ -9899,7 +9914,7 @@ mod tests {
         // `content` is rebuilt from the survivors — the 1:1 line/paragraph
         // invariant the rest of the editor depends on.
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "keep this\nand this"
         );
     }
@@ -9931,7 +9946,7 @@ mod tests {
         state.delete_analytics();
 
         assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
-        assert!(state.workspace.tabs[0].document.content.is_empty());
+        assert!(state.workspace.tabs[0].document.content().is_empty());
         assert!(
             !state.workspace.tabs[0].document.paragraphs[0]
                 .runs
@@ -9950,13 +9965,13 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.tag_size_half_points = 26;
         state.set_analytic_color("0000ff");
-        state.workspace.tabs[0].cursor = state.workspace.tabs[0].document.content.len();
+        state.workspace.tabs[0].cursor = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection =
-            Some((0, state.workspace.tabs[0].document.content.len()));
+            Some((0, state.workspace.tabs[0].document.content().len()));
 
         state.delete_analytics();
 
-        assert!(state.workspace.tabs[0].cursor <= state.workspace.tabs[0].document.content.len());
+        assert!(state.workspace.tabs[0].cursor <= state.workspace.tabs[0].document.content().len());
         assert_eq!(
             state.workspace.tabs[0].selection, None,
             "a selection into deleted text must clear"
@@ -10311,13 +10326,14 @@ mod tests {
             unsupported_xml: None,
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let content_before = state.workspace.tabs[0].document.content.clone();
+        let content_before = state.workspace.tabs[0].document.content().to_owned();
         state.highlight_color = "yellow".to_string();
 
         state.standardize_highlighting();
 
         assert_eq!(
-            state.workspace.tabs[0].document.content, content_before,
+            state.workspace.tabs[0].document.content(),
+            content_before,
             "text must not move"
         );
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
@@ -10573,7 +10589,7 @@ mod tests {
         let mut state = make_state("", 0, None);
         state.paste_condense = false;
         state.paste_text("one\ntwo");
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     #[test]
@@ -10581,7 +10597,7 @@ mod tests {
         let mut state = make_state("", 0, None);
         state.paste_condense = true;
         state.paste_text("one\ntwo");
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
@@ -10590,7 +10606,7 @@ mod tests {
         state.paste_condense = true;
         state.paste_condense_pilcrow = true;
         state.paste_text("one\ntwo");
-        assert_eq!(state.workspace.tabs[0].document.content, "one¶two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one¶two");
     }
 
     /// The pilcrow sub-setting is meaningless on its own — condensing off means
@@ -10601,7 +10617,7 @@ mod tests {
         state.paste_condense = false;
         state.paste_condense_pilcrow = true;
         state.paste_text("one\ntwo");
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     /// Paragraph integrity and condense-on-paste are opposites: turning the
@@ -11918,22 +11934,22 @@ mod tests {
             vec![para_plain("one"), para_plain("two"), para_plain("three")],
             "condense",
         );
-        let len = state.workspace.tabs[0].document.content.len();
+        let len = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, len));
         state.condense_selection();
         assert!(
-            !state.workspace.tabs[0].document.content.contains('\n'),
+            !state.workspace.tabs[0].document.content().contains('\n'),
             "condensed to one line: {:?}",
-            state.workspace.tabs[0].document.content
+            state.workspace.tabs[0].document.content()
         );
 
-        let len = state.workspace.tabs[0].document.content.len();
+        let len = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, len));
         state.uncondense_selection();
         assert!(
-            state.workspace.tabs[0].document.content.contains('\n'),
+            state.workspace.tabs[0].document.content().contains('\n'),
             "and back: {:?}",
-            state.workspace.tabs[0].document.content
+            state.workspace.tabs[0].document.content()
         );
     }
 
@@ -12011,7 +12027,7 @@ mod tests {
         );
 
         state.insert_str("typed");
-        assert_eq!(state.workspace.tabs[idx].document.content, "typed");
+        assert_eq!(state.workspace.tabs[idx].document.content(), "typed");
         state.save_active_tab().unwrap();
 
         let (reloaded, _) = crate::docx_parser::parse_docx(&path).unwrap();
@@ -12237,7 +12253,7 @@ mod tests {
         assert_eq!(state.ui.pending_close, None); // dialog still resolves/closes
         assert_eq!(state.workspace.tabs.len(), 2); // but the tab itself was NOT closed
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "unsaved scratch content"
         ); // content preserved
         assert!(state.workspace.tabs[0].document.is_modified); // still dirty, still needs a Save
@@ -12813,7 +12829,7 @@ mod tests {
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 1);
         state.insert_char('X');
-        assert_eq!(state.workspace.tabs[0].document.content, "aXbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aXbc");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "aXbc"
@@ -12835,7 +12851,7 @@ mod tests {
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.backspace();
-        assert_eq!(state.workspace.tabs[0].document.content, "ac");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "ac"
@@ -12864,7 +12880,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.workspace.tabs[0].selection = Some((2, 6)); // deletes "ld p"
         state.delete_selection();
-        assert_eq!(state.workspace.tabs[0].document.content, "bolain");
+        assert_eq!(state.workspace.tabs[0].document.content(), "bolain");
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "bo");
@@ -12898,7 +12914,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("d", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two");
         assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
@@ -12918,7 +12934,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aXYbc");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "aXYbc"
@@ -12950,7 +12966,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.dispatch_vim_command("%s/foo/baz/");
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "baz bar\nuntouched"
         );
         // changed paragraph loses formatting (documented scope limit)
@@ -12977,7 +12993,7 @@ mod tests {
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.insert_char('\n');
-        assert_eq!(state.workspace.tabs[0].document.content, "he\nllo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "he\nllo");
         assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 2);
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
@@ -13024,7 +13040,7 @@ mod tests {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         let text = state.cut_selection();
         assert_eq!(text, Some("hello".to_string()));
-        assert_eq!(state.workspace.tabs[0].document.content, " world");
+        assert_eq!(state.workspace.tabs[0].document.content(), " world");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert!(state.workspace.tabs[0].selection.is_none());
     }
@@ -13034,7 +13050,7 @@ mod tests {
         let mut state = make_state("hello world", 5, None);
         let text = state.cut_selection();
         assert_eq!(text, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "hello world"); // unchanged
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello world"); // unchanged
     }
 
     // ── Rich clipboard round-trip: copy_selection_runs -> encode_with_lengths
@@ -13075,7 +13091,7 @@ mod tests {
 
         // Select the five styled lines (not the trailing blank) and copy
         // through the real clipboard encoding.
-        let doc_len = state.workspace.tabs[0].document.content.len();
+        let doc_len = state.workspace.tabs[0].document.content().len();
         let copy_end = doc_len - 1; // excludes the trailing blank paragraph
         state.workspace.tabs[0].selection = Some((0, copy_end));
         let plain = state.copy_selection().unwrap();
@@ -13147,7 +13163,7 @@ mod tests {
             para_plain("test"),
         ];
         let mut source = make_state_with_paragraphs(paragraphs, 0);
-        let doc_len = source.workspace.tabs[0].document.content.len();
+        let doc_len = source.workspace.tabs[0].document.content().len();
         source.workspace.tabs[0].selection = Some((0, doc_len));
 
         let plain = source.copy_selection().unwrap();
@@ -13236,7 +13252,7 @@ mod tests {
         // line's first byte — the selection a drag down the card produces.
         let end = source.workspace.tabs[0]
             .document
-            .content
+            .content()
             .find("normal text")
             .unwrap()
             + "normal text".len()
@@ -13348,7 +13364,7 @@ mod tests {
                                                 // which has no place in a state-level test.
         state.workspace.tabs[0].cursor = state.workspace.tabs[0]
             .document
-            .content
+            .content()
             .find("body")
             .unwrap();
         state.handle_vim_key("p", false, None); // put below it
@@ -13380,7 +13396,7 @@ mod tests {
         let mut state = make_state("abc", 0, None);
         state.set_register('"', "XY".to_string(), None);
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aXYbc");
     }
     #[test]
     fn test_multi_paragraph_copy_paste_round_trip_preserves_per_line_formatting() {
@@ -13419,7 +13435,7 @@ mod tests {
             },
         ];
         let mut source = make_state_with_paragraphs(paragraphs, 0);
-        let doc_len = source.workspace.tabs[0].document.content.len();
+        let doc_len = source.workspace.tabs[0].document.content().len();
         source.workspace.tabs[0].selection = Some((0, doc_len)); // whole doc, crossing both paragraph boundaries
 
         let plain_text = source.copy_selection().unwrap();
@@ -13436,7 +13452,7 @@ mod tests {
         let mut dest = make_state("", 0, None);
         dest.insert_str_with_runs(&plain_text, &decoded_runs);
 
-        assert_eq!(dest.workspace.tabs[0].document.content, plain_text);
+        assert_eq!(dest.workspace.tabs[0].document.content(), plain_text);
         assert_eq!(dest.workspace.tabs[0].document.paragraphs.len(), 3);
         assert_eq!(
             dest.workspace.tabs[0].document.paragraphs[0].runs[0].text,
@@ -13465,7 +13481,7 @@ mod tests {
     fn test_insert_str_no_selection() {
         let mut state = make_state("hello", 5, None);
         state.insert_str(" world");
-        assert_eq!(state.workspace.tabs[0].document.content, "hello world");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello world");
         assert_eq!(state.workspace.tabs[0].cursor, 11);
     }
 
@@ -13473,7 +13489,7 @@ mod tests {
     fn test_insert_str_replaces_selection() {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.insert_str("goodbye");
-        assert_eq!(state.workspace.tabs[0].document.content, "goodbye world");
+        assert_eq!(state.workspace.tabs[0].document.content(), "goodbye world");
         assert_eq!(state.workspace.tabs[0].cursor, 7);
         assert!(state.workspace.tabs[0].selection.is_none());
     }
@@ -13483,7 +13499,7 @@ mod tests {
         // Inserting an empty string is a no-op (no crash, content unchanged).
         let mut state = make_state("hello", 5, None);
         state.insert_str("");
-        assert_eq!(state.workspace.tabs[0].document.content, "hello");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello");
         assert_eq!(state.workspace.tabs[0].cursor, 5);
     }
 
@@ -13493,7 +13509,7 @@ mod tests {
         // swap shortened the content out from under it.
         let mut state = make_state("hi", 9999, None);
         state.insert_str("x"); // must not panic
-        assert!(state.workspace.tabs[0].document.content.contains('x'));
+        assert!(state.workspace.tabs[0].document.content().contains('x'));
     }
 
     #[test]
@@ -13501,7 +13517,7 @@ mod tests {
         // 'é' is 2 bytes; cursor at position 2 lands inside 'é', not on a boundary
         let mut state = make_state("héllo", 2, None);
         state.insert_str("x"); // must not panic
-        assert!(state.workspace.tabs[0].document.content.contains('x'));
+        assert!(state.workspace.tabs[0].document.content().contains('x'));
     }
 
     // ── move_left / move_right ──────────────────────────────────────────────
@@ -13529,7 +13545,7 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].cursor, 5);
         assert!(state.workspace.tabs[0]
             .document
-            .content
+            .content()
             .is_char_boundary(state.workspace.tabs[0].cursor));
     }
 
@@ -13554,7 +13570,7 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].cursor, 3);
         assert!(state.workspace.tabs[0]
             .document
-            .content
+            .content()
             .is_char_boundary(state.workspace.tabs[0].cursor));
     }
 
@@ -13718,7 +13734,7 @@ mod tests {
         // Deletes "world" back to its start (6); the space before it
         // belongs to the gap *preceding* "world", not to "world" itself,
         // so it's left behind — same as vim's `b` landing on index 6.
-        assert_eq!(state.workspace.tabs[0].document.content, "hello ");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello ");
         assert_eq!(state.workspace.tabs[0].cursor, 6);
     }
 
@@ -13726,7 +13742,7 @@ mod tests {
     fn test_delete_word_backward_at_start_of_line_is_a_noop() {
         let mut state = make_state("hello", 0, None);
         state.delete_word_backward();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
     }
 
@@ -13734,7 +13750,7 @@ mod tests {
     fn test_delete_word_backward_deletes_selection_instead_when_active() {
         let mut state = make_state("hello world", 11, Some((6, 11)));
         state.delete_word_backward();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello ");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello ");
         assert!(state.workspace.tabs[0].selection.is_none());
     }
 
@@ -13746,7 +13762,7 @@ mod tests {
         // into the previous line, exactly like backspace already does.
         let mut state = make_state("hello\nworld", 11, None); // cursor at end
         state.delete_word_backward();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello\n");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello\n");
         assert_eq!(state.workspace.tabs[0].cursor, 6);
     }
 
@@ -13763,18 +13779,18 @@ mod tests {
         vim_key_recorded(&mut state, "i", false, None);
         state.insert_str("hello world");
         state.delete_word_backward();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello ");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello ");
         state.insert_str("there");
         state.vim_exit_to_normal();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello there");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello there");
 
         // Repeat the insertion at the end of the document: if the deleted
         // "world" text were still sitting in the recording, this would
         // replay "hello worldthere" instead of just "hello there".
-        state.workspace.tabs[0].cursor = state.workspace.tabs[0].document.content.len();
+        state.workspace.tabs[0].cursor = state.workspace.tabs[0].document.content().len();
         state.vim_repeat_last_change();
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "hello therehello there"
         );
     }
@@ -14145,7 +14161,7 @@ mod tests {
             .document
             .undo_stack
             .iter()
-            .map(|(c, _)| c.clone())
+            .map(|p| crate::docx_parser::paragraphs_to_plain_text(&p))
             .collect()
     }
 
@@ -14154,7 +14170,7 @@ mod tests {
             .document
             .redo_stack
             .iter()
-            .map(|(c, _)| c.clone())
+            .map(|p| crate::docx_parser::paragraphs_to_plain_text(&p))
             .collect()
     }
 
@@ -14173,7 +14189,7 @@ mod tests {
         state.insert_char('b');
         state.insert_char('c');
         assert_eq!(undo_contents(&state), vec!["a".to_string()]);
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -14256,9 +14272,9 @@ mod tests {
     fn test_undo_restores_previous_content() {
         let mut state = make_state("ab", 2, None);
         state.insert_char('c');
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "ab");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ab");
     }
 
     #[test]
@@ -14267,7 +14283,7 @@ mod tests {
         state.workspace.tabs[0]
             .document
             .undo_stack
-            .push(("ab".to_string(), default_paragraphs()));
+            .push(default_paragraphs());
         state.undo();
         assert!(state.workspace.tabs[0].selection.is_none());
         assert!(state.workspace.tabs[0].document.is_modified);
@@ -14279,11 +14295,11 @@ mod tests {
         state.insert_char('c'); // content = "abc", cursor = 3
         state.undo();
         // Restored content is "ab" (len 2); cursor must not remain at 3.
-        assert_eq!(state.workspace.tabs[0].document.content, "ab");
-        assert!(state.workspace.tabs[0].cursor <= state.workspace.tabs[0].document.content.len());
+        assert_eq!(state.workspace.tabs[0].document.content(), "ab");
+        assert!(state.workspace.tabs[0].cursor <= state.workspace.tabs[0].document.content().len());
         assert!(state.workspace.tabs[0]
             .document
-            .content
+            .content()
             .is_char_boundary(state.workspace.tabs[0].cursor));
     }
 
@@ -14291,7 +14307,7 @@ mod tests {
     fn test_undo_with_empty_stack_is_noop() {
         let mut state = make_state("abc", 3, None);
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
         assert_eq!(state.workspace.tabs[0].cursor, 3);
     }
 
@@ -14308,9 +14324,9 @@ mod tests {
         let mut state = make_state("ab", 2, None);
         state.insert_char('c');
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "ab");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ab");
         state.redo();
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -14333,7 +14349,7 @@ mod tests {
             "boldX"
         );
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "bold");
+        assert_eq!(state.workspace.tabs[0].document.content(), "bold");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "bold"
@@ -14358,7 +14374,7 @@ mod tests {
         state.insert_char('X');
         state.undo();
         state.redo();
-        assert_eq!(state.workspace.tabs[0].document.content, "boldX");
+        assert_eq!(state.workspace.tabs[0].document.content(), "boldX");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "boldX"
@@ -14482,7 +14498,7 @@ mod tests {
         // spanning multiple paragraphs left the other paragraphs bold.
         let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let content_len = state.workspace.tabs[0].document.content.len();
+        let content_len = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, content_len));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
         for para in &state.workspace.tabs[0].document.paragraphs {
@@ -14522,7 +14538,7 @@ mod tests {
         state.apply_formatting_to_selection(FormatOp::Bold(true));
         state.insert_char('X');
         state.insert_char('Y');
-        assert_eq!(state.workspace.tabs[0].document.content, "abXY");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abXY");
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "ab");
@@ -14545,7 +14561,7 @@ mod tests {
         state.apply_formatting_to_selection(FormatOp::Bold(true)); // toggle off
         state.workspace.tabs[0].cursor = 0;
         state.insert_char('Y'); // "YaXb", Y at the very start
-        assert_eq!(state.workspace.tabs[0].document.content, "YaXb");
+        assert_eq!(state.workspace.tabs[0].document.content(), "YaXb");
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].text, "Ya");
@@ -14573,7 +14589,7 @@ mod tests {
     fn test_redo_with_empty_stack_is_noop() {
         let mut state = make_state("abc", 3, None);
         state.redo();
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -14807,7 +14823,7 @@ mod tests {
         }
         let tab = &state.workspace.tabs[0];
         let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
-            &tab.document.content,
+            &tab.document.content(),
             &tab.document.paragraphs,
         ));
         assert!(expected_cap < 200);
@@ -14831,7 +14847,7 @@ mod tests {
         }
         let tab = &state.workspace.tabs[0];
         let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
-            &tab.document.content,
+            &tab.document.content(),
             &tab.document.paragraphs,
         ));
         assert!(expected_cap < 200);
@@ -14863,7 +14879,7 @@ mod tests {
     fn delete_forward_removes_the_character_after_the_cursor() {
         let mut state = make_state("abc", 1, None);
         state.delete_forward();
-        assert_eq!(state.workspace.tabs[0].document.content, "ac");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(
             state.workspace.tabs[0].cursor, 1,
             "cursor doesn't move for a forward delete"
@@ -14874,14 +14890,14 @@ mod tests {
     fn delete_forward_deletes_the_selection_when_one_is_active() {
         let mut state = make_state("hello world", 5, Some((0, 5)));
         state.delete_forward();
-        assert_eq!(state.workspace.tabs[0].document.content, " world");
+        assert_eq!(state.workspace.tabs[0].document.content(), " world");
     }
 
     #[test]
     fn delete_forward_is_a_no_op_at_document_end() {
         let mut state = make_state("abc", 3, None);
         state.delete_forward();
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
         assert!(state.workspace.tabs[0].document.undo_stack.is_empty());
     }
 
@@ -14972,7 +14988,7 @@ mod tests {
     fn test_vim_open_line_below_creates_new_line_and_places_cursor_on_it() {
         let mut state = make_state("hello", 2, None);
         state.vim_open_line_below();
-        assert_eq!(state.workspace.tabs[0].document.content, "hello\n");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello\n");
         assert_eq!(state.workspace.tabs[0].cursor, 6);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
@@ -14988,7 +15004,10 @@ mod tests {
     fn test_vim_open_line_below_on_last_line_of_multiline_doc() {
         let mut state = make_state("first\nsecond", 8, None);
         state.vim_open_line_below();
-        assert_eq!(state.workspace.tabs[0].document.content, "first\nsecond\n");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "first\nsecond\n"
+        );
         assert_eq!(state.workspace.tabs[0].cursor, 13);
     }
 
@@ -14996,7 +15015,7 @@ mod tests {
     fn test_vim_open_line_below_on_empty_document() {
         let mut state = make_state("", 0, None);
         state.vim_open_line_below();
-        assert_eq!(state.workspace.tabs[0].document.content, "\n");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\n");
         assert_eq!(state.workspace.tabs[0].cursor, 1);
     }
 
@@ -15004,7 +15023,7 @@ mod tests {
     fn test_vim_open_line_above_inserts_before_current_line() {
         let mut state = make_state("hello", 2, None);
         state.vim_open_line_above();
-        assert_eq!(state.workspace.tabs[0].document.content, "\nhello");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\nhello");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
@@ -15020,7 +15039,10 @@ mod tests {
     fn test_vim_open_line_above_on_second_line() {
         let mut state = make_state("first\nsecond", 8, None);
         state.vim_open_line_above();
-        assert_eq!(state.workspace.tabs[0].document.content, "first\n\nsecond");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "first\n\nsecond"
+        );
         assert_eq!(state.workspace.tabs[0].cursor, 6);
     }
 
@@ -15028,7 +15050,7 @@ mod tests {
     fn test_vim_open_line_above_on_empty_document() {
         let mut state = make_state("", 0, None);
         state.vim_open_line_above();
-        assert_eq!(state.workspace.tabs[0].document.content, "\n");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\n");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
     }
 
@@ -15132,7 +15154,7 @@ mod tests {
         let mut state = make_state("hello", 2, None);
         let handled = state.handle_vim_key("q", false, None);
         assert!(handled);
-        assert_eq!(state.workspace.tabs[0].document.content, "hello"); // not inserted as text
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello"); // not inserted as text
     }
 
     #[test]
@@ -15219,7 +15241,7 @@ mod tests {
         let handled = state.handle_vim_key("x", false, None);
         assert!(handled);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Command);
-        assert_eq!(state.workspace.tabs[0].document.content, "hello"); // not inserted as text
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello"); // not inserted as text
         assert_eq!(state.workspace.tabs[0].vim_command_line, "x"); // captured into command line instead
     }
 
@@ -15363,7 +15385,7 @@ mod tests {
     fn test_dispatch_vim_command_substitute_first_match_per_line() {
         let mut state = make_state("foo foo\nbar", 0, None);
         state.dispatch_vim_command("%s/foo/baz/");
-        assert_eq!(state.workspace.tabs[0].document.content, "baz foo\nbar");
+        assert_eq!(state.workspace.tabs[0].document.content(), "baz foo\nbar");
         assert!(state.workspace.tabs[0].document.is_modified);
     }
 
@@ -15371,21 +15393,21 @@ mod tests {
     fn test_dispatch_vim_command_substitute_global_flag_replaces_all_on_line() {
         let mut state = make_state("foo foo\nbar", 0, None);
         state.dispatch_vim_command("%s/foo/baz/g");
-        assert_eq!(state.workspace.tabs[0].document.content, "baz baz\nbar");
+        assert_eq!(state.workspace.tabs[0].document.content(), "baz baz\nbar");
     }
 
     #[test]
     fn test_dispatch_vim_command_substitute_case_insensitive_flag() {
         let mut state = make_state("Foo bar", 0, None);
         state.dispatch_vim_command("%s/foo/baz/i");
-        assert_eq!(state.workspace.tabs[0].document.content, "baz bar");
+        assert_eq!(state.workspace.tabs[0].document.content(), "baz bar");
     }
 
     #[test]
     fn test_dispatch_vim_command_substitute_no_match_leaves_content_unmodified() {
         let mut state = make_state("hello", 0, None);
         state.dispatch_vim_command("%s/xyz/abc/");
-        assert_eq!(state.workspace.tabs[0].document.content, "hello");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello");
         assert!(!state.workspace.tabs[0].document.is_modified);
     }
 
@@ -15496,7 +15518,7 @@ mod tests {
         let mut state = make_state("abc", 0, None);
         state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aXYbc");
         assert_eq!(state.workspace.tabs[0].cursor, 2); // lands on last pasted char 'Y'
     }
 
@@ -15505,7 +15527,7 @@ mod tests {
         let mut state = make_state("abc", 1, None);
         state.global_vim.registers.insert('"', "XY".to_string());
         state.handle_vim_key("p", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "aXYbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aXYbc");
     }
 
     #[test]
@@ -15516,7 +15538,10 @@ mod tests {
             .registers
             .insert('"', "middle\n".to_string());
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one\nmiddle\ntwo");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "one\nmiddle\ntwo"
+        );
     }
 
     #[test]
@@ -15527,14 +15552,17 @@ mod tests {
             .registers
             .insert('"', "middle\n".to_string());
         state.handle_vim_key("p", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one\nmiddle\ntwo");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "one\nmiddle\ntwo"
+        );
     }
 
     #[test]
     fn test_paste_empty_register_is_noop() {
         let mut state = make_state("abc", 0, None);
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -15544,7 +15572,7 @@ mod tests {
         state.handle_vim_key("'", true, Some("\""));
         state.handle_vim_key("a", false, None);
         state.handle_vim_key("p", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "aZbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aZbc");
     }
 
     // ── Task I.1: x/X/s/S/~/J convenience commands ──────────────────────────
@@ -15553,7 +15581,7 @@ mod tests {
     fn test_x_deletes_char_under_cursor() {
         let mut state = make_state("abc", 1, None);
         state.handle_vim_key("x", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ac");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(state.workspace.tabs[0].cursor, 1);
         assert_eq!(state.global_vim.registers.get(&'"'), Some(&"b".to_string()));
     }
@@ -15562,21 +15590,21 @@ mod tests {
     fn test_x_at_end_of_line_does_not_cross_newline() {
         let mut state = make_state("ab\ncd", 1, None); // cursor on 'b', last char of line
         state.handle_vim_key("x", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "a\ncd");
+        assert_eq!(state.workspace.tabs[0].document.content(), "a\ncd");
     }
 
     #[test]
     fn test_x_on_empty_line_is_noop() {
         let mut state = make_state("\nabc", 0, None);
         state.handle_vim_key("x", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "\nabc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\nabc");
     }
 
     #[test]
     fn test_capital_x_deletes_char_before_cursor() {
         let mut state = make_state("abc", 2, None);
         state.handle_vim_key("x", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ac");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(state.workspace.tabs[0].cursor, 1);
     }
 
@@ -15584,14 +15612,14 @@ mod tests {
     fn test_capital_x_at_line_start_does_not_cross_newline() {
         let mut state = make_state("ab\ncd", 3, None); // cursor on 'c', first char of line 2
         state.handle_vim_key("x", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ab\ncd");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ab\ncd");
     }
 
     #[test]
     fn test_s_deletes_char_and_enters_insert() {
         let mut state = make_state("abc", 1, None);
         state.handle_vim_key("s", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ac");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
 
@@ -15599,7 +15627,7 @@ mod tests {
     fn test_capital_s_deletes_line_and_enters_insert() {
         let mut state = make_state("abc\ndef", 1, None);
         state.handle_vim_key("s", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "\ndef");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\ndef");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
 
@@ -15607,7 +15635,7 @@ mod tests {
     fn test_tilde_toggles_case_and_advances_cursor() {
         let mut state = make_state("aBc", 0, None);
         state.handle_vim_key("`", true, Some("~"));
-        assert_eq!(state.workspace.tabs[0].document.content, "ABc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ABc");
         assert_eq!(state.workspace.tabs[0].cursor, 1);
     }
 
@@ -15615,28 +15643,28 @@ mod tests {
     fn test_tilde_at_end_of_line_is_noop() {
         let mut state = make_state("\nabc", 0, None);
         state.handle_vim_key("`", true, Some("~"));
-        assert_eq!(state.workspace.tabs[0].document.content, "\nabc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\nabc");
     }
 
     #[test]
     fn test_join_joins_current_line_with_next() {
         let mut state = make_state("one\ntwo", 0, None);
         state.handle_vim_key("j", true, None); // J (shift+j)
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
     fn test_join_collapses_next_line_leading_whitespace() {
         let mut state = make_state("one\n   two", 0, None);
         state.handle_vim_key("j", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
     fn test_join_on_last_line_is_noop() {
         let mut state = make_state("only", 0, None);
         state.handle_vim_key("j", true, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "only");
+        assert_eq!(state.workspace.tabs[0].document.content(), "only");
     }
 
     // ── Task I.2: r<char> replace one character ─────────────────────────────
@@ -15646,7 +15674,7 @@ mod tests {
         let mut state = make_state("abc", 1, None);
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "azc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "azc");
         assert_eq!(state.workspace.tabs[0].cursor, 1); // stays on the replaced char
     }
 
@@ -15655,7 +15683,7 @@ mod tests {
         let mut state = make_state("abc", 0, None);
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", true, None); // shift+z -> 'Z'
-        assert_eq!(state.workspace.tabs[0].document.content, "Zbc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "Zbc");
     }
 
     #[test]
@@ -15663,7 +15691,7 @@ mod tests {
         let mut state = make_state("abc", 1, None);
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("escape", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -15686,7 +15714,7 @@ mod tests {
         let mut state = make_state("\nabc", 0, None);
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "\nabc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\nabc");
     }
 
     // ── bare `u` = real vim Undo (checklist: previously unwired) ──────────────
@@ -15696,16 +15724,16 @@ mod tests {
         let mut state = make_state("abc", 1, None);
         state.handle_vim_key("r", false, None);
         state.handle_vim_key("z", false, None); // "abc" -> "azc"
-        assert_eq!(state.workspace.tabs[0].document.content, "azc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "azc");
         state.handle_vim_key("u", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
     fn test_bare_u_is_a_noop_with_nothing_to_undo() {
         let mut state = make_state("abc", 1, None);
         assert!(state.handle_vim_key("u", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -15717,7 +15745,8 @@ mod tests {
         state.handle_vim_key("z", false, None); // "abc" -> "azc"
         state.handle_vim_key("u", true, None);
         assert_eq!(
-            state.workspace.tabs[0].document.content, "azc",
+            state.workspace.tabs[0].document.content(),
+            "azc",
             "shift+u must not undo"
         );
     }
@@ -15769,7 +15798,7 @@ mod tests {
         format!(
             "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
             tab.cursor,
-            tab.document.content,
+            tab.document.content(),
             tab.selection,
             tab.vim_command_buf,
             tab.vim_mode,
@@ -15867,7 +15896,8 @@ mod tests {
             "z must not have started a vim-keybind sequence here"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.content, "hello world",
+            state.workspace.tabs[0].document.content(),
+            "hello world",
             "nothing should have been deleted"
         );
         assert_eq!(state.take_pending_vim_action(), None);
@@ -15891,7 +15921,8 @@ mod tests {
             "d must not also have started a real delete operator"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.content, "hello world",
+            state.workspace.tabs[0].document.content(),
+            "hello world",
             "no direct deletion — Cut fires via dispatch_action, out of this function's reach"
         );
     }
@@ -15903,7 +15934,7 @@ mod tests {
         assert!(state.handle_vim_key("escape", false, None));
         assert_eq!(state.workspace.tabs[0].vim_keybind_seq, "");
         assert_eq!(state.take_pending_vim_action(), None);
-        assert_eq!(state.workspace.tabs[0].document.content, "hello");
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello");
     }
 
     #[test]
@@ -15934,7 +15965,7 @@ mod tests {
         state.workspace.tabs[0].vim_mode = VimMode::Replace;
         state.handle_vim_key("x", false, Some("x"));
         state.handle_vim_key("y", false, Some("y"));
-        assert_eq!(state.workspace.tabs[0].document.content, "xycdef");
+        assert_eq!(state.workspace.tabs[0].document.content(), "xycdef");
         assert_eq!(state.workspace.tabs[0].cursor, 2);
     }
 
@@ -15943,7 +15974,7 @@ mod tests {
         let mut state = make_state("ab", 2, None);
         state.workspace.tabs[0].vim_mode = VimMode::Replace;
         state.handle_vim_key("z", false, Some("z"));
-        assert_eq!(state.workspace.tabs[0].document.content, "abz");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abz");
     }
 
     #[test]
@@ -16098,11 +16129,11 @@ mod tests {
         let mut state = make_state("foo bar baz", 0, None);
         vim_key_recorded(&mut state, "d", false, None);
         vim_key_recorded(&mut state, "w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "bar baz");
+        assert_eq!(state.workspace.tabs[0].document.content(), "bar baz");
         // cursor now at start of "bar" (0). Move to "baz" and repeat.
         state.workspace.tabs[0].cursor = 4;
         state.vim_repeat_last_change();
-        assert_eq!(state.workspace.tabs[0].document.content, "bar ");
+        assert_eq!(state.workspace.tabs[0].document.content(), "bar ");
     }
 
     #[test]
@@ -16110,9 +16141,9 @@ mod tests {
         let mut state = make_state("one\ntwo\nthree", 0, None);
         vim_key_recorded(&mut state, "d", false, None);
         vim_key_recorded(&mut state, "d", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "two\nthree");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two\nthree");
         state.vim_repeat_last_change();
-        assert_eq!(state.workspace.tabs[0].document.content, "three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "three");
     }
 
     #[test]
@@ -16121,10 +16152,10 @@ mod tests {
         vim_key_recorded(&mut state, "d", false, None);
         vim_key_recorded(&mut state, "i", false, None);
         vim_key_recorded(&mut state, "(", true, Some("("));
-        assert_eq!(state.workspace.tabs[0].document.content, "() (b)");
+        assert_eq!(state.workspace.tabs[0].document.content(), "() (b)");
         state.workspace.tabs[0].cursor = 4; // inside second parens
         state.vim_repeat_last_change();
-        assert_eq!(state.workspace.tabs[0].document.content, "() ()");
+        assert_eq!(state.workspace.tabs[0].document.content(), "() ()");
     }
 
     #[test]
@@ -16146,10 +16177,10 @@ mod tests {
         state.insert_char('X');
         state.insert_char('Y');
         state.vim_exit_to_normal();
-        assert_eq!(state.workspace.tabs[0].document.content, "XYab");
+        assert_eq!(state.workspace.tabs[0].document.content(), "XYab");
         state.workspace.tabs[0].cursor = 4; // end of content
         state.vim_repeat_last_change();
-        assert_eq!(state.workspace.tabs[0].document.content, "XYabXY");
+        assert_eq!(state.workspace.tabs[0].document.content(), "XYabXY");
     }
 
     #[test]
@@ -16164,10 +16195,10 @@ mod tests {
         // `dw` does (this codebase doesn't special-case `cw` to stop
         // before trailing whitespace like real vim's `ce`-like quirk) —
         // so the space goes with it.
-        assert_eq!(state.workspace.tabs[0].document.content, "Xbar");
+        assert_eq!(state.workspace.tabs[0].document.content(), "Xbar");
         state.workspace.tabs[0].cursor = 1; // start of "bar"
         state.vim_repeat_last_change();
-        assert_eq!(state.workspace.tabs[0].document.content, "XX");
+        assert_eq!(state.workspace.tabs[0].document.content(), "XX");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
     }
 
@@ -16175,7 +16206,7 @@ mod tests {
     fn test_dot_with_no_prior_change_is_noop() {
         let mut state = make_state("abc", 0, None);
         state.handle_vim_key(".", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "abc");
+        assert_eq!(state.workspace.tabs[0].document.content(), "abc");
     }
 
     #[test]
@@ -16901,7 +16932,7 @@ mod tests {
         let handled = state.handle_vim_key("i", false, None);
         assert!(handled);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Visual); // not Insert
-        assert_eq!(state.workspace.tabs[0].document.content, "hello"); // not inserted as text
+        assert_eq!(state.workspace.tabs[0].document.content(), "hello"); // not inserted as text
     }
 
     #[test]
@@ -17340,7 +17371,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, Some('d'));
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two three");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
         assert_eq!(
@@ -17356,7 +17387,7 @@ mod tests {
         state.handle_vim_key("3", false, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, Some('d')); // still pending
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "four");
+        assert_eq!(state.workspace.tabs[0].document.content(), "four");
     }
 
     #[test]
@@ -17364,7 +17395,7 @@ mod tests {
         let mut state = make_state("one two", 0, None);
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("e", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, " two");
+        assert_eq!(state.workspace.tabs[0].document.content(), " two");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
     }
 
@@ -17379,8 +17410,8 @@ mod tests {
         de.handle_vim_key("d", false, None);
         de.handle_vim_key("e", false, None);
         assert_ne!(
-            dw.workspace.tabs[0].document.content,
-            de.workspace.tabs[0].document.content
+            dw.workspace.tabs[0].document.content(),
+            de.workspace.tabs[0].document.content()
         );
     }
 
@@ -17389,7 +17420,7 @@ mod tests {
         let mut state = make_state("one\ntwo\nthree", 0, None);
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("d", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "two\nthree");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two\nthree");
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(
             state.global_vim.registers.get(&'"'),
@@ -17404,7 +17435,7 @@ mod tests {
         state.handle_vim_key("2", false, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, Some('d')); // still pending
         state.handle_vim_key("d", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "c\nd");
+        assert_eq!(state.workspace.tabs[0].document.content(), "c\nd");
     }
 
     #[test]
@@ -17412,7 +17443,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("4", true, None); // shifted 4 => $
-        assert_eq!(state.workspace.tabs[0].document.content, "");
+        assert_eq!(state.workspace.tabs[0].document.content(), "");
     }
 
     #[test]
@@ -17420,7 +17451,7 @@ mod tests {
         let mut state = make_state("one\ntwo", 0, None);
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("y", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo"); // unchanged
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo"); // unchanged
         assert_eq!(
             state.global_vim.registers.get(&'"'),
             Some(&"one\n".to_string())
@@ -17437,7 +17468,7 @@ mod tests {
         let mut state = make_state("one two", 0, None);
         state.handle_vim_key("y", false, None);
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
         assert_eq!(
             state.global_vim.registers.get(&'"'),
             Some(&"one ".to_string())
@@ -17450,7 +17481,7 @@ mod tests {
         let mut state = make_state("one\ntwo", 0, None);
         state.handle_vim_key("c", false, None);
         state.handle_vim_key("c", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "\ntwo"); // line kept, just emptied
+        assert_eq!(state.workspace.tabs[0].document.content(), "\ntwo"); // line kept, just emptied
         assert_eq!(state.workspace.tabs[0].cursor, 0);
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
         assert_eq!(
@@ -17465,7 +17496,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("f", false, None);
         state.handle_vim_key("X", true, Some("X"));
-        assert_eq!(state.workspace.tabs[0].document.content, "def");
+        assert_eq!(state.workspace.tabs[0].document.content(), "def");
     }
 
     #[test]
@@ -17477,7 +17508,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("t", false, None);
         state.handle_vim_key("X", true, Some("X"));
-        assert_eq!(state.workspace.tabs[0].document.content, "cXdef");
+        assert_eq!(state.workspace.tabs[0].document.content(), "cXdef");
     }
 
     #[test]
@@ -17485,9 +17516,9 @@ mod tests {
         let mut state = make_state("one two three", 0, None);
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two three");
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "one two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two three");
     }
 
     #[test]
@@ -17501,7 +17532,7 @@ mod tests {
         state.handle_vim_key("q", false, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
         assert!(!state.vim_is_recording_macro());
-        assert_eq!(state.workspace.tabs[0].document.content, "one two"); // unchanged
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two"); // unchanged
     }
 
     #[test]
@@ -17512,7 +17543,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("j", false, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     #[test]
@@ -17533,7 +17564,7 @@ mod tests {
         let mut state = make_state("one two three", 8, None); // cursor on "three"
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("b", false, None); // b moves backward to "two"
-        assert_eq!(state.workspace.tabs[0].document.content, "one three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one three");
     }
 
     #[test]
@@ -17669,7 +17700,7 @@ mod tests {
             Some(true)
         );
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one  three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one  three");
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
         assert_eq!(state.workspace.tabs[0].vim_pending_text_object_prefix, None);
     }
@@ -17681,7 +17712,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("a", false, None);
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one three");
     }
 
     #[test]
@@ -17692,7 +17723,7 @@ mod tests {
         state.handle_vim_key("c", false, None);
         state.handle_vim_key("i", false, None);
         state.handle_vim_key("\"", true, Some("\""));
-        assert_eq!(state.workspace.tabs[0].document.content, "say \"\" now");
+        assert_eq!(state.workspace.tabs[0].document.content(), "say \"\" now");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
         assert_eq!(
             state.global_vim.registers.get(&'"'),
@@ -17708,7 +17739,10 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("i", false, None);
         state.handle_vim_key("(", true, Some("("));
-        assert_eq!(state.workspace.tabs[0].document.content, "foo(bar()qux)end");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "foo(bar()qux)end"
+        );
     }
 
     #[test]
@@ -17717,7 +17751,7 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("i", false, None);
         state.handle_vim_key("\"", true, Some("\""));
-        assert_eq!(state.workspace.tabs[0].document.content, "no quotes here");
+        assert_eq!(state.workspace.tabs[0].document.content(), "no quotes here");
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
     }
 
@@ -17729,7 +17763,7 @@ mod tests {
         state.handle_vim_key(".", true, Some(">")); // shifted '.' reported directly as '>'
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, Some('>'));
         state.handle_vim_key(".", true, Some(">"));
-        assert_eq!(state.workspace.tabs[0].document.content, "\tone\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\tone\ntwo");
     }
 
     #[test]
@@ -17737,7 +17771,7 @@ mod tests {
         let mut state = make_state("\tone\ntwo", 0, None);
         state.handle_vim_key(",", true, Some("<"));
         state.handle_vim_key(",", true, Some("<"));
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     #[test]
@@ -17745,7 +17779,7 @@ mod tests {
         let mut state = make_state("      one\ntwo", 0, None);
         state.handle_vim_key(",", true, Some("<"));
         state.handle_vim_key(",", true, Some("<"));
-        assert_eq!(state.workspace.tabs[0].document.content, "  one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "  one\ntwo");
     }
 
     #[test]
@@ -17760,7 +17794,7 @@ mod tests {
         state.handle_vim_key("i", false, None);
         state.handle_vim_key("p", false, None);
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "\tone\n\ttwo\n\nthree"
         );
     }
@@ -17773,7 +17807,7 @@ mod tests {
         state.handle_vim_key("u", true, None); // gU
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, Some('U'));
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ONE two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ONE two three");
     }
 
     #[test]
@@ -17784,7 +17818,7 @@ mod tests {
         state.handle_vim_key("u", false, None); // gu
         state.handle_vim_key("i", false, None);
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ONE two THREE");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ONE two THREE");
     }
 
     #[test]
@@ -17797,7 +17831,8 @@ mod tests {
         state.handle_vim_key("g", false, None);
         state.handle_vim_key("u", true, None);
         state.handle_vim_key("w", false, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "ONE two\nthree"); // not the whole line
+        assert_eq!(state.workspace.tabs[0].document.content(), "ONE two\nthree");
+        // not the whole line
     }
 
     #[test]
@@ -17810,7 +17845,7 @@ mod tests {
         state.handle_vim_key("u", true, None); // gU
         state.handle_vim_key("u", true, None); // second U: not a supported completion
         assert_eq!(state.workspace.tabs[0].vim_pending_operator, None);
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
@@ -17818,9 +17853,9 @@ mod tests {
         let mut state = make_state("one\ntwo", 0, None);
         state.handle_vim_key(".", true, Some(">"));
         state.handle_vim_key(".", true, Some(">"));
-        assert_eq!(state.workspace.tabs[0].document.content, "\tone\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\tone\ntwo");
         state.undo();
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     // ── Visual-mode operators (Task G) ────────────────────────────────────────────
@@ -17831,7 +17866,7 @@ mod tests {
         state.vim_enter_visual();
         state.handle_vim_key("l", false, None); // extend selection to (0,2)
         assert!(state.handle_vim_key("d", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "e two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "e two three");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
         assert_eq!(state.workspace.tabs[0].selection, None);
         assert_eq!(
@@ -17846,7 +17881,7 @@ mod tests {
         state.vim_enter_visual();
         state.handle_vim_key("l", false, None);
         assert!(state.handle_vim_key("x", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "e two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "e two three");
     }
 
     #[test]
@@ -17855,7 +17890,7 @@ mod tests {
         state.vim_enter_visual();
         state.handle_vim_key("l", false, None);
         assert!(state.handle_vim_key("y", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "one two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two three");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
         assert_eq!(
             state.global_vim.registers.get(&'"'),
@@ -17873,7 +17908,7 @@ mod tests {
         state.vim_enter_visual();
         state.handle_vim_key("l", false, None);
         assert!(state.handle_vim_key("c", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "e two three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "e two three");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
 
@@ -17882,7 +17917,7 @@ mod tests {
         let mut state = make_state("one\ntwo\nthree", 4, None); // on "two"
         state.vim_enter_visual_line();
         assert!(state.handle_vim_key("d", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "one\nthree");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\nthree");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
     }
 
@@ -17891,7 +17926,7 @@ mod tests {
         let mut state = make_state("one\ntwo\nthree", 4, None); // on "two"
         state.vim_enter_visual_line();
         assert!(state.handle_vim_key("c", false, None));
-        assert_eq!(state.workspace.tabs[0].document.content, "one\n\nthree");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\n\nthree");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Insert);
     }
 
@@ -17902,7 +17937,7 @@ mod tests {
         let mut state = make_state("one\ntwo", 0, None); // charwise selection covers only part of "one"
         state.vim_enter_visual();
         assert!(state.handle_vim_key(".", true, Some(">")));
-        assert_eq!(state.workspace.tabs[0].document.content, "\tone\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\tone\ntwo");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
     }
 
@@ -17911,7 +17946,7 @@ mod tests {
         let mut state = make_state("\tone\ntwo", 0, None);
         state.vim_enter_visual();
         assert!(state.handle_vim_key(",", true, Some("<")));
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     #[test]
@@ -17927,7 +17962,7 @@ mod tests {
         assert_eq!(state.workspace.tabs[0].selection, Some((0, 8)));
         assert!(state.handle_vim_key(".", true, Some(">")));
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "\tone\n\ttwo\nthree"
         );
     }
@@ -17939,7 +17974,7 @@ mod tests {
         state.handle_vim_key("l", false, None); // selects "on"
         state.handle_vim_key("g", false, None);
         assert!(state.handle_vim_key("u", true, None)); // gU
-        assert_eq!(state.workspace.tabs[0].document.content, "ONe two\nthree");
+        assert_eq!(state.workspace.tabs[0].document.content(), "ONe two\nthree");
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
     }
 
@@ -17951,7 +17986,7 @@ mod tests {
         state.handle_vim_key("l", false, None); // selection now covers all of "ONE"
         state.handle_vim_key("g", false, None);
         assert!(state.handle_vim_key("u", false, None)); // gu
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
@@ -17960,7 +17995,7 @@ mod tests {
         state.vim_enter_visual();
         state.handle_vim_key("l", false, None); // selects "On"
         assert!(state.handle_vim_key("`", true, Some("~")));
-        assert_eq!(state.workspace.tabs[0].document.content, "oNe two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "oNe two");
     }
 
     #[test]
@@ -17981,7 +18016,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.workspace.tabs[0].selection = Some((4, 7));
         state.apply_case_to_selection(crate::case_converter::CaseType::Upper);
-        assert_eq!(state.workspace.tabs[0].document.content, "one TWO three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one TWO three");
     }
 
     #[test]
@@ -18556,60 +18591,69 @@ mod tests {
     fn test_condense_selection_replaces_newlines_with_spaces() {
         let paragraphs = vec![para_plain("one"), para_plain("two")];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
         state.condense_selection();
         // Reads exactly like "one two" — the zero-width space renders as
         // nothing — but the marker is real text, which is what makes
         // uncondense_selection able to find it.
-        assert_eq!(state.workspace.tabs[0].document.content, "one\u{200B} two");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "one\u{200B} two"
+        );
     }
 
     #[test]
     fn test_uncondense_reverses_a_plain_condense() {
         let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
         state.condense_selection();
         state.workspace.tabs[0].selection =
-            Some((0, state.workspace.tabs[0].document.content.len()));
+            Some((0, state.workspace.tabs[0].document.content().len()));
         state.uncondense_selection();
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo\nthree");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "one\ntwo\nthree"
+        );
     }
 
     #[test]
     fn test_uncondense_reverses_a_pilcrow_condense() {
         let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
         state.condense_with_pilcrows();
         state.workspace.tabs[0].selection =
-            Some((0, state.workspace.tabs[0].document.content.len()));
+            Some((0, state.workspace.tabs[0].document.content().len()));
         state.uncondense_selection();
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo\nthree");
+        assert_eq!(
+            state.workspace.tabs[0].document.content(),
+            "one\ntwo\nthree"
+        );
     }
 
     #[test]
     fn test_uncondense_is_a_no_op_without_either_marker() {
         let mut state = make_state("one two", 0, None);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
         state.uncondense_selection();
-        assert_eq!(state.workspace.tabs[0].document.content, "one two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one two");
     }
 
     #[test]
     fn test_condense_with_pilcrows_marks_each_break() {
         let paragraphs = vec![para_plain("one"), para_plain("two"), para_plain("three")];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
 
         state.condense_with_pilcrows();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "one¶two¶three");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one¶two¶three");
         assert_eq!(
             state.workspace.tabs[0].document.paragraphs.len(),
             1,
@@ -18642,12 +18686,12 @@ mod tests {
             },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
 
         state.condense_with_pilcrows();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "bold¶plain");
+        assert_eq!(state.workspace.tabs[0].document.content(), "bold¶plain");
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
         assert!(runs.iter().find(|r| r.text.contains("bold")).unwrap().bold);
         assert!(!runs.iter().find(|r| r.text.contains("plain")).unwrap().bold);
@@ -18860,7 +18904,7 @@ mod tests {
 
         state.remove_blank_lines();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "one\ntwo");
+        assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
     }
 
     #[test]
@@ -18870,15 +18914,15 @@ mod tests {
         // Select only the middle + last line, leaving the leading blank alone.
         let start = state.workspace.tabs[0]
             .document
-            .content
+            .content()
             .find("kept")
             .unwrap();
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((start, end));
 
         state.remove_blank_lines();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "\nkept");
+        assert_eq!(state.workspace.tabs[0].document.content(), "\nkept");
     }
 
     #[test]
@@ -18898,7 +18942,7 @@ mod tests {
 
         state.remove_pilcrows();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "boldtext");
+        assert_eq!(state.workspace.tabs[0].document.content(), "boldtext");
         assert!(state.workspace.tabs[0].document.paragraphs[0]
             .runs
             .iter()
@@ -18949,7 +18993,7 @@ mod tests {
         state.delete_tags();
 
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "body\nA tag\nmore body"
         );
         let tag = &state.workspace.tabs[0].document.paragraphs[1];
@@ -19046,7 +19090,7 @@ mod tests {
         }];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.workspace.tabs[0].selection =
-            Some((0, state.workspace.tabs[0].document.content.len()));
+            Some((0, state.workspace.tabs[0].document.content().len()));
 
         assert_eq!(state.spoken_words_in_selection(), Some(6));
     }
@@ -19187,7 +19231,7 @@ mod tests {
         state.condense_with_pilcrows();
         state.condense_selection();
 
-        assert_eq!(state.workspace.tabs[0].document.content, "single line");
+        assert_eq!(state.workspace.tabs[0].document.content(), "single line");
         assert_eq!(
             state.workspace.tabs[0].document.content_version,
             version_before
@@ -19222,12 +19266,12 @@ mod tests {
             },
         ];
         let mut state = make_state_with_paragraphs(paragraphs, 0);
-        let end = state.workspace.tabs[0].document.content.len();
+        let end = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, end));
         state.condense_selection();
 
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "bold\u{200B} plain"
         );
         let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
@@ -19489,7 +19533,7 @@ mod tests {
         let tab = &state.workspace.tabs[0];
         let markdown = crate::wikifi_export::export_to_markdown(
             &tab.document.paragraphs,
-            &tab.document.content,
+            &tab.document.content(),
         );
         assert_eq!(
             markdown,
@@ -19571,19 +19615,22 @@ mod tests {
         for round in 0..=6 {
             if round > 0 {
                 for _ in 0..200 {
-                    let mid = state.workspace.tabs[0].document.content.len() / 2;
+                    let mid = state.workspace.tabs[0].document.content().len() / 2;
                     state.workspace.tabs[0].cursor =
-                        clamp_to_char_boundary(&state.workspace.tabs[0].document.content, mid);
+                        clamp_to_char_boundary(&state.workspace.tabs[0].document.content(), mid);
                     state.insert_char('x');
                     // Defeat the undo coalescing window so every keystroke
                     // takes the same path a real typing session does.
                     state.workspace.tabs[0].document.last_edit_at = None;
                 }
                 for _ in 0..40 {
-                    let mid = state.workspace.tabs[0].document.content.len() / 2;
-                    let a = clamp_to_char_boundary(&state.workspace.tabs[0].document.content, mid);
-                    let b =
-                        clamp_to_char_boundary(&state.workspace.tabs[0].document.content, mid + 20);
+                    let mid = state.workspace.tabs[0].document.content().len() / 2;
+                    let a =
+                        clamp_to_char_boundary(&state.workspace.tabs[0].document.content(), mid);
+                    let b = clamp_to_char_boundary(
+                        &state.workspace.tabs[0].document.content(),
+                        mid + 20,
+                    );
                     state.workspace.tabs[0].selection = Some((a, b));
                     state.apply_formatting_to_selection(FormatOp::Bold(true));
                     state.workspace.tabs[0].selection = Some((a, b));
@@ -19737,10 +19784,10 @@ mod tests {
                 .map(|p| p.runs.len())
                 .sum::<usize>(),
             state.workspace.tabs[0].document.paragraphs.len(),
-            state.workspace.tabs[0].document.content.len(),
+            state.workspace.tabs[0].document.content().len(),
         );
         let estimate = snapshot_byte_estimate(
-            &state.workspace.tabs[0].document.content,
+            &state.workspace.tabs[0].document.content(),
             &state.workspace.tabs[0].document.paragraphs,
         );
         println!(
@@ -19754,9 +19801,9 @@ mod tests {
 
         for round in 1..=6 {
             for _ in 0..25 {
-                let mid = state.workspace.tabs[0].document.content.len() / 2;
+                let mid = state.workspace.tabs[0].document.content().len() / 2;
                 state.workspace.tabs[0].cursor =
-                    clamp_to_char_boundary(&state.workspace.tabs[0].document.content, mid);
+                    clamp_to_char_boundary(&state.workspace.tabs[0].document.content(), mid);
                 state.insert_char('x');
                 // Every keystroke its own undo step, as a real typing session
                 // spread over minutes produces.
@@ -20058,7 +20105,7 @@ mod tests {
 
         state.replace_current();
         assert!(
-            state.workspace.tabs[0].document.content.contains("two"),
+            state.workspace.tabs[0].document.content().contains("two"),
             "unrelated selection was overwritten"
         );
     }
@@ -20072,7 +20119,7 @@ mod tests {
 
         state.find_next(true);
         state.replace_current();
-        assert_eq!(state.workspace.tabs[0].document.content, "X two one");
+        assert_eq!(state.workspace.tabs[0].document.content(), "X two one");
         // ...and moved on to the remaining match.
         assert_eq!(state.workspace.tabs[0].selection, Some((6, 9)));
     }
@@ -20085,7 +20132,7 @@ mod tests {
         state.ui.find_bar.as_mut().unwrap().replacement = "two".to_string();
 
         assert_eq!(state.replace_all(), 3);
-        assert_eq!(state.workspace.tabs[0].document.content, "two two two");
+        assert_eq!(state.workspace.tabs[0].document.content(), "two two two");
     }
 
     /// A replacement containing the query would loop forever if the scan
@@ -20098,7 +20145,7 @@ mod tests {
         state.ui.find_bar.as_mut().unwrap().replacement = "aa".to_string();
 
         assert_eq!(state.replace_all(), 3);
-        assert_eq!(state.workspace.tabs[0].document.content, "aa aa aa");
+        assert_eq!(state.workspace.tabs[0].document.content(), "aa aa aa");
     }
 
     #[test]
@@ -20140,7 +20187,7 @@ mod tests {
         };
         state.replace_spell_target(&target, "world");
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "hello world there"
         );
     }
@@ -20159,7 +20206,7 @@ mod tests {
         };
         state.replace_spell_target(&target, "the");
         assert_eq!(
-            state.workspace.tabs[0].document.content,
+            state.workspace.tabs[0].document.content(),
             "first line\nsecond the line"
         );
     }
@@ -20995,7 +21042,7 @@ mod tests {
         // The dirty tab is still there with its content — the file opened
         // alongside it instead of replacing it.
         assert_eq!(state.workspace.tabs.len(), 2);
-        assert_eq!(state.workspace.tabs[0].document.content, "unsaved work");
+        assert_eq!(state.workspace.tabs[0].document.content(), "unsaved work");
         assert_eq!(state.workspace.tabs[1].file_path, Some(path));
     }
 
@@ -21045,7 +21092,7 @@ mod tests {
         // Up to but not including Pocket B, and carrying the '\n' that
         // terminates "body" — so deleting this leaves no blank line behind.
         assert_eq!(
-            &state.workspace.tabs[0].document.content[start..end],
+            &state.workspace.tabs[0].document.content()[start..end],
             "Pocket A\nbody\n"
         );
     }
@@ -21063,7 +21110,7 @@ mod tests {
         );
         let (start, end) = state.heading_contents_range(1).unwrap();
         assert_eq!(
-            &state.workspace.tabs[0].document.content[start..end],
+            &state.workspace.tabs[0].document.content()[start..end],
             "Hat\nunder hat\n"
         );
     }
@@ -21081,7 +21128,7 @@ mod tests {
         let (start, end) = state.heading_contents_range(0).unwrap();
         // Everything nested under the Pocket comes with it.
         assert_eq!(
-            &state.workspace.tabs[0].document.content[start..end],
+            &state.workspace.tabs[0].document.content()[start..end],
             "Pocket\nHat\nTag"
         );
     }
@@ -21093,9 +21140,9 @@ mod tests {
             0,
         );
         let (start, end) = state.heading_contents_range(0).unwrap();
-        assert_eq!(end, state.workspace.tabs[0].document.content.len());
+        assert_eq!(end, state.workspace.tabs[0].document.content().len());
         assert_eq!(
-            &state.workspace.tabs[0].document.content[start..end],
+            &state.workspace.tabs[0].document.content()[start..end],
             "Pocket\ntrailing body"
         );
     }
@@ -21124,7 +21171,7 @@ mod tests {
         state.delete_selection();
         // The '\n' that ended the deleted section went with it, so Pocket B
         // is now the first line rather than sitting under a stranded blank.
-        assert_eq!(state.workspace.tabs[0].document.content, "Pocket B");
+        assert_eq!(state.workspace.tabs[0].document.content(), "Pocket B");
     }
 
     // ── Right-click menus: tab operations ───────────────────────────────────
@@ -21328,7 +21375,7 @@ mod tests {
             tab.document.is_modified,
             "resumed changes are unsaved by design"
         );
-        assert!(tab.document.content.contains("recovered text"));
+        assert!(tab.document.content().contains("recovered text"));
         assert_eq!(state.workspace.active_tab, state.workspace.tabs.len() - 1);
         // The snapshot is consumed — the content now lives in the editor.
         assert!(!entry.snapshot.exists());
@@ -21367,7 +21414,7 @@ mod tests {
         let tab = state.workspace.tabs.last().unwrap();
         assert_eq!(tab.file_path, None);
         assert!(tab.document.is_modified);
-        assert!(tab.document.content.contains("recovered text"));
+        assert!(tab.document.content().contains("recovered text"));
     }
 
     #[test]

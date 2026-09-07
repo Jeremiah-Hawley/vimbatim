@@ -1116,7 +1116,7 @@ impl FileExplorer {
         let max_level = self.nav_max_level.unwrap_or(4);
         let headings: Vec<(usize, u8, String)> = tab
             .document
-            .content
+            .content()
             .split('\n')
             .enumerate()
             .filter_map(|(line_idx, line_text)| {

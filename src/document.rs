@@ -6,19 +6,17 @@ pub struct TabId(pub usize);
 /// cannot be independently replaced by a future caller.
 #[derive(Clone, Debug)]
 pub struct DocumentBuffer {
-    pub content: String,
     pub paragraphs: Vec<Paragraph>,
     pub content_version: u64,
     pub is_modified: bool,
-    pub undo_stack: Vec<(String, Vec<Paragraph>)>,
-    pub redo_stack: Vec<(String, Vec<Paragraph>)>,
+    pub undo_stack: Vec<Vec<Paragraph>>,
+    pub redo_stack: Vec<Vec<Paragraph>>,
     pub last_edit_at: Option<std::time::Instant>,
 }
 
 impl DocumentBuffer {
-    pub fn new(content: String, paragraphs: Vec<Paragraph>) -> Self {
+    pub fn new(paragraphs: Vec<Paragraph>) -> Self {
         Self {
-            content,
             paragraphs,
             content_version: 0,
             is_modified: false,
@@ -28,7 +26,11 @@ impl DocumentBuffer {
         }
     }
 
-    #[allow(dead_code)] // Called by the next mutation-boundary extraction.
+    /// Plain text derived from the canonical rich paragraph representation.
+    pub fn content(&self) -> String {
+        crate::docx_parser::paragraphs_to_plain_text(&self.paragraphs)
+    }
+
     pub fn debug_assert_valid(&self, cursor: usize, selection: Option<(usize, usize)>) {
         debug_assert!(!self.paragraphs.is_empty());
         debug_assert!(self
@@ -45,13 +47,13 @@ impl DocumentBuffer {
                     .collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n"),
-            self.content
+            self.content()
         );
-        debug_assert!(cursor <= self.content.len() && self.content.is_char_boundary(cursor));
+        debug_assert!(cursor <= self.content().len() && self.content().is_char_boundary(cursor));
         if let Some((anchor, focus)) = selection {
-            debug_assert!(anchor <= self.content.len() && focus <= self.content.len());
+            debug_assert!(anchor <= self.content().len() && focus <= self.content().len());
             debug_assert!(
-                self.content.is_char_boundary(anchor) && self.content.is_char_boundary(focus)
+                self.content().is_char_boundary(anchor) && self.content().is_char_boundary(focus)
             );
         }
     }
@@ -59,16 +61,13 @@ impl DocumentBuffer {
 
 impl Default for DocumentBuffer {
     fn default() -> Self {
-        Self::new(
-            String::new(),
-            vec![Paragraph {
-                list: None,
-                runs: vec![Run::default()],
-                heading: 0,
-                alignment: Alignment::default(),
-                unsupported_xml: None,
-            }],
-        )
+        Self::new(vec![Paragraph {
+            list: None,
+            runs: vec![Run::default()],
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }])
     }
 }
 
@@ -469,19 +468,16 @@ mod tests {
 
     #[test]
     fn buffer_validation_accepts_synced_text_and_runs() {
-        let buffer = DocumentBuffer::new(
-            "hello".into(),
-            vec![Paragraph {
-                list: None,
-                runs: vec![Run {
-                    text: "hello".into(),
-                    ..Run::default()
-                }],
-                heading: 0,
-                alignment: Alignment::default(),
-                unsupported_xml: None,
+        let buffer = DocumentBuffer::new(vec![Paragraph {
+            list: None,
+            runs: vec![Run {
+                text: "hello".into(),
+                ..Run::default()
             }],
-        );
+            heading: 0,
+            alignment: Alignment::default(),
+            unsupported_xml: None,
+        }]);
         buffer.debug_assert_valid(5, Some((0, 5)));
     }
 }

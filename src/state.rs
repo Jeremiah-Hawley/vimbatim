@@ -506,7 +506,7 @@ impl Tab {
     /// on one. `is_modified` alone isn't enough: a tab can be modified back to
     /// empty by undo, and that still shouldn't be silently replaced.
     pub fn is_blank_new_tab(&self) -> bool {
-        self.file_path.is_none() && self.document.content.is_empty() && !self.document.is_modified
+        self.file_path.is_none() && self.document.content().is_empty() && !self.document.is_modified
     }
 
     pub fn new_empty(id: TabId) -> Self {
