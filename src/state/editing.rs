@@ -2797,11 +2797,13 @@ impl AppState {
     /// the settings modal.
     pub fn set_paste_condense(&mut self, on: bool) {
         self.paste_condense = on;
+        self.preferences.paste_condense = on;
         self.save_setting("paste_condense", if on { "true" } else { "false" });
     }
 
     pub fn set_paste_condense_pilcrow(&mut self, on: bool) {
         self.paste_condense_pilcrow = on;
+        self.preferences.paste_condense_pilcrow = on;
         self.save_setting("paste_condense_pilcrow", if on { "true" } else { "false" });
     }
 
@@ -2811,6 +2813,7 @@ impl AppState {
     pub fn set_shrink_size_points(&mut self, points: u16) {
         let points = clamp_shrink_size_points(points);
         self.small_size_half_points = points * 2;
+        self.preferences.small_size_half_points = points * 2;
         self.save_setting("small_size", &points.to_string());
     }
 
@@ -2897,6 +2900,12 @@ impl AppState {
             CardStyleKind::Block => self.block_size_half_points = points * 2,
             CardStyleKind::Tag => self.tag_size_half_points = points * 2,
         }
+        match kind {
+            CardStyleKind::Pocket => self.preferences.pocket_size_half_points = points * 2,
+            CardStyleKind::Hat => self.preferences.hat_size_half_points = points * 2,
+            CardStyleKind::Block => self.preferences.block_size_half_points = points * 2,
+            CardStyleKind::Tag => self.preferences.tag_size_half_points = points * 2,
+        }
         let key = match kind {
             CardStyleKind::Pocket => "pocket_size",
             CardStyleKind::Hat => "hat_size",
@@ -2911,6 +2920,7 @@ impl AppState {
     pub fn set_cite_size_points(&mut self, points: u16) {
         let points = clamp_card_size_points(points);
         self.cite_size_half_points = points * 2;
+        self.preferences.cite_size_half_points = points * 2;
         self.save_setting("cite_size", &points.to_string());
     }
 
@@ -2920,6 +2930,7 @@ impl AppState {
     pub fn set_emphasis_size_points(&mut self, points: u16) {
         let points = clamp_emphasis_size_points(points);
         self.emphasis_size_half_points = points * 2;
+        self.preferences.emphasis_size_half_points = points * 2;
         self.save_setting("emphasis_size", &points.to_string());
     }
 
@@ -2941,11 +2952,13 @@ impl AppState {
     pub fn set_line_spacing(&mut self, spacing: f32) {
         let spacing = clamp_line_spacing(spacing);
         self.line_spacing = spacing;
+        self.preferences.line_spacing = spacing;
         self.save_setting("line_spacing", &format!("{spacing:.1}"));
     }
 
     pub fn set_emphasis_change_size(&mut self, on: bool) {
         self.emphasis_change_size = on;
+        self.preferences.emphasis_change_size = on;
         self.save_setting("emphasis_change_size", if on { "true" } else { "false" });
     }
 
@@ -2960,11 +2973,13 @@ impl AppState {
     /// what `Run.highlight_color` stores.
     pub fn set_highlight_color(&mut self, name: &str) {
         self.highlight_color = name.to_string();
+        self.preferences.highlight_color = name.to_string();
         self.save_setting("highlight_color", name);
     }
 
     pub fn set_analytic_color(&mut self, hex: &str) {
         self.analytic_color = hex.to_string();
+        self.preferences.analytic_color = hex.to_string();
         self.save_setting("analytic_color", hex);
     }
 
@@ -2972,6 +2987,7 @@ impl AppState {
     /// An empty string clears it.
     pub fn set_standardize_exception(&mut self, name: &str) {
         self.standardize_highlight_exception = name.to_string();
+        self.preferences.standardize_highlight_exception = name.to_string();
         self.save_setting("standardize_highlight_exception", name);
     }
 
@@ -2979,6 +2995,9 @@ impl AppState {
         self.emphasis_bold = bold;
         self.emphasis_underline = underline;
         self.emphasis_box = boxed;
+        self.preferences.emphasis_bold = bold;
+        self.preferences.emphasis_underline = underline;
+        self.preferences.emphasis_box = boxed;
         self.save_setting("emphasis_bold", if bold { "true" } else { "false" });
         self.save_setting(
             "emphasis_underline",
