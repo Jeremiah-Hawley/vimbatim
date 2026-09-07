@@ -726,7 +726,7 @@ impl SettingsModal {
     /// `main_window.rs`), writes `theme::custom_theme_template()` verbatim —
     /// a blank starting point the user edits and re-imports.
     fn download_theme_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.state.read(cx).working_directory.clone();
+        let dir = self.state.read(cx).workspace.working_directory.clone();
         let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
         cx.spawn_in(window, async move |_this, cx| {
             let Ok(Ok(Some(path))) = path_rx.await else {

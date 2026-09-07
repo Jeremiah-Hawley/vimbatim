@@ -195,8 +195,9 @@ impl AutoScroller {
         let paragraphs = self
             .state
             .read(cx)
+            .workspace
             .tabs
-            .get(self.state.read(cx).active_tab)
+            .get(self.state.read(cx).workspace.active_tab)
             .map(|t| t.document.paragraphs.clone())
             .unwrap_or_default();
         let lines = document_lines(&content);

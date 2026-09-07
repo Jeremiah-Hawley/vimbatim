@@ -1563,6 +1563,7 @@ impl FormattingRibbon {
         let (tabs, active_tab) = {
             let state = self.state.read(cx);
             let tabs: Vec<(usize, TabId, String)> = state
+                .workspace
                 .tabs
                 .iter()
                 .enumerate()
@@ -1692,13 +1693,13 @@ impl FormattingRibbon {
             }
             "enter" => {
                 let query = self.tab_search_buffer.to_lowercase();
-                let hit = {
-                    let state = self.state.read(cx);
-                    state
-                        .tabs
-                        .iter()
-                        .position(|t| query.is_empty() || t.title.to_lowercase().contains(&query))
-                };
+                let hit =
+                    {
+                        let state = self.state.read(cx);
+                        state.workspace.tabs.iter().position(|t| {
+                            query.is_empty() || t.title.to_lowercase().contains(&query)
+                        })
+                    };
                 if let Some(pos) = hit {
                     self.state.update(cx, |state, cx| {
                         state.set_active_tab(pos);

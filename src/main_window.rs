@@ -302,7 +302,7 @@ impl MainWindow {
             // as the tab bar's × button (tab_bar.rs) when the tab is dirty
             // — otherwise this keybind would be a silent-discard backdoor
             // around the whole point of this confirmation flow.
-            let idx = s.read(cx).active_tab;
+            let idx = s.read(cx).workspace.active_tab;
             s.update(cx, |st, cx| {
                 st.request_close_tab(idx);
                 cx.notify();
@@ -839,8 +839,8 @@ impl Render for MainWindow {
         let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
         let word_count_visible = self.state.read(cx).ui.word_count_visible;
         let timer_visible = self.state.read(cx).ui.timer.visible;
-        let split_view = self.state.read(cx).split_view;
-        let split_ratio = self.state.read(cx).split_ratio;
+        let split_view = self.state.read(cx).workspace.split_view;
+        let split_ratio = self.state.read(cx).workspace.split_ratio;
         let sidebar_width = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).ui.find_bar.is_some();
         let command_palette_visible = self.state.read(cx).ui.command_palette.is_some();

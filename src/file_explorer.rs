@@ -185,7 +185,7 @@ impl FileExplorer {
          * In a future iteration this should open a modal asking for a custom name
          * rather than auto-generating one.
          */
-        let dir = self.state.read(cx).working_directory.clone();
+        let dir = self.state.read(cx).workspace.working_directory.clone();
         self.state.update(cx, |s, cx| {
             if let Err(e) = s.create_new_docx_in(&dir) {
                 crate::state::log_line(&format!(
@@ -1375,6 +1375,7 @@ impl Render for FileExplorer {
         let p = state.current_palette();
         let sidebar_mode = state.sidebar_mode;
         let dir_name = state
+            .workspace
             .working_directory
             .file_name()
             .and_then(|n| n.to_str())
@@ -1387,6 +1388,7 @@ impl Render for FileExplorer {
             .map(|t| t.title.clone());
         let file_tree = state.workspace.file_tree.clone();
         let active_path = state
+            .workspace
             .tabs
             .get(state.workspace.active_tab)
             .and_then(|tab| tab.file_path.clone());

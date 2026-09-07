@@ -1230,20 +1230,6 @@ pub struct AppState {
     pub user_dictionary: Rc<HashSet<String>>,
 }
 
-impl std::ops::Deref for AppState {
-    type Target = WorkspaceState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.workspace
-    }
-}
-
-impl std::ops::DerefMut for AppState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.workspace
-    }
-}
-
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VimChange {

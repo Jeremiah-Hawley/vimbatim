@@ -251,6 +251,7 @@ impl AppState {
     pub fn delete_tags(&mut self) {
         let is_tag = Self::tag_paragraph_test();
         let any = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.document.paragraphs.iter().any(&is_tag))
@@ -575,6 +576,7 @@ impl AppState {
         }
 
         let selection_is_match = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.selection.map(|(a, f)| (t, a.min(f), a.max(f))))
@@ -849,6 +851,7 @@ impl AppState {
             return;
         }
         if let Some(idx) = self
+            .workspace
             .tabs
             .iter()
             .position(|t| t.file_path.as_deref() == Some(&path))
@@ -1082,6 +1085,7 @@ impl AppState {
     /// instead of silently dropping edits.
     pub fn request_close_tab(&mut self, idx: usize) {
         if self
+            .workspace
             .tabs
             .get(idx)
             .map(|t| t.document.is_modified)
@@ -1169,6 +1173,7 @@ impl AppState {
                 };
                 let _ = self.save_tab(idx);
                 let persisted = self
+                    .workspace
                     .tabs
                     .get(idx)
                     .map(|t| !t.document.is_modified)
@@ -1539,6 +1544,7 @@ impl AppState {
          */
         self.push_undo_snapshot();
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -1560,6 +1566,7 @@ impl AppState {
         // until the same action is triggered again — not just this one.
         if let Some((start, end)) = inserted_range {
             let pending = self
+                .workspace
                 .tabs
                 .get(self.workspace.active_tab)
                 .and_then(|t| t.pending_format.clone());
@@ -1583,6 +1590,7 @@ impl AppState {
          * backspace doesn't create an empty undo step.
          */
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -1592,6 +1600,7 @@ impl AppState {
             return;
         }
         let at_document_start = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.cursor == 0)
@@ -1653,6 +1662,7 @@ impl AppState {
     /// those.
     pub fn delete_forward(&mut self) {
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -1662,6 +1672,7 @@ impl AppState {
             return;
         }
         let at_document_end = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.cursor >= t.document.content.len())
@@ -1688,6 +1699,7 @@ impl AppState {
          * `selection` is `None`.
          */
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -1714,6 +1726,7 @@ impl AppState {
          * the user can already see.
          */
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -1723,6 +1736,7 @@ impl AppState {
             return;
         }
         let Some((start, cursor)) = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| (word_backward(&t.document.content, t.cursor), t.cursor))
@@ -2029,6 +2043,7 @@ impl AppState {
          */
         let default_size = self.normal_text_size_half_points;
         let has_selection = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -2101,6 +2116,7 @@ impl AppState {
         };
 
         let nothing_to_do = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| {
@@ -3048,6 +3064,7 @@ impl AppState {
          * File is saved as document_name.md in same directory.
          */
         let tab = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No active tab"))?;
@@ -3090,6 +3107,7 @@ impl AppState {
             Some((a, f)) => (a.min(f), a.max(f)),
             None => {
                 let cursor = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|t| t.cursor)
@@ -3290,6 +3308,7 @@ impl AppState {
     pub fn delete_analytics(&mut self) {
         let is_analytic = self.analytic_paragraph_test();
         let any = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.document.paragraphs.iter().any(&is_analytic))
@@ -3334,6 +3353,7 @@ impl AppState {
         let is_analytic = self.analytic_paragraph_test();
 
         let any = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.document.paragraphs.iter().any(&is_analytic))
@@ -3629,6 +3649,7 @@ impl AppState {
         }
         self.push_undo_snapshot();
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -3685,6 +3706,7 @@ impl AppState {
         }
         self.push_undo_snapshot();
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.selection.is_some())
@@ -4878,6 +4900,7 @@ impl AppState {
         // Already open elsewhere: `open_file` knows how to focus that tab (or
         // that pane) instead of pulling a second copy of the document in.
         if self
+            .workspace
             .tabs
             .iter()
             .any(|t| t.file_path.as_deref() == Some(&path))
@@ -5151,6 +5174,7 @@ impl AppState {
                 .unwrap_or("Untitled")
                 .to_string();
             for tab in self
+                .workspace
                 .tabs
                 .iter_mut()
                 .filter(|t| t.file_path.as_deref() == Some(old))
@@ -5368,6 +5392,7 @@ impl AppState {
          * between characters).
          */
         let was_insert = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.vim_mode == VimMode::Insert)
@@ -5729,6 +5754,7 @@ impl AppState {
         // the keystroke — so if the buffer is non-empty, nothing else
         // could be racing it.
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .is_some_and(|t| !t.vim_keybind_seq.is_empty())
@@ -5737,6 +5763,7 @@ impl AppState {
         }
 
         if let Some(operator) = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.vim_pending_operator)
@@ -5751,6 +5778,7 @@ impl AppState {
         // the same reason a pending operator is: it must claim its next key
         // unconditionally.
         if self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.vim_pending_replace)
@@ -6132,6 +6160,7 @@ impl AppState {
          * empirically after `$` didn't fire under a narrower check.
          */
         let buf = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.vim_command_buf.clone())
@@ -6166,6 +6195,7 @@ impl AppState {
                     // with them.
                     else if matches_shifted_symbol(key, shift, key_char, "4", "$") {
                         let target = self
+                            .workspace
                             .tabs
                             .get(self.workspace.active_tab)
                             .map(|tab| line_end(&tab.document.content, tab.cursor))
@@ -6176,6 +6206,7 @@ impl AppState {
                         };
                     } else if key == "0" && !shift {
                         let target = self
+                            .workspace
                             .tabs
                             .get(self.workspace.active_tab)
                             .map(|tab| line_start(&tab.document.content, tab.cursor))
@@ -6186,6 +6217,7 @@ impl AppState {
                         };
                     } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
                         let target = self
+                            .workspace
                             .tabs
                             .get(self.workspace.active_tab)
                             .map(|tab| first_nonblank(&tab.document.content, tab.cursor))
@@ -6202,6 +6234,7 @@ impl AppState {
                     if let Some(target_char) = vim_find_target_char(key, shift, key_char) {
                         let count = pending_count.unwrap_or(1);
                         let mut pos = self
+                            .workspace
                             .tabs
                             .get(self.workspace.active_tab)
                             .map(|t| t.cursor)
@@ -6245,6 +6278,7 @@ impl AppState {
         if matches_shifted_symbol(key, shift, key_char, "4", "$") {
             self.clear_vim_command_buf();
             let target = self
+                .workspace
                 .tabs
                 .get(self.workspace.active_tab)
                 .map(|tab| line_end(&tab.document.content, tab.cursor))
@@ -6257,6 +6291,7 @@ impl AppState {
         if matches_shifted_symbol(key, shift, key_char, "6", "^") {
             self.clear_vim_command_buf();
             let target = self
+                .workspace
                 .tabs
                 .get(self.workspace.active_tab)
                 .map(|tab| first_nonblank(&tab.document.content, tab.cursor))
@@ -6377,6 +6412,7 @@ impl AppState {
             }
             ("0", false) => {
                 let t = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|tab| line_start(&tab.document.content, tab.cursor))
@@ -6389,6 +6425,7 @@ impl AppState {
             ("_", false) => {
                 let c = count.unwrap_or(1);
                 let t = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|tab| underscore_motion(&tab.document.content, tab.cursor, c))
@@ -6450,6 +6487,7 @@ impl AppState {
             }
             ("home", _) => {
                 let t = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|tab| line_start(&tab.document.content, tab.cursor))
@@ -6461,6 +6499,7 @@ impl AppState {
             }
             ("end", _) => {
                 let t = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|tab| line_end(&tab.document.content, tab.cursor))
@@ -7032,6 +7071,7 @@ impl AppState {
          *    has no viewport context to resolve them).
          */
         if let Some(inner) = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.vim_pending_text_object_prefix)
@@ -7611,6 +7651,7 @@ impl AppState {
         }
         if key == "enter" {
             let line = self
+                .workspace
                 .tabs
                 .get(self.workspace.active_tab)
                 .map(|t| t.vim_command_line.clone())
@@ -7652,6 +7693,7 @@ impl AppState {
         match self.capture_vim_line_input(key, shift, key_char) {
             VimLineInput::Dispatch(pattern) => {
                 let forward = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|t| t.vim_search_direction)
@@ -7702,6 +7744,7 @@ impl AppState {
             }
             "q" => {
                 let modified = self
+                    .workspace
                     .tabs
                     .get(self.workspace.active_tab)
                     .map(|t| t.document.is_modified)
@@ -7793,6 +7836,7 @@ impl AppState {
         }
         self.global_vim.last_search = Some((pattern.to_string(), forward));
         let cursor = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.cursor)
@@ -7839,6 +7883,7 @@ impl AppState {
         };
         let effective_forward = if reverse { !forward } else { forward };
         let cursor = self
+            .workspace
             .tabs
             .get(self.workspace.active_tab)
             .map(|t| t.cursor)
@@ -11247,6 +11292,7 @@ mod tests {
         state.open_file(path.clone());
 
         let tab = state
+            .workspace
             .tabs
             .iter()
             .find(|t| t.title == "corrupt.docx")
@@ -11258,6 +11304,7 @@ mod tests {
 
         // Edit and save the way a user would; the original must be untouched.
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.title == "corrupt.docx")
@@ -11288,6 +11335,7 @@ mod tests {
         let mut state = make_state("hello", 0, None);
         state.open_file(path);
         let tab = state
+            .workspace
             .tabs
             .iter()
             .find(|t| t.title == "corrupt.docx")
@@ -11301,6 +11349,7 @@ mod tests {
 
         // Dismissible, like the unsupported-content banner it shares a slot with.
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.title == "corrupt.docx")
@@ -11324,6 +11373,7 @@ mod tests {
         let mut state = make_state("hello", 0, None);
         state.open_file(path);
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.title == "corrupt.docx")
@@ -11399,6 +11449,7 @@ mod tests {
         // blank starting tab — so give it a second one to close from.
         state.new_tab();
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.file_path.as_ref() == Some(&src))
@@ -11423,6 +11474,7 @@ mod tests {
         state.reopen_closed_tab();
         assert!(
             state
+                .workspace
                 .tabs
                 .iter()
                 .any(|t| t.file_path.as_ref() == Some(&moved)),
@@ -11496,6 +11548,7 @@ mod tests {
         state.open_file(path.clone());
 
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.title == "placeholder.docx")
@@ -11940,6 +11993,7 @@ mod tests {
         let mut state = make_state("hello", 0, None);
         state.open_file(path.clone());
         let idx = state
+            .workspace
             .tabs
             .iter()
             .position(|t| t.title == "Blank.docx")
@@ -13088,8 +13142,8 @@ mod tests {
             para_plain("test"),
         ];
         let mut source = make_state_with_paragraphs(paragraphs, 0);
-        let doc_len = source.tabs[0].document.content.len();
-        source.tabs[0].selection = Some((0, doc_len));
+        let doc_len = source.workspace.tabs[0].document.content.len();
+        source.workspace.tabs[0].selection = Some((0, doc_len));
 
         let plain = source.copy_selection().unwrap();
         let runs = source.copy_selection_runs().unwrap();
@@ -13101,7 +13155,7 @@ mod tests {
         let mut dest = make_state("", 0, None);
         dest.insert_str_with_runs_and_paragraphs(&plain, &decoded, &decoded_attrs);
 
-        let paras = &dest.tabs[0].document.paragraphs;
+        let paras = &dest.workspace.tabs[0].document.paragraphs;
         assert_eq!(paras.len(), 5, "expected one paragraph per copied line");
 
         // Paragraph-level card-style markers must survive the paste.
@@ -13175,9 +13229,14 @@ mod tests {
         );
         // Through the newline that ends "normal text", stopping at the blank
         // line's first byte — the selection a drag down the card produces.
-        let end =
-            source.tabs[0].document.content.find("normal text").unwrap() + "normal text".len() + 1;
-        source.tabs[0].selection = Some((0, end));
+        let end = source.workspace.tabs[0]
+            .document
+            .content
+            .find("normal text")
+            .unwrap()
+            + "normal text".len()
+            + 1;
+        source.workspace.tabs[0].selection = Some((0, end));
 
         let plain = source.copy_selection().unwrap();
         let runs = source.copy_selection_runs().unwrap();
@@ -13191,7 +13250,7 @@ mod tests {
         let mut dest = make_state_with_paragraphs(vec![para_plain("")], 0);
         dest.insert_str_with_runs_and_paragraphs(&plain, &runs, &attrs);
 
-        let paras = &dest.tabs[0].document.paragraphs;
+        let paras = &dest.workspace.tabs[0].document.paragraphs;
         assert_eq!(
             paras.iter().map(|p| p.heading).collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 0, 0],
@@ -13355,8 +13414,8 @@ mod tests {
             },
         ];
         let mut source = make_state_with_paragraphs(paragraphs, 0);
-        let doc_len = source.tabs[0].document.content.len();
-        source.tabs[0].selection = Some((0, doc_len)); // whole doc, crossing both paragraph boundaries
+        let doc_len = source.workspace.tabs[0].document.content.len();
+        source.workspace.tabs[0].selection = Some((0, doc_len)); // whole doc, crossing both paragraph boundaries
 
         let plain_text = source.copy_selection().unwrap();
         let runs = source.copy_selection_runs().unwrap();
@@ -13372,22 +13431,25 @@ mod tests {
         let mut dest = make_state("", 0, None);
         dest.insert_str_with_runs(&plain_text, &decoded_runs);
 
-        assert_eq!(dest.tabs[0].document.content, plain_text);
-        assert_eq!(dest.tabs[0].document.paragraphs.len(), 3);
+        assert_eq!(dest.workspace.tabs[0].document.content, plain_text);
+        assert_eq!(dest.workspace.tabs[0].document.paragraphs.len(), 3);
         assert_eq!(
-            dest.tabs[0].document.paragraphs[0].runs[0].text,
+            dest.workspace.tabs[0].document.paragraphs[0].runs[0].text,
             "bold line"
         );
-        assert!(dest.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(dest.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
         assert_eq!(
-            dest.tabs[0].document.paragraphs[1].runs[0].text,
+            dest.workspace.tabs[0].document.paragraphs[1].runs[0].text,
             "plain line"
         );
-        assert!(!dest.tabs[0].document.paragraphs[1].runs[0].bold);
-        assert_eq!(dest.tabs[0].document.paragraphs[2].runs[0].text, "hi line");
-        assert!(dest.tabs[0].document.paragraphs[2].runs[0].highlight);
+        assert!(!dest.workspace.tabs[0].document.paragraphs[1].runs[0].bold);
         assert_eq!(
-            dest.tabs[0].document.paragraphs[2].runs[0].highlight_color,
+            dest.workspace.tabs[0].document.paragraphs[2].runs[0].text,
+            "hi line"
+        );
+        assert!(dest.workspace.tabs[0].document.paragraphs[2].runs[0].highlight);
+        assert_eq!(
+            dest.workspace.tabs[0].document.paragraphs[2].runs[0].highlight_color,
             "yellow"
         );
     }
@@ -17311,7 +17373,10 @@ mod tests {
         let mut de = make_state("one two", 0, None);
         de.handle_vim_key("d", false, None);
         de.handle_vim_key("e", false, None);
-        assert_ne!(dw.tabs[0].document.content, de.tabs[0].document.content);
+        assert_ne!(
+            dw.workspace.tabs[0].document.content,
+            de.workspace.tabs[0].document.content
+        );
     }
 
     #[test]
@@ -17455,7 +17520,7 @@ mod tests {
         let mut state2 = make_state("hello", 0, None);
         state2.handle_vim_key("d", false, None);
         state2.vim_enter_visual();
-        assert_eq!(state2.tabs[0].vim_pending_operator, None);
+        assert_eq!(state2.workspace.tabs[0].vim_pending_operator, None);
     }
 
     #[test]

@@ -808,7 +808,7 @@ pub struct TextEditor {
     spell_cache: Rc<RefCell<SpellCache>>,
     /// Which pane this editor paints. Two `TextEditor` entities exist while
     /// the split is open (`notes/split_view_plan.md`); every tab read below
-    /// goes through `tab_index` rather than `AppState.active_tab`, so each one
+    /// goes through `tab_index` rather than `AppState.workspace.active_tab`, so each one
     /// shows its own document.
     pane: Pane,
 }
@@ -1456,6 +1456,7 @@ impl TextEditor {
         if self
             .state
             .read(cx)
+            .workspace
             .tabs
             .get(self.tab_index(cx).unwrap_or(usize::MAX))
             .is_some_and(|t| !t.similar_ranges.is_empty())
@@ -1867,6 +1868,7 @@ impl TextEditor {
                         .and_then(|i| {
                             self.state
                                 .read(cx)
+                                .workspace
                                 .tabs
                                 .get(i)
                                 .map(|t| t.vim_keybind_seq == "z")
@@ -1937,6 +1939,7 @@ impl TextEditor {
                         .and_then(|i| {
                             self.state
                                 .read(cx)
+                                .workspace
                                 .tabs
                                 .get(i)
                                 .map(|t| t.vim_command_buf.is_empty())
@@ -2237,7 +2240,7 @@ impl Render for TextEditor {
         // Only when *this* pane is the one being asked for — with two editors
         // mounted, an unqualified flag lets whichever renders first steal the
         // keyboard from the pane the user actually acted on.
-        if self.state.read(cx).pending_focus_editor == Some(self.pane) {
+        if self.state.read(cx).workspace.pending_focus_editor == Some(self.pane) {
             self.state
                 .update(cx, |state, _cx| state.workspace.pending_focus_editor = None);
             self.focus_handle.clone().focus(window, cx);
@@ -2276,7 +2279,7 @@ impl Render for TextEditor {
         // first time that tab has ever been active.
         let active_tab_id = self
             .tab_index(cx)
-            .and_then(|i| self.state.read(cx).tabs.get(i))
+            .and_then(|i| self.state.read(cx).workspace.tabs.get(i))
             .map(|t| t.id.0);
         if self.last_seen_active_tab != active_tab_id {
             if let Some(prev_id) = self.last_seen_active_tab {
@@ -2370,6 +2373,7 @@ impl Render for TextEditor {
             (
                 state.pane_content(self.pane).to_string(),
                 state
+                    .workspace
                     .tabs
                     .get(idx.unwrap_or(usize::MAX))
                     .map(|t| t.document.paragraphs.clone())
@@ -2377,11 +2381,13 @@ impl Render for TextEditor {
             )
         });
         let is_new_tab = state
+            .workspace
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .map(|t| t.is_blank_new_tab())
             .unwrap_or(true);
         let banner_message = state
+            .workspace
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .and_then(|t| t.banner_message());
@@ -2395,6 +2401,7 @@ impl Render for TextEditor {
         // the caret selection, and the next keystroke or click clears the
         // similar ranges.
         let selections: Vec<(usize, usize)> = state
+            .workspace
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .into_iter()
@@ -2451,6 +2458,7 @@ impl Render for TextEditor {
         // until the next `:` is opened, matching real vim's persistent
         // error line.
         let pending_command_text: Option<String> = state
+            .workspace
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .map(|t| {
@@ -3461,6 +3469,7 @@ impl Render for TextEditor {
                     let has_selection = self
                         .state
                         .read(cx)
+                        .workspace
                         .tabs
                         .get(self.tab_index(cx).unwrap_or(usize::MAX))
                         .is_some_and(|t| t.selection.is_some());
