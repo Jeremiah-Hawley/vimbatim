@@ -1,49 +1,54 @@
+use crate::app::error::AppError;
+use crate::app::repository::{DocumentRepository, WorkspaceRepository};
 use crate::document::DocumentBuffer;
 use std::path::{Path, PathBuf};
 
 pub struct DocumentStore;
 
-impl DocumentStore {
+impl DocumentRepository for DocumentStore {
     // Currently synchronous facades to encapsulate fs interactions.
     // In next steps, these can be made async and scheduled on GPUI background executors.
-    pub fn load_document(
+    fn load_document(
+        &self,
         path: &Path,
     ) -> Result<
         (
             Vec<crate::document::Paragraph>,
             crate::docx_parser::DocxOrigin,
         ),
-        String,
+        AppError,
     > {
-        crate::docx_parser::parse_docx(path).map_err(|e| e.to_string())
+        crate::docx_parser::parse_docx(path).map_err(|e| AppError::DocumentParse(e.to_string()))
     }
 
-    pub fn save_new_docx(
+    fn save_new_docx(
+        &self,
         paragraphs: &[crate::document::Paragraph],
         path: &Path,
         doc_style: &crate::docx_parser::NewDocStyle,
-    ) -> Result<(), String> {
-        crate::docx_parser::create_new_docx(paragraphs, path, *doc_style).map_err(|e| e.to_string())
+    ) -> Result<(), AppError> {
+        crate::docx_parser::create_new_docx(paragraphs, path, *doc_style)
+            .map_err(|e| AppError::DocumentParse(e.to_string()))
     }
 }
 
 pub struct WorkspaceFs;
 
-impl WorkspaceFs {
-    pub fn copy_file(src: &Path, dest: &Path) -> std::io::Result<u64> {
-        std::fs::copy(src, dest)
+impl WorkspaceRepository for WorkspaceFs {
+    fn copy_file(&self, src: &Path, dest: &Path) -> Result<u64, AppError> {
+        std::fs::copy(src, dest).map_err(|e| AppError::Workspace(e.to_string()))
     }
 
-    pub fn create_dir(path: &Path) -> std::io::Result<()> {
-        std::fs::create_dir(path)
+    fn create_dir(&self, path: &Path) -> Result<(), AppError> {
+        std::fs::create_dir(path).map_err(|e| AppError::Workspace(e.to_string()))
     }
 
-    pub fn rename(src: &Path, dest: &Path) -> std::io::Result<()> {
-        std::fs::rename(src, dest)
+    fn rename(&self, src: &Path, dest: &Path) -> Result<(), AppError> {
+        std::fs::rename(src, dest).map_err(|e| AppError::Workspace(e.to_string()))
     }
 
-    pub fn remove_file(path: &Path) -> std::io::Result<()> {
-        std::fs::remove_file(path)
+    fn remove_file(&self, path: &Path) -> Result<(), AppError> {
+        std::fs::remove_file(path).map_err(|e| AppError::Workspace(e.to_string()))
     }
 }
 
