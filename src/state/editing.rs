@@ -375,21 +375,25 @@ impl AppState {
 
     pub fn toggle_spellcheck(&mut self) {
         self.spellcheck_enabled = !self.spellcheck_enabled;
+        self.preferences.spellcheck_enabled = self.spellcheck_enabled;
         self.save_flag("spellcheck", self.spellcheck_enabled);
     }
 
     pub fn toggle_nav_fold_buttons(&mut self) {
         self.nav_fold_buttons = !self.nav_fold_buttons;
+        self.preferences.nav_fold_buttons = self.nav_fold_buttons;
         self.save_flag("nav_fold_buttons", self.nav_fold_buttons);
     }
 
     pub fn toggle_search_from_list(&mut self) {
         self.search_from_list_enabled = !self.search_from_list_enabled;
+        self.preferences.search_from_list_enabled = self.search_from_list_enabled;
         self.save_flag("search_from_list", self.search_from_list_enabled);
     }
 
     pub fn toggle_search_list_whole_words(&mut self) {
         self.search_list_whole_words = !self.search_list_whole_words;
+        self.preferences.search_list_whole_words = self.search_list_whole_words;
         self.save_flag("search_list_whole_words", self.search_list_whole_words);
         // The match count depends on this, so an open Search From List panel's
         // readout must follow the flip rather than going stale.
@@ -398,6 +402,7 @@ impl AppState {
 
     pub fn toggle_command_palette_enabled(&mut self) {
         self.command_palette_enabled = !self.command_palette_enabled;
+        self.preferences.command_palette_enabled = self.command_palette_enabled;
         self.save_flag("command_palette", self.command_palette_enabled);
         // Turning the feature off closes an already-open palette, rather than
         // leaving a panel up that its keybind can no longer reopen.
