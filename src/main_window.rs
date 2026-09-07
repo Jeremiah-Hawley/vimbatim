@@ -345,7 +345,7 @@ impl MainWindow {
         cx.on_action(move |_: &ToggleSidebarAction, cx| {
             s.update(cx, |st, cx| {
                 for effect in st.execute(crate::app::command::AppCommand::ToggleSidebar) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -582,7 +582,7 @@ impl MainWindow {
         cx.on_action(move |_: &UndoAction, cx| {
             s.update(cx, |st, cx| {
                 for effect in st.execute(crate::app::command::AppCommand::Undo) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -592,7 +592,7 @@ impl MainWindow {
         cx.on_action(move |_: &RedoAction, cx| {
             s.update(cx, |st, cx| {
                 for effect in st.execute(crate::app::command::AppCommand::Redo) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -620,7 +620,7 @@ impl MainWindow {
                 for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
                     crate::document_ops::FormatOp::Bold(true),
                 )) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -632,7 +632,7 @@ impl MainWindow {
                 for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
                     crate::document_ops::FormatOp::Underline(true),
                 )) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -736,7 +736,7 @@ impl MainWindow {
                 for effect in st.execute(crate::app::command::AppCommand::ApplyCardStyle(
                     crate::state::CardStyleKind::Block,
                 )) {
-                    // apply effects
+                    st.apply_effect(effect);
                 }
                 cx.notify();
             });
@@ -862,6 +862,7 @@ impl Render for MainWindow {
         let sidebar_width = self.state.read(cx).sidebar_width;
         let find_bar_visible = self.state.read(cx).ui.find_bar.is_some();
         let command_palette_visible = self.state.read(cx).ui.command_palette.is_some();
+        let notification = self.state.read(cx).ui.notifications.last().cloned();
         let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();
@@ -1113,5 +1114,29 @@ impl Render for MainWindow {
             .when(has_recovery, |d| d.child(self.recovery_prompt.clone()))
             // ── Word count panel ────────────────────────────────────────────
             .when(word_count_visible, |d| d.child(self.word_count.clone()))
+            .when_some(notification, |d, notification| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .bottom(px(16.0))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .px(px(14.0))
+                                    .py(px(10.0))
+                                    .bg(rgb(p.sidebar))
+                                    .border_1()
+                                    .border_color(rgb(p.border))
+                                    .text_color(rgb(p.text))
+                                    .child(notification.message),
+                            ),
+                    )
+                    .with_priority(200),
+                )
+            })
     }
 }

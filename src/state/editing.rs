@@ -1,4 +1,6 @@
 use super::*;
+use crate::app::repository::DocumentRepository;
+use crate::app::store::DocumentStore;
 
 impl AppState {
     pub fn new() -> Self {
@@ -848,12 +850,9 @@ impl AppState {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
         {
-            // stderr, matching how every other non-fatal file error in this
-            // file reports itself — there's no in-app notification surface.
-            log_line(&format!(
-                "[open] not a .docx, refusing to open: {}",
-                path.display()
-            ));
+            let message = format!("Not a .docx file: {}", path.display());
+            log_line(&format!("[open] {message}"));
+            self.apply_effect(crate::app::command::AppEffect::ShowError(message));
             return;
         }
         if let Some(idx) = self
@@ -875,6 +874,12 @@ impl AppState {
         }
         let tab = tab_from_docx(TabId(self.workspace.next_tab_id), &path);
         self.workspace.next_tab_id += 1;
+        if tab.opened_detached {
+            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                "Could not open {}; it was opened as a detached blank document.",
+                path.display()
+            )));
+        }
 
         // An untouched "New Tab" is a placeholder, not work — opening a file
         // takes its slot instead of leaving a blank tab stranded beside the
@@ -999,13 +1004,8 @@ impl AppState {
         let origin = tab.docx_origin.clone();
         let doc_style = self.new_doc_style();
         let save_started = Instant::now();
-        match origin {
-            Some(origin) => origin
-                .save(&paragraphs, &path)
-                .map_err(|e| format!("Save failed: {}", e))?,
-            None => create_new_docx(&paragraphs, &path, doc_style)
-                .map_err(|e| format!("Save failed: {}", e))?,
-        }
+        DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style)
+            .map_err(|e| format!("Save failed: {e}"))?;
         log_save_cost(&paragraphs, save_started.elapsed());
         let tab_id = if let Some(tab) = self.workspace.tabs.get_mut(idx) {
             tab.document.is_modified = false;
@@ -3033,15 +3033,13 @@ impl AppState {
     /// Writes one key to this state's settings.conf. Best-effort, matching
     /// every other settings write in this file — an unwritable directory must
     /// not break the in-memory change.
-    fn save_setting(&self, key: &str, value: &str) -> Vec<crate::app::command::AppEffect> {
-        let mut effects = vec![];
+    fn save_setting(&mut self, key: &str, value: &str) {
         if let Err(e) = crate::preferences::Preferences::update(&self.settings_path, key, value) {
-            effects.push(crate::app::command::AppEffect::ShowError(format!(
+            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                 "Failed to save setting {}: {}",
                 key, e
             )));
         }
-        effects
     }
 
     /// Swaps the sidebar between its Files and Nav views.
@@ -8072,7 +8070,7 @@ impl AppState {
 /// isn't there. Only the silent overwrite of real bytes goes away.
 fn tab_from_docx(id: TabId, path: &std::path::Path) -> Tab {
     let mut tab = Tab::from_path(id, path.to_path_buf());
-    match parse_docx(path) {
+    match DocumentStore.load_document(path) {
         Ok((paragraphs, origin)) => {
             tab.document.paragraphs = paragraphs;
             tab.has_unsupported_blocks = origin.has_unsupported_blocks;
@@ -21589,6 +21587,22 @@ mod tests {
         let state = make_state("hello", 0, None);
         assert!(state.dirty_tab_snapshots().is_empty());
     }
+
+    #[test]
+    fn show_error_effect_creates_a_visible_notification() {
+        let mut state = make_state("", 0, None);
+        state.apply_effect(crate::app::command::AppEffect::ShowError(
+            "save failed".into(),
+        ));
+        assert_eq!(state.ui.notifications.len(), 1);
+        assert_eq!(state.ui.notifications[0].message, "save failed");
+        assert_eq!(
+            state.ui.notifications[0].severity,
+            crate::state::NotificationSeverity::Error
+        );
+        state.execute(crate::app::command::AppCommand::ClearToast);
+        assert!(state.ui.notifications.is_empty());
+    }
 }
 
 impl AppState {
@@ -21596,7 +21610,7 @@ impl AppState {
         &mut self,
         command: crate::app::command::AppCommand,
     ) -> Vec<crate::app::command::AppEffect> {
-        use crate::app::command::{AppCommand, AppEffect};
+        use crate::app::command::AppCommand;
 
         match command {
             AppCommand::ApplyFormatting(op) => {
@@ -21624,8 +21638,19 @@ impl AppState {
                 vec![]
             }
             AppCommand::ClearToast => {
-                self.ui.toast_message = None;
+                self.ui.notifications.clear();
                 vec![]
+            }
+        }
+    }
+
+    pub fn apply_effect(&mut self, effect: crate::app::command::AppEffect) {
+        match effect {
+            crate::app::command::AppEffect::ShowError(message) => {
+                self.ui.notifications.push(crate::state::Notification {
+                    severity: crate::state::NotificationSeverity::Error,
+                    message,
+                });
             }
         }
     }
