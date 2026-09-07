@@ -518,46 +518,6 @@ struct ScrollbarDecoration {
 }
 
 /// Thumb size and position for one frame of the scrollbar.
-pub(crate) struct ScrollbarGeometry {
-    pub thumb_h: f32,
-    /// How far the thumb can travel: track height minus thumb height.
-    pub travel: f32,
-    pub thumb_top: f32,
-}
-
-/// Where the scrollbar thumb sits, given the viewport, the total content
-/// height, and how far the document is currently scrolled (a positive
-/// distance, unlike gpui's negative scroll offset).
-///
-/// Split out of `ScrollbarDecoration::compute` because it is the only part
-/// with arithmetic worth checking, and `compute` needs a live GPUI frame.
-pub(crate) fn scrollbar_geometry(
-    viewport_h: f32,
-    content_h: f32,
-    scrolled: f32,
-) -> ScrollbarGeometry {
-    /*
-     * The thumb is as large a fraction of the track as the viewport is of the
-     * document, floored at SCROLLBAR_MIN_THUMB_PX so a long document leaves
-     * something clickable, and capped at the track so a short one cannot
-     * overflow it.
-     */
-    let thumb_h = (viewport_h * (viewport_h / content_h))
-        .max(SCROLLBAR_MIN_THUMB_PX)
-        .min(viewport_h);
-    let travel = viewport_h - thumb_h;
-    let max_scroll = content_h - viewport_h;
-    let thumb_top = if max_scroll > 0.0 {
-        (scrolled / max_scroll).clamp(0.0, 1.0) * travel
-    } else {
-        0.0
-    };
-    ScrollbarGeometry {
-        thumb_h,
-        travel,
-        thumb_top,
-    }
-}
 
 impl UniformListDecoration for ScrollbarDecoration {
     fn compute(
@@ -590,11 +550,16 @@ impl UniformListDecoration for ScrollbarDecoration {
         // `scroll_offset.y` grows more negative the further down the document
         // is scrolled, which is why this negates before taking a fraction.
         let scrolled = (-scroll_offset.y.as_f32()).clamp(0.0, max_scroll);
-        let ScrollbarGeometry {
+        let crate::editor::geometry::ScrollbarGeometry {
             thumb_h,
             travel,
             thumb_top,
-        } = scrollbar_geometry(viewport_h, content_h, scrolled);
+        } = crate::editor::geometry::scrollbar_geometry(
+            viewport_h,
+            content_h,
+            scrolled,
+            SCROLLBAR_MIN_THUMB_PX,
+        );
 
         // The decoration is prepainted at `padded_bounds.origin + scroll_offset`
         // (gpui's `uniform_list`), i.e. in *scrolled content* space, so
@@ -5631,14 +5596,13 @@ mod tests {
         list_item_ordinal, list_marker_text, list_marker_text_for_level,
         nearest_wrap_row_for_display_row, page_scroll_offset, paints_run_box, real_row_height_px,
         row_cache_is_valid_for, row_edge_target_col, row_slot_px, run_is_hidden,
-        scrollbar_fade_opacity, scrollbar_geometry, selection_span_for_line,
-        slot_count_for_paragraph, spell_ranges_cached, sub_cursor_for_run, text_line_box_px,
-        to_letter, to_roman, usable_wrap_width, visual_row_for_line_col, visual_row_step,
-        wrap_line_into_rows, x_for_col_in_row, RowCache, RowEdge, SegmentStyle, SpellCache,
-        CARD_BOX_EXTRA_PX, CHAR_ADVANCE_RATIO, CURATED_SERIF_FONT, EMPHASIS_BOX_EXTRA_PX,
-        FONT_FAMILY, LINE_HEIGHT_PX, LINE_HEIGHT_RATIO, LIST_GUTTER_PX, ROW_SUBDIVISIONS,
-        SCROLLBAR_GUTTER_PX, SCROLLBAR_IDLE_OPACITY, SCROLLBAR_MIN_THUMB_PX,
-        SERIF_CHAR_ADVANCE_RATIO,
+        scrollbar_fade_opacity, selection_span_for_line, slot_count_for_paragraph,
+        spell_ranges_cached, sub_cursor_for_run, text_line_box_px, to_letter, to_roman,
+        usable_wrap_width, visual_row_for_line_col, visual_row_step, wrap_line_into_rows,
+        x_for_col_in_row, RowCache, RowEdge, SegmentStyle, SpellCache, CARD_BOX_EXTRA_PX,
+        CHAR_ADVANCE_RATIO, CURATED_SERIF_FONT, EMPHASIS_BOX_EXTRA_PX, FONT_FAMILY, LINE_HEIGHT_PX,
+        LINE_HEIGHT_RATIO, LIST_GUTTER_PX, ROW_SUBDIVISIONS, SCROLLBAR_GUTTER_PX,
+        SCROLLBAR_IDLE_OPACITY, SCROLLBAR_MIN_THUMB_PX, SERIF_CHAR_ADVANCE_RATIO,
     };
     use crate::docx_parser::{Alignment, ListItem, ListKind, Paragraph, Run};
     use crate::state::AppState;
@@ -7934,10 +7898,20 @@ mod tests {
         let (viewport, content) = (400.0f32, 2000.0f32);
         let max_scroll = content - viewport;
 
-        let top = scrollbar_geometry(viewport, content, 0.0);
+        let top = crate::editor::geometry::scrollbar_geometry(
+            viewport,
+            content,
+            0.0,
+            SCROLLBAR_MIN_THUMB_PX,
+        );
         assert_eq!(top.thumb_top, 0.0);
 
-        let bottom = scrollbar_geometry(viewport, content, max_scroll);
+        let bottom = crate::editor::geometry::scrollbar_geometry(
+            viewport,
+            content,
+            max_scroll,
+            SCROLLBAR_MIN_THUMB_PX,
+        );
         assert!(
             (bottom.thumb_top + bottom.thumb_h - viewport).abs() < 0.01,
             "fully scrolled thumb must end at the track's bottom: {} + {} vs {viewport}",
@@ -7945,15 +7919,22 @@ mod tests {
             bottom.thumb_h
         );
 
-        let middle = scrollbar_geometry(viewport, content, max_scroll / 2.0);
+        let middle = crate::editor::geometry::scrollbar_geometry(
+            viewport,
+            content,
+            max_scroll / 2.0,
+            SCROLLBAR_MIN_THUMB_PX,
+        );
         assert!((middle.thumb_top - bottom.thumb_top / 2.0).abs() < 0.01);
     }
 
     /// Thumb size tracks how much of the document is on screen.
     #[test]
     fn scrollbar_thumb_is_proportional_to_the_visible_fraction() {
-        let short = scrollbar_geometry(400.0, 800.0, 0.0);
-        let long = scrollbar_geometry(400.0, 8000.0, 0.0);
+        let short =
+            crate::editor::geometry::scrollbar_geometry(400.0, 800.0, 0.0, SCROLLBAR_MIN_THUMB_PX);
+        let long =
+            crate::editor::geometry::scrollbar_geometry(400.0, 8000.0, 0.0, SCROLLBAR_MIN_THUMB_PX);
         assert!(short.thumb_h > long.thumb_h);
         // Half the document visible -> half the track.
         assert!(
@@ -7967,7 +7948,12 @@ mod tests {
     /// unclickable, and a short one must not overflow the track.
     #[test]
     fn scrollbar_thumb_is_clamped_at_both_ends() {
-        let huge = scrollbar_geometry(400.0, 1_000_000.0, 0.0);
+        let huge = crate::editor::geometry::scrollbar_geometry(
+            400.0,
+            1_000_000.0,
+            0.0,
+            SCROLLBAR_MIN_THUMB_PX,
+        );
         assert!(
             huge.thumb_h >= SCROLLBAR_MIN_THUMB_PX,
             "got {}",
@@ -7978,7 +7964,8 @@ mod tests {
             "a floored thumb must still have room to move"
         );
 
-        let barely = scrollbar_geometry(400.0, 401.0, 0.0);
+        let barely =
+            crate::editor::geometry::scrollbar_geometry(400.0, 401.0, 0.0, SCROLLBAR_MIN_THUMB_PX);
         assert!(
             barely.thumb_h <= 400.0,
             "thumb overflowed the track: {}",
@@ -7991,7 +7978,8 @@ mod tests {
     /// a NaN that would lay out as a zero-height thumb.
     #[test]
     fn scrollbar_geometry_survives_a_document_that_fits_on_screen() {
-        let exact = scrollbar_geometry(400.0, 400.0, 0.0);
+        let exact =
+            crate::editor::geometry::scrollbar_geometry(400.0, 400.0, 0.0, SCROLLBAR_MIN_THUMB_PX);
         assert_eq!(exact.thumb_top, 0.0);
         assert!(exact.thumb_h.is_finite() && exact.travel.is_finite());
     }
