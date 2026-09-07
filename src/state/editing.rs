@@ -70,6 +70,7 @@ impl AppState {
                 vim_keybinds,
                 ..Default::default()
             },
+            preferences: preferences.clone(),
             sidebar_visible: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             copied_file: None,
@@ -9482,6 +9483,7 @@ mod tests {
                 vim_enabled: true,
                 ..Default::default()
             },
+            preferences: crate::preferences::Preferences::default(),
             sidebar_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             copied_file: None,

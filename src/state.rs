@@ -902,6 +902,9 @@ pub struct AppState {
     pub workspace: WorkspaceState,
     pub ui: UiState,
     pub global_vim: GlobalVimState,
+    /// Typed persisted settings. Legacy mirrors remain until their setters
+    /// are migrated, avoiding a behavior-changing bulk rewrite.
+    pub preferences: crate::preferences::Preferences,
     pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
