@@ -16,6 +16,7 @@ mod command_palette;
 mod document;
 mod document_ops;
 mod docx_parser;
+mod editor;
 mod file_explorer;
 mod find_bar;
 mod font_import;

@@ -3002,7 +3002,7 @@ impl Render for TextEditor {
                                 self.state.read(cx).preferences.spellcheck_enabled;
                             let user_dictionary = self.state.read(cx).user_dictionary.clone();
                             let spell_cache = self.spell_cache.clone();
-                            let spellcheck_color = highlight_color_hex(
+                            let spellcheck_color = crate::editor::color::highlight_color_hex(
                                 &self.state.read(cx).preferences.spellcheck_underline_color,
                             );
                             let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
@@ -4233,7 +4233,7 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
         }]);
     }
     if run.highlight {
-        let base_hex = highlight_color_hex(&run.highlight_color);
+        let base_hex = crate::editor::color::highlight_color_hex(&run.highlight_color);
         let text_hex = run
             .color
             .as_deref()
@@ -4245,8 +4245,10 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
         // default text color follows the theme, the condition does the gating
         // by itself — in light mode `p.text` is dark, so a yellow highlight
         // is left alone, which is what Word does there too.
-        let highlight_hex = if is_light_color(base_hex) && is_light_color(text_hex) {
-            darken_for_light_text(base_hex)
+        let highlight_hex = if crate::editor::color::is_light_color(base_hex)
+            && crate::editor::color::is_light_color(text_hex)
+        {
+            crate::editor::color::darken_for_light_text(base_hex)
         } else {
             base_hex
         };
@@ -4283,64 +4285,6 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
         }
     }
     el
-}
-
-pub(crate) fn highlight_color_hex(name: &str) -> u32 {
-    /*
-     * Maps Word's highlight color names to their GPUI hex value (spec
-     * 6.2's 15-entry table, plus a fallback for anything unrecognized).
-     * Falls back to parsing `name` as a raw 6-digit hex string before
-     * giving up — the HL Color dropdown's Custom option stores colors
-     * this way since there's no name for an arbitrary RGB value.
-     */
-    match name {
-        "yellow" => 0xFFD700,
-        "green" => 0x00FF00,
-        "blue" => 0x0000FF,
-        "cyan" => 0x00FFFF,
-        "magenta" => 0xFF00FF,
-        "red" => 0xFF0000,
-        "darkBlue" => 0x00008B,
-        "darkCyan" => 0x008B8B,
-        "darkGreen" => 0x006400,
-        "darkMagenta" => 0x8B008B,
-        "darkRed" => 0x8B0000,
-        "darkYellow" => 0x8B8B00,
-        "darkGray" => 0xA9A9A9,
-        "lightGray" => 0xD3D3D3,
-        "black" => 0x000000,
-        "white" => 0xFFFFFF,
-        _ => u32::from_str_radix(name, 16).unwrap_or(0x888888),
-    }
-}
-
-fn relative_luminance(hex: u32) -> f32 {
-    /*
-     * Standard perceived-luminance weighting (ITU-R BT.709 coefficients),
-     * used to decide whether a color reads as "light" (spec: bug fix,
-     * darken highlight under light text, matching Word's dark-mode
-     * behavior).
-     */
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-fn is_light_color(hex: u32) -> bool {
-    relative_luminance(hex) > 0.5
-}
-
-fn darken_for_light_text(hex: u32) -> u32 {
-    /*
-     * Scales each channel down uniformly (preserving hue) so a light
-     * highlight color stops washing out light-colored text on top of it.
-     */
-    const SCALE: f32 = 0.4;
-    let r = (((hex >> 16) & 0xFF) as f32 * SCALE) as u32;
-    let g = (((hex >> 8) & 0xFF) as f32 * SCALE) as u32;
-    let b = ((hex & 0xFF) as f32 * SCALE) as u32;
-    (r << 16) | (g << 8) | b
 }
 
 fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
@@ -5680,14 +5624,14 @@ mod tests {
     // sends the test-attribute expansion into infinite recursion if it's in
     // scope here.
     use super::{
-        build_visual_rows, column_for_x_in_row, darken_for_light_text, display_line,
-        document_lines, effective_char_advance_ratio, effective_char_font, effective_char_size_px,
-        expand_rows_for_display, heading_font_size_px, hidden_wrap_rows, highlight_color_hex,
-        is_light_color, line_col_from_mouse_position, line_font_px, line_for_y, line_height_px,
-        line_segments, list_item_ordinal, list_marker_text, list_marker_text_for_level,
+        build_visual_rows, column_for_x_in_row, display_line, document_lines,
+        effective_char_advance_ratio, effective_char_font, effective_char_size_px,
+        expand_rows_for_display, heading_font_size_px, hidden_wrap_rows,
+        line_col_from_mouse_position, line_font_px, line_for_y, line_height_px, line_segments,
+        list_item_ordinal, list_marker_text, list_marker_text_for_level,
         nearest_wrap_row_for_display_row, page_scroll_offset, paints_run_box, real_row_height_px,
-        relative_luminance, row_cache_is_valid_for, row_edge_target_col, row_slot_px,
-        run_is_hidden, scrollbar_fade_opacity, scrollbar_geometry, selection_span_for_line,
+        row_cache_is_valid_for, row_edge_target_col, row_slot_px, run_is_hidden,
+        scrollbar_fade_opacity, scrollbar_geometry, selection_span_for_line,
         slot_count_for_paragraph, spell_ranges_cached, sub_cursor_for_run, text_line_box_px,
         to_letter, to_roman, usable_wrap_width, visual_row_for_line_col, visual_row_step,
         wrap_line_into_rows, x_for_col_in_row, RowCache, RowEdge, SegmentStyle, SpellCache,
@@ -6855,15 +6799,21 @@ mod tests {
 
     #[test]
     fn test_highlight_color_hex_known_names() {
-        assert_eq!(highlight_color_hex("yellow"), 0xFFD700);
-        assert_eq!(highlight_color_hex("green"), 0x00FF00);
-        assert_eq!(highlight_color_hex("black"), 0x000000);
-        assert_eq!(highlight_color_hex("white"), 0xFFFFFF);
+        assert_eq!(
+            crate::editor::color::highlight_color_hex("yellow"),
+            0xFFD700
+        );
+        assert_eq!(crate::editor::color::highlight_color_hex("green"), 0x00FF00);
+        assert_eq!(crate::editor::color::highlight_color_hex("black"), 0x000000);
+        assert_eq!(crate::editor::color::highlight_color_hex("white"), 0xFFFFFF);
     }
 
     #[test]
     fn test_highlight_color_hex_unknown_name_falls_back() {
-        assert_eq!(highlight_color_hex("nonexistent"), 0x888888);
+        assert_eq!(
+            crate::editor::color::highlight_color_hex("nonexistent"),
+            0x888888
+        );
     }
 
     /// The 16 names `docx_parser` writes as `w:highlight` must all render as a
@@ -6892,7 +6842,7 @@ mod tests {
     fn test_every_word_highlight_name_has_a_color() {
         for name in crate::docx_parser::WORD_HIGHLIGHT_NAMES {
             assert_ne!(
-                highlight_color_hex(name),
+                crate::editor::color::highlight_color_hex(name),
                 0x888888,
                 "{name} falls through to the unknown-color fallback",
             );
@@ -6901,13 +6851,19 @@ mod tests {
 
     #[test]
     fn test_highlight_color_hex_raw_hex_string() {
-        assert_eq!(highlight_color_hex("00ff88"), 0x00ff88);
-        assert_eq!(highlight_color_hex("0000FF"), 0x0000ff);
+        assert_eq!(
+            crate::editor::color::highlight_color_hex("00ff88"),
+            0x00ff88
+        );
+        assert_eq!(
+            crate::editor::color::highlight_color_hex("0000FF"),
+            0x0000ff
+        );
     }
 
     #[test]
     fn test_highlight_color_hex_blue_named() {
-        assert_eq!(highlight_color_hex("blue"), 0x0000ff);
+        assert_eq!(crate::editor::color::highlight_color_hex("blue"), 0x0000ff);
     }
 
     #[test]
@@ -6945,43 +6901,47 @@ mod tests {
 
     #[test]
     fn test_relative_luminance_white_is_one() {
-        assert!((relative_luminance(0xFFFFFF) - 1.0).abs() < 0.001);
+        assert!((crate::editor::color::relative_luminance(0xFFFFFF) - 1.0).abs() < 0.001);
     }
 
     #[test]
     fn test_relative_luminance_black_is_zero() {
-        assert!((relative_luminance(0x000000) - 0.0).abs() < 0.001);
+        assert!((crate::editor::color::relative_luminance(0x000000) - 0.0).abs() < 0.001);
     }
 
     #[test]
     fn test_relative_luminance_yellow_is_high() {
         // 0.2126*1 + 0.7152*1 + 0.0722*0 = 0.9278
-        assert!((relative_luminance(0xFFFF00) - 0.9278).abs() < 0.001);
+        assert!((crate::editor::color::relative_luminance(0xFFFF00) - 0.9278).abs() < 0.001);
     }
 
     #[test]
     fn test_is_light_color_white_is_light() {
-        assert!(is_light_color(0xFFFFFF));
+        assert!(crate::editor::color::is_light_color(0xFFFFFF));
     }
 
     #[test]
     fn test_is_light_color_black_is_not_light() {
-        assert!(!is_light_color(0x000000));
+        assert!(!crate::editor::color::is_light_color(0x000000));
     }
 
     #[test]
     fn test_is_light_color_yellow_highlight_is_light() {
-        assert!(is_light_color(highlight_color_hex("yellow")));
+        assert!(crate::editor::color::is_light_color(
+            crate::editor::color::highlight_color_hex("yellow")
+        ));
     }
 
     #[test]
     fn test_is_light_color_dark_blue_highlight_is_not_light() {
-        assert!(!is_light_color(highlight_color_hex("darkBlue")));
+        assert!(!crate::editor::color::is_light_color(
+            crate::editor::color::highlight_color_hex("darkBlue")
+        ));
     }
 
     #[test]
     fn test_darken_for_light_text_reduces_each_channel() {
-        let darkened = darken_for_light_text(0xFFD700); // yellow highlight
+        let darkened = crate::editor::color::darken_for_light_text(0xFFD700); // yellow highlight
         let r = (darkened >> 16) & 0xFF;
         let g = (darkened >> 8) & 0xFF;
         let b = darkened & 0xFF;
@@ -6994,7 +6954,7 @@ mod tests {
     fn test_darken_for_light_text_preserves_hue_ratio() {
         // Darkening scales channels uniformly, so a pure-red channel stays
         // proportionally larger than a zero channel.
-        let darkened = darken_for_light_text(0xFFFF00);
+        let darkened = crate::editor::color::darken_for_light_text(0xFFFF00);
         let r = (darkened >> 16) & 0xFF;
         let g = (darkened >> 8) & 0xFF;
         let b = darkened & 0xFF;
@@ -7005,8 +6965,10 @@ mod tests {
 
     #[test]
     fn test_darken_for_light_text_result_is_no_longer_light() {
-        assert!(is_light_color(0xFFD700));
-        assert!(!is_light_color(darken_for_light_text(0xFFD700)));
+        assert!(crate::editor::color::is_light_color(0xFFD700));
+        assert!(!crate::editor::color::is_light_color(
+            crate::editor::color::darken_for_light_text(0xFFD700)
+        ));
     }
 
     // ── Diagnostic: isolate the per-keystroke cost on a large loaded document ──
