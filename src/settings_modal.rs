@@ -1100,7 +1100,10 @@ impl SettingsModal {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_collapsed = *self.collapsed.get(&category).unwrap_or(&false);
-        let actions = Self::listed_actions(category, self.state.read(cx).command_palette_enabled);
+        let actions = Self::listed_actions(
+            category,
+            self.state.read(cx).preferences.command_palette_enabled,
+        );
 
         div()
             .flex()
@@ -1351,7 +1354,10 @@ impl SettingsModal {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_collapsed = *self.vim_collapsed.get(&category).unwrap_or(&false);
-        let actions = Self::listed_actions(category, self.state.read(cx).command_palette_enabled);
+        let actions = Self::listed_actions(
+            category,
+            self.state.read(cx).preferences.command_palette_enabled,
+        );
 
         div()
             .flex()
@@ -2574,16 +2580,21 @@ impl Render for SettingsModal {
          * clicked to arm capture.
          */
         let vim_enabled = self.state.read(cx).global_vim.vim_enabled;
-        let spellcheck_enabled = self.state.read(cx).spellcheck_enabled;
-        let spellcheck_color = self.state.read(cx).spellcheck_underline_color.clone();
+        let spellcheck_enabled = self.state.read(cx).preferences.spellcheck_enabled;
+        let spellcheck_color = self
+            .state
+            .read(cx)
+            .preferences
+            .spellcheck_underline_color
+            .clone();
         let spreading_wpm = self.state.read(cx).spreading_wpm;
-        let nav_fold_buttons = self.state.read(cx).nav_fold_buttons;
-        let search_from_list_enabled = self.state.read(cx).search_from_list_enabled;
-        let search_list_whole_words = self.state.read(cx).search_list_whole_words;
-        let command_palette_enabled = self.state.read(cx).command_palette_enabled;
-        let shrink_points = self.state.read(cx).small_size_half_points / 2;
+        let nav_fold_buttons = self.state.read(cx).preferences.nav_fold_buttons;
+        let search_from_list_enabled = self.state.read(cx).preferences.search_from_list_enabled;
+        let search_list_whole_words = self.state.read(cx).preferences.search_list_whole_words;
+        let command_palette_enabled = self.state.read(cx).preferences.command_palette_enabled;
+        let shrink_points = self.state.read(cx).preferences.small_size_half_points / 2;
         let exception = self.state.read(cx).standardize_highlight_exception.clone();
-        let analytic_color = self.state.read(cx).analytic_color.clone();
+        let analytic_color = self.state.read(cx).preferences.analytic_color.clone();
         // The same colors the HL Color dropdown offers — built-ins plus
         // whatever the user has saved — so the exception can name any highlight
         // actually reachable in the document.
@@ -2618,9 +2629,9 @@ impl Render for SettingsModal {
                 st.paste_condense_pilcrow,
             )
         };
-        let current_theme = self.state.read(cx).theme;
-        let current_theme_mode = self.state.read(cx).theme_mode;
-        let current_theme_color_mode = self.state.read(cx).theme_color_mode;
+        let current_theme = self.state.read(cx).preferences.theme;
+        let current_theme_mode = self.state.read(cx).preferences.theme_mode;
+        let current_theme_color_mode = self.state.read(cx).preferences.theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
         let vim_keybinds = self.state.read(cx).global_vim.vim_keybinds.clone();
         let p = self.state.read(cx).current_palette();
