@@ -1236,7 +1236,7 @@ impl FormattingRibbon {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme_mode = self.state.read(cx).theme_mode;
+        let theme_mode = self.state.read(cx).preferences.theme_mode;
         let rows: Vec<AnyElement> = match action {
             FormatAction::DocMenu => Self::text_menu_rows(
                 "Doc Menu",
@@ -2354,8 +2354,10 @@ impl Render for FormattingRibbon {
         // The button wears the current highlight color, nudged toward
         // visibility against this theme's chrome — see `visible_on_chrome`.
         let highlight_tint = crate::theme::visible_on_chrome(
-            crate::text_editor::highlight_color_hex(&self.state.read(cx).highlight_color),
-            self.state.read(cx).theme_mode,
+            crate::text_editor::highlight_color_hex(
+                &self.state.read(cx).preferences.highlight_color,
+            ),
+            self.state.read(cx).preferences.theme_mode,
         );
         let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
         let all_collapsed = ribbon_groups
