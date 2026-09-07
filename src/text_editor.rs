@@ -1145,7 +1145,7 @@ impl TextEditor {
         let idx = self.tab_index(cx);
         let state = self.state.read(cx);
         let dragging = state.workspace.split_dragging;
-        let invisibility = state.invisibility_mode;
+        let invisibility = state.ui.invisibility_mode;
         let cite_size = state.cite_size_half_points;
         let fold_version = idx
             .and_then(|i| state.workspace.tabs.get(i))
@@ -1474,7 +1474,7 @@ impl TextEditor {
         // scroll actually moved, so at the end of the document the key still
         // falls through to ordinary cursor movement.
         let plain_arrow = !ks.modifiers.shift && !ks.modifiers.control && !ks.modifiers.platform;
-        if self.state.read(cx).read_mode && plain_arrow {
+        if self.state.read(cx).ui.read_mode && plain_arrow {
             let forward = match ks.key.as_str() {
                 "right" => Some(true),
                 "left" => Some(false),
@@ -2331,7 +2331,7 @@ impl Render for TextEditor {
             self.scrollbar_activity = self.scrollbar_activity.wrapping_add(1);
         }
         let scrollbar_activity = self.scrollbar_activity;
-        let invisibility = state.invisibility_mode;
+        let invisibility = state.ui.invisibility_mode;
         let cite_size = state.cite_size_half_points;
         let fold_version = idx
             .and_then(|i| state.workspace.tabs.get(i))
@@ -2997,7 +2997,7 @@ impl Render for TextEditor {
                             let spellcheck_color = highlight_color_hex(
                                 &self.state.read(cx).preferences.spellcheck_underline_color,
                             );
-                            let invisibility_mode = self.state.read(cx).invisibility_mode;
+                            let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
                             let cite_size_half_points = self.state.read(cx).cite_size_half_points;
                             let folded_headings = {
                                 let st = self.state.read(cx);

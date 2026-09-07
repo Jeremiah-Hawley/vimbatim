@@ -825,7 +825,6 @@ pub enum PendingClose {
 }
 
 /// Transient UI overlays and menus.
-#[derive(Default)]
 pub struct UiState {
     pub file_context_menu: Option<FileContextMenu>,
     pub nav_context_menu: Option<NavContextMenu>,
@@ -835,6 +834,35 @@ pub struct UiState {
     pub settings_visible: bool,
     pub font_import_modal_open: bool,
     pub pending_close: Option<PendingClose>,
+    pub sidebar_visible: bool,
+    pub word_count_visible: bool,
+    pub timer: crate::timer::TimerState,
+    pub read_mode: bool,
+    pub sidebar_before_read_mode: bool,
+    pub invisibility_mode: bool,
+    pub print_layout: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            file_context_menu: None,
+            nav_context_menu: None,
+            editor_context_menu: None,
+            find_bar: None,
+            command_palette: None,
+            settings_visible: false,
+            font_import_modal_open: false,
+            pending_close: None,
+            sidebar_visible: true,
+            word_count_visible: false,
+            timer: crate::timer::TimerState::default(),
+            read_mode: false,
+            sidebar_before_read_mode: true,
+            invisibility_mode: false,
+            print_layout: false,
+        }
+    }
 }
 
 /// Vim state shared across tabs: registers, macros, searches, and repeat state.
@@ -1200,18 +1228,6 @@ pub struct AppState {
     /// closure (which must be `'static`, so it can't borrow) for the price of
     /// a refcount bump instead of deep-cloning every word on every frame.
     pub user_dictionary: Rc<HashSet<String>>,
-    pub invisibility_mode: bool,
-    /// Renders the document inside an 8.5x11in page centered in the editing
-    /// pane, wrapped to the page's text column instead of the viewport.
-    /// Continuous scroll, not true pagination — no page breaks (see
-    /// `PAGE_WIDTH_PX`/`PAGE_MARGIN_PX` in `text_editor.rs`). Not persisted,
-    /// same as `invisibility_mode` above.
-    pub print_layout: bool,
-    /// Reading mode: the split pane and sidebar are hidden, and Left/Right
-    /// page through the document a screenful at a time.
-    pub read_mode: bool,
-    /// Whether the sidebar was showing before read mode hid it.
-    sidebar_before_read_mode: bool,
 }
 
 impl std::ops::Deref for AppState {

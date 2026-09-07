@@ -120,10 +120,6 @@ impl AppState {
             spellcheck_enabled: preferences.spellcheck_enabled,
             spellcheck_underline_color: preferences.spellcheck_underline_color,
             user_dictionary: Rc::new(load_user_dictionary(&user_dictionary_path())),
-            invisibility_mode: false,
-            print_layout: false,
-            read_mode: false,
-            sidebar_before_read_mode: true,
         }
     }
 
@@ -710,13 +706,13 @@ impl AppState {
     /// away, same as `close_split`) and hides the sidebar, so the document has
     /// the whole window. Leaving restores the sidebar to whatever it was.
     pub fn toggle_read_mode(&mut self) {
-        self.read_mode = !self.read_mode;
-        if self.read_mode {
-            self.sidebar_before_read_mode = self.sidebar_visible;
+        self.ui.read_mode = !self.ui.read_mode;
+        if self.ui.read_mode {
+            self.ui.sidebar_before_read_mode = self.ui.sidebar_visible;
             self.close_split();
-            self.sidebar_visible = false;
+            self.ui.sidebar_visible = false;
         } else {
-            self.sidebar_visible = self.sidebar_before_read_mode;
+            self.ui.sidebar_visible = self.ui.sidebar_before_read_mode;
         }
     }
 
@@ -3031,7 +3027,7 @@ impl AppState {
             SidebarMode::Files => SidebarMode::Nav,
             SidebarMode::Nav => SidebarMode::Files,
         };
-        self.sidebar_visible = true;
+        self.ui.sidebar_visible = true;
     }
 
     pub fn toggle_invisibility_mode(&mut self) {
@@ -3039,11 +3035,11 @@ impl AppState {
          * Toggles invisibility mode. When on, only highlighted text,
          * tags, and citations are shown.
          */
-        self.invisibility_mode = !self.invisibility_mode;
+        self.ui.invisibility_mode = !self.ui.invisibility_mode;
     }
 
     pub fn toggle_print_layout(&mut self) {
-        self.print_layout = !self.print_layout;
+        self.ui.print_layout = !self.ui.print_layout;
     }
 
     pub fn wikify_current_tab(&mut self) -> std::io::Result<()> {
@@ -4672,7 +4668,7 @@ impl AppState {
          * reopens here next launch instead of resetting to the default.
          */
         self.workspace.working_directory = dir;
-        self.sidebar_visible = true;
+        self.ui.sidebar_visible = true;
         self.refresh_file_tree();
         let _ = save_working_directory(&self.settings_path, &self.workspace.working_directory);
     }
@@ -9557,10 +9553,6 @@ mod tests {
             spellcheck_enabled: false,
             spellcheck_underline_color: "red".to_string(),
             user_dictionary: Rc::new(HashSet::new()),
-            invisibility_mode: false,
-            print_layout: false,
-            read_mode: false,
-            sidebar_before_read_mode: true,
         };
         state
     }
@@ -10732,14 +10724,14 @@ mod tests {
     #[test]
     fn read_mode_hides_the_sidebar_and_collapses_the_split() {
         let mut state = make_state("doc", 0, None);
-        state.sidebar_visible = true;
+        state.ui.sidebar_visible = true;
         state.open_split();
         let tabs_before = state.workspace.tabs.len();
 
         state.toggle_read_mode();
 
-        assert!(state.read_mode);
-        assert!(!state.sidebar_visible);
+        assert!(state.ui.read_mode);
+        assert!(!state.ui.sidebar_visible);
         assert!(!state.workspace.split_view);
         // The split's tab is only un-shown, never closed.
         assert_eq!(
@@ -10752,13 +10744,13 @@ mod tests {
     #[test]
     fn leaving_read_mode_restores_the_sidebar_it_hid() {
         let mut state = make_state("doc", 0, None);
-        state.sidebar_visible = true;
+        state.ui.sidebar_visible = true;
 
         state.toggle_read_mode();
         state.toggle_read_mode();
 
-        assert!(!state.read_mode);
-        assert!(state.sidebar_visible);
+        assert!(!state.ui.read_mode);
+        assert!(state.ui.sidebar_visible);
     }
 
     /// A sidebar the user had already hidden must stay hidden on exit —
@@ -10766,12 +10758,12 @@ mod tests {
     #[test]
     fn leaving_read_mode_does_not_reveal_a_sidebar_that_was_already_hidden() {
         let mut state = make_state("doc", 0, None);
-        state.sidebar_visible = false;
+        state.ui.sidebar_visible = false;
 
         state.toggle_read_mode();
         state.toggle_read_mode();
 
-        assert!(!state.sidebar_visible);
+        assert!(!state.ui.sidebar_visible);
     }
 
     // ── Split view (notes/split_view_plan.md) ──────────────────────────────
@@ -19911,9 +19903,9 @@ mod tests {
     #[test]
     fn toggle_sidebar_mode_reveals_a_hidden_sidebar() {
         let mut state = make_state("", 0, None);
-        state.sidebar_visible = false;
+        state.ui.sidebar_visible = false;
         state.toggle_sidebar_mode();
-        assert!(state.sidebar_visible);
+        assert!(state.ui.sidebar_visible);
     }
 
     #[test]

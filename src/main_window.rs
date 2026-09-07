@@ -344,7 +344,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ToggleSidebarAction, cx| {
             s.update(cx, |st, cx| {
-                st.sidebar_visible = !st.sidebar_visible;
+                st.ui.sidebar_visible = !st.ui.sidebar_visible;
                 cx.notify();
             });
         });
@@ -783,7 +783,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &StartTimerAction, cx| {
             s.update(cx, |st, cx| {
-                st.timer.visible = !st.timer.visible;
+                st.ui.timer.visible = !st.ui.timer.visible;
                 cx.notify();
             });
         });
@@ -791,7 +791,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &OpenStatsAction, cx| {
             s.update(cx, |st, cx| {
-                st.word_count_visible = !st.word_count_visible;
+                st.ui.word_count_visible = !st.ui.word_count_visible;
                 cx.notify();
             });
         });
@@ -832,13 +832,13 @@ impl Render for MainWindow {
          * The outer container has `.relative()` so the modal's `.absolute()` is
          * scoped to this window rather than the display.
          */
-        let sidebar_visible = self.state.read(cx).sidebar_visible;
+        let sidebar_visible = self.state.read(cx).ui.sidebar_visible;
         let settings_visible = self.state.read(cx).ui.settings_visible;
         let pending_close = self.state.read(cx).ui.pending_close;
         let font_import_modal_open = self.state.read(cx).ui.font_import_modal_open;
         let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
-        let word_count_visible = self.state.read(cx).word_count_visible;
-        let timer_visible = self.state.read(cx).timer.visible;
+        let word_count_visible = self.state.read(cx).ui.word_count_visible;
+        let timer_visible = self.state.read(cx).ui.timer.visible;
         let split_view = self.state.read(cx).split_view;
         let split_ratio = self.state.read(cx).split_ratio;
         let sidebar_width = self.state.read(cx).sidebar_width;
@@ -904,7 +904,7 @@ impl Render for MainWindow {
                 split_state.update(cx, |s, cx| {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
-                    let left = if s.sidebar_visible {
+                    let left = if s.ui.sidebar_visible {
                         s.sidebar_width
                     } else {
                         0.0

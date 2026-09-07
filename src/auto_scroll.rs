@@ -213,7 +213,7 @@ impl AutoScroller {
         let (invisibility, cite_size, folds) = {
             let st = self.state.read(cx);
             (
-                st.invisibility_mode,
+                st.ui.invisibility_mode,
                 st.cite_size_half_points,
                 st.workspace
                     .tabs

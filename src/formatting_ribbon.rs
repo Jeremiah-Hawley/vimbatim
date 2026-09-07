@@ -349,7 +349,7 @@ pub struct FormattingRibbon {
     tab_search_focus: FocusHandle,
     /// `pub(crate)` so `color_picker::render_picker`'s listeners can reach it.
     pub(crate) picker: crate::color_picker::CustomColorPicker,
-    /// `AppState.read_mode` as of the last render, so the transition into it
+    /// `AppState.ui.read_mode` as of the last render, so the transition into it
     /// can be acted on once. Same check-and-update-per-frame idiom as
     /// `TextEditor.last_seen_active_tab`.
     last_seen_read_mode: bool,
@@ -835,7 +835,7 @@ impl FormattingRibbon {
                         }
                         FormatAction::Timer => {
                             st.update(cx, |state, _cx| {
-                                state.timer.visible = !state.timer.visible;
+                                state.ui.timer.visible = !state.ui.timer.visible;
                             });
                             cx.notify();
                         }
@@ -856,7 +856,7 @@ impl FormattingRibbon {
                                         crate::state::SidebarMode::Files
                                     }
                                 };
-                                state.sidebar_visible = true;
+                                state.ui.sidebar_visible = true;
                             });
                             cx.notify();
                         }
@@ -2319,7 +2319,7 @@ impl Render for FormattingRibbon {
         // window; leaving puts the previous layout back. Acted on once per
         // transition rather than held as an override, so a group can still be
         // expanded by hand while reading.
-        let read_mode = self.state.read(cx).read_mode;
+        let read_mode = self.state.read(cx).ui.read_mode;
         if read_mode != self.last_seen_read_mode {
             self.last_seen_read_mode = read_mode;
             if read_mode {
@@ -2346,11 +2346,11 @@ impl Render for FormattingRibbon {
             let state_read = state.read(cx);
             (state_read.current_palette(), state_read.theme_color_mode)
         };
-        let invisibility_mode = self.state.read(cx).invisibility_mode;
-        // let print_layout = self.state.read(cx).print_layout; // see the
+        let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
+        // let print_layout = self.state.read(cx).ui.print_layout; // see the
         // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
-        let timer_visible = self.state.read(cx).timer.visible;
+        let timer_visible = self.state.read(cx).ui.timer.visible;
         // The button wears the current highlight color, nudged toward
         // visibility against this theme's chrome — see `visible_on_chrome`.
         let highlight_tint = crate::theme::visible_on_chrome(
@@ -2536,7 +2536,7 @@ impl Render for FormattingRibbon {
                             RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold)
                                 .engaged(any_folded),
                             // Print Layout: deferred (checklist) — the toggle/state
-                            // (AppState.print_layout, toggle_print_layout) and this
+                            // (AppState.ui.print_layout, toggle_print_layout) and this
                             // action's click-handler arm are left in place, inert,
                             // for whenever the real wrap-width/hit-testing rework
                             // lands. No button until then — one that visibly does

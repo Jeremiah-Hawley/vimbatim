@@ -234,7 +234,7 @@ impl Timer {
                     .timer(Duration::from_millis(200))
                     .await;
                 let keep_going = this.update(cx, |this: &mut Timer, cx| {
-                    let running = this.state.read(cx).timer.is_running();
+                    let running = this.state.read(cx).ui.timer.is_running();
                     if !running {
                         this.ticking = false;
                     }
@@ -260,7 +260,7 @@ impl Timer {
     ) {
         let key = event.keystroke.key.clone();
         self.state.update(cx, |state, _cx| {
-            let input = &mut state.timer.input;
+            let input = &mut state.ui.timer.input;
             match key.as_str() {
                 "backspace" => {
                     input.pop();
@@ -313,7 +313,7 @@ impl Timer {
                         });
                         // Cheap to call when nothing started: it returns
                         // immediately unless the clock is actually running.
-                        if this.state.read(cx).timer.is_running() {
+                        if this.state.read(cx).ui.timer.is_running() {
                             this.start_ticking(cx);
                         }
                         cx.notify();
@@ -352,7 +352,7 @@ impl Timer {
             .hover(move |s| s.text_color(rgb(if selected { 0xffffff } else { p.text })))
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 this.state.update(cx, |state, cx| {
-                    state.timer.set_mode(mode);
+                    state.ui.timer.set_mode(mode);
                     cx.notify();
                 });
                 cx.notify();
@@ -371,7 +371,7 @@ impl Timer {
         // *remaining*, the opposite of what a words-per-minute calculation
         // needs (checklist: "Fix timer functionality to use the amount of
         // time gone... currently it uses the time left on the clock").
-        let over = state.timer.elapsed();
+        let over = state.ui.timer.elapsed();
 
         let (label, muted) = match words {
             // Deliberately the user's own wording — the hint has to say what to
@@ -402,11 +402,11 @@ impl Render for Timer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let mode = state.timer.mode;
-        let running = state.timer.is_running();
-        let display = format_duration(state.timer.displayed());
-        let input = state.timer.input.clone();
-        let unparseable = mode == TimerMode::Countdown && state.timer.target().is_none();
+        let mode = state.ui.timer.mode;
+        let running = state.ui.timer.is_running();
+        let display = format_duration(state.ui.timer.displayed());
+        let input = state.ui.timer.input.clone();
+        let unparseable = mode == TimerMode::Countdown && state.ui.timer.target().is_none();
         // Newest first: the lap you just took is the one you're reading.
         let laps: Vec<(usize, String)> = state
             .timer
@@ -476,7 +476,7 @@ impl Render for Timer {
                             .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                 this.state.update(cx, |s, cx| {
-                                    s.timer.visible = false;
+                                    s.ui.timer.visible = false;
                                     cx.notify();
                                 });
                             }))
