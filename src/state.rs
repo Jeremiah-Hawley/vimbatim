@@ -841,6 +841,7 @@ pub struct UiState {
     pub sidebar_before_read_mode: bool,
     pub invisibility_mode: bool,
     pub print_layout: bool,
+    pub toast_message: Option<String>,
 }
 
 impl Default for UiState {
@@ -861,6 +862,7 @@ impl Default for UiState {
             sidebar_before_read_mode: true,
             invisibility_mode: false,
             print_layout: false,
+            toast_message: None,
         }
     }
 }

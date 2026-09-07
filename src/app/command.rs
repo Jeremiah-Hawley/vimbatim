@@ -9,7 +9,10 @@ pub enum AppCommand {
     SwitchTab(usize),
     Undo,
     Redo,
+    ClearToast,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum AppEffect {}
+pub enum AppEffect {
+    ShowError(String),
+}

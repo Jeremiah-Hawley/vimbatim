@@ -3026,10 +3026,15 @@ impl AppState {
     /// Writes one key to this state's settings.conf. Best-effort, matching
     /// every other settings write in this file — an unwritable directory must
     /// not break the in-memory change.
-    fn save_setting(&self, key: &str, value: &str) {
+    fn save_setting(&self, key: &str, value: &str) -> Vec<crate::app::command::AppEffect> {
+        let mut effects = vec![];
         if let Err(e) = crate::preferences::Preferences::update(&self.settings_path, key, value) {
-            log_line(&format!("[settings] couldn't save {key}: {e}"));
+            effects.push(crate::app::command::AppEffect::ShowError(format!(
+                "Failed to save setting {}: {}",
+                key, e
+            )));
         }
+        effects
     }
 
     /// Swaps the sidebar between its Files and Nav views.
@@ -21569,6 +21574,10 @@ impl AppState {
             }
             AppCommand::Redo => {
                 self.redo();
+                vec![]
+            }
+            AppCommand::ClearToast => {
+                self.ui.toast_message = None;
                 vec![]
             }
         }
