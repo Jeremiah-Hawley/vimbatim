@@ -144,8 +144,27 @@ impl Render for RecoveryPrompt {
                                         let Ok(Ok(Some(dest))) = dest_rx.await else {
                                             return;
                                         };
+                                        let destination = crate::state::with_docx_extension(&dest);
+                                        let snapshot = entry.snapshot.clone();
+                                        let result = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                std::fs::copy(&snapshot, &destination)
+                                                    .map(|_| ())
+                                                    .map_err(|e| format!("Save failed: {e}"))
+                                            })
+                                            .await;
                                         let _ = state.update(cx, |s, cx| {
-                                            let _ = s.complete_recovery_save_as(&entry, &dest);
+                                            match result {
+                                                Ok(()) => {
+                                                    let _ = s.finish_recovery_save_as(&entry);
+                                                }
+                                                Err(error) => s.apply_effect(
+                                                    crate::app::command::AppEffect::ShowError(
+                                                        error,
+                                                    ),
+                                                ),
+                                            }
                                             cx.notify();
                                         });
                                     })

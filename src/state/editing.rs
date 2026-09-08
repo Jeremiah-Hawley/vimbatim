@@ -1364,12 +1364,14 @@ impl AppState {
         entry: &RecoveryEntry,
         dest: &Path,
     ) -> Result<(), String> {
-        // Forced here, at the funnel, rather than trusting the picker: a
-        // never-saved tab's title is literally "New Tab" (`Tab::new_empty`),
-        // so accepting the suggested name verbatim would otherwise write an
-        // extension-less file that nothing will reopen as a document.
         let dest = with_docx_extension(dest);
         std::fs::copy(&entry.snapshot, &dest).map_err(|e| format!("Save failed: {e}"))?;
+        self.finish_recovery_save_as(entry)
+    }
+
+    /// Applies the UI-state half of an already completed recovery copy.
+    /// The copy itself belongs on the background executor.
+    pub fn finish_recovery_save_as(&mut self, entry: &RecoveryEntry) -> Result<(), String> {
         self.recovery
             .pending_entries
             .retain(|e| e.snapshot != entry.snapshot);
