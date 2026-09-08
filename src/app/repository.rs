@@ -1,7 +1,7 @@
 use crate::app::error::AppError;
-use crate::document::{DocumentBuffer, Paragraph};
+use crate::document::Paragraph;
 use crate::docx_parser::{DocxOrigin, NewDocStyle};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub trait DocumentRepository {
     fn load_document(&self, path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), AppError>;
