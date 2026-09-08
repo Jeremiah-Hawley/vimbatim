@@ -12,6 +12,7 @@ use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{ListKind, Paragraph, Run};
 use crate::editor::layout::{line_height_px, row_slot_px, text_line_box_px};
+use crate::editor::style::heading_font_size_px;
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{
     matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, Pane, SpellTarget,
@@ -4242,21 +4243,6 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
         }
     }
     el
-}
-
-fn heading_font_size_px(heading: u8, zoom: f32) -> Option<f32> {
-    /*
-     * Spec 6.5's heading-level font size table, scaled by `zoom`. `None`
-     * for `heading == 0` (body text — no override).
-     */
-    match heading {
-        0 => None,
-        1 => Some(24.0 * zoom),
-        2 => Some(20.0 * zoom),
-        3 => Some(18.0 * zoom),
-        4..=6 => Some(16.0 * zoom),
-        _ => Some(14.0 * zoom), // 7-9
-    }
 }
 
 /// Vertical padding (`py(8.0)`, top+bottom) plus border (`border_2()`,
