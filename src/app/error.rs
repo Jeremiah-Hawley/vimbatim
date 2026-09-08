@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AppError {
     DocumentParse(String),
     DocumentSave(String),
