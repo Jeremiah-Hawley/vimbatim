@@ -952,11 +952,20 @@ impl AppState {
     /// The tab-bar right-click menu specifically needs this — its "Save As"
     /// awaits a native file dialog, and `active_tab` can have moved to a
     /// different document by the time the user picks a path.
-    pub fn save_tab_as(&mut self, idx: usize, path: PathBuf) -> Result<(), String> {
-        // Same funnel-level forcing the recovery Save As already does: a
-        // picker (or a user typing a name) can hand back a bare or
-        // wrong-extension path, and saving a docx there produces a file
-        // `open_file` will refuse to reopen.
+    pub fn prepare_save_as(
+        &mut self,
+        idx: usize,
+        path: PathBuf,
+    ) -> Result<
+        Option<(
+            TabId,
+            Vec<Paragraph>,
+            Option<Arc<DocxOrigin>>,
+            PathBuf,
+            crate::docx_parser::NewDocStyle,
+        )>,
+        String,
+    > {
         let path = with_docx_extension(&path);
 
         let tab = self.workspace.tabs.get_mut(idx).ok_or("No active tab")?;
@@ -967,70 +976,91 @@ impl AppState {
             .unwrap_or("Untitled")
             .to_string();
         tab.document.is_modified = true;
-        self.save_tab(idx)
+        self.prepare_save(idx)
     }
 
-    pub fn save_tab(&mut self, idx: usize) -> Result<(), String> {
-        /*
-         * Saves the tab at `idx` to its associated file path, from the
-         * live, formatting-synced `paragraphs` (rich-text formatting plan,
-         * Phase 1 Task 7) — the fix for the long-standing "editing a
-         * loaded docx destroys its formatting on save" simplification
-         * (`editor_instructions.md` line 82), since `paragraphs` now stays
-         * accurate through every edit (Phase 1 Task 4) instead of being
-         * regenerated from scratch as plain unstyled runs.
-         *
-         * When `docx_origin` is `Some`: uses it as the template (original
-         * ZIP bytes, XML preamble/sectPr) so styles/images/fonts survive
-         * untouched.
-         *
-         * When `docx_origin` is `None` (file created fresh inside
-         * vimbatim): uses `create_new_docx` to write a valid minimal docx
-         * from scratch.
-         *
-         * Tabs with no file path (plain "New Tab") are silently skipped — there
-         * is nowhere to write to yet.
-         */
+    pub fn save_tab_as(&mut self, idx: usize, path: PathBuf) -> Result<(), String> {
+        // Core synchronous save-as for non-GPUI paths
+        let Some((tab_id, paragraphs, origin, path, doc_style)) =
+            self.prepare_save_as(idx, path)?
+        else {
+            return Ok(());
+        };
+        let save_started = Instant::now();
+        let result = DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style);
+
+        let elapsed = save_started.elapsed();
+        self.complete_save(tab_id, result.clone(), elapsed);
+
+        result.map_err(|e| format!("Save failed: {e}"))
+    }
+
+    pub fn prepare_save(
+        &mut self,
+        idx: usize,
+    ) -> Result<
+        Option<(
+            TabId,
+            Vec<Paragraph>,
+            Option<Arc<DocxOrigin>>,
+            PathBuf,
+            crate::docx_parser::NewDocStyle,
+        )>,
+        String,
+    > {
         let tab = self.workspace.tabs.get(idx).ok_or("No active tab")?;
         let path = match &tab.file_path {
             Some(p) => p.clone(),
             None => {
-                // A detached tab looks file-backed but has nowhere to write, so
-                // a silent `Ok` here is the exact trap the banner exists to
-                // warn about. Bring the warning back if it was dismissed:
-                // pressing Save is the moment the user needs to read it, and
-                // `SaveAction` only logs to stderr otherwise.
                 if let Some(tab) = self.workspace.tabs.get_mut(idx) {
                     if tab.opened_detached {
                         tab.banner_dismissed = false;
                     }
                 }
-                return Ok(()); // nothing to save yet
+                return Ok(None); // nothing to save yet
             }
         };
         if !tab.document.is_modified {
-            return Ok(());
+            return Ok(None);
         }
         let paragraphs = tab.document.paragraphs.clone();
         let origin = tab.docx_origin.clone();
         let doc_style = self.new_doc_style();
-        let save_started = Instant::now();
-        DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style)
-            .map_err(|e| format!("Save failed: {e}"))?;
-        log_save_cost(&paragraphs, save_started.elapsed());
-        let tab_id = if let Some(tab) = self.workspace.tabs.get_mut(idx) {
-            tab.document.is_modified = false;
-            tab.last_snapshot_version = tab.document.content_version;
-            Some(tab.id)
-        } else {
-            None
-        };
-        // Persisted for real — the recovery snapshot is now redundant, and
-        // leaving it would prompt on next launch about work already saved.
-        if let Some(id) = tab_id {
-            crate::recovery::delete_snapshot(id);
+        Ok(Some((tab.id, paragraphs, origin, path, doc_style)))
+    }
+
+    pub fn complete_save(
+        &mut self,
+        tab_id: TabId,
+        result: Result<(), crate::app::error::AppError>,
+        elapsed: Duration,
+    ) {
+        match result {
+            Ok(()) => {
+                if let Some(tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    tab.document.is_modified = false;
+                    tab.last_snapshot_version = tab.document.content_version;
+                    crate::recovery::delete_snapshot(tab_id);
+                    log_save_cost(&tab.document.paragraphs, elapsed);
+                }
+            }
+            Err(e) => {
+                self.apply_effect(crate::app::command::AppEffect::ShowError(e.to_string()));
+            }
         }
-        Ok(())
+    }
+
+    pub fn save_tab(&mut self, idx: usize) -> Result<(), String> {
+        let Some((tab_id, paragraphs, origin, path, doc_style)) = self.prepare_save(idx)? else {
+            return Ok(());
+        };
+        let save_started = Instant::now();
+        let result = DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style);
+
+        let elapsed = save_started.elapsed();
+        self.complete_save(tab_id, result.clone(), elapsed);
+
+        result.map_err(|e| format!("Save failed: {e}"))
     }
 
     pub fn close_tab(&mut self, idx: usize) {

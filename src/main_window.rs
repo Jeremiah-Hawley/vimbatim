@@ -364,11 +364,36 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &SaveAction, cx| {
-            s.update(cx, |st, _cx| {
-                if let Err(e) = st.save_active_tab() {
-                    crate::state::log_line(&format!("[save] {}", e));
-                }
+            let prepared = s.update(cx, |st, cx| {
+                let p = st.prepare_save(st.workspace.active_tab);
+                cx.notify();
+                p
             });
+            if let Ok(Some((tab_id, paragraphs, origin, path, doc_style))) = prepared {
+                let state = s.clone();
+                cx.spawn(async move |mut cx| {
+                    let start = std::time::Instant::now();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::app::store::DocumentStore::save_document(
+                                &paragraphs,
+                                origin.as_deref(),
+                                &path,
+                                doc_style,
+                            )
+                        })
+                        .await;
+                    let elapsed = start.elapsed();
+                    let _ = state.update(cx, |st, cx| {
+                        st.complete_save(tab_id, result, elapsed);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            } else if let Err(e) = prepared {
+                crate::state::log_line(&format!("[save] {}", e));
+            }
         });
 
         let s = state.clone();
@@ -393,16 +418,38 @@ impl MainWindow {
 
             let path_rx = cx.prompt_for_new_path(&dir, Some(&suggested));
             let state = s.clone();
-            cx.spawn(async move |cx| {
+            cx.spawn(async move |mut cx| {
                 let Ok(Ok(Some(path))) = path_rx.await else {
-                    return; // cancelled, or the platform couldn't open a picker
+                    return; // cancelled
                 };
-                let _ = state.update(cx, |st, cx| {
-                    if let Err(e) = st.save_active_tab_as(path) {
-                        crate::state::log_line(&format!("[save as] {}", e));
-                    }
+                let active_tab = state.update(cx, |st, _| st.workspace.active_tab);
+                let prepared = state.update(cx, |st, cx| {
+                    let p = st.prepare_save_as(active_tab, path);
                     cx.notify();
+                    p
                 });
+
+                if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
+                    let start = std::time::Instant::now();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::app::store::DocumentStore::save_document(
+                                &paragraphs,
+                                origin.as_deref(),
+                                &p,
+                                doc_style,
+                            )
+                        })
+                        .await;
+                    let elapsed = start.elapsed();
+                    let _ = state.update(cx, |st, cx| {
+                        st.complete_save(tab_id, result, elapsed);
+                        cx.notify();
+                    });
+                } else if let Err(e) = prepared {
+                    crate::state::log_line(&format!("[save as] {}", e));
+                }
             })
             .detach();
         });
