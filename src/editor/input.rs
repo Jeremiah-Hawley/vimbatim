@@ -109,7 +109,9 @@ impl TextEditor {
                     (state.global_vim.vim_enabled, mode)
                 };
                 if vim_enabled && vim_mode == VimMode::Normal {
-                    self.state.update(cx, |state, _cx| state.redo());
+                    self.state.update(cx, |state, _cx| {
+                        state.dispatch(crate::app::command::AppCommand::Redo);
+                    });
                     cx.notify();
                 }
             }

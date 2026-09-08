@@ -254,6 +254,10 @@ pub struct Tab {
     pub document: DocumentBuffer,
     pub title: String,
     pub file_path: Option<PathBuf>,
+    /// True from save preparation until that save's matching completion is applied.
+    pub is_saving: bool,
+    /// Content version captured by the in-flight save.
+    pub saving_version: Option<u64>,
     /// Save-time constants (original ZIP bytes, XML preamble/sectPr) needed
     /// to write `paragraphs` back out as a real .docx. `None` for brand-new
     /// tabs that have never been associated with a real docx file, or for
@@ -518,6 +522,8 @@ impl Tab {
             id,
             title: "New Tab".to_string(),
             file_path: None,
+            is_saving: false,
+            saving_version: None,
             document: DocumentBuffer::default(),
             docx_origin: None,
             pending_format: None,
@@ -590,6 +596,8 @@ impl Tab {
             id,
             title,
             file_path: Some(path),
+            is_saving: false,
+            saving_version: None,
             document: DocumentBuffer::default(),
             docx_origin: None,
             pending_format: None,

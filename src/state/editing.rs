@@ -412,13 +412,15 @@ impl AppState {
 
     /// Writes one boolean to settings.conf. A failed write is logged, not
     /// propagated — losing the persisted flag must never take the flip with it.
-    fn save_flag(&self, key: &str, value: bool) {
+    fn save_flag(&mut self, key: &str, value: bool) {
         if let Err(e) = crate::theme::save_setting_line(
             &self.settings_path,
             key,
             if value { "true" } else { "false" },
         ) {
+            let message = format!("Failed to save settings: {e}");
             log_line(&format!("[settings] failed to save {key}: {e}"));
+            self.apply_effect(crate::app::command::AppEffect::ShowError(message));
         }
     }
 
@@ -969,6 +971,9 @@ impl AppState {
         let path = with_docx_extension(&path);
 
         let tab = self.workspace.tabs.get_mut(idx).ok_or("No active tab")?;
+        if tab.is_saving {
+            return Ok(None);
+        }
         tab.file_path = Some(path.clone());
         tab.title = path
             .file_name()
@@ -1008,25 +1013,33 @@ impl AppState {
         )>,
         String,
     > {
-        let tab = self.workspace.tabs.get(idx).ok_or("No active tab")?;
-        let path = match &tab.file_path {
-            Some(p) => p.clone(),
-            None => {
-                if let Some(tab) = self.workspace.tabs.get_mut(idx) {
-                    if tab.opened_detached {
-                        tab.banner_dismissed = false;
-                    }
+        let (tab_id, paragraphs, origin, path) = {
+            let tab = self.workspace.tabs.get_mut(idx).ok_or("No active tab")?;
+            let Some(path) = tab.file_path.clone() else {
+                if tab.opened_detached {
+                    tab.banner_dismissed = false;
                 }
                 return Ok(None); // nothing to save yet
+            };
+            if tab.is_saving || !tab.document.is_modified {
+                return Ok(None);
             }
+            tab.is_saving = true;
+            tab.saving_version = Some(tab.document.content_version);
+            (
+                tab.id,
+                tab.document.paragraphs.clone(),
+                tab.docx_origin.clone(),
+                path,
+            )
         };
-        if !tab.document.is_modified {
-            return Ok(None);
-        }
-        let paragraphs = tab.document.paragraphs.clone();
-        let origin = tab.docx_origin.clone();
-        let doc_style = self.new_doc_style();
-        Ok(Some((tab.id, paragraphs, origin, path, doc_style)))
+        Ok(Some((
+            tab_id,
+            paragraphs,
+            origin,
+            path,
+            self.new_doc_style(),
+        )))
     }
 
     pub fn complete_save(
@@ -1038,13 +1051,21 @@ impl AppState {
         match result {
             Ok(()) => {
                 if let Some(tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
-                    tab.document.is_modified = false;
-                    tab.last_snapshot_version = tab.document.content_version;
-                    crate::recovery::delete_snapshot(tab_id);
+                    let saved_version = tab.saving_version.take();
+                    tab.is_saving = false;
+                    if saved_version == Some(tab.document.content_version) {
+                        tab.document.is_modified = false;
+                        tab.last_snapshot_version = tab.document.content_version;
+                        crate::recovery::delete_snapshot(tab_id);
+                    }
                     log_save_cost(&tab.document.paragraphs, elapsed);
                 }
             }
             Err(e) => {
+                if let Some(tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    tab.is_saving = false;
+                    tab.saving_version = None;
+                }
                 self.apply_effect(crate::app::command::AppEffect::ShowError(e.to_string()));
             }
         }
@@ -9584,6 +9605,8 @@ mod tests {
                     id: TabId(0),
                     title: "test".into(),
                     file_path: None,
+                    is_saving: false,
+                    saving_version: None,
                     document: DocumentBuffer::new(plain_paragraphs(content)),
                     docx_origin: None,
                     pending_format: None,
@@ -21646,6 +21669,24 @@ mod tests {
         assert_eq!(mirror.len(), 1);
         assert_eq!(mirror[0].title, "dirty");
         assert_eq!(mirror[0].id, state.workspace.tabs[0].id);
+    }
+
+    #[test]
+    fn save_preparation_rejects_duplicates_and_keeps_newer_edits_dirty() {
+        let mut state = make_state("first", 0, None);
+        let tab = &mut state.workspace.tabs[0];
+        tab.file_path = Some(std::env::temp_dir().join("vimbatim-save-test.docx"));
+        tab.document.is_modified = true;
+
+        let prepared = state.prepare_save(0).unwrap();
+        assert!(prepared.is_some());
+        assert!(state.workspace.tabs[0].is_saving);
+        assert!(state.prepare_save(0).unwrap().is_none());
+
+        state.insert_char('!');
+        state.complete_save(TabId(0), Ok(()), std::time::Duration::ZERO);
+        assert!(!state.workspace.tabs[0].is_saving);
+        assert!(state.workspace.tabs[0].document.is_modified);
     }
 
     #[test]

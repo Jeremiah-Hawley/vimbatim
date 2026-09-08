@@ -357,7 +357,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ToggleSidebarModeAction, cx| {
             s.update(cx, |st, cx| {
-                st.toggle_sidebar_mode();
+                st.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
                 cx.notify();
             });
         });

@@ -775,13 +775,14 @@ impl FormattingRibbon {
                         }
                         FormatAction::Strikethrough => {
                             st.update(cx, |state, _cx| {
-                                state.toggle_strikethrough();
+                                state
+                                    .dispatch(crate::app::command::AppCommand::ToggleStrikethrough);
                             });
                             cx.notify();
                         }
                         FormatAction::FoldToggle => {
                             st.update(cx, |state, _cx| {
-                                state.toggle_fold();
+                                state.dispatch(crate::app::command::AppCommand::ToggleFold);
                             });
                             cx.notify();
                         }
@@ -862,7 +863,9 @@ impl FormattingRibbon {
                         }
                         FormatAction::InvisibilityMode => {
                             st.update(cx, |state, _cx| {
-                                state.toggle_invisibility_mode();
+                                state.dispatch(
+                                    crate::app::command::AppCommand::ToggleInvisibilityMode,
+                                );
                             });
                             cx.notify();
                         }
@@ -904,7 +907,11 @@ impl FormattingRibbon {
                                 FormatAction::Tag => crate::state::CardStyleKind::Tag,
                                 _ => unreachable!(),
                             };
-                            st.update(cx, |state, _cx| state.apply_card_style(kind));
+                            st.update(cx, |state, _cx| {
+                                state.dispatch(crate::app::command::AppCommand::ApplyCardStyle(
+                                    kind,
+                                ));
+                            });
                             cx.notify();
                         }
                         // Analytic: Tag's weight and size in the configured
@@ -912,7 +919,7 @@ impl FormattingRibbon {
                         // AppState::apply_analytic_style.
                         FormatAction::Analytic => {
                             st.update(cx, |state, _cx| {
-                                state.apply_analytic_style();
+                                state.dispatch(crate::app::command::AppCommand::ApplyAnalyticStyle);
                             });
                             cx.notify();
                         }
@@ -920,7 +927,9 @@ impl FormattingRibbon {
                         // also used by the `f8` keybind (main_window.rs) so
                         // the ribbon button and hotkey behave identically.
                         FormatAction::Cite => {
-                            st.update(cx, |state, _cx| state.apply_cite_style());
+                            st.update(cx, |state, _cx| {
+                                state.dispatch(crate::app::command::AppCommand::ApplyCiteStyle);
+                            });
                             cx.notify();
                         }
                         // Emphasis: applies whichever combination of
@@ -928,7 +937,9 @@ impl FormattingRibbon {
                         // configures, plus the configured size when that's
                         // on — see AppState::apply_emphasis_style.
                         FormatAction::Emphasis => {
-                            st.update(cx, |state, _cx| state.apply_emphasis_style());
+                            st.update(cx, |state, _cx| {
+                                state.dispatch(crate::app::command::AppCommand::ApplyEmphasisStyle);
+                            });
                             cx.notify();
                         }
                         // Align Left / Center / Right: set the current line's
@@ -942,13 +953,17 @@ impl FormattingRibbon {
                                 FormatAction::AlignRight => Alignment::Right,
                                 _ => unreachable!(),
                             };
-                            st.update(cx, |state, _cx| state.apply_line_alignment(alignment));
+                            st.update(cx, |state, _cx| {
+                                state.dispatch(
+                                    crate::app::command::AppCommand::ApplyLineAlignment(alignment),
+                                );
+                            });
                             cx.notify();
                         }
                         // Clear: clear all formatting from the entire line.
                         FormatAction::Clear => {
                             st.update(cx, |state, _cx| {
-                                state.clear_formatting();
+                                state.dispatch(crate::app::command::AppCommand::ClearFormatting);
                             });
                             cx.notify();
                         }
