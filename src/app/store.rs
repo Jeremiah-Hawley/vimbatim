@@ -81,9 +81,59 @@ impl WorkspaceRepository for WorkspaceFs {
     }
 }
 
-pub struct SettingsStore;
+pub struct SettingsStore {
+    path: std::path::PathBuf,
+}
+
+impl SettingsStore {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl crate::app::repository::SettingsRepository for SettingsStore {
+    fn load_preferences(&self) -> Result<crate::preferences::Preferences, AppError> {
+        crate::preferences::Preferences::load(&self.path)
+            .map_err(|e| AppError::Settings(e.to_string()))
+    }
+
+    fn save_preferences(
+        &self,
+        preferences: &crate::preferences::Preferences,
+    ) -> Result<(), AppError> {
+        preferences
+            .save(&self.path)
+            .map_err(|e| AppError::Settings(e.to_string()))
+    }
+}
 
 pub struct RecoveryStore;
+
+impl crate::app::repository::RecoveryRepository for RecoveryStore {
+    fn list_entries(&self) -> Result<Vec<crate::recovery::RecoveryEntry>, AppError> {
+        Ok(crate::recovery::scan_recovery_dir(
+            &crate::recovery::recovery_dir(),
+        ))
+    }
+
+    fn write_snapshot(&self, snapshot: &crate::state::TabSnapshot) -> Result<(), AppError> {
+        crate::recovery::write_snapshot(
+            snapshot.id,
+            &snapshot.paragraphs,
+            snapshot.origin.as_deref(),
+            snapshot.file_path.as_deref(),
+            &snapshot.title,
+            snapshot.doc_style,
+        )
+        .map(|_| ())
+        .map_err(|e| AppError::Recovery(e.to_string()))
+    }
+
+    fn delete_entry(&self, entry: &crate::recovery::RecoveryEntry) -> Result<(), AppError> {
+        crate::recovery::delete_entry(entry);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {

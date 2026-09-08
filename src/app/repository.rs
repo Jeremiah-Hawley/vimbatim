@@ -21,11 +21,17 @@ pub trait WorkspaceRepository {
 }
 
 pub trait SettingsRepository {
-    // Methods for loading/saving settings
+    fn load_preferences(&self) -> Result<crate::preferences::Preferences, AppError>;
+    fn save_preferences(
+        &self,
+        preferences: &crate::preferences::Preferences,
+    ) -> Result<(), AppError>;
 }
 
 pub trait RecoveryRepository {
-    // Methods for listing/deleting/writing snapshots
+    fn list_entries(&self) -> Result<Vec<crate::recovery::RecoveryEntry>, AppError>;
+    fn write_snapshot(&self, snapshot: &crate::state::TabSnapshot) -> Result<(), AppError>;
+    fn delete_entry(&self, entry: &crate::recovery::RecoveryEntry) -> Result<(), AppError>;
 }
 
 #[cfg(test)]
@@ -109,6 +115,61 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
 }
 
 #[cfg(test)]
+pub struct InMemorySettingsRepository {
+    pub preferences: std::cell::RefCell<crate::preferences::Preferences>,
+}
+
+#[cfg(test)]
+impl InMemorySettingsRepository {
+    pub fn new(preferences: crate::preferences::Preferences) -> Self {
+        Self {
+            preferences: std::cell::RefCell::new(preferences),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SettingsRepository for InMemorySettingsRepository {
+    fn load_preferences(&self) -> Result<crate::preferences::Preferences, AppError> {
+        Ok(self.preferences.borrow().clone())
+    }
+
+    fn save_preferences(
+        &self,
+        preferences: &crate::preferences::Preferences,
+    ) -> Result<(), AppError> {
+        *self.preferences.borrow_mut() = preferences.clone();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct InMemoryRecoveryRepository {
+    pub entries: std::cell::RefCell<Vec<crate::recovery::RecoveryEntry>>,
+    pub written: std::cell::RefCell<Vec<crate::document::TabId>>,
+}
+
+#[cfg(test)]
+impl RecoveryRepository for InMemoryRecoveryRepository {
+    fn list_entries(&self) -> Result<Vec<crate::recovery::RecoveryEntry>, AppError> {
+        Ok(self.entries.borrow().clone())
+    }
+
+    fn write_snapshot(&self, snapshot: &crate::state::TabSnapshot) -> Result<(), AppError> {
+        self.written.borrow_mut().push(snapshot.id);
+        Ok(())
+    }
+
+    fn delete_entry(&self, entry: &crate::recovery::RecoveryEntry) -> Result<(), AppError> {
+        self.entries
+            .borrow_mut()
+            .retain(|candidate| candidate.snapshot != entry.snapshot);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -119,6 +180,15 @@ mod tests {
             repo.load_document(Path::new("broken.docx")),
             Err(AppError::DocumentParse(message)) if message == "bad zip"
         ));
+    }
+
+    #[test]
+    fn settings_fake_round_trips_preferences_without_disk() {
+        let repo = InMemorySettingsRepository::new(crate::preferences::Preferences::default());
+        let mut preferences = repo.load_preferences().unwrap();
+        preferences.line_spacing = 1.5;
+        repo.save_preferences(&preferences).unwrap();
+        assert_eq!(repo.load_preferences().unwrap().line_spacing, 1.5);
     }
 
     #[test]
