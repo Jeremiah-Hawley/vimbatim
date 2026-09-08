@@ -11,6 +11,7 @@ use std::sync::{OnceLock, RwLock};
 use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{ListKind, Paragraph, Run};
+use crate::editor::layout::{line_height_px, row_slot_px, text_line_box_px};
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{
     matches_shifted_symbol, vim_find_target_char, AppState, EditorContextMenu, Pane, SpellTarget,
@@ -90,9 +91,6 @@ const LINE_HEIGHT_RATIO: f32 = LINE_HEIGHT_PX / FONT_SIZE_PX;
 /// together rather than letting them drift apart. Multiplied on top of
 /// `LINE_HEIGHT_RATIO` rather than replacing it, so 1.0 reproduces the
 /// spacing that shipped before the setting existed.
-fn line_height_px(normal_size_px: f32, spacing: f32) -> f32 {
-    normal_size_px * LINE_HEIGHT_RATIO * spacing
-}
 
 /// How many `uniform_list` rows one line of body text is divided into.
 ///
@@ -138,9 +136,6 @@ const ROW_SUBDIVISIONS: usize = 6;
 /// row again by a fraction. Flooring guarantees the painted box is never
 /// taller than the space reserved for it. The lost sub-pixel is slack in the
 /// line box, not in the glyphs — it does not clip text.
-fn text_line_box_px(font_px: f32) -> f32 {
-    (font_px * LINE_HEIGHT_RATIO).floor().max(1.0)
-}
 
 /// The height of one `uniform_list` row — a `ROW_SUBDIVISIONS` fraction of a
 /// real line of body text. This is the pitch of the *display* grid, so it is
@@ -148,9 +143,6 @@ fn text_line_box_px(font_px: f32) -> f32 {
 /// scrolling, click hit-testing) must multiply by; `line_height_px` remains
 /// the height of an actual line of text and is what "one line" means to
 /// things like `SCROLL_MARGIN_LINES`.
-fn row_slot_px(normal_size_px: f32, spacing: f32, zoom: f32) -> f32 {
-    line_height_px(normal_size_px, spacing) * zoom / ROW_SUBDIVISIONS as f32
-}
 /// Matches the `.p(px(16.0))` set on the outer editor div in render().
 const CONTENT_PADDING_PX: f32 = 16.0;
 /// Number of lines of buffer to keep visible above/below the cursor —
