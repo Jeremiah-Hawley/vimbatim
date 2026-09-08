@@ -885,8 +885,15 @@ impl AppState {
             }
             return;
         }
+        let load_error = result.as_ref().err().cloned();
         let tab = tab_from_loaded_docx(TabId(self.workspace.next_tab_id), &path, result);
         self.workspace.next_tab_id += 1;
+        if let Some(error) = load_error {
+            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                "Could not open {}: {error}",
+                path.display()
+            )));
+        }
         if tab.opened_detached {
             self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                 "Could not open {}; it was opened as a detached blank document.",
@@ -21693,6 +21700,24 @@ mod tests {
     fn dirty_tab_snapshots_is_empty_when_nothing_is_modified() {
         let state = make_state("hello", 0, None);
         assert!(state.dirty_tab_snapshots().is_empty());
+    }
+
+    #[test]
+    fn fake_document_failure_reaches_the_open_notification_flow() {
+        use crate::app::repository::{DocumentRepository, InMemoryDocumentRepository};
+
+        let mut state = make_state("", 0, None);
+        let repo = InMemoryDocumentRepository::failing(crate::app::error::AppError::DocumentParse(
+            "bad zip".into(),
+        ));
+        let result = repo.load_document(std::path::Path::new("broken.docx"));
+        state.complete_open_file("broken.docx".into(), result);
+
+        assert!(state
+            .ui
+            .notifications
+            .iter()
+            .any(|notification| notification.message.contains("bad zip")));
     }
 
     #[test]
