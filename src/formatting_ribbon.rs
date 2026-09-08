@@ -849,14 +849,7 @@ impl FormattingRibbon {
                             // implies making it visible, not just switching
                             // its mode while it might be collapsed.
                             st.update(cx, |state, _cx| {
-                                state.sidebar_mode = match state.sidebar_mode {
-                                    crate::state::SidebarMode::Files => {
-                                        crate::state::SidebarMode::Nav
-                                    }
-                                    crate::state::SidebarMode::Nav => {
-                                        crate::state::SidebarMode::Files
-                                    }
-                                };
+                                state.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
                                 state.ui.sidebar_visible = true;
                             });
                             cx.notify();

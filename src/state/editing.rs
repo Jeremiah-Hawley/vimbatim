@@ -4859,13 +4859,15 @@ impl AppState {
     /// Writes one custom color list back to settings.conf. A failed write is
     /// logged, not propagated — losing a saved swatch must never take the
     /// applied color (or the user's edit) with it.
-    fn persist_custom_colors(&self, target: CustomColorTarget) {
+    fn persist_custom_colors(&mut self, target: CustomColorTarget) {
         if let Err(e) = save_custom_colors(
             &self.settings_path,
             target.settings_key(),
             self.custom_colors(target),
         ) {
-            log_line(&format!("[settings] failed to save custom colors: {e}"));
+            let message = format!("Failed to save custom colors: {e}");
+            log_line(&format!("[settings] {message}"));
+            self.apply_effect(crate::app::command::AppEffect::ShowError(message));
         }
     }
 
@@ -4950,11 +4952,9 @@ impl AppState {
     pub fn create_new_file_in_working_directory(&mut self) {
         let dir = self.workspace.working_directory.clone();
         if let Err(e) = self.create_new_docx_in(&dir) {
-            log_line(&format!(
-                "[new file] failed to create new file in {}: {}",
-                dir.display(),
-                e
-            ));
+            let message = format!("Failed to create a file in {}: {e}", dir.display());
+            log_line(&format!("[new file] {message}"));
+            self.apply_effect(crate::app::command::AppEffect::ShowError(message));
         }
     }
 
@@ -5002,10 +5002,9 @@ impl AppState {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
         {
-            log_line(&format!(
-                "[open] not a .docx, refusing to open: {}",
-                path.display()
-            ));
+            let message = format!("Not a .docx file: {}", path.display());
+            log_line(&format!("[open] {message}"));
+            self.apply_effect(crate::app::command::AppEffect::ShowError(message));
             return;
         }
         let tab = tab_from_loaded_docx(
