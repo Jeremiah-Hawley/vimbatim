@@ -463,8 +463,18 @@ impl MainWindow {
                 let Some(dir) = paths.pop() else {
                     return;
                 };
+                let scan_dir = dir.clone();
                 let _ = state.update(cx, |st, cx| {
-                    st.set_working_directory(dir);
+                    st.begin_working_directory(dir);
+                    cx.notify();
+                });
+                let scan_input = scan_dir.clone();
+                let file_tree = cx
+                    .background_executor()
+                    .spawn(async move { crate::state::scan_directory(&scan_input) })
+                    .await;
+                let _ = state.update(cx, |st, cx| {
+                    st.complete_file_tree_scan(&scan_dir, file_tree);
                     cx.notify();
                 });
             })
@@ -489,10 +499,20 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &RefreshFileTreeAction, cx| {
-            s.update(cx, |st, cx| {
-                st.refresh_file_tree();
-                cx.notify();
-            });
+            let directory = s.read(cx).workspace.working_directory.clone();
+            let state = s.clone();
+            cx.spawn(async move |cx| {
+                let scan_dir = directory.clone();
+                let file_tree = cx
+                    .background_executor()
+                    .spawn(async move { crate::state::scan_directory(&scan_dir) })
+                    .await;
+                let _ = state.update(cx, |st, cx| {
+                    st.complete_file_tree_scan(&directory, file_tree);
+                    cx.notify();
+                });
+            })
+            .detach();
         });
 
         // Ctrl+F and Ctrl+H open the same panel — it always carries both a

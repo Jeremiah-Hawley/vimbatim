@@ -4679,6 +4679,17 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Applies a completed background scan only if the explorer has not been
+    /// pointed at another directory while it was running.
+    pub fn complete_file_tree_scan(&mut self, directory: &PathBuf, mut file_tree: Vec<FileNode>) {
+        if &self.workspace.working_directory != directory {
+            return;
+        }
+        let expanded = crate::file_explorer::collect_expanded_dirs(&self.workspace.file_tree);
+        crate::file_explorer::restore_expanded_dirs(&mut file_tree, &expanded);
+        self.workspace.file_tree = file_tree;
+    }
+
     pub fn refresh_file_tree(&mut self) {
         /*
          * Re-scans the working directory and updates the file tree. Call this
@@ -4697,6 +4708,13 @@ impl AppState {
     }
 
     pub fn set_working_directory(&mut self, dir: PathBuf) {
+        self.begin_working_directory(dir);
+        self.refresh_file_tree();
+    }
+
+    /// Changes the root without scanning; views schedule the scan in the
+    /// background and call `complete_file_tree_scan` on completion.
+    pub fn begin_working_directory(&mut self, dir: PathBuf) {
         /*
          * Re-roots the file explorer at `dir` (the "Open Folder" button) and
          * shows the sidebar, since picking a folder implies the user wants to
@@ -4706,7 +4724,6 @@ impl AppState {
          */
         self.workspace.working_directory = dir;
         self.ui.sidebar_visible = true;
-        self.refresh_file_tree();
         let _ = save_working_directory(&self.settings_path, &self.workspace.working_directory);
     }
 
