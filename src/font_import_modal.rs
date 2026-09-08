@@ -58,8 +58,17 @@ impl FontImportModal {
                 return;
             };
             let Some(path) = paths.pop() else { return };
+
+            let faces_result = cx
+                .background_executor()
+                .spawn(async move { crate::font_import::prepare_install(&path) })
+                .await;
+
             let result = state.update(cx, |_s, cx| {
-                let result = crate::font_import::install_from_path(cx, &path);
+                let result = match faces_result {
+                    Ok(faces) => crate::font_import::commit_install_faces(cx, faces),
+                    Err(e) => Err(e),
+                };
                 cx.notify();
                 result
             });

@@ -1188,7 +1188,9 @@ impl FormattingRibbon {
                 Some(half) => half,
             };
             let points = (current_half as i32 / 2 + delta).clamp(1, 409);
-            state.set_font_size_half_points((points * 2) as u16);
+            state.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                crate::document_ops::FormatOp::FontSize((points * 2) as u16),
+            ));
         });
         // Typing then stepping should continue from the stepped value, not the
         // half-finished text.
@@ -1217,7 +1219,9 @@ impl FormattingRibbon {
                 self.font_size_buffer = None;
                 if let Some(points) = points {
                     self.state.update(cx, |state, _cx| {
-                        state.set_font_size_half_points((points * 2) as u16);
+                        state.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                            crate::document_ops::FormatOp::FontSize((points * 2) as u16),
+                        ));
                     });
                 }
             }
@@ -1702,7 +1706,7 @@ impl FormattingRibbon {
                     };
                 if let Some(pos) = hit {
                     self.state.update(cx, |state, cx| {
-                        state.set_active_tab(pos);
+                        state.dispatch(crate::app::command::AppCommand::SwitchTab(pos));
                         cx.notify();
                     });
                 }

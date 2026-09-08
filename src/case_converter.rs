@@ -1,5 +1,5 @@
 // src/case_converter.rs
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CaseType {
     Title,
     Upper,

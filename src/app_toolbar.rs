@@ -90,12 +90,8 @@ impl Render for AppToolbar {
                     .hover(move |s| s.bg(rgb(p.accent_strong)))
                     .active(move |s| s.bg(rgb(p.accent_muted)))
                     // Directly mutate AppState so the button works regardless of focus
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.sidebar_visible = !s.sidebar_visible;
-                            cx.notify();
-                        });
-                        cx.notify();
+                    .on_click(cx.listener(|_this, _ev, window, cx| {
+                        window.dispatch_action(Box::new(crate::keybinds::ToggleSidebarAction), cx);
                     }))
                     .child(sidebar_label),
             )
@@ -118,27 +114,8 @@ impl Render for AppToolbar {
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     // Native OS folder picker (gpui's own prompt_for_paths) —
                     // no dialog UI of our own to build or maintain.
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
-                            files: false,
-                            directories: true,
-                            multiple: false,
-                            prompt: None,
-                        });
-                        let state = this.state.clone();
-                        cx.spawn_in(window, async move |_this, cx| {
-                            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
-                                return;
-                            };
-                            let Some(dir) = paths.pop() else {
-                                return;
-                            };
-                            state.update(cx, |s, cx| {
-                                s.set_working_directory(dir);
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                    .on_click(cx.listener(|_this, _ev, window, cx| {
+                        window.dispatch_action(Box::new(crate::keybinds::OpenFolderAction), cx);
                     }))
                     .child("Open Folder"),
             )
@@ -163,27 +140,8 @@ impl Render for AppToolbar {
                     .border_color(rgb(p.border_subtle))
                     .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        let paths_rx = cx.prompt_for_paths(PathPromptOptions {
-                            files: true,
-                            directories: false,
-                            multiple: false,
-                            prompt: None,
-                        });
-                        let state = this.state.clone();
-                        cx.spawn_in(window, async move |_this, cx| {
-                            let Ok(Ok(Some(mut paths))) = paths_rx.await else {
-                                return;
-                            };
-                            let Some(file) = paths.pop() else {
-                                return;
-                            };
-                            state.update(cx, |s, cx| {
-                                s.open_file(file);
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                    .on_click(cx.listener(|_this, _ev, window, cx| {
+                        window.dispatch_action(Box::new(crate::keybinds::OpenFileAction), cx);
                     }))
                     .child("Open File"),
             )
@@ -381,12 +339,8 @@ impl Render for AppToolbar {
                     .border_color(rgb(p.border))
                     .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
-                    .on_click(cx.listener(|this, _ev, _window, cx| {
-                        this.state.update(cx, |s, cx| {
-                            s.ui.settings_visible = !s.ui.settings_visible;
-                            cx.notify();
-                        });
-                        cx.notify();
+                    .on_click(cx.listener(|_this, _ev, window, cx| {
+                        window.dispatch_action(Box::new(crate::keybinds::ToggleSettingsAction), cx);
                     }))
                     .child("⚙"),
             )

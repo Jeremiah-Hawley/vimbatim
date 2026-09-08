@@ -21687,6 +21687,46 @@ impl AppState {
                 self.apply_card_style(kind);
                 vec![]
             }
+            AppCommand::ApplyCiteStyle => {
+                self.apply_cite_style();
+                vec![]
+            }
+            AppCommand::ApplyAnalyticStyle => {
+                self.apply_analytic_style();
+                vec![]
+            }
+            AppCommand::ApplyEmphasisStyle => {
+                self.apply_emphasis_style();
+                vec![]
+            }
+            AppCommand::ClearFormatting => {
+                self.clear_formatting();
+                vec![]
+            }
+            AppCommand::ToggleStrikethrough => {
+                self.toggle_strikethrough();
+                vec![]
+            }
+            AppCommand::ApplyCaseToSelection(case_type) => {
+                self.apply_case_to_selection(case_type);
+                vec![]
+            }
+            AppCommand::ApplyLineAlignment(alignment) => {
+                self.apply_line_alignment(alignment);
+                vec![]
+            }
+            AppCommand::ToggleFold => {
+                self.toggle_fold();
+                vec![]
+            }
+            AppCommand::ToggleInvisibilityMode => {
+                self.toggle_invisibility_mode();
+                vec![]
+            }
+            AppCommand::ToggleSidebarMode => {
+                self.toggle_sidebar_mode();
+                vec![]
+            }
             AppCommand::ToggleSidebar => {
                 self.ui.sidebar_visible = !self.ui.sidebar_visible;
                 vec![]

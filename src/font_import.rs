@@ -17,7 +17,7 @@ use gpui::App;
 /// One face's raw bytes plus the (family, bold, italic) identity read from
 /// its own name/OS-2 tables.
 #[derive(Debug)]
-struct Face {
+pub struct Face {
     family: String,
     bold: bool,
     italic: bool,
@@ -64,6 +64,11 @@ fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
         .to_lowercase();
     let raw_faces: Vec<Vec<u8>> = match ext.as_str() {
         "zip" => {
+            let metadata =
+                std::fs::metadata(path).map_err(|e| format!("Couldn't stat file: {e}"))?;
+            if metadata.len() > 100 * 1024 * 1024 {
+                return Err("File exceeds 100MiB font import limit.".into());
+            }
             let file =
                 std::fs::File::open(path).map_err(|e| format!("Couldn't open that file: {e}"))?;
             let mut archive =
@@ -182,9 +187,13 @@ pub fn missing_style_warning(outcomes: &[FontImportOutcome]) -> Option<String> {
 /// `FontImportOutcome` per family that became available. Re-importing the
 /// same family overwrites its stored faces (matches "import" reading as
 /// "make this the current version of that font", not "add a duplicate").
-pub fn install_from_path(cx: &App, path: &Path) -> Result<Vec<FontImportOutcome>, String> {
-    let faces = candidate_faces(path)?;
+/// Reads candidate faces off the UI thread, returning them so they can be
+/// saved and activated in `commit_install_faces`.
+pub fn prepare_install(path: &Path) -> Result<Vec<Face>, String> {
+    candidate_faces(path)
+}
 
+pub fn commit_install_faces(cx: &App, faces: Vec<Face>) -> Result<Vec<FontImportOutcome>, String> {
     let mut by_family: HashMap<String, Vec<Face>> = HashMap::new();
     for face in faces {
         by_family.entry(face.family.clone()).or_default().push(face);

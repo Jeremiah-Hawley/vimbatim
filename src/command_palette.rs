@@ -172,19 +172,16 @@ pub fn registry() -> Vec<PaletteCommand> {
                 FormatOp::Highlight(None),
             ));
         }),
-        ("Fold / Unfold All", AppState::toggle_fold),
-        (
-            "Toggle Invisibility Mode",
-            AppState::toggle_invisibility_mode,
-        ),
+        ("Fold / Unfold All", |s| {
+            s.dispatch(crate::app::command::AppCommand::ToggleFold);
+        }),
+        ("Toggle Invisibility Mode", |s| {
+            s.dispatch(crate::app::command::AppCommand::ToggleInvisibilityMode);
+        }),
         // Matches the ribbon's Nav button: switches the sidebar's mode *and*
         // makes sure the sidebar is actually showing.
         ("Toggle Navigation Sidebar", |s| {
-            s.sidebar_mode = match s.sidebar_mode {
-                crate::state::SidebarMode::Files => crate::state::SidebarMode::Nav,
-                crate::state::SidebarMode::Nav => crate::state::SidebarMode::Files,
-            };
-            s.sidebar_visible = true;
+            s.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
         }),
         ("Toggle Split View", |s| {
             if s.workspace.split_view {

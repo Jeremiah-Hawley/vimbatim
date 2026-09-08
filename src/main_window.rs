@@ -724,7 +724,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ClearFormattingAction, cx| {
             s.update(cx, |st, cx| {
-                st.clear_formatting();
+                st.dispatch(crate::app::command::AppCommand::ClearFormatting);
                 cx.notify();
             });
         });
@@ -792,7 +792,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &PocketAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_card_style(CardStyleKind::Pocket);
+                st.dispatch(crate::app::command::AppCommand::ApplyCardStyle(
+                    CardStyleKind::Pocket,
+                ));
                 cx.notify();
             });
         });
@@ -800,7 +802,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &HatAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_card_style(CardStyleKind::Hat);
+                st.dispatch(crate::app::command::AppCommand::ApplyCardStyle(
+                    CardStyleKind::Hat,
+                ));
                 cx.notify();
             });
         });
@@ -808,11 +812,9 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &BlockAction, cx| {
             s.update(cx, |st, cx| {
-                for effect in st.execute(crate::app::command::AppCommand::ApplyCardStyle(
+                st.dispatch(crate::app::command::AppCommand::ApplyCardStyle(
                     crate::state::CardStyleKind::Block,
-                )) {
-                    st.apply_effect(effect);
-                }
+                ));
                 cx.notify();
             });
         });
@@ -820,17 +822,17 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &TagAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_card_style(CardStyleKind::Tag);
+                st.dispatch(crate::app::command::AppCommand::ApplyCardStyle(
+                    CardStyleKind::Tag,
+                ));
                 cx.notify();
             });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &CiteAction, cx| {
-            // Cite applies to the current selection only, not the whole
-            // line (matching the ribbon's Cite button — formatting_ribbon.rs).
             s.update(cx, |st, cx| {
-                st.apply_cite_style();
+                st.dispatch(crate::app::command::AppCommand::ApplyCiteStyle);
                 cx.notify();
             });
         });
@@ -838,7 +840,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &AnalyticAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_analytic_style();
+                st.dispatch(crate::app::command::AppCommand::ApplyAnalyticStyle);
                 cx.notify();
             });
         });
@@ -846,7 +848,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &EmphasisAction, cx| {
             s.update(cx, |st, cx| {
-                st.apply_emphasis_style();
+                st.dispatch(crate::app::command::AppCommand::ApplyEmphasisStyle);
                 cx.notify();
             });
         });
@@ -854,10 +856,10 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &HighlightAction, cx| {
             s.update(cx, |st, cx| {
-                // settings.conf's `highlight_color`, not a hardcoded yellow —
-                // the setting existed but nothing had ever read it.
                 let color = st.highlight_color.clone();
-                st.apply_formatting_to_selection(FormatOp::Highlight(Some(color)));
+                st.dispatch(crate::app::command::AppCommand::ApplyFormatting(
+                    FormatOp::Highlight(Some(color)),
+                ));
                 cx.notify();
             });
         });
