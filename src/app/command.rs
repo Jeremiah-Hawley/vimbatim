@@ -20,9 +20,16 @@ pub enum AppCommand {
     Undo,
     Redo,
     ClearToast,
+    VimKey {
+        key: String,
+        shift: bool,
+        key_char: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppEffect {
     ShowError(String),
+    WriteClipboard { text: String, metadata: String },
+    DispatchKeybind(crate::keybinds::KeybindAction),
 }

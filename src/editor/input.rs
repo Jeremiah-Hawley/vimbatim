@@ -521,35 +521,27 @@ impl TextEditor {
                     }
                 }
 
-                let (consumed, clipboard_sync, vim_action) = self.state.update(cx, |state, cx| {
-                    let handled = state.handle_vim_key(key, shift, key_char);
-                    if handled {
-                        cx.notify();
+                let (consumed, effects) = self
+                    .state
+                    .update(cx, |state, _| state.execute_vim_key(key, shift, key_char));
+                for effect in effects {
+                    match effect {
+                        crate::app::command::AppEffect::WriteClipboard { text, metadata } => {
+                            cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
+                                text, metadata,
+                            ));
+                        }
+                        crate::app::command::AppEffect::DispatchKeybind(action) => {
+                            window.dispatch_action(crate::keybinds::action_for(action), cx);
+                        }
+                        crate::app::command::AppEffect::ShowError(message) => {
+                            self.state.update(cx, |state, _| {
+                                state.apply_effect(crate::app::command::AppEffect::ShowError(
+                                    message,
+                                ));
+                            });
+                        }
                     }
-                    (
-                        handled,
-                        state.take_pending_clipboard_sync(),
-                        state.take_pending_vim_action(),
-                    )
-                });
-                // `"+y`/`"+d`/`"+c` (write direction): mirrors the read
-                // direction above — `execute_vim_operator_range` stages the
-                // text in `pending_clipboard_sync` when the `+` register
-                // was targeted; this is the only place with `cx` to
-                // actually push it onto the OS clipboard.
-                if let Some((text, metadata)) = clipboard_sync {
-                    // Carries the formatting as clipboard metadata, exactly as
-                    // `CopyAction` does, so `"+y` then Ctrl+V pastes a styled
-                    // card rather than bare text.
-                    cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
-                }
-                // Checklist: Settings -> Vim Mode. Same mailbox pattern as
-                // `clipboard_sync` above — `state.rs` staged the resolved
-                // `KeybindAction`, this is the one place with `window`+`cx`
-                // to actually fire it, via the same `dispatch_action` call
-                // `app_toolbar.rs`'s toolbar buttons already use.
-                if let Some(action) = vim_action {
-                    window.dispatch_action(crate::keybinds::action_for(action), cx);
                 }
                 if consumed {
                     cx.notify();

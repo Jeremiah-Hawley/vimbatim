@@ -21812,7 +21812,32 @@ impl AppState {
                 self.ui.notifications.clear();
                 vec![]
             }
+            AppCommand::VimKey {
+                key,
+                shift,
+                key_char,
+            } => self.execute_vim_key(&key, shift, key_char.as_deref()).1,
         }
+    }
+
+    /// Runs a Vim key through the application boundary. The boolean retains
+    /// the editor-view fallthrough contract for visual-row navigation; all
+    /// platform work is returned as effects.
+    pub fn execute_vim_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        key_char: Option<&str>,
+    ) -> (bool, Vec<crate::app::command::AppEffect>) {
+        let handled = self.handle_vim_key(key, shift, key_char);
+        let mut effects = Vec::new();
+        if let Some((text, metadata)) = self.take_pending_clipboard_sync() {
+            effects.push(crate::app::command::AppEffect::WriteClipboard { text, metadata });
+        }
+        if let Some(action) = self.take_pending_vim_action() {
+            effects.push(crate::app::command::AppEffect::DispatchKeybind(action));
+        }
+        (handled, effects)
     }
 
     pub fn dispatch(&mut self, command: crate::app::command::AppCommand) {
@@ -21829,6 +21854,8 @@ impl AppState {
                     message,
                 });
             }
+            crate::app::command::AppEffect::WriteClipboard { .. }
+            | crate::app::command::AppEffect::DispatchKeybind(_) => {}
         }
     }
 }
