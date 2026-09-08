@@ -176,16 +176,42 @@ impl TabBar {
                         p,
                         cx.listener(move |this, _ev, _window, cx| {
                             this.context_menu = None;
-                            this.state.update(cx, |s, cx| {
-                                if let Some(idx) =
-                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
-                                {
-                                    if let Err(e) = s.save_tab(idx) {
-                                        crate::state::log_line(&format!("[save] {e}"));
-                                    }
-                                }
+                            let state = this.state.clone();
+                            let prepared = state.update(cx, |s, cx| {
+                                let prepared = s
+                                    .workspace
+                                    .tabs
+                                    .iter()
+                                    .position(|t| t.id == tab_id)
+                                    .map(|idx| s.prepare_save(idx))
+                                    .transpose()
+                                    .map(|prepared| prepared.flatten());
                                 cx.notify();
+                                prepared
                             });
+                            if let Ok(Some((id, paragraphs, origin, path, doc_style))) = prepared {
+                                cx.spawn(async move |_this, cx| {
+                                    let started = std::time::Instant::now();
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            crate::app::store::DocumentStore::save_document(
+                                                &paragraphs,
+                                                origin.as_deref(),
+                                                &path,
+                                                doc_style,
+                                            )
+                                        })
+                                        .await;
+                                    let _ = state.update(cx, |s, cx| {
+                                        s.complete_save(id, result, started.elapsed());
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            } else if let Err(e) = prepared {
+                                crate::state::log_line(&format!("[save] {e}"));
+                            }
                             cx.notify();
                         }),
                     ))
@@ -216,18 +242,41 @@ impl TabBar {
                                 let Ok(Ok(Some(path))) = path_rx.await else {
                                     return; // cancelled, or no picker available
                                 };
-                                let _ = s.update(cx, |st, cx| {
-                                    // Resolved *after* the await: tabs can be
-                                    // reordered or closed while the dialog is up.
-                                    if let Some(idx) =
-                                        st.workspace.tabs.iter().position(|t| t.id == tab_id)
-                                    {
-                                        if let Err(e) = st.save_tab_as(idx, path) {
-                                            crate::state::log_line(&format!("[save as] {e}"));
-                                        }
-                                    }
+                                let prepared = s.update(cx, |st, cx| {
+                                    // Resolved after the await: tabs can be reordered or closed.
+                                    let prepared = st
+                                        .workspace
+                                        .tabs
+                                        .iter()
+                                        .position(|t| t.id == tab_id)
+                                        .map(|idx| st.prepare_save_as(idx, path))
+                                        .transpose()
+                                        .map(|prepared| prepared.flatten());
                                     cx.notify();
+                                    prepared
                                 });
+                                if let Ok(Some((id, paragraphs, origin, path, doc_style))) =
+                                    prepared
+                                {
+                                    let started = std::time::Instant::now();
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            crate::app::store::DocumentStore::save_document(
+                                                &paragraphs,
+                                                origin.as_deref(),
+                                                &path,
+                                                doc_style,
+                                            )
+                                        })
+                                        .await;
+                                    let _ = s.update(cx, |st, cx| {
+                                        st.complete_save(id, result, started.elapsed());
+                                        cx.notify();
+                                    });
+                                } else if let Err(e) = prepared {
+                                    crate::state::log_line(&format!("[save as] {e}"));
+                                }
                             })
                             .detach();
                         })
