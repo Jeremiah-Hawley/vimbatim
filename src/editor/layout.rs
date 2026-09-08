@@ -15,6 +15,146 @@ pub(crate) fn row_slot_px(normal_size_px: f32, spacing: f32, zoom: f32) -> f32 {
     line_height_px(normal_size_px, spacing) * zoom / ROW_SUBDIVISIONS as f32
 }
 
+pub(crate) fn wrap_line_into_rows(
+    chars: &[char],
+    wrap_width_px: f32,
+    width_of: &mut impl FnMut(usize, char) -> f32,
+) -> Vec<(usize, usize)> {
+    /*
+     * Word-wraps one logical line's characters into visual rows whose
+     * accumulated real glyph width (via `width_of`) stays within
+     * `wrap_width_px`, breaking at the last space within budget when one
+     * exists, or hard-breaking mid-word when a single word exceeds the
+     * budget on its own. The space a word-boundary break lands on is
+     * consumed (not repeated as a leading space on the next row), matching
+     * normal word-wrap behaviour.
+     *
+     * Pure and independent of any real font/GPUI context — callers supply
+     * `width_of`, so this stays unit-testable with synthetic width
+     * functions (see the tests below for one that exercises variable-width
+     * characters directly).
+     *
+     * Always returns at least one row, even for an empty line, so every
+     * logical line still occupies its own visual slot — this is what lets
+     * click/scroll math treat "row index" as a stable, always-present
+     * coordinate.
+     */
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut rows = Vec::new();
+    let mut row_start = 0;
+    while row_start < chars.len() {
+        let mut width = 0.0f32;
+        let mut i = row_start;
+        let mut last_space: Option<usize> = None;
+        while i < chars.len() {
+            let char_width = width_of(i, chars[i]);
+            // `i > row_start` forces at least one character onto every row,
+            // even one whose width alone exceeds the budget — otherwise a
+            // very narrow viewport (or a single unusually wide glyph) could
+            // produce a zero-width row and loop forever.
+            if width + char_width > wrap_width_px && i > row_start {
+                break;
+            }
+            width += char_width;
+            if chars[i] == ' ' && i > row_start {
+                last_space = Some(i);
+            }
+            i += 1;
+        }
+        if i >= chars.len() {
+            rows.push((row_start, chars.len()));
+            break;
+        }
+        let row_end = last_space.unwrap_or(i);
+        rows.push((row_start, row_end));
+        // Skip the space itself when we broke on one, so it doesn't reappear
+        // as a leading character on the next row.
+        row_start = if last_space.is_some() {
+            row_end + 1
+        } else {
+            row_end
+        };
+    }
+    rows
+}
+
+pub(crate) fn build_visual_rows(
+    lines: &[String],
+    wrap_width_px: f32,
+    width_at: &mut impl FnMut(usize, usize, char) -> f32,
+) -> Vec<(usize, usize, usize)> {
+    /*
+     * Flattens every logical line into an ordered list of visual rows, each
+     * tagged with its owning logical line index and its [start, end) char
+     * range within that line. Shared by rendering (which paints one
+     * fixed-height div per row) and click/scroll math (which maps pixel
+     * positions to/from this same row table) so all three always agree on
+     * where each row's boundaries fall.
+     */
+    let mut rows = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut width_of = |idx: usize, ch: char| width_at(li, idx, ch);
+        for (start, end) in wrap_line_into_rows(&chars, wrap_width_px, &mut width_of) {
+            rows.push((li, start, end));
+        }
+    }
+    rows
+}
+
+pub(crate) fn visual_row_for_line_col(
+    rows: &[(usize, usize, usize)],
+    logical_line: usize,
+    char_col: usize,
+) -> usize {
+    /*
+     * Finds the visual row that a (logical_line, char_col) cursor position
+     * belongs to.
+     *
+     * A column sitting exactly at a row's end is ambiguous, and is resolved
+     * differently depending on *why* the row ended:
+     *   - Hard break (a long word forced mid-word, no space consumed): the
+     *     next row starts exactly where this one ends, so the column is
+     *     redirected to the *start* of that next row — matching how text
+     *     editors visually carry the cursor onto the next wrapped row
+     *     rather than trailing behind the break.
+     *   - Soft break (`wrap_line_into_rows` consumed a space at the wrap
+     *     point): the next row starts one character *past* this row's end,
+     *     leaving a one-character gap for the consumed space. A column
+     *     equal to this row's end is the space itself — not a valid
+     *     position on the next row — so it stays here, trailing the last
+     *     visible character. (Redirecting it forward regardless of this gap
+     *     was the original bug: the next row's `row_start` could then
+     *     exceed `char_col`, underflowing any `char_col - row_start` a
+     *     caller computed downstream.)
+     *   - Last row of the line: there's no next row to redirect to, so it
+     *     stays here regardless.
+     */
+    let mut last_row_of_line = 0;
+    for (idx, &(li, start, end)) in rows.iter().enumerate() {
+        if li != logical_line {
+            continue;
+        }
+        last_row_of_line = idx;
+        if char_col >= start && char_col < end {
+            return idx;
+        }
+        if char_col == end {
+            let next_is_contiguous = rows
+                .get(idx + 1)
+                .map(|&(next_li, next_start, _)| next_li == li && next_start == end)
+                .unwrap_or(false);
+            if !next_is_contiguous {
+                return idx;
+            }
+            // else: a hard break — fall through so the next iteration's
+            // `char_col >= start && char_col < end` check picks it up.
+        }
+    }
+    last_row_of_line
+}
 #[cfg(test)]
 mod tests {
     use super::*;
