@@ -211,6 +211,11 @@ impl TabBar {
                                 .detach();
                             } else if let Err(e) = prepared {
                                 crate::state::log_line(&format!("[save] {e}"));
+                                this.state.update(cx, |s, _| {
+                                    s.apply_effect(crate::app::command::AppEffect::ShowError(
+                                        format!("Save failed: {e}"),
+                                    ));
+                                });
                             }
                             cx.notify();
                         }),
@@ -276,6 +281,11 @@ impl TabBar {
                                     });
                                 } else if let Err(e) = prepared {
                                     crate::state::log_line(&format!("[save as] {e}"));
+                                    let _ = s.update(cx, |st, _| {
+                                        st.apply_effect(crate::app::command::AppEffect::ShowError(
+                                            format!("Save As failed: {e}"),
+                                        ));
+                                    });
                                 }
                             })
                             .detach();

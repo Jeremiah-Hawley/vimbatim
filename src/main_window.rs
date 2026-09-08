@@ -392,7 +392,12 @@ impl MainWindow {
                 })
                 .detach();
             } else if let Err(e) = prepared {
-                crate::state::log_line(&format!("[save] {}", e));
+                crate::state::log_line(&format!("[save] {e}"));
+                s.update(cx, |st, _| {
+                    st.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                        "Save failed: {e}"
+                    )));
+                });
             }
         });
 
@@ -448,7 +453,12 @@ impl MainWindow {
                         cx.notify();
                     });
                 } else if let Err(e) = prepared {
-                    crate::state::log_line(&format!("[save as] {}", e));
+                    crate::state::log_line(&format!("[save as] {e}"));
+                    let _ = state.update(cx, |st, _| {
+                        st.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                            "Save As failed: {e}"
+                        )));
+                    });
                 }
             })
             .detach();

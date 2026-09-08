@@ -117,7 +117,9 @@ impl FileExplorer {
                         target
                     {
                         if let Err(e) = s.rename_path(&old, &new_name) {
-                            crate::state::log_line(&format!("[FileExplorer] rename failed: {e}"));
+                            let message = format!("Rename failed: {e}");
+                            crate::state::log_line(&format!("[FileExplorer] {message}"));
+                            s.apply_effect(crate::app::command::AppEffect::ShowError(message));
                         }
                     }
                 }
@@ -188,11 +190,9 @@ impl FileExplorer {
         let dir = self.state.read(cx).workspace.working_directory.clone();
         self.state.update(cx, |s, cx| {
             if let Err(e) = s.create_new_docx_in(&dir) {
-                crate::state::log_line(&format!(
-                    "[FileExplorer] failed to create new file in {}: {}",
-                    dir.display(),
-                    e
-                ));
+                let message = format!("Failed to create a file in {}: {e}", dir.display());
+                crate::state::log_line(&format!("[FileExplorer] {message}"));
+                s.apply_effect(crate::app::command::AppEffect::ShowError(message));
             }
             cx.notify();
         });
@@ -483,10 +483,13 @@ impl FileExplorer {
                                 .on_click(move |_ev, _window, cx| {
                                     confirm_state.update(cx, |s, cx| {
                                         if let Err(e) = s.confirm_context_menu_delete() {
+                                            let message = format!("Delete failed: {e}");
                                             crate::state::log_line(&format!(
-                                                "[FileExplorer] failed to delete: {}",
-                                                e
+                                                "[FileExplorer] {message}"
                                             ));
+                                            s.apply_effect(
+                                                crate::app::command::AppEffect::ShowError(message),
+                                            );
                                         }
                                         cx.notify();
                                     });
@@ -706,8 +709,10 @@ impl FileExplorer {
                             dup.update(cx, |s, cx| {
                                 s.close_file_context_menu();
                                 if let Err(e) = s.duplicate_file(&p1) {
-                                    crate::state::log_line(&format!(
-                                        "[FileExplorer] duplicate failed: {e}"
+                                    let message = format!("Duplicate failed: {e}");
+                                    crate::state::log_line(&format!("[FileExplorer] {message}"));
+                                    s.apply_effect(crate::app::command::AppEffect::ShowError(
+                                        message,
                                     ));
                                 }
                                 cx.notify();
@@ -777,8 +782,10 @@ impl FileExplorer {
                             paste.update(cx, |s, cx| {
                                 s.close_file_context_menu();
                                 if let Err(e) = s.paste_file_into(&path) {
-                                    crate::state::log_line(&format!(
-                                        "[FileExplorer] paste failed: {e}"
+                                    let message = format!("Paste failed: {e}");
+                                    crate::state::log_line(&format!("[FileExplorer] {message}"));
+                                    s.apply_effect(crate::app::command::AppEffect::ShowError(
+                                        message,
                                     ));
                                 }
                                 cx.notify();
@@ -797,9 +804,10 @@ impl FileExplorer {
                         move |_, _, cx| {
                             new_file_state.update(cx, |s, cx| {
                                 if let Err(e) = s.create_file_at_context_menu_location() {
-                                    crate::state::log_line(&format!(
-                                        "[FileExplorer] failed to create file: {}",
-                                        e
+                                    let message = format!("Failed to create file: {e}");
+                                    crate::state::log_line(&format!("[FileExplorer] {message}"));
+                                    s.apply_effect(crate::app::command::AppEffect::ShowError(
+                                        message,
                                     ));
                                 }
                                 cx.notify();
@@ -822,9 +830,9 @@ impl FileExplorer {
                                 _ => s.workspace.working_directory.clone(),
                             };
                             if let Err(e) = s.create_new_folder_in(&dir) {
-                                crate::state::log_line(&format!(
-                                    "[FileExplorer] new folder failed: {e}"
-                                ));
+                                let message = format!("Failed to create folder: {e}");
+                                crate::state::log_line(&format!("[FileExplorer] {message}"));
+                                s.apply_effect(crate::app::command::AppEffect::ShowError(message));
                             }
                             cx.notify();
                         });
