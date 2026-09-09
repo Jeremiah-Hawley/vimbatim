@@ -4985,7 +4985,18 @@ impl AppState {
     /// no confirmation, which is the exact thing `request_close_tab`'s
     /// Save/Discard/Cancel dialog exists to prevent. A clean tab has nothing
     /// to lose, which is the case this is actually for.
+    /// Synchronous compatibility path for tests and non-GPUI callers.
     pub fn open_file_in_current_tab(&mut self, path: PathBuf) {
+        let result = DocumentStore.load_document(&path);
+        self.complete_open_file_in_current_tab(path, result);
+    }
+
+    /// Applies an asynchronously loaded document to the focused clean tab.
+    pub fn complete_open_file_in_current_tab(
+        &mut self,
+        path: PathBuf,
+        result: Result<(Vec<Paragraph>, DocxOrigin), crate::app::error::AppError>,
+    ) {
         let replaceable = self
             .pane_tab_index(self.workspace.focused_pane)
             .filter(|&i| {
@@ -4995,18 +5006,16 @@ impl AppState {
                     .is_some_and(|t| !t.document.is_modified)
             });
         let Some(idx) = replaceable else {
-            self.open_file(path);
+            self.complete_open_file(path, result);
             return;
         };
-        // Already open elsewhere: `open_file` knows how to focus that tab (or
-        // that pane) instead of pulling a second copy of the document in.
         if self
             .workspace
             .tabs
             .iter()
             .any(|t| t.file_path.as_deref() == Some(&path))
         {
-            self.open_file(path);
+            self.complete_open_file(path, result);
             return;
         }
         if !path
@@ -5018,16 +5027,21 @@ impl AppState {
             self.apply_effect(crate::app::command::AppEffect::ShowError(message));
             return;
         }
-        let tab = tab_from_loaded_docx(
-            TabId(self.workspace.next_tab_id),
-            &path,
-            DocumentStore.load_document(&path),
-        );
+        let load_error = result.as_ref().err().cloned();
+        let tab = tab_from_loaded_docx(TabId(self.workspace.next_tab_id), &path, result);
         self.workspace.next_tab_id += 1;
-        // The outgoing tab's recovery snapshot goes with it — it was clean,
-        // so there is nothing left to recover. Its path still goes on the
-        // reopen stack, so Shift+Ctrl+W brings it back exactly as it would
-        // after a deliberate close.
+        if let Some(error) = load_error {
+            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                "Could not open {}: {error}",
+                path.display()
+            )));
+        }
+        if tab.opened_detached {
+            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                "Could not open {}; it was opened as a detached blank document.",
+                path.display()
+            )));
+        }
         if let Some(old) = self.workspace.tabs.get(idx) {
             crate::recovery::delete_snapshot(old.id);
             if let Some(old_path) = old.file_path.clone() {

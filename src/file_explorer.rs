@@ -633,11 +633,27 @@ impl FileExplorer {
                         false,
                         p,
                         move |_, _, cx| {
+                            let path = p2.clone();
+                            let load_path = path.clone();
+                            let state = current_tab.clone();
                             current_tab.update(cx, |s, cx| {
                                 s.close_file_context_menu();
-                                s.open_file_in_current_tab(p2.clone());
                                 cx.notify();
                             });
+                            cx.spawn(async move |cx| {
+                                use crate::app::repository::DocumentRepository;
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::store::DocumentStore.load_document(&load_path)
+                                    })
+                                    .await;
+                                let _ = state.update(cx, |s, cx| {
+                                    s.complete_open_file_in_current_tab(path, result);
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         },
                     ))
                     .child(Self::menu_item(
@@ -646,11 +662,28 @@ impl FileExplorer {
                         false,
                         p,
                         move |_, _, cx| {
+                            let path = p3.clone();
+                            let load_path = path.clone();
+                            let state = side_pane.clone();
                             side_pane.update(cx, |s, cx| {
                                 s.close_file_context_menu();
-                                s.open_file_in_side_pane(p3.clone());
+                                s.open_split();
                                 cx.notify();
                             });
+                            cx.spawn(async move |cx| {
+                                use crate::app::repository::DocumentRepository;
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::store::DocumentStore.load_document(&load_path)
+                                    })
+                                    .await;
+                                let _ = state.update(cx, |s, cx| {
+                                    s.complete_open_file(path, result);
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         },
                     ))
                     .child(Self::menu_separator(p))
