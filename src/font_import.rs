@@ -57,6 +57,11 @@ fn is_font_entry(name: &str) -> bool {
 /// (bold, italic) slot, which GPUI's own weight/style matching can't tell
 /// apart anyway (see `main.rs`'s `assert_family_has_four_distinct_faces`).
 fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
+    const MAX_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
+    let metadata = std::fs::metadata(path).map_err(|e| format!("Couldn't stat file: {e}"))?;
+    if metadata.len() > MAX_IMPORT_BYTES {
+        return Err("File exceeds 100MiB font import limit.".into());
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -64,16 +69,12 @@ fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
         .to_lowercase();
     let raw_faces: Vec<Vec<u8>> = match ext.as_str() {
         "zip" => {
-            let metadata =
-                std::fs::metadata(path).map_err(|e| format!("Couldn't stat file: {e}"))?;
-            if metadata.len() > 100 * 1024 * 1024 {
-                return Err("File exceeds 100MiB font import limit.".into());
-            }
             let file =
                 std::fs::File::open(path).map_err(|e| format!("Couldn't open that file: {e}"))?;
             let mut archive =
                 zip::ZipArchive::new(file).map_err(|e| format!("Not a valid .zip file: {e}"))?;
             let mut out = Vec::new();
+            let mut expanded_bytes = 0u64;
             for i in 0..archive.len() {
                 let mut entry = match archive.by_index(i) {
                     Ok(entry) => entry,
@@ -81,6 +82,10 @@ fn candidate_faces(path: &Path) -> Result<Vec<Face>, String> {
                 };
                 if entry.is_dir() || !is_font_entry(entry.name()) {
                     continue;
+                }
+                expanded_bytes = expanded_bytes.saturating_add(entry.size());
+                if expanded_bytes > MAX_IMPORT_BYTES {
+                    return Err("Font archive expands beyond the 100MiB import limit.".into());
                 }
                 let mut bytes = Vec::new();
                 if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
