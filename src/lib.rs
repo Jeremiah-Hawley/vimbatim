@@ -1,6 +1,3 @@
-#[path = "../config_parsing/config_parsing.rs"]
-pub mod config_parsing;
-
 pub mod app;
 pub mod app_toolbar;
 pub mod auto_scroll;
@@ -155,7 +152,7 @@ fn load_bundled_fonts(cx: &mut App) {
     }
 }
 
-pub fn run_app() {
+pub(crate) fn run_app() {
     install_panic_hook();
 
     /*
