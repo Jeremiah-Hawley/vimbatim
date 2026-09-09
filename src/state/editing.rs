@@ -1386,18 +1386,34 @@ impl AppState {
     /// Per the recovery spec, the original file is not validated: if it
     /// moved, changed, or was deleted since the crash, the tab still points
     /// at that path and a later save writes there.
+    /// Synchronous compatibility path for tests and non-GPUI callers.
     pub fn resume_recovery(&mut self) {
-        if self.recovery.pending_entries.is_empty() {
+        let Some(entry) = self.take_recovery_for_resume() else {
             return;
-        }
-        let entry = self.recovery.pending_entries.remove(0);
+        };
+        self.complete_recovery_resume(
+            entry.clone(),
+            parse_docx(&entry.snapshot).map_err(|e| e.to_string()),
+        );
+    }
 
-        // A snapshot that won't parse has nothing to restore. Drop it rather
-        // than opening an empty tab that looks like the recovery succeeded —
-        // `scan_recovery_dir` deliberately doesn't parse every zip at launch,
-        // so this is where a corrupt snapshot is caught.
-        let Ok((paragraphs, origin)) = parse_docx(&entry.snapshot) else {
+    /// Removes the next pending recovery entry before its snapshot is parsed
+    /// off the UI thread.
+    pub fn take_recovery_for_resume(&mut self) -> Option<RecoveryEntry> {
+        (!self.recovery.pending_entries.is_empty()).then(|| self.recovery.pending_entries.remove(0))
+    }
+
+    /// Applies a completed recovery parse on the UI thread.
+    pub fn complete_recovery_resume(
+        &mut self,
+        entry: RecoveryEntry,
+        result: Result<(Vec<Paragraph>, DocxOrigin), String>,
+    ) {
+        let Ok((paragraphs, origin)) = result else {
             crate::recovery::delete_entry(&entry);
+            self.apply_effect(crate::app::command::AppEffect::ShowError(
+                "Could not restore the recovery snapshot.".into(),
+            ));
             return;
         };
 

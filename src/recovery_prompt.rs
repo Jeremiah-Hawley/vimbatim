@@ -176,10 +176,27 @@ impl Render for RecoveryPrompt {
                                 "Resume Editing",
                                 p,
                                 cx.listener(|this, _ev, _window, cx| {
-                                    this.state.update(cx, |s, cx| {
-                                        s.resume_recovery();
-                                        cx.notify();
-                                    });
+                                    let Some(entry) =
+                                        this.state.update(cx, |s, _| s.take_recovery_for_resume())
+                                    else {
+                                        return;
+                                    };
+                                    let snapshot = entry.snapshot.clone();
+                                    let state = this.state.clone();
+                                    cx.spawn(async move |_this, cx| {
+                                        let result = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                crate::docx_parser::parse_docx(&snapshot)
+                                                    .map_err(|e| e.to_string())
+                                            })
+                                            .await;
+                                        let _ = state.update(cx, |s, cx| {
+                                            s.complete_recovery_resume(entry, result);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
                                     cx.notify();
                                 }),
                             )),
