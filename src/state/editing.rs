@@ -93,10 +93,11 @@ impl AppState {
             custom_font_colors: preferences.custom_font_colors,
             custom_highlight_colors: preferences.custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
+            // Recovery scanning happens after the window opens on GPUI's
+            // background executor; startup must not recursively walk the
+            // recovery directory on the UI thread.
             recovery: RecoveryState {
-                pending_entries: crate::recovery::scan_recovery_dir(
-                    &crate::recovery::recovery_dir(),
-                ),
+                pending_entries: Vec::new(),
             },
             keybinds,
             theme,

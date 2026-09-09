@@ -216,6 +216,30 @@ pub(crate) fn run_app() {
             )
             .expect("Failed to open main window");
 
+        // Recovery scanning can recursively read a directory, so defer it
+        // until the window exists and keep it off the UI thread.
+        let recovery_state = window
+            .update(cx, |view, _, _| view.state.clone())
+            .expect("Failed to access application state");
+        let state_for_scan = recovery_state.clone();
+        cx.spawn(async move |cx| {
+            use crate::app::repository::RecoveryRepository;
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::app::store::RecoveryStore.list_entries() })
+                .await;
+            let _ = state_for_scan.update(cx, |state, cx| {
+                match result {
+                    Ok(entries) => state.recovery.pending_entries = entries,
+                    Err(error) => state.apply_effect(app::command::AppEffect::ShowError(format!(
+                        "Could not check crash recovery: {error}"
+                    ))),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+
         // The native titlebar close button previously bypassed the
         // Save/Discard/Cancel prompt entirely: every other quit path routes
         // through AppState::request_close_app (see tab_bar.rs), but the OS
