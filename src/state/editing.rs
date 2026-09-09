@@ -1,8 +1,8 @@
 use super::*;
 use crate::app::command::AppCommand;
 use crate::app::error::AppError;
-use crate::app::repository::{DocumentRepository, WorkspaceRepository};
-use crate::app::store::{DocumentStore, WorkspaceFs};
+use crate::app::repository::{DocumentRepository, SettingsRepository, WorkspaceRepository};
+use crate::app::store::{DocumentStore, SettingsStore, WorkspaceFs};
 
 impl AppState {
     pub fn new() -> Self {
@@ -21,7 +21,9 @@ impl AppState {
          */
         let settings_path = settings_conf_path();
         let settings_path = settings_path.as_path();
-        let preferences = crate::preferences::Preferences::load(settings_path).unwrap_or_default();
+        let preferences = SettingsStore::new(settings_path.to_path_buf())
+            .load_preferences()
+            .unwrap_or_default();
         let working_directory = preferences
             .working_directory
             .clone()
