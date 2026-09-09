@@ -337,11 +337,23 @@ impl FileExplorer {
                     // Open on double-click; single click is for selection (future)
                     .on_click(move |ev, _window, cx| {
                         if ev.click_count() >= 2 {
-                            let p: PathBuf = path_clone.clone();
-                            state_clone.update(cx, |s, cx| {
-                                s.open_file(p);
-                                cx.notify();
-                            });
+                            let path: PathBuf = path_clone.clone();
+                            let load_path = path.clone();
+                            let state = state_clone.clone();
+                            cx.spawn(async move |cx| {
+                                use crate::app::repository::DocumentRepository;
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::store::DocumentStore.load_document(&load_path)
+                                    })
+                                    .await;
+                                let _ = state.update(cx, |s, cx| {
+                                    s.complete_open_file(path, result);
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         }
                     })
                     // Right-click: open the context menu targeting this
@@ -589,11 +601,27 @@ impl FileExplorer {
                         false,
                         p,
                         move |_, _, cx| {
+                            let path = p1.clone();
+                            let load_path = path.clone();
+                            let state = new_tab.clone();
                             new_tab.update(cx, |s, cx| {
                                 s.close_file_context_menu();
-                                s.open_file(p1.clone());
                                 cx.notify();
                             });
+                            cx.spawn(async move |cx| {
+                                use crate::app::repository::DocumentRepository;
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::store::DocumentStore.load_document(&load_path)
+                                    })
+                                    .await;
+                                let _ = state.update(cx, |s, cx| {
+                                    s.complete_open_file(path, result);
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         },
                     ))
                     .child(Self::menu_item(
