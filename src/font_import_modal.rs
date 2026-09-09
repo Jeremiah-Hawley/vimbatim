@@ -88,6 +88,12 @@ impl FontImportModal {
                         }
                     }
                     Err(e) => {
+                        this.state.update(cx, |state, cx| {
+                            state.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                                "Font import failed: {e}"
+                            )));
+                            cx.notify();
+                        });
                         this.error = Some(e);
                         this.warning = None;
                     }
