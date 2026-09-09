@@ -287,6 +287,188 @@ impl MainWindow {
     /// Adding a future bindable action means: one enum variant in
     /// `keybinds.rs`, one action struct there, one keybinding arm in
     /// `rebuild_keymap`, and one `cx.on_action` call here.
+    /// Evaluates application effects that require platform/window capabilities
+    /// (shelling out, dialogs, clipboard, keybinds), resolving them asynchronously
+    /// or mutating `state` when done.
+    pub fn handle_app_effects(
+        state: Entity<AppState>,
+        effects: Vec<crate::app::command::AppEffect>,
+        cx: &mut App,
+    ) {
+        for effect in effects {
+            match effect {
+                crate::app::command::AppEffect::WriteClipboard { text, metadata } => {
+                    cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
+                }
+                crate::app::command::AppEffect::DispatchKeybind(action) => {
+                    // Requires window dispatch but we only have App here, so we defer it
+                    // or implement a global action dispatcher. Wait, we can't dispatch
+                    // without a window locally. But we can just skip it here or handle it.
+                }
+                crate::app::command::AppEffect::ShowError(message) => {
+                    state.update(cx, |st, cx| {
+                        st.apply_effect(crate::app::command::AppEffect::ShowError(message));
+                        cx.notify();
+                    });
+                }
+                crate::app::command::AppEffect::PromptOpenFile => {
+                    let rx = cx.prompt_for_paths(PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: false,
+                        prompt: None,
+                    });
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        if let Ok(Ok(Some(mut paths))) = rx.await {
+                            if let Some(file) = paths.pop() {
+                                let load_path = file.clone();
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        use crate::app::repository::DocumentRepository;
+                                        crate::app::store::DocumentStore.load_document(&load_path)
+                                    })
+                                    .await;
+                                let _ = s.update(cx, |st, cx| {
+                                    st.complete_open_file(file, result);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                crate::app::command::AppEffect::PromptOpenFolder => {
+                    let rx = cx.prompt_for_paths(PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: None,
+                    });
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        if let Ok(Ok(Some(mut paths))) = rx.await {
+                            if let Some(dir) = paths.pop() {
+                                let scan_dir = dir.clone();
+                                let _ = s.update(cx, |st, cx| {
+                                    st.begin_working_directory(dir);
+                                    cx.notify();
+                                });
+                                let scan_dir_clone = scan_dir.clone();
+                                let file_tree = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::repository::WorkspaceRepository::scan_directory(
+                                            &crate::app::store::WorkspaceFs,
+                                            &scan_dir_clone,
+                                        )
+                                        .unwrap_or_default()
+                                    })
+                                    .await;
+                                let _ = s.update(cx, |st, cx| {
+                                    st.complete_file_tree_scan(&scan_dir, file_tree);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                crate::app::command::AppEffect::PromptSaveAs(idx) => {
+                    let (dir, suggested) = {
+                        let st = state.read(cx);
+                        let tab = st.workspace.tabs.get(idx);
+                        let dir = tab
+                            .and_then(|t| t.file_path.as_ref())
+                            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                            .unwrap_or_else(|| st.workspace.working_directory.clone());
+                        let suggested = tab
+                            .map(|t| t.title.clone())
+                            .filter(|t| t.ends_with(".docx"))
+                            .unwrap_or_else(|| "Untitled.docx".to_string());
+                        (dir, suggested)
+                    };
+
+                    let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        if let Ok(Ok(Some(path))) = rx.await {
+                            let prepared = s.update(cx, |st, cx| {
+                                let p = st.prepare_save_as(idx, path);
+                                cx.notify();
+                                p
+                            });
+
+                            if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
+                                let start = std::time::Instant::now();
+                                let result = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        use crate::app::repository::DocumentRepository;
+                                        crate::app::store::DocumentStore.save_new_docx(
+                                            &paragraphs,
+                                            &p,
+                                            &doc_style,
+                                        )
+                                    })
+                                    .await;
+                                let _ = s.update(cx, |st, cx| {
+                                    st.complete_save(tab_id, result, start.elapsed());
+                                    cx.notify();
+                                });
+                            } else if let Err(e) = prepared {
+                                crate::state::log_line(&format!("[save as] {e}"));
+                                let _ = s.update(cx, |st, _| {
+                                    st.apply_effect(crate::app::command::AppEffect::ShowError(
+                                        format!("Save As failed: {e}"),
+                                    ));
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                crate::app::command::AppEffect::PerformSave(idx) => {
+                    let prepared = state.update(cx, |st, cx| {
+                        let p = st.prepare_save(idx);
+                        cx.notify();
+                        p
+                    });
+                    if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
+                        let s = state.clone();
+                        cx.spawn(async move |cx| {
+                            let start = std::time::Instant::now();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    crate::app::store::DocumentStore::save_document(
+                                        &paragraphs,
+                                        origin.as_deref(),
+                                        &p,
+                                        doc_style,
+                                    )
+                                })
+                                .await;
+                            let _ = s.update(cx, |st, cx| {
+                                st.complete_save(tab_id, result, start.elapsed());
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    } else if let Err(e) = prepared {
+                        crate::state::log_line(&format!("[save] {e}"));
+                        state.update(cx, |st, _| {
+                            st.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                                "Save failed: {e}"
+                            )));
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     fn register_global_actions(state: Entity<AppState>, cx: &mut App) {
         let s = state.clone();
         cx.on_action(move |_: &NewTabAction, cx| {
@@ -365,182 +547,38 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &SaveAction, cx| {
-            let prepared = s.update(cx, |st, cx| {
-                let p = st.prepare_save(st.workspace.active_tab);
+            s.update(cx, |st, cx| {
+                let effects = st.execute(crate::app::command::AppCommand::Save);
+                Self::handle_app_effects(s.clone(), effects, cx);
                 cx.notify();
-                p
             });
-            if let Ok(Some((tab_id, paragraphs, origin, path, doc_style))) = prepared {
-                let state = s.clone();
-                cx.spawn(async move |mut cx| {
-                    let start = std::time::Instant::now();
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            crate::app::store::DocumentStore::save_document(
-                                &paragraphs,
-                                origin.as_deref(),
-                                &path,
-                                doc_style,
-                            )
-                        })
-                        .await;
-                    let elapsed = start.elapsed();
-                    let _ = state.update(cx, |st, cx| {
-                        st.complete_save(tab_id, result, elapsed);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            } else if let Err(e) = prepared {
-                crate::state::log_line(&format!("[save] {e}"));
-                s.update(cx, |st, _| {
-                    st.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                        "Save failed: {e}"
-                    )));
-                });
-            }
         });
 
         let s = state.clone();
         cx.on_action(move |_: &SaveAsAction, cx| {
-            // Native save dialog (gpui's `prompt_for_new_path`), seeded with
-            // the tab's own folder and filename when it has one so "Save As"
-            // on an opened document starts beside the original rather than at
-            // some unrelated default.
-            let (dir, suggested) = {
-                let st = s.read(cx);
-                let tab = st.workspace.tabs.get(st.workspace.active_tab);
-                let dir = tab
-                    .and_then(|t| t.file_path.as_ref())
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                    .unwrap_or_else(|| st.workspace.working_directory.clone());
-                let suggested = tab
-                    .map(|t| t.title.clone())
-                    .filter(|t| t.ends_with(".docx"))
-                    .unwrap_or_else(|| "Untitled.docx".to_string());
-                (dir, suggested)
-            };
-
-            let path_rx = cx.prompt_for_new_path(&dir, Some(&suggested));
-            let state = s.clone();
-            cx.spawn(async move |mut cx| {
-                let Ok(Ok(Some(path))) = path_rx.await else {
-                    return; // cancelled
-                };
-                let active_tab = state.update(cx, |st, _| st.workspace.active_tab);
-                let prepared = state.update(cx, |st, cx| {
-                    let p = st.prepare_save_as(active_tab, path);
-                    cx.notify();
-                    p
-                });
-
-                if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
-                    let start = std::time::Instant::now();
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move {
-                            crate::app::store::DocumentStore::save_document(
-                                &paragraphs,
-                                origin.as_deref(),
-                                &p,
-                                doc_style,
-                            )
-                        })
-                        .await;
-                    let elapsed = start.elapsed();
-                    let _ = state.update(cx, |st, cx| {
-                        st.complete_save(tab_id, result, elapsed);
-                        cx.notify();
-                    });
-                } else if let Err(e) = prepared {
-                    crate::state::log_line(&format!("[save as] {e}"));
-                    let _ = state.update(cx, |st, _| {
-                        st.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                            "Save As failed: {e}"
-                        )));
-                    });
-                }
-            })
-            .detach();
+            s.update(cx, |st, cx| {
+                let effects = st.execute(crate::app::command::AppCommand::SaveAs);
+                Self::handle_app_effects(s.clone(), effects, cx);
+                cx.notify();
+            });
         });
 
         let s = state.clone();
         cx.on_action(move |_: &OpenFileAction, cx| {
-            // Same native picker + `AppState::open_file` as the toolbar's own
-            // "Open File" button (`app_toolbar.rs`) — this handler exists so
-            // the same action is reachable from a keybind and the command
-            // palette too. No `window` in scope here (a global `on_action`,
-            // not a view's `cx.listener`), so this uses plain `cx.spawn`
-            // rather than `cx.spawn_in`, same as `SaveAsAction` above.
-            let paths_rx = cx.prompt_for_paths(PathPromptOptions {
-                files: true,
-                directories: false,
-                multiple: false,
-                prompt: None,
+            s.update(cx, |st, cx| {
+                let effects = st.execute(crate::app::command::AppCommand::OpenFile);
+                Self::handle_app_effects(s.clone(), effects, cx);
+                cx.notify();
             });
-            let state = s.clone();
-            cx.spawn(async move |cx| {
-                let Ok(Ok(Some(mut paths))) = paths_rx.await else {
-                    return;
-                };
-                let Some(file) = paths.pop() else {
-                    return;
-                };
-                let load_path = file.clone();
-                let result = cx
-                    .background_executor()
-                    .spawn(async move {
-                        use crate::app::repository::DocumentRepository;
-                        crate::app::store::DocumentStore.load_document(&load_path)
-                    })
-                    .await;
-                let _ = state.update(cx, |st, cx| {
-                    st.complete_open_file(file, result);
-                    cx.notify();
-                });
-            })
-            .detach();
         });
 
         let s = state.clone();
         cx.on_action(move |_: &OpenFolderAction, cx| {
-            // Same native picker + `AppState::set_working_directory` as the
-            // toolbar's own "Open Folder" button.
-            let paths_rx = cx.prompt_for_paths(PathPromptOptions {
-                files: false,
-                directories: true,
-                multiple: false,
-                prompt: None,
+            s.update(cx, |st, cx| {
+                let effects = st.execute(crate::app::command::AppCommand::OpenFolder);
+                Self::handle_app_effects(s.clone(), effects, cx);
+                cx.notify();
             });
-            let state = s.clone();
-            cx.spawn(async move |cx| {
-                let Ok(Ok(Some(mut paths))) = paths_rx.await else {
-                    return;
-                };
-                let Some(dir) = paths.pop() else {
-                    return;
-                };
-                let scan_dir = dir.clone();
-                let _ = state.update(cx, |st, cx| {
-                    st.begin_working_directory(dir);
-                    cx.notify();
-                });
-                let scan_input = scan_dir.clone();
-                let file_tree = cx
-                    .background_executor()
-                    .spawn(async move {
-                        crate::app::store::WorkspaceFs
-                            .scan_directory(&scan_input)
-                            .unwrap_or_default()
-                    })
-                    .await;
-                let _ = state.update(cx, |st, cx| {
-                    st.complete_file_tree_scan(&scan_dir, file_tree);
-                    cx.notify();
-                });
-            })
-            .detach();
         });
 
         let s = state.clone();

@@ -541,6 +541,13 @@ impl TextEditor {
                                 ));
                             });
                         }
+                        _ => {
+                            crate::main_window::MainWindow::handle_app_effects(
+                                self.state.clone(),
+                                vec![effect],
+                                cx,
+                            );
+                        }
                     }
                 }
                 if consumed {

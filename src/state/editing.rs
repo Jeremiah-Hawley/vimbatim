@@ -21752,6 +21752,16 @@ impl AppState {
                 self.ui.notifications.clear();
                 vec![]
             }
+            AppCommand::Save => vec![crate::app::command::AppEffect::PerformSave(
+                self.workspace.active_tab,
+            )],
+            AppCommand::SaveAs => vec![crate::app::command::AppEffect::PromptSaveAs(
+                self.workspace.active_tab,
+            )],
+            AppCommand::SaveTab(idx) => vec![crate::app::command::AppEffect::PerformSave(idx)],
+            AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
+            AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
+            AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
             AppCommand::VimKey {
                 key,
                 shift,
@@ -21795,7 +21805,11 @@ impl AppState {
                 });
             }
             crate::app::command::AppEffect::WriteClipboard { .. }
-            | crate::app::command::AppEffect::DispatchKeybind(_) => {}
+            | crate::app::command::AppEffect::DispatchKeybind(_)
+            | crate::app::command::AppEffect::PromptOpenFolder
+            | crate::app::command::AppEffect::PromptOpenFile
+            | crate::app::command::AppEffect::PromptSaveAs(_)
+            | crate::app::command::AppEffect::PerformSave(_) => {}
         }
     }
 }
