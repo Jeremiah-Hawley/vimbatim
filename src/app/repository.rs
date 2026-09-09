@@ -18,6 +18,7 @@ pub trait WorkspaceRepository {
     fn create_dir(&self, path: &Path) -> Result<(), AppError>;
     fn rename(&self, src: &Path, dest: &Path) -> Result<(), AppError>;
     fn remove_file(&self, path: &Path) -> Result<(), AppError>;
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<crate::state::FileNode>, AppError>;
 }
 
 pub trait SettingsRepository {
@@ -111,6 +112,11 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .remove(path)
             .map(|_| ())
             .ok_or_else(|| AppError::Workspace(format!("{} does not exist", path.display())))
+    }
+
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<crate::state::FileNode>, AppError> {
+        // Limited fake for tests
+        Ok(Vec::new())
     }
 }
 

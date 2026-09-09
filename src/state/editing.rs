@@ -1,6 +1,7 @@
 use super::*;
-use crate::app::repository::DocumentRepository;
-use crate::app::store::DocumentStore;
+use crate::app::error::AppError;
+use crate::app::repository::{DocumentRepository, WorkspaceRepository};
+use crate::app::store::{DocumentStore, WorkspaceFs};
 
 impl AppState {
     pub fn new() -> Self {
@@ -25,7 +26,9 @@ impl AppState {
             .clone()
             .unwrap_or_else(default_working_directory);
 
-        let mut file_tree = scan_directory(&working_directory);
+        let mut file_tree = crate::app::store::WorkspaceFs
+            .scan_directory(&working_directory)
+            .unwrap_or_default();
         crate::file_explorer::restore_expanded_dirs(&mut file_tree, &preferences.expanded_dirs);
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_keybinds = crate::vim_keybinds::VimKeybinds::load(settings_path);
@@ -4779,7 +4782,9 @@ impl AppState {
          * expansion onto a fresh scan.
          */
         let expanded = crate::file_explorer::collect_expanded_dirs(&self.workspace.file_tree);
-        self.workspace.file_tree = scan_directory(&self.workspace.working_directory);
+        self.workspace.file_tree = WorkspaceFs
+            .scan_directory(&self.workspace.working_directory)
+            .unwrap_or_default();
         crate::file_explorer::restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
     }
 
@@ -4900,29 +4905,19 @@ impl AppState {
         }
     }
 
-    pub fn confirm_context_menu_delete(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Deletes the file the open context menu targets from disk and
-         * refreshes the tree. A no-op (not an error) for a Dir or
-         * Background target — deletion is scoped to files only, since
-         * deleting a whole directory tree needs stronger confirmation than
-         * this menu offers. Closes the menu either way.
-         */
-        let result: Result<(), Box<dyn std::error::Error>> = match self.ui.file_context_menu.take()
-        {
+    pub fn confirm_context_menu_delete(&mut self) -> Result<(), AppError> {
+        let result = match self.ui.file_context_menu.take() {
             Some(FileContextMenu {
                 target: FileContextMenuTarget::File(path),
                 ..
-            }) => std::fs::remove_file(&path).map_err(Into::into),
+            }) => WorkspaceFs.remove_file(&path),
             _ => Ok(()),
         };
         self.refresh_file_tree();
         result
     }
 
-    pub fn create_file_at_context_menu_location(
-        &mut self,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn create_file_at_context_menu_location(&mut self) -> Result<(), AppError> {
         /*
          * Creates a new blank .docx in the context menu's target directory
          * (a File target's parent directory, a Dir target itself, or
@@ -4945,19 +4940,13 @@ impl AppState {
         self.create_new_docx_in(&dir)
     }
 
-    pub fn create_new_docx_in(
-        &mut self,
-        dir: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Creates a new blank .docx file in `dir`, named the first unused
-         * "Untitled.docx" / "Untitled 1.docx" / ... in sequence, opens it,
-         * and refreshes the file tree. Shared by the sidebar's "+" button
-         * (dir = working_directory) and the right-click menu's "New File"
-         * (dir = wherever was clicked).
-         */
+    pub fn create_new_docx_in(&mut self, dir: &std::path::Path) -> Result<(), AppError> {
         let path = unique_path_in(dir, "Untitled", "docx");
-        create_new_docx(&default_paragraphs(), &path, self.new_doc_style())?;
+        crate::app::store::DocumentStore.save_new_docx(
+            &default_paragraphs(),
+            &path,
+            &self.new_doc_style(),
+        )?;
         self.refresh_file_tree();
         self.open_file(path);
         Ok(())
@@ -5057,17 +5046,16 @@ impl AppState {
     /// "Duplicate file" — copies `path` alongside itself as
     /// "<name> copy.docx" (or "<name> copy 2.docx", …). Does not open the
     /// copy: duplicating is usually a backup gesture, not an editing one.
-    pub fn duplicate_file(
-        &mut self,
-        path: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = path.parent().ok_or("file has no parent directory")?;
+    pub fn duplicate_file(&mut self, path: &std::path::Path) -> Result<(), AppError> {
+        let dir = path
+            .parent()
+            .ok_or(AppError::Workspace("file has no parent directory".into()))?;
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
-            .ok_or("file has no name")?;
+            .ok_or(AppError::Workspace("file has no name".into()))?;
         let dest = unique_path_in(dir, &format!("{stem} copy"), "docx");
-        std::fs::copy(path, dest)?;
+        WorkspaceFs.copy_file(path, &dest)?;
         self.refresh_file_tree();
         Ok(())
     }
@@ -5095,40 +5083,28 @@ impl AppState {
     /// A copy leaves `copied_file` set, so one copy can be pasted into
     /// several folders. A cut clears it: the original has moved, and pasting
     /// it a second time would only fail on a path that no longer exists.
-    pub fn paste_file_into(
-        &mut self,
-        dir: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (src, is_cut) = self.copied_file.clone().ok_or("nothing copied")?;
+    pub fn paste_file_into(&mut self, dir: &std::path::Path) -> Result<(), AppError> {
+        let (src, is_cut) = self
+            .copied_file
+            .clone()
+            .ok_or(AppError::Workspace("nothing copied".into()))?;
         let is_dir = src.is_dir();
         if is_cut {
-            // Pasting a cut back into the folder it came from means "leave it
-            // where it is". Without this it fell through to `unique_path_in`,
-            // which sees the name taken — by the very file being moved — and
-            // renames it: `Case.docx` became `Case 1.docx`, `Round 3` became
-            // `Round 3 1`. A no-op gesture that silently renames the user's
-            // work is worse than one that does nothing.
             if src.parent() == Some(dir) {
                 self.copied_file = None;
                 return Ok(());
             }
-            // A folder can't be moved inside itself: `fs::rename` would either
-            // fail obscurely or, worse, succeed and strand the subtree.
-            //
-            // Compared on canonical paths so a symlinked destination pointing
-            // into `src` is caught here, with a message that says what
-            // happened, rather than reaching the filesystem and coming back as
-            // "Invalid argument (os error 22)". The lexical fallback covers a
-            // path that can't be canonicalised (it may not exist yet).
             let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
             if is_dir && canon(dir).starts_with(canon(&src)) {
-                return Err("can't move a folder into itself".into());
+                return Err(AppError::Workspace(
+                    "can't move a folder into itself".into(),
+                ));
             }
         }
         let stem = src
             .file_stem()
             .and_then(|s| s.to_str())
-            .ok_or("file has no name")?;
+            .ok_or(AppError::Workspace("file has no name".into()))?;
         let dest = if is_dir {
             let mut candidate = dir.join(stem);
             let mut counter = 1;
@@ -5144,7 +5120,7 @@ impl AppState {
             self.relocate_path(&src, dest, is_dir)?;
             self.copied_file = None;
         } else {
-            std::fs::copy(&src, dest)?;
+            WorkspaceFs.copy_file(&src, &dest)?;
             self.refresh_file_tree();
         }
         Ok(())
@@ -5152,17 +5128,14 @@ impl AppState {
 
     /// "New folder" — creates the first free "New Folder" / "New Folder 2" /
     /// … inside `dir`.
-    pub fn create_new_folder_in(
-        &mut self,
-        dir: &std::path::Path,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn create_new_folder_in(&mut self, dir: &std::path::Path) -> Result<(), AppError> {
         let mut name = "New Folder".to_string();
         let mut counter = 2;
         while dir.join(&name).exists() {
             name = format!("New Folder {counter}");
             counter += 1;
         }
-        std::fs::create_dir(dir.join(&name))?;
+        WorkspaceFs.create_dir(&dir.join(&name))?;
         self.refresh_file_tree();
         Ok(())
     }
@@ -5179,34 +5152,25 @@ impl AppState {
     /// (`scan_directory`, .docx-only) can never show again. Folders take no
     /// extension: `old.is_dir()` (checked before anything on disk has
     /// moved) picks the branch.
-    pub fn rename_path(
-        &mut self,
-        old: &std::path::Path,
-        new_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn rename_path(&mut self, old: &std::path::Path, new_name: &str) -> Result<(), AppError> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
-            return Err("name cannot be empty".into());
+            return Err(AppError::Workspace("name cannot be empty".into()));
         }
-        // A rename changes the basename, nothing else. `dir.join(trimmed)`
-        // will happily accept `../elsewhere` — and an *absolute* name throws
-        // the parent away entirely, so typing `/tmp/x` moved the file clean
-        // out of the project. Requiring exactly one `Normal` component rules
-        // out `..`, `.`, both platforms' separators, and root/prefix
-        // components in a single check, without an ad-hoc character
-        // blocklist that would miss one of them. Moving is a real thing to
-        // want, so it has its own gesture now: Cut File / Paste File.
+
         let mut components = std::path::Path::new(trimmed).components();
         let single_segment = matches!(
             (components.next(), components.next()),
             (Some(std::path::Component::Normal(_)), None),
         );
         if !single_segment {
-            return Err(
+            return Err(AppError::Workspace(
                 "name can't contain a path — use Cut File and Paste File to move it".into(),
-            );
+            ));
         }
-        let dir = old.parent().ok_or("path has no parent directory")?;
+        let dir = old
+            .parent()
+            .ok_or(AppError::Workspace("path has no parent directory".into()))?;
         let is_dir = old.is_dir();
         let new = if is_dir {
             dir.join(trimmed)
@@ -5237,11 +5201,14 @@ impl AppState {
         old: &std::path::Path,
         new: PathBuf,
         is_dir: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), AppError> {
         if new.exists() {
-            return Err(format!("{} already exists", new.display()).into());
+            return Err(AppError::Workspace(format!(
+                "{} already exists",
+                new.display()
+            )));
         }
-        std::fs::rename(old, &new)?;
+        WorkspaceFs.rename(old, &new)?;
         // The reopen stack (Shift+Ctrl+W) holds paths of tabs closed earlier in
         // the session. They have to move with the file too: left stale, "reopen
         // last closed tab" pointed at a path that no longer exists, and — since
@@ -5276,7 +5243,9 @@ impl AppState {
                     .into_iter()
                     .map(|p| p.strip_prefix(old).map(|rest| new.join(rest)).unwrap_or(p))
                     .collect();
-            self.workspace.file_tree = scan_directory(&self.workspace.working_directory);
+            self.workspace.file_tree = WorkspaceFs
+                .scan_directory(&self.workspace.working_directory)
+                .unwrap_or_default();
             crate::file_explorer::restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
         } else {
             let title = new
@@ -5303,7 +5272,9 @@ impl AppState {
     /// the folder that was clicked, and walking a deep tree could open
     /// hundreds of tabs from one click.
     pub fn open_all_files_in_dir(&mut self, dir: &std::path::Path) {
-        for path in scan_directory(&dir.to_path_buf())
+        for path in WorkspaceFs
+            .scan_directory(&dir.to_path_buf())
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|n| match n {
                 FileNode::File { path, .. } => Some(path),
@@ -8227,55 +8198,6 @@ pub fn unique_path_in(dir: &std::path::Path, stem: &str, ext: &str) -> PathBuf {
         counter += 1;
     }
     candidate
-}
-
-/// Recursively scans `dir` and builds a tree of FileNodes containing only .docx
-/// files (or directories that contain them).
-pub fn scan_directory(dir: &PathBuf) -> Vec<FileNode> {
-    /*
-     * Reads the given directory and returns a sorted list of FileNodes.
-     * Directories are listed before files. Only .docx files are included.
-     * Directories without any .docx descendants are still shown so the user
-     * can see the folder structure.
-     */
-    let mut nodes: Vec<FileNode> = Vec::new();
-
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return nodes,
-    };
-
-    let mut dirs: Vec<FileNode> = Vec::new();
-    let mut files: Vec<FileNode> = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // skip hidden files/dirs (those starting with '.')
-        if name.starts_with('.') {
-            continue;
-        }
-
-        if path.is_dir() {
-            dirs.push(FileNode::Dir {
-                name,
-                path,
-                children: Vec::new(),
-                expanded: false,
-            });
-        } else if path.extension().and_then(|e| e.to_str()) == Some("docx") {
-            files.push(FileNode::File { name, path });
-        }
-    }
-
-    // Sort each group alphabetically
-    dirs.sort_by(|a, b| a.name().cmp(b.name()));
-    files.sort_by(|a, b| a.name().cmp(b.name()));
-
-    nodes.extend(dirs);
-    nodes.extend(files);
-    nodes
 }
 
 fn extend_selection(tab: &mut Tab, new_cursor: usize) {

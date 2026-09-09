@@ -1,5 +1,6 @@
 use crate::app::error::AppError;
 use crate::app::repository::{DocumentRepository, WorkspaceRepository};
+use crate::state::FileNode;
 use std::path::Path;
 
 /// Reject inputs large enough to make a synchronous ZIP parse unsafe. The
@@ -78,6 +79,60 @@ impl WorkspaceRepository for WorkspaceFs {
 
     fn remove_file(&self, path: &Path) -> Result<(), AppError> {
         std::fs::remove_file(path).map_err(|e| AppError::Workspace(e.to_string()))
+    }
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<FileNode>, AppError> {
+        let mut nodes: Vec<FileNode> = Vec::new();
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => return Err(AppError::Workspace(e.to_string())),
+        };
+
+        let mut dirs: Vec<FileNode> = Vec::new();
+        let mut files: Vec<FileNode> = Vec::new();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                // Omit hidden directories (like .git or OS metadata folders)
+                if name.starts_with('.') {
+                    continue;
+                }
+                // Recursively scan the subdirectory
+                if let Ok(children) = self.scan_directory(&path) {
+                    if !children.is_empty() {
+                        dirs.push(FileNode::Dir {
+                            name,
+                            path,
+                            children,
+                            expanded: false, // populated later by `refresh_file_tree`
+                        });
+                    }
+                }
+            } else if path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("docx"))
+            {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                // Omit backup/temp files that Word and LaTeX leave behind,
+                // even if they somehow got a .docx extension.
+                if name.starts_with("~$") || name.starts_with('.') {
+                    continue;
+                }
+                files.push(FileNode::File { name, path });
+            }
+        }
+
+        dirs.sort_by(|a, b| a.name().to_lowercase().cmp(&b.name().to_lowercase()));
+        files.sort_by(|a, b| a.name().to_lowercase().cmp(&b.name().to_lowercase()));
+
+        nodes.extend(dirs);
+        nodes.extend(files);
+
+        Ok(nodes)
     }
 }
 

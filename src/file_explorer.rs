@@ -4,6 +4,9 @@ use gpui::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::app::repository::WorkspaceRepository;
+use crate::app::store::WorkspaceFs;
+
 use crate::state::{
     AppState, FileContextMenu, FileContextMenuTarget, FileNode, NavContextMenuTarget, SidebarMode,
 };
@@ -1730,7 +1733,7 @@ fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
             if path == target {
                 *expanded = !*expanded;
                 if *expanded && children.is_empty() {
-                    *children = crate::state::scan_directory(path);
+                    *children = WorkspaceFs.scan_directory(path).unwrap_or_default();
                 }
                 return;
             }

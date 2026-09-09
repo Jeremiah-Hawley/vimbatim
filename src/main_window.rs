@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::app::repository::WorkspaceRepository;
 use crate::app_toolbar::AppToolbar;
 use crate::close_confirm::CloseConfirm;
 use crate::command_palette::CommandPaletteView;
@@ -528,7 +529,11 @@ impl MainWindow {
                 let scan_input = scan_dir.clone();
                 let file_tree = cx
                     .background_executor()
-                    .spawn(async move { crate::state::scan_directory(&scan_input) })
+                    .spawn(async move {
+                        crate::app::store::WorkspaceFs
+                            .scan_directory(&scan_input)
+                            .unwrap_or_default()
+                    })
                     .await;
                 let _ = state.update(cx, |st, cx| {
                     st.complete_file_tree_scan(&scan_dir, file_tree);
@@ -562,7 +567,11 @@ impl MainWindow {
                 let scan_dir = directory.clone();
                 let file_tree = cx
                     .background_executor()
-                    .spawn(async move { crate::state::scan_directory(&scan_dir) })
+                    .spawn(async move {
+                        crate::app::store::WorkspaceFs
+                            .scan_directory(&scan_dir)
+                            .unwrap_or_default()
+                    })
                     .await;
                 let _ = state.update(cx, |st, cx| {
                     st.complete_file_tree_scan(&directory, file_tree);
