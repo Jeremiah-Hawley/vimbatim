@@ -20,6 +20,12 @@ pub enum AppCommand {
     Undo,
     Redo,
     ClearToast,
+    Save,
+    SaveAs,
+    SaveTab(usize),
+    SaveTabAs(usize),
+    OpenFile,
+    OpenFolder,
     VimKey {
         key: String,
         shift: bool,
@@ -32,4 +38,8 @@ pub enum AppEffect {
     ShowError(String),
     WriteClipboard { text: String, metadata: String },
     DispatchKeybind(crate::keybinds::KeybindAction),
+    PromptOpenFolder,
+    PromptOpenFile,
+    PromptSaveAs(usize),
+    PerformSave(usize),
 }
