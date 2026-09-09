@@ -12,15 +12,16 @@ use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{ListKind, Paragraph, Run};
 use crate::editor::layout::{
-    build_visual_rows, line_height_px, row_slot_px, text_line_box_px, visual_row_for_line_col,
+    build_visual_rows, line_height_px, row_cache_is_valid_for, row_slot_px, text_line_box_px,
+    visual_row_for_line_col, RowCache,
 };
-use crate::editor::style::heading_font_size_px;
+use crate::editor::style::{heading_font_size_px, line_font_px};
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{AppState, EditorContextMenu, Pane, SpellTarget, VimMode};
 use crate::theme::{Palette, ThemeMode};
 
-#[path = "input.rs"]
-mod input;
+#[path = "input_adapter.rs"]
+mod input_adapter;
 
 /// `CHAR_WIDTH_PX`/`FONT_SIZE_PX`/`LINE_HEIGHT_PX` below are the 100%-zoom
 /// baseline (`AppState.zoom == 1.0`) — every call site multiplies by the
@@ -281,51 +282,6 @@ fn is_curated_font(name: &str) -> bool {
 /// character's real rendered width per font instead.
 const SERIF_CHAR_ADVANCE_RATIO: f32 = 0.589;
 
-/// Caches the word-wrapped row table (and the intermediate data it's built
-/// from — split lines, per-line chars, line byte offsets, and the cloned
-/// paragraph formatting) across renders that don't actually change the
-/// document. Scrolling, cursor movement, and focus changes all trigger a
-/// render but don't touch `content`/`paragraphs` — without this cache,
-/// `render()` re-wraps the *entire* document on every single one of those,
-/// regardless of how much is actually visible (see performance_plan.md /
-/// uniform_list_plan.md). Invalidated by `Tab.content_version` (bumped on
-/// every real edit — see its own doc comment in `state.rs`), not by
-/// comparing `content` itself, which would defeat the point.
-///
-/// `Rc`-wrapped so a cache hit is a handful of cheap pointer clones, not a
-/// deep clone of the document — also what lets this data be captured
-/// cheaply into a `uniform_list` render closure later, instead of deep-
-/// cloned into it on every render.
-struct RowCache {
-    tab_id: usize,
-    content_version: u64,
-    /// `f32` isn't `Eq`; comparing via `to_bits()` is the standard way to
-    /// use a float as an exact cache key without pulling in an epsilon
-    /// comparison that would need its own tuning.
-    viewport_width_bits: u32,
-    zoom_bits: u32,
-    /// Line spacing feeds `slot_count_for_paragraph`, so changing it changes
-    /// `display_to_wrap` — same reason `zoom_bits` is a key, and same
-    /// `to_bits()` treatment since `f32` isn't `Eq`.
-    line_spacing_bits: u32,
-    /// Invisibility mode and fold both drop rows from `display_to_wrap`, so
-    /// toggling either changes the tables and must invalidate — otherwise the
-    /// editor keeps painting the previous mode's row list.
-    invisibility: bool,
-    fold_version: u64,
-    lines: Rc<Vec<String>>,
-    line_chars: Rc<Vec<Vec<char>>>,
-    line_byte_starts: Rc<Vec<usize>>,
-    rows: Rc<Vec<(usize, usize, usize)>>,
-    paragraphs: Rc<Vec<Paragraph>>,
-    /// `uniform_list`-facing expansion of `rows` — see
-    /// `expand_rows_for_display`'s doc comment. Cached alongside `rows`
-    /// since it's derived from it plus `paragraphs`/`zoom`, all of which are
-    /// already part of this cache's invalidation key.
-    display_to_wrap: Rc<Vec<Option<usize>>>,
-    wrap_to_display: Rc<Vec<usize>>,
-}
-
 /// Whether a run should be left unpainted in invisibility mode.
 ///
 /// What survives is highlighted text plus every card style:
@@ -383,38 +339,6 @@ fn page_scroll_offset(
     };
     let clamped = target.clamp(-max_y.max(0.0), 0.0);
     ((clamped - current).abs() >= 0.5).then_some(clamped)
-}
-
-/// Pure cache-validity check, pulled out of `render()` so it's unit-testable
-/// without a GPUI context — the one part of the row cache that isn't just
-/// GPUI interaction glue. `ignore_width` optionally accepts a cache built at a
-/// different width.
-///
-/// `ignore_width` is set only while the split divider is being dragged
-/// (`AppState.split_dragging`). A width change normally *must* invalidate —
-/// the wrap points depend on it — but rebuilding costs a full-document re-wrap
-/// per pane per mouse-move, which locks the app up on a large file. Reusing
-/// the stale tables leaves the text wrapped at the pre-drag width for the
-/// duration of the drag; releasing clears the flag and the next render wraps
-/// correctly, once.
-fn row_cache_is_valid_for(
-    cache: &RowCache,
-    tab_id: usize,
-    content_version: u64,
-    viewport_width: f32,
-    zoom: f32,
-    line_spacing: f32,
-    ignore_width: bool,
-    invisibility: bool,
-    fold_version: u64,
-) -> bool {
-    cache.tab_id == tab_id
-        && cache.content_version == content_version
-        && (ignore_width || cache.viewport_width_bits == viewport_width.to_bits())
-        && cache.zoom_bits == zoom.to_bits()
-        && cache.line_spacing_bits == line_spacing.to_bits()
-        && cache.invisibility == invisibility
-        && cache.fold_version == fold_version
 }
 
 /// Width of the document scrollbar's track, and the inset of the thumb inside
@@ -3775,42 +3699,6 @@ pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
 ///
 /// Returns the plain body size for the cases the reservation treats as one
 /// ordinary line — no paragraph data, and Tag (`heading == 4`).
-fn line_font_px(para: Option<&Paragraph>, zoom: f32, normal_size_px: f32) -> f32 {
-    let Some(para) = para else {
-        return normal_size_px * zoom;
-    };
-    if para.heading == 4 {
-        return normal_size_px * zoom;
-    }
-    // Emphasis runs are no longer excluded. They were, because the quantum
-    // used to be a whole line: one emphasized word in a plain paragraph cost
-    // the entire paragraph a full extra line of spacing (that bug report is
-    // what added the filter). With `ROW_SUBDIVISIONS` the same run now costs
-    // a fraction of a line, which is small enough to be the honest answer —
-    // and excluding it is what left an emphasis box painting outside the row
-    // reserved for it, overlapping the box on the line above.
-    let run_max_px = para
-        .runs
-        .iter()
-        .filter(|r| r.size > 0 && r.style != Some(crate::docx_parser::CardStyle::Cite))
-        .map(|r| r.size as f32 / 2.0 * zoom)
-        .fold(0.0_f32, f32::max);
-    // An explicit run-level size (card styles always set one, covering the
-    // whole line) already reflects what's actually drawn and wins over the
-    // heading fallback below it — using both would over-reserve whenever the
-    // card style's real size is smaller than its heading level's generic
-    // default (e.g. Tag: 13px run size vs. heading level 4's 16px fallback),
-    // padding in a spurious blank row under every Tag line. `heading_px` is
-    // only relevant when no run carries an explicit size — plain document
-    // headings with no card-style override.
-    let heading_px = heading_font_size_px(para.heading, zoom).unwrap_or(0.0);
-    if run_max_px > 0.0 {
-        run_max_px
-    } else {
-        heading_px
-    }
-    .max(normal_size_px * zoom)
-}
 
 fn slot_count_for_paragraph(
     para: Option<&Paragraph>,
