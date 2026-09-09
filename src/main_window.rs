@@ -311,6 +311,24 @@ impl MainWindow {
                         cx.notify();
                     });
                 }
+                crate::app::command::AppEffect::LoadDocument(file) => {
+                    let load_path = file.clone();
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        use crate::app::repository::DocumentRepository;
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::app::store::DocumentStore.load_document(&load_path)
+                            })
+                            .await;
+                        let _ = s.update(cx, |st, cx| {
+                            st.complete_open_file(file, result);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
                 crate::app::command::AppEffect::PromptOpenFile => {
                     let rx = cx.prompt_for_paths(PathPromptOptions {
                         files: true,
@@ -494,10 +512,12 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &ReopenClosedTabAction, cx| {
-            s.update(cx, |st, cx| {
-                st.reopen_closed_tab();
+            let effects = s.update(cx, |st, cx| {
+                let effects = st.execute(crate::app::command::AppCommand::ReopenClosedTab);
                 cx.notify();
+                effects
             });
+            Self::handle_app_effects(s.clone(), effects, cx);
         });
 
         let s = state.clone();

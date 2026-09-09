@@ -161,10 +161,17 @@ impl TabBar {
                     p,
                     cx.listener(|this, _ev, _window, cx| {
                         this.context_menu = None;
-                        this.state.update(cx, |s, cx| {
-                            s.reopen_closed_tab();
+                        let effects = this.state.update(cx, |s, cx| {
+                            let effects =
+                                s.execute(crate::app::command::AppCommand::ReopenClosedTab);
                             cx.notify();
+                            effects
                         });
+                        crate::main_window::MainWindow::handle_app_effects(
+                            this.state.clone(),
+                            effects,
+                            cx,
+                        );
                         cx.notify();
                     }),
                 )),

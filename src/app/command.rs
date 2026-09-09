@@ -26,6 +26,7 @@ pub enum AppCommand {
     SaveTabAs(usize),
     OpenFile,
     OpenFolder,
+    ReopenClosedTab,
     VimKey {
         key: String,
         shift: bool,
@@ -40,6 +41,7 @@ pub enum AppEffect {
     DispatchKeybind(crate::keybinds::KeybindAction),
     PromptOpenFolder,
     PromptOpenFile,
+    LoadDocument(std::path::PathBuf),
     PromptSaveAs(usize),
     PerformSave(usize),
 }

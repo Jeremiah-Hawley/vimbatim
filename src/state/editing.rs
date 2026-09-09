@@ -21780,6 +21780,13 @@ impl AppState {
             AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
             AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
             AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
+            AppCommand::ReopenClosedTab => self
+                .workspace
+                .closed_tabs
+                .pop()
+                .map(crate::app::command::AppEffect::LoadDocument)
+                .into_iter()
+                .collect(),
             command @ AppCommand::VimKey { .. } => self.execute_vim_command(command).1,
         }
     }
@@ -21828,6 +21835,7 @@ impl AppState {
             | crate::app::command::AppEffect::DispatchKeybind(_)
             | crate::app::command::AppEffect::PromptOpenFolder
             | crate::app::command::AppEffect::PromptOpenFile
+            | crate::app::command::AppEffect::LoadDocument(_)
             | crate::app::command::AppEffect::PromptSaveAs(_)
             | crate::app::command::AppEffect::PerformSave(_) => {}
         }
