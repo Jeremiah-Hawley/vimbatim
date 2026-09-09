@@ -709,11 +709,45 @@ impl FileExplorer {
                         false,
                         p,
                         move |_, _, cx| {
+                            let dir = p1.clone();
+                            let state = open_all.clone();
                             open_all.update(cx, |s, cx| {
                                 s.close_file_context_menu();
-                                s.open_all_files_in_dir(&p1);
                                 cx.notify();
                             });
+                            cx.spawn(async move |cx| {
+                                use crate::app::repository::{
+                                    DocumentRepository, WorkspaceRepository,
+                                };
+                                let loaded = cx
+                                    .background_executor()
+                                    .spawn(async move {
+                                        crate::app::store::WorkspaceFs
+                                            .scan_directory(&dir)
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .filter_map(|node| match node {
+                                                crate::state::FileNode::File { path, .. } => {
+                                                    Some(path)
+                                                }
+                                                crate::state::FileNode::Dir { .. } => None,
+                                            })
+                                            .map(|path| {
+                                                let result = crate::app::store::DocumentStore
+                                                    .load_document(&path);
+                                                (path, result)
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .await;
+                                let _ = state.update(cx, |s, cx| {
+                                    for (path, result) in loaded {
+                                        s.complete_open_file(path, result);
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         },
                     ))
                     .child(Self::menu_item(
