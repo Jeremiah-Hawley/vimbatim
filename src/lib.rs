@@ -173,13 +173,6 @@ pub(crate) fn run_app() {
 
     application().run(|cx: &mut App| {
         load_bundled_fonts(cx);
-        // Re-registers any fonts the user imported in a previous session
-        // (font_import.rs) — must run after load_bundled_fonts so the text
-        // system already exists, and before the first frame so the Font
-        // Family picker and any document naming an imported font are
-        // correct from the start.
-        font_import::load_persisted(cx);
-
         // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
         // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
         // loaded from settings.conf and registered here. The settings modal
@@ -221,6 +214,22 @@ pub(crate) fn run_app() {
         let recovery_state = window
             .update(cx, |view, _, _| view.state.clone())
             .expect("Failed to access application state");
+
+        // Read persisted font files in the background; registration still
+        // happens on the UI thread because it uses GPUI's text system.
+        let state_for_fonts = recovery_state.clone();
+        cx.spawn(async move |cx| {
+            let fonts = cx
+                .background_executor()
+                .spawn(async { font_import::prepare_persisted() })
+                .await;
+            let _ = state_for_fonts.update(cx, |_state, cx| {
+                font_import::activate_persisted(cx, fonts);
+                cx.notify();
+            });
+        })
+        .detach();
+
         let state_for_scan = recovery_state.clone();
         cx.spawn(async move |cx| {
             use crate::app::repository::RecoveryRepository;

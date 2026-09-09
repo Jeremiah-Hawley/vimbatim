@@ -234,15 +234,21 @@ pub fn commit_install_faces(cx: &App, faces: Vec<Face>) -> Result<Vec<FontImport
     Ok(installed)
 }
 
-/// Re-registers every font previously imported, called once at startup
-/// (`main.rs`, right after `load_bundled_fonts`) so imports persist across
-/// restarts. Best-effort per family: a directory that fails to read/parse is
-/// skipped rather than aborting the rest.
-pub fn load_persisted(cx: &App) {
+/// Font faces loaded from disk before they are registered with GPUI.
+pub struct PersistedFamily {
+    family: String,
+    dir: PathBuf,
+    faces: Vec<Face>,
+}
+
+/// Reads persisted font files without touching GPUI, so startup can run this
+/// potentially large directory walk on the background executor.
+pub fn prepare_persisted() -> Vec<PersistedFamily> {
     let root = fonts_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
-        return;
+        return Vec::new();
     };
+    let mut families = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -259,7 +265,15 @@ pub fn load_persisted(cx: &App) {
         let Some(family) = faces.first().map(|f| f.family.clone()) else {
             continue;
         };
-        let _ = activate_family(cx, &family, dir, &faces);
+        families.push(PersistedFamily { family, dir, faces });
+    }
+    families
+}
+
+/// Registers font bytes read by [`prepare_persisted`] on the UI thread.
+pub fn activate_persisted(cx: &App, families: Vec<PersistedFamily>) {
+    for family in families {
+        let _ = activate_family(cx, &family.family, family.dir, &family.faces);
     }
 }
 
