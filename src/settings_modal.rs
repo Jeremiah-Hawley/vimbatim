@@ -645,11 +645,15 @@ impl SettingsModal {
     fn set_spellcheck_color(&mut self, name: &'static str, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.spellcheck_underline_color = name.to_string();
-            let _ = crate::theme::save_setting_line(
+            if let Err(error) = crate::theme::save_setting_line(
                 &settings_path(),
                 "spellcheck_underline_color",
                 name,
-            );
+            ) {
+                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                    "Could not save spellcheck color: {error}"
+                )));
+            }
             cx.notify();
         });
         cx.notify();
@@ -711,11 +715,15 @@ impl SettingsModal {
             let next =
                 crate::state::clamp_spreading_wpm((s.spreading_wpm as i32 + delta).max(0) as u32);
             s.spreading_wpm = next;
-            let _ = crate::theme::save_setting_line(
+            if let Err(error) = crate::theme::save_setting_line(
                 &settings_path(),
                 "spreading_wpm",
                 &next.to_string(),
-            );
+            ) {
+                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                    "Could not save reading speed: {error}"
+                )));
+            }
             cx.notify();
         });
         cx.notify();
@@ -807,7 +815,11 @@ impl SettingsModal {
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme = theme;
-            let _ = save_theme(&settings_path(), theme);
+            if let Err(error) = save_theme(&settings_path(), theme) {
+                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                    "Could not save theme: {error}"
+                )));
+            }
             cx.notify();
         });
         cx.notify();
@@ -816,7 +828,11 @@ impl SettingsModal {
     fn set_theme_color_mode(&mut self, mode: ThemeColorMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme_color_mode = mode;
-            let _ = save_theme_color_mode(&settings_path(), mode);
+            if let Err(error) = save_theme_color_mode(&settings_path(), mode) {
+                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                    "Could not save theme color mode: {error}"
+                )));
+            }
             cx.notify();
         });
         cx.notify();
@@ -859,7 +875,11 @@ impl SettingsModal {
     fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.theme_mode = mode;
-            let _ = save_theme_mode(&settings_path(), mode);
+            if let Err(error) = save_theme_mode(&settings_path(), mode) {
+                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                    "Could not save theme mode: {error}"
+                )));
+            }
             cx.notify();
         });
         cx.notify();
