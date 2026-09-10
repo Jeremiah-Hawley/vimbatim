@@ -7832,7 +7832,9 @@ impl AppState {
             "w" => {
                 self.global_vim
                     .pending_effects
-                    .push(crate::app::command::AppEffect::PerformSave(self.workspace.active_tab));
+                    .push(crate::app::command::AppEffect::PerformSave(
+                        self.workspace.active_tab,
+                    ));
             }
             "wa" => {
                 for idx in 0..self.workspace.tabs.len() {
@@ -7858,7 +7860,9 @@ impl AppState {
             "wq" | "x" => {
                 self.global_vim
                     .pending_effects
-                    .push(crate::app::command::AppEffect::PerformSave(self.workspace.active_tab));
+                    .push(crate::app::command::AppEffect::PerformSave(
+                        self.workspace.active_tab,
+                    ));
                 self.close_tab(self.workspace.active_tab);
             }
             "set vim" => self.global_vim.vim_enabled = true,
@@ -21783,10 +21787,13 @@ impl AppState {
             AppCommand::OpenFileInSidePane(path) => {
                 if !self.workspace.split_view {
                     self.workspace.split_view = true;
-                    self.workspace.tabs.push(crate::state::Tab::new_empty(
-                        crate::document::TabId(self.workspace.next_tab_id),
-                    ));
-                    self.workspace.secondary_tab_id = Some(crate::document::TabId(self.workspace.next_tab_id));
+                    self.workspace
+                        .tabs
+                        .push(crate::state::Tab::new_empty(crate::document::TabId(
+                            self.workspace.next_tab_id,
+                        )));
+                    self.workspace.secondary_tab_id =
+                        Some(crate::document::TabId(self.workspace.next_tab_id));
                     self.workspace.next_tab_id += 1;
                 }
                 self.focus_pane(crate::state::Pane::Secondary);

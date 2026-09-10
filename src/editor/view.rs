@@ -10,11 +10,14 @@ use std::sync::{OnceLock, RwLock};
 
 use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
-use crate::docx_parser::{ListKind, Paragraph, Run};
+use crate::docx_parser::{Paragraph, Run};
 use crate::editor::layout::{
-    build_visual_rows, line_height_px, row_cache_is_valid_for, row_slot_px, text_line_box_px,
+    build_visual_rows, display_line, document_lines, line_for_y, line_height_px, list_item_ordinal,
+    list_marker_text_for_level, row_cache_is_valid_for, row_slot_px, text_line_box_px,
     visual_row_for_line_col, RowCache,
 };
+#[cfg(test)]
+use crate::editor::layout::{list_marker_text, to_letter, to_roman};
 use crate::editor::style::{heading_font_size_px, line_font_px};
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
 use crate::state::{AppState, EditorContextMenu, Pane, SpellTarget, VimMode};
@@ -2837,35 +2840,6 @@ fn render_context_menu(
     .with_priority(1)
     .into_any_element()
 }
-
-/// One-char-for-one-char substitution of any control character -> `' '` for
-/// display only — `render_line`'s and `char_width_fn`'s shared reasoning for
-/// why a raw control character can't be handed to GPUI's shaper (no glyph in
-/// the bundled fonts) and why swapping it for a space here can't desync any
-/// offset-based computation downstream (cursor/selection/misspelled ranges
-/// all index by position, not content). Never touches the actual document
-/// model — callers pass in a line already read out of `tab.document.content()`/
-/// `paragraphs`, which still holds the real character for undo/.docx
-/// export/Verbatim round-trip fidelity.
-///
-/// Originally just `'\t'` (GPUI paints it with zero width — no on-screen gap,
-/// cursor doesn't visually advance). Widened to the whole control-character
-/// class after a `'\r'` embedded mid-paragraph (reachable via typing, paste,
-/// or a `.docx` whose `<w:t>` contains a literal CR instead of `<w:br/>`)
-/// was found to make GPUI drop the *entire* text fragment containing it —
-/// not just that one character — since `'\r'` never triggers this codebase's
-/// own paragraph-split logic (only `'\n'` does) and GPUI's `shape_line` only
-/// asserts against `'\n'` too, so it reaches the shaper unguarded. A `'\n'`
-/// itself can never reach here (every `line` this app ever builds is already
-/// split on it), but including it costs nothing.
-fn display_line(line: &str) -> std::borrow::Cow<'_, str> {
-    if line.contains(char::is_control) {
-        std::borrow::Cow::Owned(line.replace(char::is_control, " "))
-    } else {
-        std::borrow::Cow::Borrowed(line)
-    }
-}
-
 fn render_line(
     line: &str,
     cursor_col: Option<usize>,
@@ -3502,145 +3476,6 @@ const EMPHASIS_BOX_EXTRA_PX: f32 = 2.0;
 /// ponytail: simplification, not Word's hanging-indent-on-every-wrapped-row;
 /// upgrade if wrapped list items turn out to need it visually.
 pub(crate) const LIST_GUTTER_PX: f32 = 28.0;
-
-/// 1-indexed letter for `NumberLowerLetterDot`/`NumberLowerLetterParen`/
-/// `NumberUpperLetter` — `1 -> "a"`, `26 -> "z"`, wrapping into double
-/// letters beyond that the way Word's own `lowerLetter`/`upperLetter`
-/// formats do (`27 -> "aa"`), which this app's practical list lengths won't
-/// reach but is cheap to get right regardless.
-pub(crate) fn to_letter(n: u32) -> String {
-    let mut n = n;
-    let mut out = Vec::new();
-    while n > 0 {
-        let rem = (n - 1) % 26;
-        out.push((b'a' + rem as u8) as char);
-        n = (n - 1) / 26;
-    }
-    out.iter().rev().collect()
-}
-
-/// 1-indexed lowercase Roman numeral, for `NumberLowerRoman`/`NumberUpperRoman`
-/// (the caller upper-cases when needed). Covers this app's practical list
-/// range (well past 100) with the standard subtractive-notation table.
-pub(crate) fn to_roman(n: u32) -> String {
-    const TABLE: [(u32, &str); 13] = [
-        (1000, "m"),
-        (900, "cm"),
-        (500, "d"),
-        (400, "cd"),
-        (100, "c"),
-        (90, "xc"),
-        (50, "l"),
-        (40, "xl"),
-        (10, "x"),
-        (9, "ix"),
-        (5, "v"),
-        (4, "iv"),
-        (1, "i"),
-    ];
-    let mut n = n;
-    let mut out = String::new();
-    for (value, symbol) in TABLE {
-        while n >= value {
-            out.push_str(symbol);
-            n -= value;
-        }
-    }
-    out
-}
-
-/// The text painted in a list paragraph's gutter: the fixed glyph for a
-/// bullet kind, or `ordinal` formatted per the number kind's own template.
-///
-/// Deliberately does **not** paint Word's real Wingdings/Symbol
-/// private-use-area codepoints (`docs/superpowers/specs/2026-08-11-lists-design.md`'s
-/// ground-truth table) — this app bundles only DejaVu Sans Mono
-/// (`FONT_FAMILY`), which has no glyphs at those codepoints, so painting
-/// them here would show missing-glyph boxes on screen. The saved `.docx`
-/// still gets Word's real codepoints (`docx_parser::build_numbering_xml`) —
-/// this is purely an in-app rendering substitution, the same category of
-/// deliberate simplification as `Run.font` already not being applied to
-/// on-screen rendering (see that field's own doc comment).
-pub(crate) fn list_marker_text(kind: ListKind, ordinal: u32) -> String {
-    match kind {
-        ListKind::BulletSolid => "\u{2022}".to_string(),
-        ListKind::BulletHollow => "o".to_string(),
-        ListKind::BulletSolidBox => "\u{25aa}".to_string(),
-        ListKind::BulletDiamond => "\u{25c6}".to_string(),
-        ListKind::BulletArrow => "\u{2192}".to_string(),
-        ListKind::BulletCheckmark => "\u{2713}".to_string(),
-        ListKind::NumberDecimalDot => format!("{ordinal}."),
-        ListKind::NumberDecimalParen => format!("{ordinal})"),
-        ListKind::NumberUpperRoman => format!("{}.", to_roman(ordinal).to_uppercase()),
-        ListKind::NumberUpperLetter => format!("{}.", to_letter(ordinal).to_uppercase()),
-        ListKind::NumberLowerLetterParen => format!("{})", to_letter(ordinal)),
-        ListKind::NumberLowerLetterDot => format!("{}.", to_letter(ordinal)),
-        ListKind::NumberLowerRoman => format!("{}.", to_roman(ordinal)),
-    }
-}
-
-/// `list_marker_text`, extended for `level` (Phase 2 multi-level indent).
-/// Level 0 uses the paragraph's own picked `kind`; levels 1+ always use the
-/// one fixed cascade confirmed from real Word — the *complete* ilvl 0-8
-/// range dumped from `Lists.docx`'s `BulletSolid`/`NumberDecimalDot`/
-/// `NumberUpperRoman` `abstractNum`s, matching `docx_parser::cascade_level_xml`
-/// exactly (see that function's own doc comment, including its fix
-/// history — an earlier version of this pair only checked ilvl 0-2 and
-/// shipped a wrong 2-value cascade for 1 for every 3 wrapped levels):
-/// bullets go hollow `o` (level 1) -> filled square (level 2) -> plain
-/// solid bullet (level 3) -> repeats every 3 levels; numbers go
-/// `lowerLetter` (level 1) -> `lowerRoman` (level 2) -> `decimal` (level 3)
-/// -> repeats every 3 levels — independent of which style was picked at
-/// level 0. Uses this app's own in-app glyph substitutes (see
-/// `list_marker_text`'s doc comment on why), not Word's real Wingdings
-/// codepoints — reusing `list_marker_text`'s own `BulletSolid`/
-/// `NumberDecimalDot` cases for the level-3-position glyph/format keeps
-/// both cascade positions in exactly one place each.
-pub(crate) fn list_marker_text_for_level(kind: ListKind, level: u8, ordinal: u32) -> String {
-    if level == 0 {
-        return list_marker_text(kind, ordinal);
-    }
-    let cascade_pos = (level - 1) % 3;
-    if kind.is_bullet() {
-        match cascade_pos {
-            0 => "o".to_string(),
-            1 => "\u{25aa}".to_string(),
-            _ => list_marker_text(ListKind::BulletSolid, ordinal),
-        }
-    } else {
-        match cascade_pos {
-            0 => format!("{}.", to_letter(ordinal)),
-            1 => format!("{}.", to_roman(ordinal)),
-            _ => list_marker_text(ListKind::NumberDecimalDot, ordinal),
-        }
-    }
-}
-
-/// 1-indexed position of `paragraphs[index]` within its own contiguous run
-/// of *same-`ListKind`* list paragraphs — the same run-boundary rule
-/// `docx_parser::assign_list_num_ids` uses on the write side (confirmed
-/// against real Word's own behavior: a style change starts a new list even
-/// with no non-list paragraph between them — see that function's own doc
-/// comment), so the on-screen ordinal always matches what gets saved and
-/// what numId a paragraph actually resolves to. Walks backward from `index`
-/// while the preceding paragraph is a list item of the *same kind*; a
-/// non-list paragraph, a different `ListKind`, or the start of the document
-/// ends the run. `index` itself must carry a list, or the count is
-/// meaningless — callers only invoke this after checking
-/// `paragraphs[index].list.is_some()`.
-pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
-    let Some(run_kind) = paragraphs[index].list.map(|item| item.kind) else {
-        return 1;
-    };
-    let mut ordinal = 1u32;
-    let mut i = index;
-    while i > 0 && paragraphs[i - 1].list.map(|item| item.kind) == Some(run_kind) {
-        ordinal += 1;
-        i -= 1;
-    }
-    ordinal
-}
-
 /// How many uniform-height `LINE_HEIGHT_PX` slots a paragraph's rendered
 /// line actually needs. `gpui::uniform_list` (see `RowCache`/`render()`)
 /// measures exactly one row and forces every item in the list to that same
@@ -4106,21 +3941,6 @@ fn visual_row_step(
     );
     Some((target_line, target_row_start + target_col_in_row))
 }
-
-pub(crate) fn document_lines(content: &str) -> Vec<String> {
-    /*
-     * Splits document content into logical lines on '\n', matching the model
-     * used throughout rendering and click/scroll math. An empty document is
-     * still one (empty) line so the editor always has somewhere to place
-     * the cursor.
-     */
-    if content.is_empty() {
-        vec![String::new()]
-    } else {
-        content.split('\n').map(|l| l.to_string()).collect()
-    }
-}
-
 /// The font size one character actually paints at, mirroring exactly how
 /// `render()` layers its three sources: a run-level `FontSize` wins (card
 /// styles Pocket/Hat/Block/Tag/Cite and Shrink all set one), otherwise the
@@ -4259,23 +4079,6 @@ fn x_for_col_in_row(
     }
     x
 }
-
-fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
-    /*
-     * Converts a y pixel offset (relative to the start of the text) into a
-     * 0-indexed visual row number, clamped to `num_rows - 1` so a click
-     * below the last row still lands on it rather than panicking on an
-     * out-of-range row index.
-     */
-    if line_height <= 0.0 || num_rows == 0 {
-        return 0;
-    }
-    if y <= 0.0 {
-        return 0;
-    }
-    ((y / line_height) as usize).min(num_rows - 1)
-}
-
 /// GPUI's own measured per-row pixel height — `UniformListScrollHandle`'s
 /// `last_item_size`, populated every `prepaint` from `measure_item`'s real
 /// Taffy layout of one row div — rather than independently recomputing

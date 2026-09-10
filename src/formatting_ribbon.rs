@@ -1665,8 +1665,13 @@ impl FormattingRibbon {
                                 if let Some(pos) =
                                     state.workspace.tabs.iter().position(|t| t.id == id)
                                 {
-                                    let effects = state.execute(crate::app::command::AppCommand::SwitchTab(pos));
-                                    crate::main_window::MainWindow::handle_app_effects(this.state.clone(), effects, cx);
+                                    let effects = state
+                                        .execute(crate::app::command::AppCommand::SwitchTab(pos));
+                                    crate::main_window::MainWindow::handle_app_effects(
+                                        this.state.clone(),
+                                        effects,
+                                        cx,
+                                    );
                                 }
                                 cx.notify();
                             });
