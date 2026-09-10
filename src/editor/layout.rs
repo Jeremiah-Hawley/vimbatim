@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{ListKind, Paragraph, Run};
-use crate::editor::style::{line_font_px, run_is_hidden};
+use crate::editor::style::{
+    effective_char_advance_ratio, effective_char_size_px, line_font_px, run_is_hidden,
+};
 
 const LINE_HEIGHT_RATIO: f32 = 20.0 / 14.0;
 pub(crate) const ROW_SUBDIVISIONS: usize = 6;
@@ -730,4 +732,136 @@ pub(crate) fn row_edge_target_col(
             .map(|i| row_start + i)
             .unwrap_or(row_end), // an all-whitespace row: land at its end, matching real vim's `^` on a blank line
     }
+}
+
+// Pure horizontal and text-span coordinate transforms.
+/// Converts an x pixel offset (relative to the start of the text, i.e. after
+/// subtracting the container's left padding) into a character column *within
+/// one visual row*, rounding to the nearest character boundary and clamping
+/// negative input to 0.
+///
+/// Walks the row character by character rather than dividing by a single
+/// width: a row can mix font sizes (a Cite run inside a body line, a Shrunk
+/// span, a heading), so no one width describes it. Dividing by a uniform
+/// estimate put the cursor increasingly far from the pointer the further into
+/// a differently-sized line the user clicked.
+pub(crate) fn column_for_x_in_row(
+    x: f32,
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    row_start: usize,
+    row_end: usize,
+    normal_size_px: f32,
+    zoom: f32,
+) -> usize {
+    if x <= 0.0 || row_end <= row_start {
+        return 0;
+    }
+    let mut left = 0.0f32;
+    for char_idx in row_start..row_end {
+        let width = effective_char_size_px(para, spans, char_idx, normal_size_px, zoom)
+            * effective_char_advance_ratio(para, spans, char_idx);
+        if x < left + width {
+            // Past this character's midpoint means the nearer boundary is the
+            // one after it — same round-to-nearest feel as clicking in Word.
+            let col = char_idx - row_start;
+            return if x - left > width / 2.0 { col + 1 } else { col };
+        }
+        left += width;
+    }
+    row_end - row_start
+}
+
+/// Inverse of `column_for_x_in_row`: the pixel X position `col_in_row`
+/// characters into a row, summing each character's own effective size.
+///
+/// Bug report: pressing `k`/`j` (`visual_row_step`) to move between two
+/// rows of different font size (e.g. off the end of an 11pt line onto a
+/// larger-sized one above, or vice versa) landed the cursor far off to one
+/// side — it was carrying the raw character *index* across rows, but two
+/// rows at different sizes don't share one width-per-character, so the
+/// same index sits at very different on-screen X positions on each. This
+/// is the piece that lets `visual_row_step` convert the current row's
+/// column to a real pixel X *before* re-resolving it against the target
+/// row's own sizes via `column_for_x_in_row` — only pixel position is
+/// actually preserved by real "move up/down" behavior.
+pub(crate) fn x_for_col_in_row(
+    col_in_row: usize,
+    para: Option<&Paragraph>,
+    spans: &[(usize, usize, usize)],
+    row_start: usize,
+    row_end: usize,
+    normal_size_px: f32,
+    zoom: f32,
+) -> f32 {
+    let end = row_start + col_in_row.min(row_end - row_start);
+    let mut x = 0.0f32;
+    for char_idx in row_start..end {
+        x += effective_char_size_px(para, spans, char_idx, normal_size_px, zoom)
+            * effective_char_advance_ratio(para, spans, char_idx);
+    }
+    x
+}
+
+pub(crate) fn selection_span_for_line(
+    line: &str,
+    line_byte_start: usize,
+    sel_start: usize,
+    sel_end: usize,
+) -> Option<(usize, usize)> {
+    /*
+     * Maps a selection's document-wide byte range onto the char-column range
+     * of a single line, or None if the selection doesn't touch this line at
+     * all (including the boundary case where the selection ends exactly at
+     * this line's first byte, or starts exactly at its last byte — those
+     * describe a selection that stops at the newline, not one that includes
+     * this line's visible characters). `sel_start`/`sel_end` must already be
+     * normalized so `sel_start <= sel_end`.
+     */
+    if sel_start == sel_end {
+        return None;
+    } // nothing selected
+    let line_byte_end = line_byte_start + line.len();
+    if sel_end <= line_byte_start || sel_start >= line_byte_end {
+        return None;
+    }
+
+    // Clamp each selection edge into this line's byte range, then convert
+    // that relative byte offset into a char column (not byte column).
+    let to_col = |byte: usize| -> usize {
+        let rel = byte.saturating_sub(line_byte_start).min(line.len());
+        line[..rel].chars().count()
+    };
+    let start_col = to_col(sel_start.max(line_byte_start));
+    let end_col = to_col(sel_end.min(line_byte_end));
+    if start_col == end_col {
+        return None;
+    } // e.g. an empty line fully inside the selection
+    Some((start_col, end_col))
+}
+
+/// Rebases a row-relative cursor column into one formatting run's own
+/// [0, run_len] coordinate space, or `None` if the cursor isn't on this run.
+///
+/// Runs are half-open and contiguous (`run_start..run_end`), so a cursor
+/// sitting exactly on the boundary between two runs must be claimed by
+/// exactly one of them — otherwise both draw a cursor segment and the caret
+/// appears twice, straddling the character at the boundary. It belongs to
+/// the *later* run (the caret sits before the character being typed into) —
+/// except when the boundary is the true end of the row (`run_end == row_len`
+/// *and* `c == row_len`), which the last run must still claim to produce the
+/// existing "cursor past end of line" segment. Checking `run_end == row_len`
+/// (not just `c == row_len`) matters: without it, a cursor sitting at the
+/// row's end column would wrongly also match every *earlier* run, since
+/// `c == row_len` alone says nothing about which run actually reaches that
+/// column.
+pub(crate) fn sub_cursor_for_run(
+    cursor_col: Option<usize>,
+    run_start: usize,
+    run_end: usize,
+    row_len: usize,
+) -> Option<usize> {
+    cursor_col
+        .filter(|&c| c >= run_start && (c < run_end || (run_end == row_len && c == row_len)))
+        .map(|c| c - run_start)
 }
