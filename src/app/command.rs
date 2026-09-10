@@ -25,7 +25,11 @@ pub enum AppCommand {
     SaveTab(usize),
     SaveTabAs(usize),
     OpenFile,
+    OpenFileAt(std::path::PathBuf),
+    OpenFileInCurrentTab(std::path::PathBuf),
+    OpenFileInSidePane(std::path::PathBuf),
     OpenFolder,
+    RefreshFileTree,
     ReopenClosedTab,
     VimKey {
         key: String,
@@ -42,6 +46,8 @@ pub enum AppEffect {
     PromptOpenFolder,
     PromptOpenFile,
     LoadDocument(std::path::PathBuf),
+    LoadDocumentInCurrentTab(std::path::PathBuf),
+    ScanWorkspace(std::path::PathBuf),
     PromptSaveAs(usize),
     PerformSave(usize),
 }

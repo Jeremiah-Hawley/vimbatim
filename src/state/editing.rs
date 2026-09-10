@@ -7830,19 +7830,15 @@ impl AppState {
 
         match line {
             "w" => {
-                if let Err(e) = self.save_active_tab() {
-                    set_error(self, e);
-                }
+                self.global_vim
+                    .pending_effects
+                    .push(crate::app::command::AppEffect::PerformSave(self.workspace.active_tab));
             }
             "wa" => {
-                let mut errors = Vec::new();
                 for idx in 0..self.workspace.tabs.len() {
-                    if let Err(e) = self.save_tab(idx) {
-                        errors.push(e);
-                    }
-                }
-                if let Some(e) = errors.into_iter().next() {
-                    set_error(self, e);
+                    self.global_vim
+                        .pending_effects
+                        .push(crate::app::command::AppEffect::PerformSave(idx));
                 }
             }
             "q" => {
@@ -7860,10 +7856,9 @@ impl AppState {
             }
             "q!" => self.close_tab(self.workspace.active_tab),
             "wq" | "x" => {
-                if let Err(e) = self.save_active_tab() {
-                    set_error(self, e);
-                    return;
-                }
+                self.global_vim
+                    .pending_effects
+                    .push(crate::app::command::AppEffect::PerformSave(self.workspace.active_tab));
                 self.close_tab(self.workspace.active_tab);
             }
             "set vim" => self.global_vim.vim_enabled = true,
@@ -21777,11 +21772,36 @@ impl AppState {
             AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
             AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
             AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
+            AppCommand::OpenFileAt(path) => {
+                vec![crate::app::command::AppEffect::LoadDocument(path)]
+            }
+            AppCommand::OpenFileInCurrentTab(path) => {
+                vec![crate::app::command::AppEffect::LoadDocumentInCurrentTab(
+                    path,
+                )]
+            }
+            AppCommand::OpenFileInSidePane(path) => {
+                if !self.workspace.split_view {
+                    self.workspace.split_view = true;
+                    self.workspace.tabs.push(crate::state::Tab::new_empty(
+                        crate::document::TabId(self.workspace.next_tab_id),
+                    ));
+                    self.workspace.secondary_tab_id = Some(crate::document::TabId(self.workspace.next_tab_id));
+                    self.workspace.next_tab_id += 1;
+                }
+                self.focus_pane(crate::state::Pane::Secondary);
+                vec![crate::app::command::AppEffect::LoadDocument(path)]
+            }
+            AppCommand::RefreshFileTree => {
+                vec![crate::app::command::AppEffect::ScanWorkspace(
+                    self.workspace.working_directory.clone(),
+                )]
+            }
             AppCommand::ReopenClosedTab => self
                 .workspace
                 .closed_tabs
                 .pop()
-                .map(crate::app::command::AppEffect::LoadDocument)
+                .map(|p| crate::app::command::AppEffect::LoadDocument(p))
                 .into_iter()
                 .collect(),
             command @ AppCommand::VimKey { .. } => self.execute_vim_command(command).1,
@@ -21834,6 +21854,8 @@ impl AppState {
             | crate::app::command::AppEffect::PromptOpenFolder
             | crate::app::command::AppEffect::PromptOpenFile
             | crate::app::command::AppEffect::LoadDocument(_)
+            | crate::app::command::AppEffect::LoadDocumentInCurrentTab(_)
+            | crate::app::command::AppEffect::ScanWorkspace(_)
             | crate::app::command::AppEffect::PromptSaveAs(_)
             | crate::app::command::AppEffect::PerformSave(_) => {}
         }

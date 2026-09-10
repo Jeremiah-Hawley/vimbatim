@@ -330,6 +330,46 @@ impl MainWindow {
                     })
                     .detach();
                 }
+                crate::app::command::AppEffect::LoadDocumentInCurrentTab(file) => {
+                    let load_path = file.clone();
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        use crate::app::repository::DocumentRepository;
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::app::store::DocumentStore.load_document(&load_path)
+                            })
+                            .await;
+                        let _ = s.update(cx, |st, cx| {
+                            st.complete_open_file_in_current_tab(file, result);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+                crate::app::command::AppEffect::ScanWorkspace(dir) => {
+                    let scan_dir = dir.clone();
+                    let s = state.clone();
+                    cx.spawn(async move |cx| {
+                        let scan_dir_clone = scan_dir.clone();
+                        let file_tree = cx
+                            .background_executor()
+                            .spawn(async move {
+                                crate::app::repository::WorkspaceRepository::scan_directory(
+                                    &crate::app::store::WorkspaceFs,
+                                    &scan_dir_clone,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .await;
+                        let _ = s.update(cx, |st, cx| {
+                            st.complete_file_tree_scan(&scan_dir, file_tree);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
                 crate::app::command::AppEffect::PromptOpenFile => {
                     let rx = cx.prompt_for_paths(PathPromptOptions {
                         files: true,

@@ -605,26 +605,17 @@ impl FileExplorer {
                         p,
                         move |_, _, cx| {
                             let path = p1.clone();
-                            let load_path = path.clone();
-                            let state = new_tab.clone();
                             new_tab.update(cx, |s, cx| {
                                 s.close_file_context_menu();
+                                let effects =
+                                    s.execute(crate::app::command::AppCommand::OpenFileAt(path));
+                                crate::main_window::MainWindow::handle_app_effects(
+                                    new_tab.clone(),
+                                    effects,
+                                    cx,
+                                );
                                 cx.notify();
                             });
-                            cx.spawn(async move |cx| {
-                                use crate::app::repository::DocumentRepository;
-                                let result = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        crate::app::store::DocumentStore.load_document(&load_path)
-                                    })
-                                    .await;
-                                let _ = state.update(cx, |s, cx| {
-                                    s.complete_open_file(path, result);
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
                         },
                     ))
                     .child(Self::menu_item(
@@ -634,26 +625,18 @@ impl FileExplorer {
                         p,
                         move |_, _, cx| {
                             let path = p2.clone();
-                            let load_path = path.clone();
-                            let state = current_tab.clone();
                             current_tab.update(cx, |s, cx| {
                                 s.close_file_context_menu();
+                                let effects = s.execute(
+                                    crate::app::command::AppCommand::OpenFileInCurrentTab(path),
+                                );
+                                crate::main_window::MainWindow::handle_app_effects(
+                                    current_tab.clone(),
+                                    effects,
+                                    cx,
+                                );
                                 cx.notify();
                             });
-                            cx.spawn(async move |cx| {
-                                use crate::app::repository::DocumentRepository;
-                                let result = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        crate::app::store::DocumentStore.load_document(&load_path)
-                                    })
-                                    .await;
-                                let _ = state.update(cx, |s, cx| {
-                                    s.complete_open_file_in_current_tab(path, result);
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
                         },
                     ))
                     .child(Self::menu_item(
