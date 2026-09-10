@@ -2,10 +2,12 @@
 
 use std::rc::Rc;
 
-use crate::docx_parser::{ListKind, Paragraph};
+use crate::document_ops::paragraph_run_char_spans;
+use crate::docx_parser::{ListKind, Paragraph, Run};
+use crate::editor::style::{line_font_px, run_is_hidden};
 
 const LINE_HEIGHT_RATIO: f32 = 20.0 / 14.0;
-const ROW_SUBDIVISIONS: usize = 6;
+pub(crate) const ROW_SUBDIVISIONS: usize = 6;
 
 pub(crate) fn line_height_px(normal_size_px: f32, spacing: f32) -> f32 {
     normal_size_px * LINE_HEIGHT_RATIO * spacing
@@ -446,4 +448,213 @@ pub(crate) fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
         return 0;
     }
     ((y / line_height) as usize).min(num_rows - 1)
+}
+
+// GPUI-free row visibility and sizing policy.
+/// How many `uniform_list` rows one line of body text is divided into.
+///
+/// `gpui::uniform_list` forces a single measured height onto every row, so a
+/// line taller than one row cannot grow — it can only reserve whole extra
+/// rows ahead of itself (`slot_count_for_paragraph`). That reservation is a
+/// `ceil`, so the *row* is the quantum of vertical space, and with one row
+/// per line every font size from 12pt to 22pt reserved exactly two lines: one
+/// abrupt doubling at 12pt, then nothing at all for the next ten points (bug
+/// report: "font size 12-22 both increase the distance between lines equally
+/// ... this is harsh").
+///
+/// Subdividing the grid shrinks that quantum without giving up the uniform
+/// height `uniform_list` requires: a plain line now occupies
+/// `ROW_SUBDIVISIONS` rows instead of one, and a taller line rounds up to the
+/// nearest *fraction* of a line. At 6, the step is ~2.6px at the 11px
+/// default — roughly one step per point of font size, which reads as
+/// continuous growth rather than a cliff.
+///
+/// This is the tuning knob for that trade: raising it makes spacing smoother
+/// and multiplies the display-row table (and the number of small empty divs
+/// `uniform_list` builds for the visible range) by the same factor; lowering
+/// it is cheaper and chunkier. It must stay >= 1.
+
+pub(crate) const CARD_BOX_EXTRA_PX: f32 = 20.0;
+
+/// Vertical clearance reserved for an `emphasis_boxed` run, on top of the
+/// font's own height.
+///
+/// The emphasis box is an inset box-shadow (`apply_run_style`), which is
+/// paint-only and adds nothing to layout — it is drawn at the span's exact
+/// bounds. Two consecutive lines carrying one therefore have boxes that are
+/// as tall as the rows are apart, and any rounding at all makes them touch
+/// or cross (bug report: "the Emphasis boxes on size 12 font overlap such
+/// that the top of a box on a lower line is above the bottom of a box from
+/// the line above it").
+///
+/// Relying on `slot_count_for_paragraph`'s own `ceil` to leave a gap is not
+/// enough: a font size whose height lands exactly on a slot boundary rounds
+/// to zero clearance. This reserves the gap explicitly — 1px above and 1px
+/// below the ring. Not scaled by `zoom`, matching the box-shadow's own fixed
+/// 1px spread.
+pub(crate) const EMPHASIS_BOX_EXTRA_PX: f32 = 2.0;
+/// Whether `run` paints a box-shaped visual (a background fill, a real
+/// border, or an inset box-shadow standing in for one — see
+/// `apply_run_style`'s `emphasis_boxed` case) rather than just styling the
+/// glyphs themselves — `render_line`'s fast
+/// path has to skip any such run, since its bare-div return isn't wrapped in
+/// `line_div`'s per-span `flex_shrink(0.0)` and would otherwise stretch the
+/// paint to the full row width instead of hugging the text. `underline`/
+/// `strikethrough`/`bold`/`size`/`font`/`color` don't paint a box, so they're
+/// deliberately not here.
+pub(crate) fn paints_run_box(run: Option<&Run>) -> bool {
+    run.is_some_and(|r| r.box_format || r.highlight || r.emphasis_boxed)
+}
+
+pub(crate) fn slot_count_for_paragraph(
+    para: Option<&Paragraph>,
+    zoom: f32,
+    normal_size_px: f32,
+    line_spacing: f32,
+) -> usize {
+    // Both early returns mean "exactly one ordinary line", which is
+    // `ROW_SUBDIVISIONS` slots now rather than a single one.
+    let Some(para) = para else {
+        return ROW_SUBDIVISIONS;
+    };
+    if para.heading == 4 {
+        return ROW_SUBDIVISIONS;
+    }
+    let font_px = line_font_px(Some(para), zoom, normal_size_px);
+    let has_box = para.runs.iter().any(|r| r.box_format);
+    let has_emphasis_box = para.runs.iter().any(|r| r.emphasis_boxed);
+    let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
+    if slot_px <= 0.0 {
+        return ROW_SUBDIVISIONS;
+    }
+    let needed_px = font_px * LINE_HEIGHT_RATIO
+        + if has_box { CARD_BOX_EXTRA_PX } else { 0.0 }
+        + if has_emphasis_box {
+            EMPHASIS_BOX_EXTRA_PX
+        } else {
+            0.0
+        };
+    // The epsilon keeps an exact fit from rounding up. A plain line's height
+    // is `ROW_SUBDIVISIONS` slots exactly, but that division is float math:
+    // a result of 6.0000001 would `ceil` to 7 and make every ordinary line in
+    // the document a slot taller than it needs to be. 1e-3 of a slot is far
+    // below a pixel and cannot hide a real overflow.
+    (((needed_px / slot_px) - 1e-3).ceil() as usize).max(ROW_SUBDIVISIONS)
+}
+
+/// Expands the word-wrapped `rows` table (one entry per visual row) into a
+/// `uniform_list`-facing "display rows" table that reserves extra blank
+/// slots *before* any oversized paragraph (see `slot_count_for_paragraph`).
+/// Before, not after: `row_div` bottom-aligns its content (`justify_end`),
+/// so an oversized paragraph's real overflow spills upward out of its slot,
+/// not downward — reserving the blank space after it left the overflow with
+/// nowhere to go but into the row above (or the ribbon toolbar, for the
+/// first line in the file).
+///
+/// Returns `(display_to_wrap, wrap_to_display)`:
+/// - `display_to_wrap[display_idx]` is `Some(wrap_idx)` for the row that
+///   holds real content (the last of its reserved slots), or `None` for a
+///   blank spacer slot reserved before it.
+/// - `wrap_to_display[wrap_idx]` is the display index a given wrap-table
+///   row starts at — needed anywhere pixel math is keyed off a wrap-row
+///   index (cursor position, scroll-to-cursor) so it accounts for spacer
+///   rows inserted earlier in the document.
+/// Which wrap rows paint nothing, so they can be dropped from the display list
+/// entirely rather than left as blank lines.
+///
+/// Two independent reasons a row disappears:
+///
+/// * **Fold** hides whatever sits under a collapsed heading. `folded_paras` is
+///   the per-paragraph map `AppState::folded_paragraphs` computed, which is
+///   level-aware — collapsing a Pocket takes its Hats, Blocks and Tags with it,
+///   not just its prose.
+/// * **Invisibility** hides individual runs, and a row whose every run is
+///   hidden has nothing left to paint.
+///
+/// Fold is checked first because it is coarser: a folded body row is gone
+/// regardless of what it contains, including highlights.
+pub(crate) fn hidden_wrap_rows(
+    rows: &[(usize, usize, usize)],
+    paragraphs: &[Paragraph],
+    invisibility: bool,
+    cite_size_half_points: u16,
+    folded_paras: &[bool],
+) -> Vec<bool> {
+    if !invisibility && folded_paras.iter().all(|f| !f) {
+        return vec![false; rows.len()];
+    }
+    rows.iter()
+        .map(|&(li, row_start, row_end)| {
+            let Some(para) = paragraphs.get(li) else {
+                return true;
+            };
+            if folded_paras.get(li).copied().unwrap_or(false) {
+                return true;
+            }
+            if !invisibility {
+                return false;
+            }
+            if para.heading != 0 {
+                return false; // a card-style line stays whole
+            }
+            !paragraph_run_char_spans(para)
+                .into_iter()
+                .any(|(s, e, run_idx)| {
+                    // Only runs actually on this row decide it.
+                    if s.max(row_start) >= e.min(row_end) {
+                        return false;
+                    }
+                    let run = para.runs.get(run_idx);
+                    !run_is_hidden(
+                        true,
+                        para.heading,
+                        run.is_some_and(|r| r.highlight),
+                        run.is_some_and(|r| r.bold),
+                        run.map(|r| r.size).unwrap_or(0),
+                        cite_size_half_points,
+                    )
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn expand_rows_for_display(
+    rows: &[(usize, usize, usize)],
+    paragraphs: &[Paragraph],
+    zoom: f32,
+    hidden: &[bool],
+    normal_size_px: f32,
+    line_spacing: f32,
+) -> (Vec<Option<usize>>, Vec<usize>) {
+    let mut display_to_wrap = Vec::with_capacity(rows.len());
+    let mut wrap_to_display = Vec::with_capacity(rows.len());
+    for (wrap_idx, (li, _, _)) in rows.iter().enumerate() {
+        // A fully hidden row gets no display slot, which is what closes up the
+        // vertical gap. It still records a `wrap_to_display` entry pointing at
+        // wherever the next visible row lands, so cursor scrolling on a hidden
+        // row resolves to the nearest thing actually on screen.
+        if hidden.get(wrap_idx).copied().unwrap_or(false) {
+            wrap_to_display.push(display_to_wrap.len());
+            continue;
+        }
+        // Blank filler slots go *before* the content row, not after: `row_div`
+        // bottom-aligns its content (`justify_end`, for aligning mixed-size
+        // text on the bottom rather than the top — see its own comment), so
+        // a paragraph too tall for one slot overflows *upward* out of its
+        // slot, not downward. Filler reserved after it left nothing above to
+        // absorb that overflow — the box of the next Pocket/Hat/heading would
+        // bleed into whatever sat above it (the previous line's text, or the
+        // ribbon toolbar if it was the first line in the file) while the
+        // filler itself just added unused space below. `wrap_to_display`
+        // still has to point at the content slot specifically (not the first
+        // filler), since cursor/scroll pixel math is keyed off it.
+        let slots =
+            slot_count_for_paragraph(paragraphs.get(*li), zoom, normal_size_px, line_spacing);
+        for _ in 1..slots {
+            display_to_wrap.push(None);
+        }
+        wrap_to_display.push(display_to_wrap.len());
+        display_to_wrap.push(Some(wrap_idx));
+    }
+    (display_to_wrap, wrap_to_display)
 }
