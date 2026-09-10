@@ -892,6 +892,8 @@ pub struct GlobalVimState {
     pub vim_enabled: bool,
     pub vim_keybinds: crate::vim_keybinds::VimKeybinds,
     pub pending_vim_action: Option<crate::keybinds::KeybindAction>,
+    /// Platform work requested by a Vim command (for example `:e path`).
+    pub pending_effects: Vec<crate::app::command::AppEffect>,
     pub vim_macros: HashMap<char, Vec<RecordedVimKey>>,
     vim_macro_recording: Option<(char, Vec<RecordedVimKey>)>,
     vim_macro_record_pending: bool,
@@ -912,6 +914,7 @@ impl Default for GlobalVimState {
             vim_enabled: false,
             vim_keybinds: crate::vim_keybinds::VimKeybinds::defaults(),
             pending_vim_action: None,
+            pending_effects: Vec::new(),
             vim_macros: HashMap::new(),
             vim_macro_recording: None,
             vim_macro_record_pending: false,

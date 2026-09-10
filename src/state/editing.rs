@@ -7872,7 +7872,9 @@ impl AppState {
             _ => {
                 if let Some(path) = line.strip_prefix("e ") {
                     let path = self.workspace.working_directory.join(path.trim());
-                    self.open_file(path);
+                    self.global_vim
+                        .pending_effects
+                        .push(crate::app::command::AppEffect::LoadDocument(path));
                 } else if let Some(count) = line.parse::<usize>().ok() {
                     if count >= 1 {
                         self.vim_move_to_line_first_nonblank(count - 1, false);
@@ -15470,19 +15472,14 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_vim_command_e_opens_new_tab_with_given_path() {
+    fn test_dispatch_vim_command_e_requests_background_open() {
         let mut state = make_state("hello", 0, None);
         state.dispatch_vim_command("e nonexistent_test_file.docx");
-        assert_eq!(state.workspace.tabs.len(), 2);
-        assert_eq!(state.workspace.active_tab, 1);
-        assert_eq!(
-            state.workspace.tabs[1]
-                .file_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str()),
-            Some("nonexistent_test_file.docx")
-        );
+        assert!(matches!(
+            state.global_vim.pending_effects.as_slice(),
+            [crate::app::command::AppEffect::LoadDocument(path)]
+                if path.ends_with("nonexistent_test_file.docx")
+        ));
     }
 
     // ── Task H.4: "<register> prefix + wiring into d/y/c ────────────────────
@@ -21814,6 +21811,7 @@ impl AppState {
         if let Some(action) = self.take_pending_vim_action() {
             effects.push(crate::app::command::AppEffect::DispatchKeybind(action));
         }
+        effects.append(&mut self.global_vim.pending_effects);
         (handled, effects)
     }
 
