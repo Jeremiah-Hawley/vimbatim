@@ -862,6 +862,8 @@ pub struct UiState {
     pub invisibility_mode: bool,
     pub print_layout: bool,
     pub notifications: Vec<Notification>,
+    /// Window-scoped keybind dispatch requested by an app effect.
+    pub pending_keybinds: Vec<crate::keybinds::KeybindAction>,
 }
 
 impl Default for UiState {
@@ -883,6 +885,7 @@ impl Default for UiState {
             invisibility_mode: false,
             print_layout: false,
             notifications: Vec::new(),
+            pending_keybinds: Vec::new(),
         }
     }
 }

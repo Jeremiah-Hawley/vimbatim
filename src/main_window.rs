@@ -301,9 +301,10 @@ impl MainWindow {
                     cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, metadata));
                 }
                 crate::app::command::AppEffect::DispatchKeybind(action) => {
-                    // Requires window dispatch but we only have App here, so we defer it
-                    // or implement a global action dispatcher. Wait, we can't dispatch
-                    // without a window locally. But we can just skip it here or handle it.
+                    state.update(cx, |st, cx| {
+                        st.ui.pending_keybinds.push(action);
+                        cx.notify();
+                    });
                 }
                 crate::app::command::AppEffect::ShowError(message) => {
                     state.update(cx, |st, cx| {
@@ -1004,6 +1005,12 @@ impl Render for MainWindow {
          * The outer container has `.relative()` so the modal's `.absolute()` is
          * scoped to this window rather than the display.
          */
+        let pending_keybinds = self.state.update(cx, |state, _| {
+            std::mem::take(&mut state.ui.pending_keybinds)
+        });
+        for action in pending_keybinds {
+            _window.dispatch_action(crate::keybinds::action_for(action), cx);
+        }
         let sidebar_visible = self.state.read(cx).ui.sidebar_visible;
         let settings_visible = self.state.read(cx).ui.settings_visible;
         let pending_close = self.state.read(cx).ui.pending_close;
