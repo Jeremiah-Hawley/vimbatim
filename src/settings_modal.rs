@@ -728,15 +728,23 @@ impl SettingsModal {
     fn download_theme_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.state.read(cx).workspace.working_directory.clone();
         let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
+        let state = self.state.clone();
         cx.spawn_in(window, async move |_this, cx| {
             let Ok(Ok(Some(path))) = path_rx.await else {
                 return;
             };
-            let _ = cx
-                .background_spawn(async move {
-                    std::fs::write(path, crate::theme::custom_theme_template())
-                })
+            let result = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(path, crate::theme::custom_theme_template()) })
                 .await;
+            if let Err(error) = result {
+                let _ = state.update(cx, |state, cx| {
+                    state.apply_effect(crate::app::command::AppEffect::ShowError(format!(
+                        "Could not save theme template: {error}"
+                    )));
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -757,7 +765,17 @@ impl SettingsModal {
                 return;
             };
             let Some(path) = paths.pop() else { return };
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            let content = cx
+                .background_executor()
+                .spawn(async move { std::fs::read_to_string(path) })
+                .await;
+            let Ok(content) = content else {
+                let _ = state.update(cx, |state, cx| {
+                    state.apply_effect(crate::app::command::AppEffect::ShowError(
+                        "Could not read theme file.".to_string(),
+                    ));
+                    cx.notify();
+                });
                 let _ = this.update(cx, |this, cx| {
                     this.theme_import_error = Some("Couldn't read that file.".to_string());
                     cx.notify();
