@@ -26,3 +26,31 @@ pub(crate) fn scrollbar_geometry(
         thumb_top,
     }
 }
+
+// Pixel-only reading-mode page movement.
+/// The scroll arithmetic behind reading mode's Left/Right paging, split out
+/// from `TextEditor::page_scroll` so it is testable without a laid-out view.
+///
+/// `current` and the result are GPUI scroll offsets: `<= 0`, growing more
+/// negative further down the document. `max_y` is the positive maximum scroll
+/// distance. Returns `None` when the page would not move — already at that end.
+pub(crate) fn page_scroll_offset(
+    current: f32,
+    viewport_h: f32,
+    row_height: f32,
+    max_y: f32,
+    forward: bool,
+) -> Option<f32> {
+    // Whole rows only: a raw pixel jump lands mid-row and slices the line
+    // straddling the fold, scrolling half of it past unread. At least one row
+    // so a viewport shorter than a single line still advances.
+    let rows_per_page = (viewport_h / row_height).floor().max(1.0);
+    let delta = rows_per_page * row_height;
+    let target = if forward {
+        current - delta
+    } else {
+        current + delta
+    };
+    let clamped = target.clamp(-max_y.max(0.0), 0.0);
+    ((clamped - current).abs() >= 0.5).then_some(clamped)
+}

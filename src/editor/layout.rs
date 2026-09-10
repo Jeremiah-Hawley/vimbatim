@@ -658,3 +658,76 @@ pub(crate) fn expand_rows_for_display(
     }
     (display_to_wrap, wrap_to_display)
 }
+
+// Pure display-row and cursor-edge resolution.
+/// See `TextEditor::move_cursor_to_row_edge`'s doc comment.
+#[derive(Clone, Copy)]
+pub(crate) enum RowEdge {
+    Start,
+    End,
+    FirstNonBlank,
+}
+
+/// Resolves a display row (see `expand_rows_for_display`) to the nearest
+/// real content row at or before it. A display row can be a blank spacer
+/// slot reserved by an earlier oversized card-style/heading row (which has
+/// no content of its own to land on), so this walks backward to the
+/// nearest one that does — shared by `line_col_from_mouse_position` (a
+/// click landing on a spacer slot) and H/M/L's row resolution (bug report:
+/// H/M/L landed on the wrong row whenever a card-style row sat above the
+/// viewport, from assuming every row was the same pixel height instead of
+/// going through this same display-row translation).
+pub(crate) fn nearest_wrap_row_for_display_row(
+    display_to_wrap: &[Option<usize>],
+    display_row: usize,
+) -> usize {
+    /*
+     * Forwards, not backwards. `expand_rows_for_display` reserves a row's
+     * blank slots *before* its content (its own doc comment explains why:
+     * `row_div` bottom-aligns, so a too-tall line overflows upward), which
+     * means the blank slots at index `i` are the space the *next* content
+     * row's glyphs are painted into — they belong to the row after them, not
+     * the one before.
+     *
+     * This used to scan backwards, a leftover from the earlier
+     * fillers-after layout. That mapped a click in an oversized line's
+     * overflow area to the line above it. It went mostly unnoticed while
+     * only card-style and heading lines reserved spacers at all; once every
+     * line is subdivided (`ROW_SUBDIVISIONS`) most slots in the document are
+     * blank ones, and scanning the wrong way would put nearly every click a
+     * line off.
+     *
+     * The backward scan survives only as the fallback for a slot past the
+     * last content row (nothing follows it to claim it), so this is still
+     * total for any in-range index.
+     */
+    display_to_wrap
+        .iter()
+        .skip(display_row)
+        .find_map(|w| *w)
+        .or_else(|| (0..=display_row).rev().find_map(|i| display_to_wrap[i]))
+        .unwrap_or(0)
+}
+
+/// Pure resolution of `RowEdge` into a char column within `line_chars`,
+/// given the current visual row's `[row_start, row_end)` char range —
+/// factored out of `TextEditor::move_cursor_to_row_edge` so this (the part
+/// with an actual branch worth testing) doesn't need a live GPUI context.
+pub(crate) fn row_edge_target_col(
+    edge: RowEdge,
+    line_chars: &[char],
+    row_start: usize,
+    row_end: usize,
+) -> usize {
+    match edge {
+        RowEdge::Start => row_start,
+        RowEdge::End => row_end,
+        RowEdge::FirstNonBlank => line_chars
+            .get(row_start..row_end.min(line_chars.len()))
+            .unwrap_or(&[])
+            .iter()
+            .position(|c| !c.is_whitespace())
+            .map(|i| row_start + i)
+            .unwrap_or(row_end), // an all-whitespace row: land at its end, matching real vim's `^` on a blank line
+    }
+}

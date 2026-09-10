@@ -8,10 +8,12 @@ use std::rc::Rc;
 use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{Paragraph, Run};
+use crate::editor::geometry::page_scroll_offset;
 use crate::editor::layout::{
     build_visual_rows, display_line, document_lines, expand_rows_for_display, hidden_wrap_rows,
-    line_for_y, line_height_px, list_item_ordinal, list_marker_text_for_level, paints_run_box,
-    row_cache_is_valid_for, row_slot_px, text_line_box_px, visual_row_for_line_col, RowCache,
+    line_for_y, line_height_px, list_item_ordinal, list_marker_text_for_level,
+    nearest_wrap_row_for_display_row, paints_run_box, row_cache_is_valid_for, row_edge_target_col,
+    row_slot_px, text_line_box_px, visual_row_for_line_col, RowCache, RowEdge,
 };
 #[cfg(test)]
 use crate::editor::layout::{list_marker_text, slot_count_for_paragraph, to_letter, to_roman};
@@ -141,33 +143,6 @@ const CONTENT_PADDING_PX: f32 = 16.0;
 /// in once the cursor was already 3-4 lines from the edge — the old value
 /// of this same constant — and needed to start earlier).
 const SCROLL_MARGIN_LINES: f32 = 6.0;
-/// The scroll arithmetic behind reading mode's Left/Right paging, split out
-/// from `TextEditor::page_scroll` so it is testable without a laid-out view.
-///
-/// `current` and the result are GPUI scroll offsets: `<= 0`, growing more
-/// negative further down the document. `max_y` is the positive maximum scroll
-/// distance. Returns `None` when the page would not move — already at that end.
-fn page_scroll_offset(
-    current: f32,
-    viewport_h: f32,
-    row_height: f32,
-    max_y: f32,
-    forward: bool,
-) -> Option<f32> {
-    // Whole rows only: a raw pixel jump lands mid-row and slices the line
-    // straddling the fold, scrolling half of it past unread. At least one row
-    // so a viewport shorter than a single line still advances.
-    let rows_per_page = (viewport_h / row_height).floor().max(1.0);
-    let delta = rows_per_page * row_height;
-    let target = if forward {
-        current - delta
-    } else {
-        current + delta
-    };
-    let clamped = target.clamp(-max_y.max(0.0), 0.0);
-    ((clamped - current).abs() >= 0.5).then_some(clamped)
-}
-
 /// Width of the document scrollbar's track, and the inset of the thumb inside
 /// it. Beta feedback asked for "the little thingy you click and drag to go up
 /// and down the doc".
@@ -581,79 +556,6 @@ fn spell_ranges_cached(
     cache.entries.insert(line.to_string(), ranges.clone());
     ranges
 }
-
-/// See `TextEditor::move_cursor_to_row_edge`'s doc comment.
-#[derive(Clone, Copy)]
-enum RowEdge {
-    Start,
-    End,
-    FirstNonBlank,
-}
-
-/// Resolves a display row (see `expand_rows_for_display`) to the nearest
-/// real content row at or before it. A display row can be a blank spacer
-/// slot reserved by an earlier oversized card-style/heading row (which has
-/// no content of its own to land on), so this walks backward to the
-/// nearest one that does — shared by `line_col_from_mouse_position` (a
-/// click landing on a spacer slot) and H/M/L's row resolution (bug report:
-/// H/M/L landed on the wrong row whenever a card-style row sat above the
-/// viewport, from assuming every row was the same pixel height instead of
-/// going through this same display-row translation).
-fn nearest_wrap_row_for_display_row(
-    display_to_wrap: &[Option<usize>],
-    display_row: usize,
-) -> usize {
-    /*
-     * Forwards, not backwards. `expand_rows_for_display` reserves a row's
-     * blank slots *before* its content (its own doc comment explains why:
-     * `row_div` bottom-aligns, so a too-tall line overflows upward), which
-     * means the blank slots at index `i` are the space the *next* content
-     * row's glyphs are painted into — they belong to the row after them, not
-     * the one before.
-     *
-     * This used to scan backwards, a leftover from the earlier
-     * fillers-after layout. That mapped a click in an oversized line's
-     * overflow area to the line above it. It went mostly unnoticed while
-     * only card-style and heading lines reserved spacers at all; once every
-     * line is subdivided (`ROW_SUBDIVISIONS`) most slots in the document are
-     * blank ones, and scanning the wrong way would put nearly every click a
-     * line off.
-     *
-     * The backward scan survives only as the fallback for a slot past the
-     * last content row (nothing follows it to claim it), so this is still
-     * total for any in-range index.
-     */
-    display_to_wrap
-        .iter()
-        .skip(display_row)
-        .find_map(|w| *w)
-        .or_else(|| (0..=display_row).rev().find_map(|i| display_to_wrap[i]))
-        .unwrap_or(0)
-}
-
-/// Pure resolution of `RowEdge` into a char column within `line_chars`,
-/// given the current visual row's `[row_start, row_end)` char range —
-/// factored out of `TextEditor::move_cursor_to_row_edge` so this (the part
-/// with an actual branch worth testing) doesn't need a live GPUI context.
-fn row_edge_target_col(
-    edge: RowEdge,
-    line_chars: &[char],
-    row_start: usize,
-    row_end: usize,
-) -> usize {
-    match edge {
-        RowEdge::Start => row_start,
-        RowEdge::End => row_end,
-        RowEdge::FirstNonBlank => line_chars
-            .get(row_start..row_end.min(line_chars.len()))
-            .unwrap_or(&[])
-            .iter()
-            .position(|c| !c.is_whitespace())
-            .map(|i| row_start + i)
-            .unwrap_or(row_end), // an all-whitespace row: land at its end, matching real vim's `^` on a blank line
-    }
-}
-
 impl TextEditor {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::for_pane(state, Pane::Primary, cx)
