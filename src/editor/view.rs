@@ -25,7 +25,7 @@ pub(crate) use crate::editor::style::{
     is_curated_font, register_imported_font, run_is_hidden, unregister_imported_font,
     CURATED_SERIF_FONT, FONT_FAMILY,
 };
-use crate::editor::style::{heading_font_size_px, line_font_px};
+use crate::editor::style::{heading_font_size_px, line_font_px, line_segments, SegmentStyle};
 #[cfg(test)]
 use crate::editor::style::{CHAR_ADVANCE_RATIO, SERIF_CHAR_ADVANCE_RATIO};
 use crate::keybinds::{CopyAction, CutAction, PasteAction};
@@ -3657,91 +3657,6 @@ pub(crate) fn line_col_from_mouse_position(
 pub enum CursorStyle {
     Block,
     Line,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum SegmentStyle {
-    Plain,
-    Cursor,
-    Selection,
-}
-
-fn line_segments(
-    len: usize,
-    cursor_col: Option<usize>,
-    selections: &[(usize, usize)],
-    misspelled: &[(usize, usize)],
-) -> Vec<(usize, usize, SegmentStyle, bool)> {
-    /*
-     * Splits a line of `len` characters into styled segments by merging the
-     * cursor position (if this is the cursor's line) and the selection's
-     * char-column range (if any) into one ordered list of breakpoints, then
-     * classifying each resulting [start, end) run. The cursor always gets
-     * its own single-character segment even where it sits inside a
-     * selection — real editors draw the block cursor on top of selection
-     * highlighting, not the other way around. A cursor sitting past the
-     * last character (end of line) produces a synthetic zero-width segment
-     * (`len, len`) that the renderer turns into a single highlighted space.
-     *
-     * Misspelled ranges are a *third*, orthogonal overlay rather than another
-     * `SegmentStyle` variant: a misspelled word can also be selected, or sit
-     * under the cursor, and those have to keep their own background. So they
-     * contribute breakpoints like the others but come back as the trailing
-     * `bool` on each segment — "paint a squiggle under this run too".
-     */
-    if cursor_col.is_none() && selections.is_empty() && misspelled.is_empty() {
-        return vec![(0, len, SegmentStyle::Plain, false)];
-    }
-
-    let mut breaks: Vec<usize> = vec![0, len];
-    if let Some(c) = cursor_col {
-        let c = c.min(len);
-        breaks.push(c);
-        if c < len {
-            breaks.push(c + 1);
-        }
-    }
-    for &(s, e) in selections {
-        breaks.push(s.min(len));
-        breaks.push(e.min(len));
-    }
-    for &(s, e) in misspelled {
-        breaks.push(s.min(len));
-        breaks.push(e.min(len));
-    }
-    breaks.sort_unstable();
-    breaks.dedup();
-
-    let mut segments = Vec::new();
-    for w in breaks.windows(2) {
-        let (start, end) = (w[0], w[1]);
-        let is_cursor = cursor_col
-            .map(|c| c.min(len) == start && end == start + 1)
-            .unwrap_or(false);
-        let in_selection = selections
-            .iter()
-            .any(|&(s, e)| start >= s.min(len) && end <= e.min(len));
-        let style = if is_cursor {
-            SegmentStyle::Cursor
-        } else if in_selection {
-            SegmentStyle::Selection
-        } else {
-            SegmentStyle::Plain
-        };
-        let is_misspelled = misspelled
-            .iter()
-            .any(|&(s, e)| start >= s.min(len) && end <= e.min(len));
-        segments.push((start, end, style, is_misspelled));
-    }
-
-    // A cursor at (or past) the end of the line has no character to occupy,
-    // so the main loop above never produces a segment for it — append one.
-    if let Some(c) = cursor_col {
-        if c >= len {
-            segments.push((len, len, SegmentStyle::Cursor, false));
-        }
-    }
-    segments
 }
 
 #[cfg(test)]
