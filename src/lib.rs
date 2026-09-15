@@ -1,4 +1,15 @@
 pub mod app;
+
+#[doc(hidden)]
+pub mod testing {
+    pub use crate::app::command::{AppCommand, AppEffect};
+    pub use crate::app::repository::{DocumentRepository, InMemoryDocumentRepository};
+    pub use crate::app::error::AppError;
+    pub use crate::state::{AppState, Tab, Pane, UiState};
+    pub use crate::document::TabId;
+    pub use crate::preferences::Preferences;
+}
+
 mod app_toolbar;
 mod auto_scroll;
 mod case_converter;

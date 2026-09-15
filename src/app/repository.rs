@@ -35,14 +35,12 @@ pub trait RecoveryRepository {
     fn delete_entry(&self, entry: &crate::recovery::RecoveryEntry) -> Result<(), AppError>;
 }
 
-#[cfg(test)]
 pub struct InMemoryDocumentRepository {
     pub load_error: AppError,
     pub save_result: Result<(), AppError>,
     pub saved_paths: std::cell::RefCell<Vec<std::path::PathBuf>>,
 }
 
-#[cfg(test)]
 impl InMemoryDocumentRepository {
     pub fn failing(error: AppError) -> Self {
         Self {
@@ -53,7 +51,6 @@ impl InMemoryDocumentRepository {
     }
 }
 
-#[cfg(test)]
 impl DocumentRepository for InMemoryDocumentRepository {
     fn load_document(&self, _path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), AppError> {
         Err(self.load_error.clone())
@@ -120,12 +117,10 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
     }
 }
 
-#[cfg(test)]
 pub struct InMemorySettingsRepository {
     pub preferences: std::cell::RefCell<crate::preferences::Preferences>,
 }
 
-#[cfg(test)]
 impl InMemorySettingsRepository {
     pub fn new(preferences: crate::preferences::Preferences) -> Self {
         Self {
