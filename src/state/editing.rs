@@ -9437,7 +9437,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_custom_colors(&path, "custom_highlight_colors"),
+            crate::preferences::Preferences::load(&path).unwrap().custom_highlight_colors,
             vec![0x00ff88, 0xaabbcc]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -9449,7 +9449,7 @@ mod tests {
         let path = dir.join("settings.conf");
 
         // Missing file.
-        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
+        assert!(crate::preferences::Preferences::load(&path).unwrap().custom_font_colors.is_empty());
 
         // Missing key, empty value, and unparseable entries mixed with good ones.
         std::fs::write(
@@ -9457,10 +9457,9 @@ mod tests {
             "[FORMATTING]\ncustom_font_colors=\ncustom_highlight_colors=00ff88|zzzzzz|1234567|aabbcc\n",
         )
         .unwrap();
-        assert!(load_custom_colors(&path, "custom_font_colors").is_empty());
-        assert!(load_custom_colors(&path, "nonexistent_key").is_empty());
+        assert!(crate::preferences::Preferences::load(&path).unwrap().custom_font_colors.is_empty());
         assert_eq!(
-            load_custom_colors(&path, "custom_highlight_colors"),
+            crate::preferences::Preferences::load(&path).unwrap().custom_highlight_colors,
             vec![0x00ff88, 0xaabbcc],
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -9474,7 +9473,7 @@ mod tests {
 
         save_custom_colors(&path, "custom_font_colors", &[0x00ff88, 0x000000]).unwrap();
         assert_eq!(
-            load_custom_colors(&path, "custom_font_colors"),
+            crate::preferences::Preferences::load(&path).unwrap().custom_font_colors,
             vec![0x00ff88, 0x000000]
         );
 
@@ -10617,20 +10616,20 @@ mod tests {
         )
         .unwrap();
 
+        let prefs = crate::preferences::Preferences::load(&path);
         assert_eq!(
-            load_string_setting(&path, "highlight_color", "yellow"),
+            prefs.highlight_color,
             "cyan"
         );
-        assert!(!load_bool_setting(&path, "emphasis_bold", true));
-        assert!(load_bool_setting(&path, "emphasis_underline", false));
-        assert!(load_bool_setting(&path, "emphasis_box", false));
-        assert!(load_bool_setting(&path, "emphasis_change_size", false));
-        assert!(load_bool_setting(&path, "paste_condense", false));
-        assert!(load_bool_setting(&path, "paste_condense_pilcrow", false));
+        assert!(!prefs.emphasis_bold);
+        assert!(prefs.emphasis_underline);
+        assert!(prefs.emphasis_box);
+        assert!(prefs.emphasis_change_size);
+        assert!(prefs.paste_condense);
+        assert!(prefs.paste_condense_pilcrow);
         assert_eq!(
-            load_font_size_half_points(&path, "emphasis_size", 24),
-            36,
-            "18pt = 36 half-points"
+            prefs.emphasis_size,
+            18,
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -14708,7 +14707,7 @@ mod tests {
         std::fs::write(&conf_path, "").unwrap();
         let target = PathBuf::from("/some/nested/dir");
         save_working_directory(&conf_path, &target).unwrap();
-        assert_eq!(load_working_directory(&conf_path), Some(target));
+        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().working_directory, Some(target));
     }
 
     #[test]
@@ -14718,7 +14717,7 @@ mod tests {
         std::fs::write(&conf_path, "").unwrap();
         let dirs = vec![PathBuf::from("/a/b"), PathBuf::from("/a/c")];
         save_expanded_dirs(&conf_path, &dirs).unwrap();
-        assert_eq!(load_expanded_dirs(&conf_path), dirs);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().expanded_dirs, dirs);
     }
 
     #[test]
@@ -14726,7 +14725,7 @@ mod tests {
         let dir = temp_test_dir("working_directory_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(load_working_directory(&conf_path), None);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().working_directory, None);
     }
 
     #[test]
@@ -14734,7 +14733,7 @@ mod tests {
         let dir = temp_test_dir("expanded_dirs_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(load_expanded_dirs(&conf_path), Vec::<PathBuf>::new());
+        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().expanded_dirs, Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -20012,7 +20011,7 @@ mod tests {
         let dir = temp_test_dir("line_spacing_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(load_line_spacing(&conf_path), DEFAULT_LINE_SPACING);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().line_spacing, DEFAULT_LINE_SPACING);
     }
 
     #[test]
@@ -20020,12 +20019,12 @@ mod tests {
         let dir = temp_test_dir("line_spacing_load");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "line_spacing=1.5\n").unwrap();
-        assert_eq!(load_line_spacing(&conf_path), 1.5);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path), 1.5);
         std::fs::write(&conf_path, "line_spacing=9.9\n").unwrap();
-        assert_eq!(load_line_spacing(&conf_path), 3.0);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path), 3.0);
         // Garbage falls back rather than panicking, same as every other loader.
         std::fs::write(&conf_path, "line_spacing=wide\n").unwrap();
-        assert_eq!(load_line_spacing(&conf_path), DEFAULT_LINE_SPACING);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path), DEFAULT_LINE_SPACING);
     }
 
     /// What the future line-spacing button actually calls: sets the live value
@@ -20040,13 +20039,13 @@ mod tests {
 
         state.set_line_spacing(1.5);
         assert_eq!(state.line_spacing, 1.5);
-        assert_eq!(load_line_spacing(&conf_path), 1.5);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path), 1.5);
 
         // Out-of-range input is clamped before it is stored *or* written, so
         // the file can never hold a value the loader would have to fix up.
         state.set_line_spacing(99.0);
         assert_eq!(state.line_spacing, 3.0);
-        assert_eq!(load_line_spacing(&conf_path), 3.0);
+        assert_eq!(crate::preferences::Preferences::load(&conf_path), 3.0);
     }
 
     // ── sidebar mode toggle (beta feedback: toggle files/nav) ─────────────
@@ -20494,8 +20493,15 @@ mod tests {
             let before = read(&state);
             toggle(&mut state);
             assert_eq!(read(&state), !before, "{key} did not flip");
+            let prefs = crate::preferences::Preferences::load(&conf);
+            let persisted = match key {
+                "invisibility_mode" => prefs.unwrap().invisibility_mode,
+                "word_count" => prefs.unwrap().word_count,
+                "timer" => prefs.unwrap().timer,
+                _ => panic!("unknown key: {}", key),
+            };
             assert_eq!(
-                load_bool_setting(&conf, key, before),
+                persisted,
                 !before,
                 "{key} flipped in memory but was not written to settings.conf",
             );

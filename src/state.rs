@@ -13,7 +13,7 @@ use crate::document_ops::{
     FormatOp,
 };
 use crate::docx_parser::{
-    create_new_docx, paragraphs_to_plain_text, parse_docx, Alignment, CardStyle, DocxOrigin,
+    parse_docx, Alignment, CardStyle, DocxOrigin,
     ListItem, ListKind, Paragraph, Run,
 };
 use crate::recovery::RecoveryEntry;
@@ -1293,15 +1293,6 @@ pub enum CardStyleKind {
 }
 
 impl CardStyleKind {
-    fn font_size(&self) -> u16 {
-        match self {
-            CardStyleKind::Pocket => 52, // 26pt
-            CardStyleKind::Hat => 44,    // 22pt
-            CardStyleKind::Block => 32,  // 16pt
-            CardStyleKind::Tag => 26,    // 13pt
-        }
-    }
-
     fn is_centered(&self) -> bool {
         matches!(
             self,
@@ -1470,20 +1461,6 @@ fn default_working_directory() -> PathBuf {
     let _ = std::fs::create_dir_all(&path);
     path
 }
-
-/// Reads `working_directory` from settings.conf — mirrors
-/// `load_normal_text_size_half_points`'s tolerant flat key=value scan. `None` when
-/// the file or key is missing, so callers can fall back to
-/// `default_working_directory()` rather than trusting a nonexistent path.
-fn load_working_directory(path: &std::path::Path) -> Option<PathBuf> {
-    std::fs::read_to_string(path).ok().and_then(|contents| {
-        contents.lines().find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "working_directory").then(|| PathBuf::from(value.trim()))
-        })
-    })
-}
-
 /// Persists `working_directory` to settings.conf via `theme`'s generic
 /// key=value upsert helper, so the file explorer reopens to the last folder
 /// the user picked (`set_working_directory`) instead of always resetting to
@@ -1491,31 +1468,6 @@ fn load_working_directory(path: &std::path::Path) -> Option<PathBuf> {
 fn save_working_directory(path: &std::path::Path, dir: &std::path::Path) -> std::io::Result<()> {
     crate::preferences::Preferences::update(path, "working_directory", &dir.display().to_string())
 }
-
-/// Reads `expanded_dirs` from settings.conf — a `|`-joined list of directory
-/// paths the nav-pane tree had expanded at last save (`save_expanded_dirs`).
-/// Empty when the file or key is missing.
-fn load_expanded_dirs(path: &std::path::Path) -> Vec<PathBuf> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|contents| {
-            contents
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once('=')?;
-                    (key.trim() == "expanded_dirs").then(|| {
-                        value
-                            .split('|')
-                            .filter(|s| !s.is_empty())
-                            .map(PathBuf::from)
-                            .collect()
-                    })
-                })
-                .unwrap_or_default()
-        })
-        .unwrap_or_default()
-}
-
 /// Persists every currently expanded nav-pane directory to settings.conf as
 /// a single `|`-joined `expanded_dirs` line, so `AppState::new()` can
 /// restore the same folders expanded on the next launch
@@ -1594,40 +1546,6 @@ pub fn clamp_line_spacing(spacing: f32) -> f32 {
     }
     spacing.clamp(0.5, 3.0)
 }
-
-/// Reads `line_spacing` (`[FORMATTING]`) from settings.conf. Same tolerant
-/// flat key=value scan as every other loader in this file; falls back to
-/// `DEFAULT_LINE_SPACING` when the file or key is missing/unparseable.
-fn load_line_spacing(path: &std::path::Path) -> f32 {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                (k.trim() == "line_spacing")
-                    .then(|| value.trim().parse::<f32>().ok())
-                    .flatten()
-            })
-        })
-        .map(clamp_line_spacing)
-        .unwrap_or(DEFAULT_LINE_SPACING)
-}
-
-fn load_spreading_wpm(path: &std::path::Path) -> u32 {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                (k.trim() == "spreading_wpm")
-                    .then(|| value.trim().parse::<u32>().ok())
-                    .flatten()
-            })
-        })
-        .map(clamp_spreading_wpm)
-        .unwrap_or(DEFAULT_SPREADING_WPM)
-}
-
 /// What the word-count panel shows. `spoken` is the figure the time estimate
 /// divides — in a debate doc the parts actually read aloud are the tag lines
 /// plus the highlighted body text.
@@ -1869,31 +1787,6 @@ impl CustomColorTarget {
 /// settings.conf and the dropdown from growing without bound. Raise it (or add
 /// a "manage colors" UI) if users ask for more slots.
 pub const MAX_CUSTOM_COLORS: usize = 16;
-
-/// Reads one pipe-separated list of `RRGGBB` hex colors from settings.conf.
-/// Same `|` convention as `expanded_dirs`, and the same tolerant flat scan as
-/// `load_font_size_half_points`: a missing file, missing key, or unparseable
-/// entry costs that entry only, never an error.
-pub(crate) fn load_custom_colors(path: &std::path::Path, key: &str) -> Vec<u32> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                (k.trim() == key).then(|| value.trim().to_string())
-            })
-        })
-        .map(|value| {
-            value
-                .split('|')
-                .map(str::trim)
-                .filter(|entry| entry.len() == 6)
-                .filter_map(|entry| u32::from_str_radix(entry, 16).ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub(crate) fn save_custom_colors(
     path: &std::path::Path,
     key: &str,
@@ -1906,74 +1799,6 @@ pub(crate) fn save_custom_colors(
         .join("|");
     crate::theme::save_setting_line(path, key, &joined)
 }
-
-/// Reads `normal_text_size` (points, `[FORMATTING]` section) from settings.conf —
-/// the size "Clear Formatting" (`found_bugs.md`) resets a line back to.
-/// Mirrors `keybinds::load_vim_enabled`'s tolerant flat key=value scan
-/// rather than pulling in the unused `config_parsing` crate (which panics
-/// on a missing file). Converted to half-points, `Run.size`'s own unit.
-/// Falls back to 22 (11pt) when the file or key is missing/unparseable,
-/// matching settings.conf's own shipped default.
-fn load_normal_text_size_half_points(path: &std::path::Path) -> u16 {
-    load_font_size_half_points(path, "normal_text_size", 22)
-}
-
-/// Reads a `[FORMATTING]` font-size setting (points) from settings.conf,
-/// converting to half-points (`Run.size`'s unit) — the shared scan behind
-/// `load_normal_text_size_half_points` and the `pocket_size`/`block_size`/
-/// `tag_size`/`cite_size` loads in `AppState::new()`. `default_half_points`
-/// is returned as-is (already in half-points) when the file or key is
-/// missing/unparseable.
-fn load_font_size_half_points(path: &std::path::Path, key: &str, default_half_points: u16) -> u16 {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                (k.trim() == key)
-                    .then(|| value.trim().parse::<u16>().ok())
-                    .flatten()
-            })
-        })
-        .map(|points| points * 2)
-        .unwrap_or(default_half_points)
-}
-
-/// Reads a `true`/`false` settings.conf key, mirroring
-/// `keybinds::load_vim_enabled`'s tolerant flat key=value scan. `default` is
-/// returned when the file or key is missing.
-///
-/// Note the scan is *section-agnostic* — every loader in this file is, and
-/// the `[...]` headers are cosmetic to it. That's why the spellcheck keys are
-/// prefixed (`spellcheck`, `spellcheck_underline_color`) rather than relying
-/// on `[SPELLCHECK]` to disambiguate a bare `enabled=`.
-fn load_bool_setting(path: &std::path::Path, key: &str, default: bool) -> bool {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                (k.trim() == key).then(|| value.trim() == "true")
-            })
-        })
-        .unwrap_or(default)
-}
-
-/// Reads a free-form string settings.conf key. Same flat scan as above; an
-/// empty value counts as missing so a blank line falls back to the default.
-fn load_string_setting(path: &std::path::Path, key: &str, default: &str) -> String {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let (k, value) = line.split_once('=')?;
-                let value = value.trim();
-                (k.trim() == key && !value.is_empty()).then(|| value.to_string())
-            })
-        })
-        .unwrap_or_else(|| default.to_string())
-}
-
 /// Where the user's added-word list lives: alongside settings.conf, one
 /// lowercased word per line.
 ///

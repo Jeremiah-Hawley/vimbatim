@@ -459,7 +459,7 @@ impl MainWindow {
                                 p
                             });
 
-                            if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
+                            if let Ok(Some((tab_id, paragraphs, _origin, p, doc_style))) = prepared {
                                 let start = std::time::Instant::now();
                                 let result = cx
                                     .background_executor()

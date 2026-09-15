@@ -114,7 +114,7 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .ok_or_else(|| AppError::Workspace(format!("{} does not exist", path.display())))
     }
 
-    fn scan_directory(&self, dir: &Path) -> Result<Vec<crate::state::FileNode>, AppError> {
+    fn scan_directory(&self, _dir: &Path) -> Result<Vec<crate::state::FileNode>, AppError> {
         // Limited fake for tests
         Ok(Vec::new())
     }
