@@ -21766,6 +21766,58 @@ impl AppState {
                 self.ui.notifications.clear();
                 vec![]
             }
+            AppCommand::Backspace => {
+                self.backspace();
+                vec![]
+            }
+            AppCommand::DeleteForward => {
+                self.delete_forward();
+                vec![]
+            }
+            AppCommand::InsertChar(ch) => {
+                self.insert_char(ch);
+                vec![]
+            }
+            AppCommand::IndentListItem => {
+                let in_list = self
+                    .workspace
+                    .tabs
+                    .get(self.workspace.active_tab)
+                    .is_some_and(|t| {
+                        let (para_idx, ..) =
+                            crate::document_ops::resolve_position(&t.document.paragraphs, t.cursor);
+                        t.document
+                            .paragraphs
+                            .get(para_idx)
+                            .is_some_and(|p| p.list.is_some())
+                    });
+                if in_list {
+                    self.indent_list_item();
+                } else {
+                    self.insert_char('\t');
+                }
+                vec![]
+            }
+            AppCommand::OutdentListItem => {
+                self.outdent_list_item();
+                vec![]
+            }
+            AppCommand::MoveLeft => {
+                self.move_left();
+                vec![]
+            }
+            AppCommand::MoveRight => {
+                self.move_right();
+                vec![]
+            }
+            AppCommand::ExtendLeft => {
+                self.extend_left();
+                vec![]
+            }
+            AppCommand::ExtendRight => {
+                self.extend_right();
+                vec![]
+            }
             AppCommand::Save => vec![crate::app::command::AppEffect::PerformSave(
                 self.workspace.active_tab,
             )],

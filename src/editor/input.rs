@@ -14,8 +14,42 @@ pub(crate) trait InputStrategy {
 pub(crate) struct PlainInputStrategy;
 
 impl InputStrategy for PlainInputStrategy {
-    fn command(&self, _: &str, _: bool, _: Option<&str>) -> Option<AppCommand> {
-        None
+    fn command(&self, key: &str, shift: bool, _key_char: Option<&str>) -> Option<AppCommand> {
+        match key {
+            "backspace" => Some(AppCommand::Backspace),
+            "delete" => Some(AppCommand::DeleteForward),
+            "enter" => Some(AppCommand::InsertChar('\n')),
+            "space" => Some(AppCommand::InsertChar(' ')),
+            "tab" => {
+                if shift {
+                    Some(AppCommand::OutdentListItem)
+                } else {
+                    Some(AppCommand::IndentListItem)
+                }
+            }
+            "left" => {
+                if shift {
+                    Some(AppCommand::ExtendLeft)
+                } else {
+                    Some(AppCommand::MoveLeft)
+                }
+            }
+            "right" => {
+                if shift {
+                    Some(AppCommand::ExtendRight)
+                } else {
+                    Some(AppCommand::MoveRight)
+                }
+            }
+            k if k.chars().count() == 1 => {
+                let mut ch = k.chars().next().unwrap();
+                if shift && ch.is_alphabetic() {
+                    ch = ch.to_uppercase().next().unwrap_or(ch);
+                }
+                Some(AppCommand::InsertChar(ch))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -46,6 +80,9 @@ mod tests {
                 key_char: Some("d".into()),
             })
         );
-        assert_eq!(PlainInputStrategy.command("x", false, Some("x")), None);
+        assert_eq!(
+            PlainInputStrategy.command("x", false, Some("x")),
+            Some(AppCommand::InsertChar('x'))
+        );
     }
 }
