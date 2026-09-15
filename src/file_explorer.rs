@@ -1209,7 +1209,7 @@ impl FileExplorer {
             .split('\n')
             .enumerate()
             .filter_map(|(line_idx, line_text)| {
-                let heading = tab.document.paragraphs.get(line_idx)?.heading;
+                let heading = tab.document.paragraphs().get(line_idx)?.heading;
                 (1..=max_level)
                     .contains(&heading)
                     .then(|| (line_idx, heading, line_text.to_string()))

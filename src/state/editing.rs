@@ -203,7 +203,7 @@ impl AppState {
             total_words: count_words(&tab.document.content()),
             ..DocumentStats::default()
         };
-        for para in &tab.document.paragraphs {
+        for para in tab.document.paragraphs() {
             // Tag is the card style at heading level 4
             // (`CardStyleKind::heading_level`).
             if para.heading == 4 {
@@ -239,7 +239,7 @@ impl AppState {
             return None;
         }
         Some(
-            runs_in_range(&tab.document.paragraphs, start, end)
+            runs_in_range(tab.document.paragraphs(), start, end)
                 .iter()
                 .filter(|r| {
                     r.highlight || matches!(r.style, Some(CardStyle::Tag) | Some(CardStyle::Cite))
@@ -263,7 +263,7 @@ impl AppState {
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.document.paragraphs.iter().any(&is_tag))
+            .map(|t| t.document.paragraphs().iter().any(&is_tag))
             .unwrap_or(false);
         // No undo entry for a no-op — Ctrl+Z should undo what the user did.
         if !any {
@@ -273,7 +273,7 @@ impl AppState {
         self.push_undo_snapshot();
         let default_size = self.normal_text_size_half_points;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in &mut tab.document.paragraphs {
+            for para in tab.document.paragraphs_mut() {
                 if !is_tag(para) {
                     continue;
                 }
@@ -1042,14 +1042,14 @@ impl AppState {
             tab.saving_version = Some(tab.document.content_version);
             (
                 tab.id,
-                tab.document.paragraphs.clone(),
+                tab.document.paragraphs().to_vec(),
                 tab.docx_origin.clone(),
                 path,
             )
         };
         Ok(Some((
             tab_id,
-            paragraphs,
+            paragraphs.to_vec(),
             origin,
             path,
             self.new_doc_style(),
@@ -1072,7 +1072,7 @@ impl AppState {
                         tab.last_snapshot_version = tab.document.content_version;
                         crate::recovery::delete_snapshot(tab_id);
                     }
-                    log_save_cost(&tab.document.paragraphs, elapsed);
+                    log_save_cost(tab.document.paragraphs(), elapsed);
                 }
             }
             Err(e) => {
@@ -1332,7 +1332,7 @@ impl AppState {
             .filter(|t| t.document.is_modified)
             .map(|t| TabSnapshot {
                 id: t.id,
-                paragraphs: t.document.paragraphs.clone(),
+                paragraphs: t.document.paragraphs().to_vec(),
                 origin: t.docx_origin.clone(),
                 file_path: t.file_path.clone(),
                 title: t.title.clone(),
@@ -1429,7 +1429,7 @@ impl AppState {
             // Never-saved tab: reopen untitled, exactly as it was pre-crash.
             None => Tab::new_empty(TabId(self.workspace.next_tab_id)),
         };
-        tab.document.paragraphs = paragraphs;
+        *tab.document.paragraphs_mut() = paragraphs;
         tab.has_unsupported_blocks = origin.has_unsupported_blocks;
         tab.docx_origin = Some(Arc::new(origin));
         if entry.original_path.is_none() {
@@ -1600,10 +1600,10 @@ impl AppState {
         }
         tab.document
             .undo_stack
-            .push(tab.document.paragraphs.clone());
+            .push(tab.document.paragraphs().to_vec());
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
         ));
         while tab.document.undo_stack.len() > cap {
             tab.document.undo_stack.remove(0);
@@ -1624,7 +1624,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             if let Some((a, f)) = tab.selection.take() {
                 let (start, end) = (a.min(f), a.max(f));
-                sync_delete_range(&mut tab.document.paragraphs, start, end);
+                sync_delete_range(tab.document.paragraphs_mut(), start, end);
                 tab.cursor = start;
                 tab.document.is_modified = true;
             }
@@ -1651,7 +1651,7 @@ impl AppState {
         }
         let mut inserted_range = None;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_insert_char(&mut tab.document.paragraphs, tab.cursor, ch);
+            sync_insert_char(tab.document.paragraphs_mut(), tab.cursor, ch);
             let start = tab.cursor;
             tab.cursor += ch.len_utf8();
             tab.document.is_modified = true;
@@ -1668,7 +1668,7 @@ impl AppState {
                 .and_then(|t| t.pending_format.clone());
             if let Some(op) = pending {
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    apply_formatting(&mut tab.document.paragraphs, start, end, op);
+                    apply_formatting(tab.document.paragraphs_mut(), start, end, op);
                 }
             }
         }
@@ -1711,19 +1711,18 @@ impl AppState {
         // character in the buffer, so there's nothing else for this
         // backspace to visibly remove first.
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
-            let (para_idx, run_idx, char_idx) =
-                resolve_position(&tab.document.paragraphs, tab.cursor);
+            let (para_idx, run_idx, char_idx) = tab.document.resolve_position(tab.cursor);
             if run_idx == 0
                 && char_idx == 0
                 && tab
                     .document
-                    .paragraphs
+                    .paragraphs()
                     .get(para_idx)
                     .is_some_and(|p| p.list.is_some())
             {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    if let Some(para) = tab.document.paragraphs.get_mut(para_idx) {
+                    if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
                         para.list = None;
                     }
                     tab.document.is_modified = true;
@@ -1740,7 +1739,7 @@ impl AppState {
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            sync_delete_range(&mut tab.document.paragraphs, prev, tab.cursor);
+            sync_delete_range(tab.document.paragraphs_mut(), prev, tab.cursor);
             tab.cursor = prev;
             tab.document.is_modified = true;
         }
@@ -1778,7 +1777,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             let next = char_right(&tab.document.content(), tab.cursor);
-            sync_delete_range(&mut tab.document.paragraphs, tab.cursor, next);
+            sync_delete_range(tab.document.paragraphs_mut(), tab.cursor, next);
             tab.document.is_modified = true;
         }
     }
@@ -1844,7 +1843,7 @@ impl AppState {
         let mut deleted_chars = 0;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             deleted_chars = tab.document.content()[start..cursor].chars().count();
-            sync_delete_range(&mut tab.document.paragraphs, start, cursor);
+            sync_delete_range(tab.document.paragraphs_mut(), start, cursor);
             tab.cursor = start;
             tab.selection = None;
             tab.document.is_modified = true;
@@ -1908,13 +1907,13 @@ impl AppState {
             return;
         };
         let effective_op =
-            if is_uniformly_active(&tab.document.paragraphs, line_start, line_end, &op) {
+            if is_uniformly_active(tab.document.paragraphs(), line_start, line_end, &op) {
                 toggled_off(&op)
             } else {
                 op.clone()
             };
         apply_formatting(
-            &mut tab.document.paragraphs,
+            tab.document.paragraphs_mut(),
             line_start,
             line_end,
             effective_op.clone(),
@@ -1930,7 +1929,7 @@ impl AppState {
         // cause behind found_bugs.md's "Clear... fails to clear pocket,
         // hat, and block formatting".
         if let FormatOp::ClearAll { .. } = effective_op {
-            reset_card_style_in_range(&mut tab.document.paragraphs, line_start, line_end);
+            reset_card_style_in_range(tab.document.paragraphs_mut(), line_start, line_end);
             // A prior card-style/formatting op on this same empty line (e.g.
             // apply_card_style's Bold+FontSize+Box sequence) may have armed
             // `pending_format`, which otherwise keeps force-applying to
@@ -1953,10 +1952,10 @@ impl AppState {
         // single slot — each call overwrote the previous one, so only the
         // last-applied op ever survived to the first keystroke.
         if is_line_empty {
-            let (para_idx, _, _) = resolve_position(&tab.document.paragraphs, line_start);
-            if let Some(para) = tab.document.paragraphs.get_mut(para_idx) {
+            let (para_idx, _, _) = tab.document.resolve_position(line_start);
+            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
                 for run in para.runs.iter_mut() {
-                    apply_format_op(run, &effective_op);
+                    apply_format_op(&mut *run, &effective_op);
                 }
             }
         }
@@ -2015,7 +2014,7 @@ impl AppState {
                     // there is only one range.
                     let effective_op = if ranges
                         .iter()
-                        .all(|&(s, e)| is_uniformly_active(&tab.document.paragraphs, s, e, &op))
+                        .all(|&(s, e)| is_uniformly_active(tab.document.paragraphs(), s, e, &op))
                     {
                         toggled_off(&op)
                     } else {
@@ -2027,7 +2026,7 @@ impl AppState {
                     );
                     for &(start, end) in &ranges {
                         apply_formatting(
-                            &mut tab.document.paragraphs,
+                            tab.document.paragraphs_mut(),
                             start,
                             end,
                             effective_op.clone(),
@@ -2042,7 +2041,7 @@ impl AppState {
                         // so toggling underline *off* doesn't also resize.
                         if matches!(effective_op, FormatOp::Underline(true)) {
                             Self::unshrink_range(
-                                &mut tab.document.paragraphs,
+                                tab.document.paragraphs_mut(),
                                 start,
                                 end,
                                 small,
@@ -2057,18 +2056,18 @@ impl AppState {
                         // through an active selection silently kept a card-styled
                         // paragraph boxed/centered while only stripping bold/size.
                         if let FormatOp::ClearAll { .. } = effective_op {
-                            let (first, _, _) = resolve_position(&tab.document.paragraphs, start);
-                            let (last, _, _) = resolve_position(&tab.document.paragraphs, end);
+                            let (first, _, _) = tab.document.resolve_position(start);
+                            let (last, _, _) = tab.document.resolve_position(end);
                             // A card's heading and alignment apply to its whole
                             // paragraph, so clearing any part of one clears its
                             // remaining run-level card formatting too.
                             let card_paragraphs: Vec<_> = (first..=last)
-                                .filter(|&i| tab.document.paragraphs[i].heading != 0)
+                                .filter(|&i| tab.document.paragraphs()[i].heading != 0)
                                 .collect();
-                            reset_card_style_in_range(&mut tab.document.paragraphs, start, end);
+                            reset_card_style_in_range(tab.document.paragraphs_mut(), start, end);
                             for i in card_paragraphs {
-                                for run in &mut tab.document.paragraphs[i].runs {
-                                    apply_format_op(run, &effective_op);
+                                for run in &mut tab.document.paragraphs_mut()[i].runs {
+                                    apply_format_op(&mut *run, &effective_op);
                                 }
                             }
                             tab.pending_format = None;
@@ -2103,7 +2102,7 @@ impl AppState {
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                         let unshrink = matches!(effective_op, FormatOp::Underline(true));
                         apply_formatting(
-                            &mut tab.document.paragraphs,
+                            tab.document.paragraphs_mut(),
                             cursor,
                             next_char_boundary,
                             effective_op,
@@ -2112,7 +2111,7 @@ impl AppState {
                         // with no selection behaves the same way.
                         if unshrink {
                             Self::unshrink_range(
-                                &mut tab.document.paragraphs,
+                                tab.document.paragraphs_mut(),
                                 cursor,
                                 next_char_boundary,
                                 small,
@@ -2227,7 +2226,7 @@ impl AppState {
             .get(self.workspace.active_tab)
             .map(|t| {
                 !t.document
-                    .paragraphs
+                    .paragraphs()
                     .iter()
                     .flat_map(|para| &para.runs)
                     .any(repaints)
@@ -2240,7 +2239,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in &mut tab.document.paragraphs {
+            for para in tab.document.paragraphs_mut() {
                 for run in &mut para.runs {
                     if repaints(run) {
                         run.highlight_color = color.clone();
@@ -2310,7 +2309,7 @@ impl AppState {
         // relies on) — replacing `\n` inside each run's own text turns those
         // into the replacement too, matching `condensed`, without touching any
         // real run's formatting.
-        let condensed_runs: Vec<Run> = runs_in_range(&tab.document.paragraphs, start, end)
+        let condensed_runs: Vec<Run> = runs_in_range(tab.document.paragraphs(), start, end)
             .into_iter()
             .map(|mut r| {
                 r.text = r.text.replace('\n', replacement);
@@ -2320,9 +2319,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(&mut tab.document.paragraphs, start, end);
+            sync_delete_range(tab.document.paragraphs_mut(), start, end);
             sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 start,
                 &condensed,
                 &condensed_runs,
@@ -2357,7 +2356,7 @@ impl AppState {
             return;
         }
 
-        let uncondensed_runs: Vec<Run> = runs_in_range(&tab.document.paragraphs, start, end)
+        let uncondensed_runs: Vec<Run> = runs_in_range(tab.document.paragraphs(), start, end)
             .into_iter()
             .map(|mut r| {
                 r.text = uncondense_markers(&r.text);
@@ -2367,9 +2366,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(&mut tab.document.paragraphs, start, end);
+            sync_delete_range(tab.document.paragraphs_mut(), start, end);
             sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 start,
                 &uncondensed,
                 &uncondensed_runs,
@@ -2392,25 +2391,25 @@ impl AppState {
         };
         let (start_para, end_para) = match tab.selection {
             Some((a, f)) => {
-                let (start_para, ..) = resolve_position(&tab.document.paragraphs, a.min(f));
-                let (end_para, ..) = resolve_position(&tab.document.paragraphs, a.max(f));
+                let (start_para, ..) = tab.document.resolve_position(a.min(f));
+                let (end_para, ..) = tab.document.resolve_position(a.max(f));
                 (start_para, end_para)
             }
             None => {
-                let (para_idx, ..) = resolve_position(&tab.document.paragraphs, tab.cursor);
+                let (para_idx, ..) = tab.document.resolve_position(tab.cursor);
                 (para_idx, para_idx)
             }
         };
 
         let already_this_style = (start_para..=end_para).all(|i| {
-            tab.document.paragraphs.get(i).map(|p| p.list)
+            tab.document.paragraphs().get(i).map(|p| p.list)
                 == Some(Some(ListItem { kind, level: 0 }))
         });
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             for i in start_para..=end_para {
-                if let Some(para) = tab.document.paragraphs.get_mut(i) {
+                if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
                     para.list = if already_this_style {
                         None
                     } else {
@@ -2432,19 +2431,19 @@ impl AppState {
         };
         let (start_para, end_para) = match tab.selection {
             Some((a, f)) => {
-                let (start_para, ..) = resolve_position(&tab.document.paragraphs, a.min(f));
-                let (end_para, ..) = resolve_position(&tab.document.paragraphs, a.max(f));
+                let (start_para, ..) = tab.document.resolve_position(a.min(f));
+                let (end_para, ..) = tab.document.resolve_position(a.max(f));
                 (start_para, end_para)
             }
             None => {
-                let (para_idx, ..) = resolve_position(&tab.document.paragraphs, tab.cursor);
+                let (para_idx, ..) = tab.document.resolve_position(tab.cursor);
                 (para_idx, para_idx)
             }
         };
 
         let any = (start_para..=end_para).any(|i| {
             tab.document
-                .paragraphs
+                .paragraphs()
                 .get(i)
                 .map(|p| p.list.is_some())
                 .unwrap_or(false)
@@ -2456,7 +2455,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             for i in start_para..=end_para {
-                if let Some(para) = tab.document.paragraphs.get_mut(i) {
+                if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
                     para.list = None;
                 }
             }
@@ -2472,8 +2471,8 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let (para_idx, ..) = resolve_position(&tab.document.paragraphs, tab.cursor);
-        let Some(item) = tab.document.paragraphs.get(para_idx).and_then(|p| p.list) else {
+        let (para_idx, ..) = tab.document.resolve_position(tab.cursor);
+        let Some(item) = tab.document.paragraphs().get(para_idx).and_then(|p| p.list) else {
             return;
         };
         if item.level >= 8 {
@@ -2482,7 +2481,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            if let Some(para) = tab.document.paragraphs.get_mut(para_idx) {
+            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
                 para.list = Some(ListItem {
                     level: item.level + 1,
                     ..item
@@ -2499,14 +2498,14 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let (para_idx, ..) = resolve_position(&tab.document.paragraphs, tab.cursor);
-        let Some(item) = tab.document.paragraphs.get(para_idx).and_then(|p| p.list) else {
+        let (para_idx, ..) = tab.document.resolve_position(tab.cursor);
+        let Some(item) = tab.document.paragraphs().get(para_idx).and_then(|p| p.list) else {
             return;
         };
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            if let Some(para) = tab.document.paragraphs.get_mut(para_idx) {
+            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
                 para.list = if item.level == 0 {
                     None
                 } else {
@@ -2548,7 +2547,7 @@ impl AppState {
 
         let mut cumulative = 0usize;
         let mut uniform: Option<u16> = None;
-        for para in &tab.document.paragraphs {
+        for para in tab.document.paragraphs() {
             for run in &para.runs {
                 let run_start = cumulative;
                 let run_end = cumulative + run.text.len();
@@ -2587,7 +2586,7 @@ impl AppState {
             tab.and_then(|t| {
                 // Check if all runs in range have same color
                 let mut uniform_color: Option<String> = None;
-                for para in &t.document.paragraphs {
+                for para in t.document.paragraphs() {
                     let mut pos = 0;
                     for run in &para.runs {
                         let run_end = pos + run.text.len();
@@ -2698,7 +2697,7 @@ impl AppState {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                     let mut cumulative = 0usize;
-                    for para in &mut tab.document.paragraphs {
+                    for para in tab.document.paragraphs_mut() {
                         for run in &mut para.runs {
                             let run_start = cumulative;
                             let run_end = cumulative + run.text.len();
@@ -2733,30 +2732,28 @@ impl AppState {
                 }
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    let (start_para, start_run, start_char) =
-                        resolve_position(&tab.document.paragraphs, start);
-                    let (end_para, end_run, end_char) =
-                        resolve_position(&tab.document.paragraphs, end);
+                    let (start_para, start_run, start_char) = tab.document.resolve_position(start);
+                    let (end_para, end_run, end_char) = tab.document.resolve_position(end);
                     // Split at the boundaries first — same pattern as
                     // `apply_formatting` — so a run that only partially
                     // overlaps the selection doesn't get skipped entirely.
                     // End before start so start's already-resolved indices
                     // aren't shifted by a run being inserted ahead of it.
                     crate::document_ops::split_run_at_position(
-                        &mut tab.document.paragraphs,
+                        tab.document.paragraphs_mut(),
                         end_para,
                         end_run,
                         end_char,
                     );
                     crate::document_ops::split_run_at_position(
-                        &mut tab.document.paragraphs,
+                        tab.document.paragraphs_mut(),
                         start_para,
                         start_run,
                         start_char,
                     );
 
                     let mut cumulative = 0usize;
-                    for para in &mut tab.document.paragraphs {
+                    for para in tab.document.paragraphs_mut() {
                         for run in &mut para.runs {
                             let run_start = cumulative;
                             let run_end = cumulative + run.text.len();
@@ -2824,9 +2821,9 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) else {
             return;
         };
-        if tab.folded_para_count != tab.document.paragraphs.len() {
+        if tab.folded_para_count != tab.document.paragraphs().len() {
             tab.folded_headings.clear();
-            tab.folded_para_count = tab.document.paragraphs.len();
+            tab.folded_para_count = tab.document.paragraphs().len();
             tab.fold_version = tab.fold_version.wrapping_add(1);
         }
     }
@@ -2840,7 +2837,7 @@ impl AppState {
         };
         if tab
             .document
-            .paragraphs
+            .paragraphs()
             .get(idx)
             .map(|p| p.heading)
             .unwrap_or(0)
@@ -2861,7 +2858,8 @@ impl AppState {
             .tabs
             .get(self.workspace.active_tab)
             .is_some_and(|t| {
-                t.folded_para_count == t.document.paragraphs.len() && !t.folded_headings.is_empty()
+                t.folded_para_count == t.document.paragraphs().len()
+                    && !t.folded_headings.is_empty()
             })
     }
 
@@ -2879,13 +2877,13 @@ impl AppState {
         };
         tab.folded_headings.clear();
         if !expand {
-            for (i, para) in tab.document.paragraphs.iter().enumerate() {
+            for (i, para) in tab.document.paragraphs().iter().enumerate() {
                 if para.heading != 0 {
                     tab.folded_headings.insert(i);
                 }
             }
         }
-        tab.folded_para_count = tab.document.paragraphs.len();
+        tab.folded_para_count = tab.document.paragraphs().len();
         tab.fold_version = tab.fold_version.wrapping_add(1);
     }
 
@@ -3174,7 +3172,7 @@ impl AppState {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No active tab"))?;
 
         let markdown =
-            wikifi_export::export_to_markdown(&tab.document.paragraphs, &tab.document.content());
+            wikifi_export::export_to_markdown(tab.document.paragraphs(), &tab.document.content());
 
         if let Some(path) = &tab.file_path {
             wikifi_export::save_markdown_file(path, &markdown)?;
@@ -3222,7 +3220,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            apply_paragraph_alignment(&mut tab.document.paragraphs, start, end, Alignment::Center);
+            apply_paragraph_alignment(tab.document.paragraphs_mut(), start, end, Alignment::Center);
             tab.document.is_modified = true;
         }
     }
@@ -3252,7 +3250,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             apply_paragraph_alignment(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 line_start,
                 line_end,
                 alignment,
@@ -3307,7 +3305,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                if let Some(para) = tab.document.paragraphs.get_mut(line_idx) {
+                if let Some(para) = tab.document.paragraphs_mut().get_mut(line_idx) {
                     para.heading = kind.heading_level();
                     para.list = None;
                 }
@@ -3357,7 +3355,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                if let Some(para) = tab.document.paragraphs.get_mut(line_idx) {
+                if let Some(para) = tab.document.paragraphs_mut().get_mut(line_idx) {
                     para.heading = 0;
                 }
             }
@@ -3415,7 +3413,7 @@ impl AppState {
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.document.paragraphs.iter().any(&is_analytic))
+            .map(|t| t.document.paragraphs().iter().any(&is_analytic))
             .unwrap_or(false);
         // No undo entry for a no-op — Ctrl+Z should undo what the user did.
         if !any {
@@ -3424,11 +3422,13 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document.paragraphs.retain(|para| !is_analytic(para));
+            tab.document
+                .paragraphs_mut()
+                .retain(|para| !is_analytic(para));
             // Every rich-text-aware function assumes at least one paragraph and
             // one run always exist (`default_paragraphs`).
-            if tab.document.paragraphs.is_empty() {
-                tab.document.paragraphs = default_paragraphs();
+            if tab.document.paragraphs().is_empty() {
+                *tab.document.paragraphs_mut() = default_paragraphs();
             }
             // The cursor and any selection pointed into text that is gone.
             tab.cursor = clamp_to_char_boundary(
@@ -3459,7 +3459,7 @@ impl AppState {
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.document.paragraphs.iter().any(&is_analytic))
+            .map(|t| t.document.paragraphs().iter().any(&is_analytic))
             .unwrap_or(false);
         // No undo entry for a no-op — Ctrl+Z should undo what the user did.
         if !any {
@@ -3469,7 +3469,7 @@ impl AppState {
         self.push_undo_snapshot();
         let tag_heading = CardStyleKind::Tag.heading_level();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in &mut tab.document.paragraphs {
+            for para in tab.document.paragraphs_mut() {
                 if !is_analytic(para) {
                     continue;
                 }
@@ -3560,7 +3560,7 @@ impl AppState {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                     for &(start, end) in &ranges {
-                        apply_all(&mut tab.document.paragraphs, start, end);
+                        apply_all(tab.document.paragraphs_mut(), start, end);
                     }
                     tab.document.is_modified = true;
                 }
@@ -3575,7 +3575,7 @@ impl AppState {
                     let next_char_boundary = char_right(&tab.document.content(), cursor);
                     self.push_undo_snapshot();
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                        apply_all(&mut tab.document.paragraphs, cursor, next_char_boundary);
+                        apply_all(tab.document.paragraphs_mut(), cursor, next_char_boundary);
                         tab.document.is_modified = true;
                     }
                 }
@@ -3610,14 +3610,14 @@ impl AppState {
         };
         tab.document.content_version += 1;
 
-        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, previous);
+        let current_paragraphs = std::mem::replace(tab.document.paragraphs_mut(), previous);
         tab.document.redo_stack.push(current_paragraphs);
         // Same size-aware cap as `push_undo_snapshot` — repeatedly undoing
         // a huge document without any new edit would otherwise let
         // `redo_stack` grow past what `undo_stack` was ever bounded to.
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
         ));
         while tab.document.redo_stack.len() > cap {
             tab.document.redo_stack.remove(0);
@@ -3645,11 +3645,11 @@ impl AppState {
         };
         tab.document.content_version += 1;
 
-        let current_paragraphs = std::mem::replace(&mut tab.document.paragraphs, next);
+        let current_paragraphs = std::mem::replace(tab.document.paragraphs_mut(), next);
         tab.document.undo_stack.push(current_paragraphs);
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
         ));
         while tab.document.undo_stack.len() > cap {
             tab.document.undo_stack.remove(0);
@@ -3680,7 +3680,7 @@ impl AppState {
         let (a, f) = tab.selection?;
         let (start, end) = (a.min(f), a.max(f));
         Some(crate::document_ops::runs_in_range(
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
             start,
             end,
         ))
@@ -3704,7 +3704,7 @@ impl AppState {
         let (a, f) = tab.selection?;
         let (start, end) = (a.min(f), a.max(f));
         Some(crate::document_ops::paragraph_attrs_in_range(
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
             start,
             end,
         ))
@@ -3758,7 +3758,7 @@ impl AppState {
         }
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
-            sync_insert_str(&mut tab.document.paragraphs, tab.cursor, text);
+            sync_insert_str(tab.document.paragraphs_mut(), tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.document.is_modified = true;
         }
@@ -3769,7 +3769,7 @@ impl AppState {
 
     /// Like `insert_str`, but also stitches `runs` (already boundary-aligned
     /// to `text`, per `rich_clipboard::decode`'s own guarantee) into
-    /// `tab.document.paragraphs` at the insertion point instead of leaving the
+    /// `tab.document.paragraphs()` at the insertion point instead of leaving the
     /// inserted text as one unstyled run — restores formatting on an in-app
     /// paste. `document_ops::sync_insert_str_with_runs` falls back to plain,
     /// inheriting behavior itself when `runs` is empty, so this mirrors
@@ -3818,15 +3818,14 @@ impl AppState {
             // own attributes are — both resolved *before* the insert, which
             // moves every offset and clears the attributes off the tail it
             // splits away.
-            let first_para =
-                crate::document_ops::resolve_position(&tab.document.paragraphs, tab.cursor).0;
+            let first_para = tab.document.resolve_position(tab.cursor).0;
             let dest_attrs = tab
                 .document
-                .paragraphs
+                .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
             crate::document_ops::sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 tab.cursor,
                 text,
                 runs,
@@ -3835,7 +3834,7 @@ impl AppState {
             tab.document.is_modified = true;
 
             crate::document_ops::apply_pasted_paragraph_attrs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 first_para,
                 text.matches('\n').count() + 1,
                 paragraph_attrs,
@@ -4296,16 +4295,16 @@ impl AppState {
             Some((a, f)) => a.min(f) + 1,
             None => tab.cursor,
         };
-        let (para_idx, run_idx, _) = resolve_position(&tab.document.paragraphs, probe);
+        let (para_idx, run_idx, _) = tab.document.resolve_position(probe);
         let Some(target) = tab
             .document
-            .paragraphs
+            .paragraphs()
             .get(para_idx)
             .and_then(|p| p.runs.get(run_idx))
         else {
             return;
         };
-        tab.similar_ranges = ranges_matching_format(&tab.document.paragraphs, &target.clone());
+        tab.similar_ranges = ranges_matching_format(tab.document.paragraphs(), &target.clone());
         tab.selection = None;
     }
 
@@ -4348,7 +4347,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let any = runs_in_range(&tab.document.paragraphs, start, end)
+        let any = runs_in_range(tab.document.paragraphs(), start, end)
             .iter()
             .any(&matches);
         // No undo entry for a no-op — Ctrl+Z should undo what the user did.
@@ -4358,26 +4357,25 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let (start_para, start_run, start_char) =
-                resolve_position(&tab.document.paragraphs, start);
-            let (end_para, end_run, end_char) = resolve_position(&tab.document.paragraphs, end);
+            let (start_para, start_run, start_char) = tab.document.resolve_position(start);
+            let (end_para, end_run, end_char) = tab.document.resolve_position(end);
             // Same end-then-start split order as `apply_formatting`, so the
             // already-resolved start position isn't shifted by the end split.
             crate::document_ops::split_run_at_position(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 end_para,
                 end_run,
                 end_char,
             );
             crate::document_ops::split_run_at_position(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 start_para,
                 start_run,
                 start_char,
             );
 
             let mut cumulative = 0usize;
-            for para in tab.document.paragraphs.iter_mut() {
+            for para in tab.document.paragraphs_mut().iter_mut() {
                 for run in para.runs.iter_mut() {
                     let run_start = cumulative;
                     let run_end = cumulative + run.text.len();
@@ -4416,7 +4414,7 @@ impl AppState {
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return;
         };
-        let any = runs_in_range(&tab.document.paragraphs, start, end)
+        let any = runs_in_range(tab.document.paragraphs(), start, end)
             .iter()
             .any(|r| r.underline && !r.highlight);
         if !any {
@@ -4425,26 +4423,25 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            let (start_para, start_run, start_char) =
-                resolve_position(&tab.document.paragraphs, start);
-            let (end_para, end_run, end_char) = resolve_position(&tab.document.paragraphs, end);
+            let (start_para, start_run, start_char) = tab.document.resolve_position(start);
+            let (end_para, end_run, end_char) = tab.document.resolve_position(end);
             // Same end-then-start split order as `apply_formatting`, so the
             // already-resolved start position isn't shifted by the end split.
             crate::document_ops::split_run_at_position(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 end_para,
                 end_run,
                 end_char,
             );
             crate::document_ops::split_run_at_position(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 start_para,
                 start_run,
                 start_char,
             );
 
             let mut cumulative = 0usize;
-            for para in tab.document.paragraphs.iter_mut() {
+            for para in tab.document.paragraphs_mut().iter_mut() {
                 for run in para.runs.iter_mut() {
                     let run_start = cumulative;
                     let run_end = cumulative + run.text.len();
@@ -4483,7 +4480,7 @@ impl AppState {
             |idx: usize| line_range.is_none_or(|(first, last)| idx >= first && idx <= last);
         let any = tab
             .document
-            .paragraphs
+            .paragraphs()
             .iter()
             .enumerate()
             .any(|(i, p)| in_scope(i) && is_blank(p));
@@ -4494,15 +4491,15 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             let mut idx = 0usize;
-            tab.document.paragraphs.retain(|p| {
+            tab.document.paragraphs_mut().retain(|p| {
                 let drop = in_scope(idx) && is_blank(p);
                 idx += 1;
                 !drop
             });
             // Every rich-text-aware function assumes at least one paragraph
             // and one run always exist (`default_paragraphs`).
-            if tab.document.paragraphs.is_empty() {
-                tab.document.paragraphs = default_paragraphs();
+            if tab.document.paragraphs().is_empty() {
+                *tab.document.paragraphs_mut() = default_paragraphs();
             }
             tab.cursor = clamp_to_char_boundary(
                 &tab.document.content(),
@@ -4542,7 +4539,7 @@ impl AppState {
         // that was only a `¶` strips down to an empty string, which
         // `sync_insert_str_with_runs` silently contributes zero characters
         // for — nothing else to special-case.
-        let stripped_runs: Vec<Run> = runs_in_range(&tab.document.paragraphs, start, end)
+        let stripped_runs: Vec<Run> = runs_in_range(tab.document.paragraphs(), start, end)
             .into_iter()
             .map(|mut r| {
                 r.text = r.text.replace('¶', "");
@@ -4552,9 +4549,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(&mut tab.document.paragraphs, start, end);
+            sync_delete_range(tab.document.paragraphs_mut(), start, end);
             sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 start,
                 &stripped,
                 &stripped_runs,
@@ -4605,14 +4602,14 @@ impl AppState {
     /// paragraphs are kept 1:1, but a range walk is no place to rely on that.
     pub fn heading_contents_range(&self, line: usize) -> Option<(usize, usize)> {
         let tab = self.workspace.tabs.get(self.workspace.active_tab)?;
-        let level = tab.document.paragraphs.get(line)?.heading;
+        let level = tab.document.paragraphs().get(line)?.heading;
         if !(1..=4).contains(&level) {
             return None;
         }
         let line_count = tab.document.content().split('\n').count();
         let end_line = (line + 1..line_count).find(|&i| {
             tab.document
-                .paragraphs
+                .paragraphs()
                 .get(i)
                 .is_some_and(|p| (1..=level).contains(&p.heading))
         });
@@ -6774,8 +6771,8 @@ impl AppState {
             return String::new();
         };
         crate::rich_clipboard::encode_with_lengths(
-            &crate::document_ops::runs_in_range(&tab.document.paragraphs, start, end),
-            &crate::document_ops::paragraph_attrs_in_range(&tab.document.paragraphs, start, end),
+            &crate::document_ops::runs_in_range(tab.document.paragraphs(), start, end),
+            &crate::document_ops::paragraph_attrs_in_range(tab.document.paragraphs(), start, end),
         )
     }
 
@@ -6866,8 +6863,7 @@ impl AppState {
             let needs_leading_newline = insert_at == tab.document.content().len()
                 && !tab.document.content().is_empty()
                 && !tab.document.content().ends_with('\n');
-            let first_para =
-                crate::document_ops::resolve_position(&tab.document.paragraphs, insert_at).0;
+            let first_para = tab.document.resolve_position(insert_at).0;
             // With a leading newline the paste appends a line instead of
             // splitting `first_para`, so that paragraph keeps its own
             // attributes and the new blank line at the end must not inherit
@@ -6875,7 +6871,7 @@ impl AppState {
             let dest_attrs = (!needs_leading_newline)
                 .then(|| {
                     tab.document
-                        .paragraphs
+                        .paragraphs()
                         .get(first_para)
                         .map(|p| (p.heading, p.alignment))
                 })
@@ -6896,14 +6892,14 @@ impl AppState {
                 );
             }
             crate::document_ops::sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 insert_at,
                 &insertion,
                 &runs,
             );
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
             crate::document_ops::apply_pasted_paragraph_attrs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 first_para + usize::from(needs_leading_newline),
                 spanned,
                 &attrs,
@@ -6916,20 +6912,20 @@ impl AppState {
             } else {
                 char_right(&tab.document.content(), tab.cursor)
             };
-            let first_para = crate::document_ops::resolve_position(&tab.document.paragraphs, at).0;
+            let first_para = tab.document.resolve_position(at).0;
             let dest_attrs = tab
                 .document
-                .paragraphs
+                .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
             crate::document_ops::sync_insert_str_with_runs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 at,
                 &text,
                 &runs,
             );
             crate::document_ops::apply_pasted_paragraph_attrs(
-                &mut tab.document.paragraphs,
+                tab.document.paragraphs_mut(),
                 first_para,
                 spanned,
                 &attrs,
@@ -7362,8 +7358,8 @@ impl AppState {
         // ~/r/J) gets its formatting kept in sync for free via this one
         // choke point — reduces to the same delete+insert primitives every
         // other mutation site uses.
-        sync_delete_range(&mut tab.document.paragraphs, start, end);
-        sync_insert_str(&mut tab.document.paragraphs, start, &replacement);
+        sync_delete_range(tab.document.paragraphs_mut(), start, end);
+        sync_insert_str(tab.document.paragraphs_mut(), start, &replacement);
         tab.selection = None;
         tab.document.is_modified = true;
         original
@@ -8071,7 +8067,7 @@ impl AppState {
                 // touch keep their existing runs exactly.
                 for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
                     if old != new {
-                        if let Some(para) = tab.document.paragraphs.get_mut(i) {
+                        if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
                             para.runs = vec![Run {
                                 text: new.clone(),
                                 ..Run::default()
@@ -8173,7 +8169,7 @@ fn tab_from_loaded_docx(
     let mut tab = Tab::from_path(id, path.to_path_buf());
     match result {
         Ok((paragraphs, origin)) => {
-            tab.document.paragraphs = paragraphs;
+            *tab.document.paragraphs_mut() = paragraphs;
             tab.has_unsupported_blocks = origin.has_unsupported_blocks;
             tab.docx_origin = Some(Arc::new(origin));
         }
@@ -9416,6 +9412,7 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docx_parser::{create_new_docx, paragraphs_to_plain_text};
 
     /// Makes a unique temp dir for one test. Mirrors `recovery.rs`'s helper —
     /// no `tempfile` dependency.
@@ -9437,7 +9434,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::preferences::Preferences::load(&path).unwrap().custom_highlight_colors,
+            crate::preferences::Preferences::load(&path)
+                .unwrap()
+                .custom_highlight_colors,
             vec![0x00ff88, 0xaabbcc]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -9449,7 +9448,10 @@ mod tests {
         let path = dir.join("settings.conf");
 
         // Missing file.
-        assert!(crate::preferences::Preferences::load(&path).unwrap().custom_font_colors.is_empty());
+        assert!(crate::preferences::Preferences::load(&path)
+            .unwrap_or_default()
+            .custom_font_colors
+            .is_empty());
 
         // Missing key, empty value, and unparseable entries mixed with good ones.
         std::fs::write(
@@ -9457,9 +9459,14 @@ mod tests {
             "[FORMATTING]\ncustom_font_colors=\ncustom_highlight_colors=00ff88|zzzzzz|1234567|aabbcc\n",
         )
         .unwrap();
-        assert!(crate::preferences::Preferences::load(&path).unwrap().custom_font_colors.is_empty());
+        assert!(crate::preferences::Preferences::load(&path)
+            .unwrap()
+            .custom_font_colors
+            .is_empty());
         assert_eq!(
-            crate::preferences::Preferences::load(&path).unwrap().custom_highlight_colors,
+            crate::preferences::Preferences::load(&path)
+                .unwrap()
+                .custom_highlight_colors,
             vec![0x00ff88, 0xaabbcc],
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -9473,7 +9480,9 @@ mod tests {
 
         save_custom_colors(&path, "custom_font_colors", &[0x00ff88, 0x000000]).unwrap();
         assert_eq!(
-            crate::preferences::Preferences::load(&path).unwrap().custom_font_colors,
+            crate::preferences::Preferences::load(&path)
+                .unwrap()
+                .custom_font_colors,
             vec![0x00ff88, 0x000000]
         );
 
@@ -9876,7 +9885,7 @@ mod tests {
         state.toggle_fold();
         assert!(state.any_folded());
         let hidden = AppState::folded_paragraphs(
-            &state.workspace.tabs[0].document.paragraphs,
+            state.workspace.tabs[0].document.paragraphs(),
             &state.workspace.tabs[0].folded_headings,
         );
         // Only the two Pockets survive: each swallows everything beneath it.
@@ -9958,7 +9967,7 @@ mod tests {
         state.delete_analytics();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             2,
             "the line should be gone, not blanked"
         );
@@ -9979,7 +9988,7 @@ mod tests {
 
         state.delete_analytics();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 1);
     }
 
     /// A document that is nothing but analytics must still end up with one
@@ -9996,10 +10005,10 @@ mod tests {
 
         state.delete_analytics();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 1);
         assert!(state.workspace.tabs[0].document.content().is_empty());
         assert!(
-            !state.workspace.tabs[0].document.paragraphs[0]
+            !state.workspace.tabs[0].document.paragraphs()[0]
                 .runs
                 .is_empty(),
             "a paragraph always has a run"
@@ -10067,7 +10076,7 @@ mod tests {
 
         state.convert_analytics_to_tags();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 4);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 4);
     }
 
     /// ...and the converse: text that coincidentally matches the old
@@ -10097,11 +10106,11 @@ mod tests {
         state.delete_analytics();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             1,
             "a marked Cite was deleted as an analytic"
         );
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 0);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 0);
     }
 
     #[test]
@@ -10109,7 +10118,7 @@ mod tests {
         let mut state = make_state_with_paragraphs(vec![para_plain("a line")], 0);
         state.apply_card_style(CardStyleKind::Block);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             Some(CardStyle::Block)
         );
     }
@@ -10120,14 +10129,14 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, 9));
         state.apply_cite_style();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             Some(CardStyle::Cite)
         );
 
         let mut state = make_state_with_paragraphs(vec![para_plain("some text")], 0);
         state.apply_analytic_style();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             Some(CardStyle::Analytic)
         );
     }
@@ -10143,7 +10152,7 @@ mod tests {
         state.clear_formatting();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             None
         );
     }
@@ -10160,12 +10169,13 @@ mod tests {
 
         state.convert_analytics_to_tags();
 
-        let converted = &state.workspace.tabs[0].document.paragraphs[0];
+        let converted = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(converted.heading, 4, "should now be a Tag");
         assert_eq!(converted.runs[0].color, None, "a Tag is plain-colored");
         assert!(converted.runs[0].bold);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].heading, 0,
+            state.workspace.tabs[0].document.paragraphs()[1].heading,
+            0,
             "body text untouched"
         );
     }
@@ -10181,9 +10191,9 @@ mod tests {
 
         state.convert_analytics_to_tags();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 0);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 0);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0]
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0]
                 .color
                 .as_deref(),
             Some("c00000")
@@ -10215,15 +10225,16 @@ mod tests {
 
         state.apply_analytic_style();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].heading, 0,
+            state.workspace.tabs[0].document.paragraphs()[0].heading,
+            0,
             "analytic must not be a heading"
         );
 
         state.convert_analytics_to_tags();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 4);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 4);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].color,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].color,
             None
         );
     }
@@ -10237,7 +10248,7 @@ mod tests {
 
         state.convert_analytics_to_tags();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 0);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 0);
     }
 
     #[test]
@@ -10248,7 +10259,7 @@ mod tests {
 
         state.apply_analytic_style();
 
-        let run = &state.workspace.tabs[0].document.paragraphs[0].runs[0];
+        let run = &state.workspace.tabs[0].document.paragraphs()[0].runs[0];
         assert!(run.bold);
         assert_eq!(run.size, 26, "should match the configured Tag size");
         assert_eq!(run.color.as_deref(), Some("c00000"));
@@ -10262,7 +10273,7 @@ mod tests {
     fn analytic_is_not_a_heading() {
         let mut state = make_state("an analytic", 0, None);
         state.apply_analytic_style();
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 0);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 0);
     }
 
     /// Converting a Tag line to an Analytic has to clear the heading it
@@ -10272,11 +10283,11 @@ mod tests {
     fn analytic_clears_an_existing_card_style_heading() {
         let mut state = make_state("was a tag", 0, None);
         state.apply_card_style(CardStyleKind::Tag);
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 4);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 4);
 
         state.apply_analytic_style();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].heading, 0);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].heading, 0);
     }
 
     #[test]
@@ -10311,7 +10322,7 @@ mod tests {
         state.standardize_highlighting();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].highlight_color,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].highlight_color,
             "cyan"
         );
     }
@@ -10352,7 +10363,7 @@ mod tests {
 
         state.standardize_highlighting();
 
-        for para in &state.workspace.tabs[0].document.paragraphs {
+        for para in state.workspace.tabs[0].document.paragraphs() {
             for run in &para.runs {
                 if run.highlight {
                     assert_eq!(run.highlight_color, "yellow");
@@ -10387,7 +10398,7 @@ mod tests {
             content_before,
             "text must not move"
         );
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(!runs[0].highlight, "plain text gained a highlight");
         assert!(!runs.last().unwrap().highlight);
     }
@@ -10409,9 +10420,12 @@ mod tests {
 
         state.standardize_highlighting();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].runs.len(), 1);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs.len(),
+            1
+        );
+        assert_eq!(
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "one two"
         );
     }
@@ -10437,7 +10451,7 @@ mod tests {
 
         state.standardize_highlighting_with_exception();
 
-        let colors: Vec<&str> = state.workspace.tabs[0].document.paragraphs[0]
+        let colors: Vec<&str> = state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .filter(|r| r.highlight)
@@ -10463,9 +10477,12 @@ mod tests {
         state.standardize_highlighting_with_exception();
 
         // Both repainted, and now identical, so they fused.
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].runs.len(), 1);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].highlight_color,
+            state.workspace.tabs[0].document.paragraphs()[0].runs.len(),
+            1
+        );
+        assert_eq!(
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].highlight_color,
             "yellow"
         );
     }
@@ -10597,7 +10614,8 @@ mod tests {
         state.shrink_text();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].size, 14,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].size,
+            14,
             "7pt = 14 half-points"
         );
     }
@@ -10616,21 +10634,15 @@ mod tests {
         )
         .unwrap();
 
-        let prefs = crate::preferences::Preferences::load(&path);
-        assert_eq!(
-            prefs.highlight_color,
-            "cyan"
-        );
+        let prefs = crate::preferences::Preferences::load(&path).unwrap();
+        assert_eq!(prefs.highlight_color, "cyan");
         assert!(!prefs.emphasis_bold);
         assert!(prefs.emphasis_underline);
         assert!(prefs.emphasis_box);
         assert!(prefs.emphasis_change_size);
         assert!(prefs.paste_condense);
         assert!(prefs.paste_condense_pilcrow);
-        assert_eq!(
-            prefs.emphasis_size,
-            18,
-        );
+        assert_eq!(prefs.emphasis_size_half_points, 36);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10733,7 +10745,7 @@ mod tests {
 
         state.apply_emphasis_style();
 
-        let r = &state.workspace.tabs[0].document.paragraphs[0].runs[0];
+        let r = &state.workspace.tabs[0].document.paragraphs()[0].runs[0];
         assert!(r.bold && !r.underline);
         // Emphasis's "Box" is the small inline border (`emphasis_boxed`),
         // never Pocket's paragraph-wide box (`box_format`) — regression
@@ -10758,7 +10770,7 @@ mod tests {
         state.apply_emphasis_style();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].size,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].size,
             36
         );
     }
@@ -10787,7 +10799,7 @@ mod tests {
 
         state.apply_emphasis_style();
 
-        let r = &state.workspace.tabs[0].document.paragraphs[0].runs[0];
+        let r = &state.workspace.tabs[0].document.paragraphs()[0].runs[0];
         assert!(r.bold, "already-bold text must stay bold, not toggle off");
         assert!(r.emphasis);
     }
@@ -10816,7 +10828,7 @@ mod tests {
 
         state.apply_emphasis_style();
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(runs[0].emphasis && runs[0].style == Some(CardStyle::Block));
     }
 
@@ -11811,7 +11823,7 @@ mod tests {
     #[test]
     fn card_markers_survive_a_real_docx_round_trip_without_rstyle_markers() {
         let state = through_a_real_docx(menu_fixture(), "markers");
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         let marker = |i: usize| paras[i].runs[0].style;
         assert_eq!(marker(0), Some(CardStyle::Pocket));
         assert_eq!(marker(1), Some(CardStyle::Hat));
@@ -11837,7 +11849,7 @@ mod tests {
     fn doc_menu_delete_tags_works_after_a_round_trip() {
         let mut state = through_a_real_docx(menu_fixture(), "deltags");
         state.delete_tags();
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         assert_eq!(paras[3].heading, 0, "the Tag line lost its heading");
         assert!(!paras[3].runs[0].bold, "and its formatting");
         assert_eq!(paras[3].runs[0].style, None);
@@ -11850,9 +11862,9 @@ mod tests {
     #[test]
     fn doc_menu_delete_analytics_works_after_a_round_trip() {
         let mut state = through_a_real_docx(menu_fixture(), "delanalytics");
-        let before = state.workspace.tabs[0].document.paragraphs.len();
+        let before = state.workspace.tabs[0].document.paragraphs().len();
         state.delete_analytics();
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         // "Delete analytics" removes the lines outright, unlike "Delete tags"
         // which strips a Tag back to body text in place.
         assert_eq!(paras.len(), before - 1);
@@ -11875,7 +11887,7 @@ mod tests {
     fn doc_menu_convert_analytics_to_tags_works_after_a_round_trip() {
         let mut state = through_a_real_docx(menu_fixture(), "convert");
         state.convert_analytics_to_tags();
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         assert_eq!(paras[4].heading, CardStyleKind::Tag.heading_level());
         assert_eq!(paras[4].runs[0].style, Some(CardStyle::Tag));
     }
@@ -11887,12 +11899,12 @@ mod tests {
     fn doc_menu_remove_emphasis_works_after_a_round_trip() {
         let mut state = through_a_real_docx(menu_fixture(), "emphasis");
         assert!(
-            state.workspace.tabs[0].document.paragraphs[6].runs[0].emphasis,
+            state.workspace.tabs[0].document.paragraphs()[6].runs[0].emphasis,
             "it survived the file"
         );
         state.select_all();
         state.remove_emphasis();
-        let run = &state.workspace.tabs[0].document.paragraphs[6].runs[0];
+        let run = &state.workspace.tabs[0].document.paragraphs()[6].runs[0];
         assert!(!run.emphasis && !run.emphasis_boxed, "emphasis cleared");
     }
 
@@ -11924,12 +11936,12 @@ mod tests {
             "similar",
         );
         assert!(
-            state.workspace.tabs[0].document.paragraphs[0]
+            state.workspace.tabs[0].document.paragraphs()[0]
                 .runs
                 .iter()
                 .all(|r| r.style == Some(CardStyle::Pocket)),
             "every run in the line carries the marker: {:?}",
-            state.workspace.tabs[0].document.paragraphs[0]
+            state.workspace.tabs[0].document.paragraphs()[0]
                 .runs
                 .iter()
                 .map(|r| (&r.text, r.style))
@@ -11960,7 +11972,7 @@ mod tests {
             "blanklines",
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             4,
             "the blank lines survived the file"
         );
@@ -11968,7 +11980,7 @@ mod tests {
         assert_eq!(
             state.workspace.tabs[0]
                 .document
-                .paragraphs
+                .paragraphs()
                 .iter()
                 .map(|p| p.runs.iter().map(|r| r.text.as_str()).collect::<String>())
                 .collect::<Vec<_>>(),
@@ -12033,12 +12045,12 @@ mod tests {
         state.highlight_color = "yellow".to_string();
         state.standardize_highlighting();
         assert!(
-            state.workspace.tabs[0].document.paragraphs[0]
+            state.workspace.tabs[0].document.paragraphs()[0]
                 .runs
                 .iter()
                 .all(|r| !r.highlight || r.highlight_color == "yellow"),
             "got: {:?}",
-            state.workspace.tabs[0].document.paragraphs[0]
+            state.workspace.tabs[0].document.paragraphs()[0]
                 .runs
                 .iter()
                 .map(|r| r.highlight_color.clone())
@@ -12072,7 +12084,7 @@ mod tests {
             .expect("opens");
         state.workspace.active_tab = idx;
         assert_eq!(
-            state.workspace.tabs[idx].document.paragraphs.len(),
+            state.workspace.tabs[idx].document.paragraphs().len(),
             1,
             "the blank paragraph must survive"
         );
@@ -12374,7 +12386,7 @@ mod tests {
     #[test]
     fn test_new_empty_tab_has_default_paragraphs_and_no_docx_origin() {
         let tab = Tab::new_empty(TabId(0));
-        assert_eq!(tab.document.paragraphs, default_paragraphs());
+        assert_eq!(tab.document.paragraphs(), default_paragraphs());
         assert!(tab.docx_origin.is_none());
     }
 
@@ -12385,7 +12397,7 @@ mod tests {
     fn make_state_with_paragraphs(paragraphs: Vec<Paragraph>, cursor: usize) -> AppState {
         let content = paragraphs_to_plain_text(&paragraphs);
         let mut state = make_state(&content, cursor, None);
-        state.workspace.tabs[0].document.paragraphs = paragraphs;
+        *state.workspace.tabs[0].document.paragraphs_mut() = paragraphs;
         state
     }
 
@@ -12421,7 +12433,7 @@ mod tests {
         );
         state.workspace.tabs[0].selection = Some((0, 13)); // whole buffer ("one\ntwo\nthree")
         state.apply_list_style(ListKind::BulletSolid);
-        for para in &state.workspace.tabs[0].document.paragraphs {
+        for para in state.workspace.tabs[0].document.paragraphs() {
             assert_eq!(
                 para.list,
                 Some(ListItem {
@@ -12450,7 +12462,7 @@ mod tests {
         );
         state.workspace.tabs[0].selection = Some((0, 3));
         state.apply_list_style(ListKind::BulletSolid);
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].list, None);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
     }
 
     #[test]
@@ -12472,7 +12484,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, 3));
         state.apply_list_style(ListKind::NumberDecimalDot);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].list,
+            state.workspace.tabs[0].document.paragraphs()[0].list,
             Some(ListItem {
                 kind: ListKind::NumberDecimalDot,
                 level: 0
@@ -12503,9 +12515,9 @@ mod tests {
         );
         state.workspace.tabs[0].selection = None;
         state.apply_list_style(ListKind::BulletHollow);
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].list, None);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].list,
+            state.workspace.tabs[0].document.paragraphs()[1].list,
             Some(ListItem {
                 kind: ListKind::BulletHollow,
                 level: 0
@@ -12531,7 +12543,7 @@ mod tests {
         );
         state.workspace.tabs[0].selection = Some((0, 3));
         state.remove_list_formatting();
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].list, None);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
     }
 
     #[test]
@@ -12563,16 +12575,18 @@ mod tests {
         state.workspace.tabs[0].cursor = 7;
         state.backspace();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             2,
             "paragraphs should not have merged"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].text, "item",
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].text,
+            "item",
             "text should be untouched"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].list, None,
+            state.workspace.tabs[0].document.paragraphs()[1].list,
+            None,
             "list formatting should be cleared"
         );
     }
@@ -12595,11 +12609,11 @@ mod tests {
         );
         state.backspace();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "iem"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].list,
+            state.workspace.tabs[0].document.paragraphs()[0].list,
             Some(ListItem {
                 kind: ListKind::BulletSolid,
                 level: 0
@@ -12627,7 +12641,7 @@ mod tests {
         );
         state.indent_list_item();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].list,
+            state.workspace.tabs[0].document.paragraphs()[0].list,
             Some(ListItem {
                 kind: ListKind::BulletSolid,
                 level: 1
@@ -12653,7 +12667,7 @@ mod tests {
         );
         state.indent_list_item();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].list,
+            state.workspace.tabs[0].document.paragraphs()[0].list,
             Some(ListItem {
                 kind: ListKind::BulletSolid,
                 level: 8
@@ -12679,7 +12693,7 @@ mod tests {
         );
         state.outdent_list_item();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].list,
+            state.workspace.tabs[0].document.paragraphs()[0].list,
             Some(ListItem {
                 kind: ListKind::BulletSolid,
                 level: 0
@@ -12704,7 +12718,7 @@ mod tests {
             1,
         );
         state.outdent_list_item();
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].list, None);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
     }
 
     #[test]
@@ -12719,9 +12733,9 @@ mod tests {
             }],
             1,
         );
-        let before = state.workspace.tabs[0].document.paragraphs.clone();
+        let before = state.workspace.tabs[0].document.paragraphs().to_vec();
         state.indent_list_item();
-        assert_eq!(state.workspace.tabs[0].document.paragraphs, before);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs(), before);
     }
 
     // ── Font size box (ribbon spinner) ──────────────────────────────────────
@@ -12882,10 +12896,10 @@ mod tests {
         state.insert_char('X');
         assert_eq!(state.workspace.tabs[0].document.content(), "aXbc");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "aXbc"
         );
-        assert!(state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
     }
 
     #[test]
@@ -12904,7 +12918,7 @@ mod tests {
         state.backspace();
         assert_eq!(state.workspace.tabs[0].document.content(), "ac");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "ac"
         );
     }
@@ -12932,7 +12946,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((2, 6)); // deletes "ld p"
         state.delete_selection();
         assert_eq!(state.workspace.tabs[0].document.content(), "bolain");
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "bo");
         assert!(runs[0].bold);
@@ -12966,9 +12980,9 @@ mod tests {
         state.handle_vim_key("d", false, None);
         state.handle_vim_key("d", false, None);
         assert_eq!(state.workspace.tabs[0].document.content(), "two");
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 1);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "two"
         );
     }
@@ -12987,7 +13001,7 @@ mod tests {
         state.handle_vim_key("p", false, None);
         assert_eq!(state.workspace.tabs[0].document.content(), "aXYbc");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "aXYbc"
         );
     }
@@ -13022,13 +13036,13 @@ mod tests {
         );
         // changed paragraph loses formatting (documented scope limit)
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "baz bar"
         );
-        assert!(!state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
         // untouched paragraph is byte-for-byte unchanged
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].text,
             "untouched"
         );
     }
@@ -13045,13 +13059,13 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 2);
         state.insert_char('\n');
         assert_eq!(state.workspace.tabs[0].document.content(), "he\nllo");
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 2);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 2);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "he"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].text,
             "llo"
         );
     }
@@ -13227,7 +13241,7 @@ mod tests {
         let mut dest = make_state("", 0, None);
         dest.insert_str_with_runs_and_paragraphs(&plain, &decoded, &decoded_attrs);
 
-        let paras = &dest.workspace.tabs[0].document.paragraphs;
+        let paras = dest.workspace.tabs[0].document.paragraphs();
         assert_eq!(paras.len(), 5, "expected one paragraph per copied line");
 
         // Paragraph-level card-style markers must survive the paste.
@@ -13322,7 +13336,7 @@ mod tests {
         let mut dest = make_state_with_paragraphs(vec![para_plain("")], 0);
         dest.insert_str_with_runs_and_paragraphs(&plain, &runs, &attrs);
 
-        let paras = &dest.workspace.tabs[0].document.paragraphs;
+        let paras = dest.workspace.tabs[0].document.paragraphs();
         assert_eq!(
             paras.iter().map(|p| p.heading).collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 0, 0],
@@ -13373,7 +13387,7 @@ mod tests {
         state.workspace.tabs[0].cursor = 0;
         state.insert_str_with_runs("new\n", &[]);
 
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         assert_eq!(paras.len(), 2);
         assert_eq!(paras[1].runs[0].text, "keep");
         assert_eq!(
@@ -13420,7 +13434,7 @@ mod tests {
             .unwrap();
         state.handle_vim_key("p", false, None); // put below it
 
-        let paras = &state.workspace.tabs[0].document.paragraphs;
+        let paras = state.workspace.tabs[0].document.paragraphs();
         let pasted = &paras[2];
         assert_eq!(pasted.runs[0].text, "Hat");
         assert_eq!(pasted.heading, 2, "yy/p lost the Hat's heading");
@@ -13504,24 +13518,24 @@ mod tests {
         dest.insert_str_with_runs(&plain_text, &decoded_runs);
 
         assert_eq!(dest.workspace.tabs[0].document.content(), plain_text);
-        assert_eq!(dest.workspace.tabs[0].document.paragraphs.len(), 3);
+        assert_eq!(dest.workspace.tabs[0].document.paragraphs().len(), 3);
         assert_eq!(
-            dest.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            dest.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "bold line"
         );
-        assert!(dest.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(dest.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
         assert_eq!(
-            dest.workspace.tabs[0].document.paragraphs[1].runs[0].text,
+            dest.workspace.tabs[0].document.paragraphs()[1].runs[0].text,
             "plain line"
         );
-        assert!(!dest.workspace.tabs[0].document.paragraphs[1].runs[0].bold);
+        assert!(!dest.workspace.tabs[0].document.paragraphs()[1].runs[0].bold);
         assert_eq!(
-            dest.workspace.tabs[0].document.paragraphs[2].runs[0].text,
+            dest.workspace.tabs[0].document.paragraphs()[2].runs[0].text,
             "hi line"
         );
-        assert!(dest.workspace.tabs[0].document.paragraphs[2].runs[0].highlight);
+        assert!(dest.workspace.tabs[0].document.paragraphs()[2].runs[0].highlight);
         assert_eq!(
-            dest.workspace.tabs[0].document.paragraphs[2].runs[0].highlight_color,
+            dest.workspace.tabs[0].document.paragraphs()[2].runs[0].highlight_color,
             "yellow"
         );
     }
@@ -14396,16 +14410,16 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 4);
         state.insert_char('X'); // "boldX", paragraphs now ["boldX"] still bold
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "boldX"
         );
         state.undo();
         assert_eq!(state.workspace.tabs[0].document.content(), "bold");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "bold"
         );
-        assert!(state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
     }
 
     #[test]
@@ -14427,10 +14441,10 @@ mod tests {
         state.redo();
         assert_eq!(state.workspace.tabs[0].document.content(), "boldX");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "boldX"
         );
-        assert!(state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
     }
 
     // ── Rich text formatting Phase 2: apply_formatting_to_selection ─────────
@@ -14441,9 +14455,9 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.workspace.tabs[0].selection = Some((0, 5));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
-        assert!(state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].text,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].text,
             "hello"
         );
     }
@@ -14455,7 +14469,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, 5));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
         state.undo();
-        assert!(!state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
     }
 
     #[test]
@@ -14469,12 +14483,12 @@ mod tests {
         state.workspace.tabs[0].selection = None;
         state.apply_formatting_to_selection(FormatOp::Bold(true));
         assert!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].bold,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold,
             "formatting wasn't applied"
         );
         state.undo();
         assert!(
-            !state.workspace.tabs[0].document.paragraphs[0].runs[0].bold,
+            !state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold,
             "undo did not revert the no-selection formatting"
         );
     }
@@ -14505,10 +14519,10 @@ mod tests {
         let mut state = make_state_with_paragraphs(paragraphs, 0);
         state.workspace.tabs[0].selection = Some((0, 5));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
-        assert!(state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
         state.workspace.tabs[0].selection = Some((0, 5));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
-        assert!(!state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
     }
 
     #[test]
@@ -14552,7 +14566,7 @@ mod tests {
         let content_len = state.workspace.tabs[0].document.content().len();
         state.workspace.tabs[0].selection = Some((0, content_len));
         state.apply_formatting_to_selection(FormatOp::Bold(true));
-        for para in &state.workspace.tabs[0].document.paragraphs {
+        for para in state.workspace.tabs[0].document.paragraphs() {
             for run in &para.runs {
                 assert!(
                     run.bold,
@@ -14564,7 +14578,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, content_len));
         state.clear_formatting();
 
-        for para in &state.workspace.tabs[0].document.paragraphs {
+        for para in state.workspace.tabs[0].document.paragraphs() {
             for run in &para.runs {
                 assert!(
                     !run.bold,
@@ -14590,7 +14604,7 @@ mod tests {
         state.insert_char('X');
         state.insert_char('Y');
         assert_eq!(state.workspace.tabs[0].document.content(), "abXY");
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "ab");
         assert!(!runs[0].bold);
@@ -14613,7 +14627,7 @@ mod tests {
         state.workspace.tabs[0].cursor = 0;
         state.insert_char('Y'); // "YaXb", Y at the very start
         assert_eq!(state.workspace.tabs[0].document.content(), "YaXb");
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert_eq!(runs.len(), 3);
         assert_eq!(runs[0].text, "Ya");
         assert!(!runs[0].bold);
@@ -14707,7 +14721,12 @@ mod tests {
         std::fs::write(&conf_path, "").unwrap();
         let target = PathBuf::from("/some/nested/dir");
         save_working_directory(&conf_path, &target).unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().working_directory, Some(target));
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .working_directory,
+            Some(target)
+        );
     }
 
     #[test]
@@ -14717,7 +14736,12 @@ mod tests {
         std::fs::write(&conf_path, "").unwrap();
         let dirs = vec![PathBuf::from("/a/b"), PathBuf::from("/a/c")];
         save_expanded_dirs(&conf_path, &dirs).unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().expanded_dirs, dirs);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .expanded_dirs,
+            dirs
+        );
     }
 
     #[test]
@@ -14725,7 +14749,12 @@ mod tests {
         let dir = temp_test_dir("working_directory_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().working_directory, None);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .working_directory,
+            None
+        );
     }
 
     #[test]
@@ -14733,7 +14762,12 @@ mod tests {
         let dir = temp_test_dir("expanded_dirs_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().expanded_dirs, Vec::<PathBuf>::new());
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .expanded_dirs,
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
@@ -14875,7 +14909,7 @@ mod tests {
         let tab = &state.workspace.tabs[0];
         let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
         ));
         assert!(expected_cap < 200);
         assert_eq!(tab.document.undo_stack.len(), expected_cap);
@@ -14899,7 +14933,7 @@ mod tests {
         let tab = &state.workspace.tabs[0];
         let expected_cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
         ));
         assert!(expected_cap < 200);
         assert_eq!(tab.document.redo_stack.len(), expected_cap);
@@ -18153,7 +18187,7 @@ mod tests {
         state.apply_line_alignment(Alignment::Center);
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].alignment,
+            state.workspace.tabs[0].document.paragraphs()[0].alignment,
             Alignment::Center
         );
     }
@@ -18168,7 +18202,7 @@ mod tests {
         state.apply_line_alignment(Alignment::Left);
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].alignment,
+            state.workspace.tabs[0].document.paragraphs()[0].alignment,
             Alignment::Left
         );
     }
@@ -18195,11 +18229,11 @@ mod tests {
         state.apply_line_alignment(Alignment::Center);
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].alignment,
+            state.workspace.tabs[0].document.paragraphs()[0].alignment,
             Alignment::Center
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].alignment,
+            state.workspace.tabs[0].document.paragraphs()[1].alignment,
             Alignment::Left
         );
     }
@@ -18227,11 +18261,11 @@ mod tests {
         state.apply_line_alignment(Alignment::Center);
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].alignment,
+            state.workspace.tabs[0].document.paragraphs()[0].alignment,
             Alignment::Left
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].alignment,
+            state.workspace.tabs[0].document.paragraphs()[1].alignment,
             Alignment::Center
         );
     }
@@ -18241,7 +18275,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Pocket);
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Center);
         assert!(para.runs.iter().all(|r| r.bold));
         assert!(para.runs.iter().all(|r| r.size == 52));
@@ -18260,12 +18294,12 @@ mod tests {
     #[test]
     fn test_apply_card_style_clears_a_preexisting_list_marker() {
         let mut state = make_state("hello world", 0, None);
-        state.workspace.tabs[0].document.paragraphs[0].list = Some(ListItem {
+        state.workspace.tabs[0].document.paragraphs_mut()[0].list = Some(ListItem {
             kind: ListKind::BulletSolid,
             level: 0,
         });
         state.apply_card_style(CardStyleKind::Pocket);
-        assert_eq!(state.workspace.tabs[0].document.paragraphs[0].list, None);
+        assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
     }
 
     #[test]
@@ -18279,7 +18313,7 @@ mod tests {
             state.insert_char(ch);
         }
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Center);
         assert!(
             para.runs.iter().all(|r| r.bold),
@@ -18312,7 +18346,7 @@ mod tests {
         let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.heading, 0, "heading not cleared");
         assert_eq!(para.alignment, Alignment::Left, "not left-aligned");
         assert!(para.runs.iter().all(|r| !r.bold), "bold not cleared");
@@ -18342,7 +18376,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, 5));
         state.clear_formatting();
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.heading, 0, "heading not cleared via selection path");
         assert_eq!(
             para.alignment,
@@ -18388,7 +18422,7 @@ mod tests {
         );
 
         state.insert_char('a');
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert!(
             para.runs.iter().all(|r| !r.box_format),
             "newly typed text should not inherit the cleared Pocket box"
@@ -18413,11 +18447,11 @@ mod tests {
         assert!(
             state.workspace.tabs[0]
                 .document
-                .paragraphs
+                .paragraphs()
                 .iter()
                 .all(|p| p.runs.iter().all(|r| !r.box_format)),
             "no paragraph should carry the cleared Pocket box after typing across a newline: {:?}",
-            state.workspace.tabs[0].document.paragraphs
+            state.workspace.tabs[0].document.paragraphs()
         );
     }
 
@@ -18454,7 +18488,7 @@ mod tests {
         // Paragraph 0 ("a") is legitimately still a real Pocket line — it
         // should keep its box. Only paragraph 1 ("b", created by the
         // Enter split) should have reverted to plain.
-        let paragraphs = &state.workspace.tabs[0].document.paragraphs;
+        let paragraphs = state.workspace.tabs[0].document.paragraphs();
         assert!(
             paragraphs[0].runs.iter().all(|r| r.box_format),
             "the original Pocket line should keep its box: {:?}",
@@ -18485,8 +18519,8 @@ mod tests {
         state.backspace(); // removes the newline, merges back into the pocket paragraph
         state.backspace(); // removes "a"
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 1);
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(
             para.heading, 0,
             "heading not cleared once pocket text is fully deleted: {:?}",
@@ -18527,8 +18561,8 @@ mod tests {
         state.insert_char('\n');
         state.backspace();
 
-        assert_eq!(state.workspace.tabs[0].document.paragraphs.len(), 1);
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        assert_eq!(state.workspace.tabs[0].document.paragraphs().len(), 1);
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Center, "pocket line's center alignment should survive merging back an empty trailing line: {:?}", para);
         assert_eq!(para.heading, 1);
         assert!(para.runs.iter().all(|r| r.box_format));
@@ -18542,7 +18576,7 @@ mod tests {
         let default_size = state.normal_text_size_half_points;
         state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.heading, 0);
         assert_eq!(para.alignment, Alignment::Left);
         assert!(para.runs.iter().all(|r| !r.double_underline));
@@ -18553,7 +18587,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Hat);
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Center);
         assert!(para.runs.iter().all(|r| r.size == 44));
         assert!(para.runs.iter().all(|r| r.double_underline));
@@ -18566,7 +18600,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Block);
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Center);
         assert!(para.runs.iter().all(|r| r.size == 32));
         assert!(para.runs.iter().all(|r| r.underline));
@@ -18579,7 +18613,7 @@ mod tests {
         let mut state = make_state("hello world", 0, None);
         state.apply_card_style(CardStyleKind::Tag);
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert_eq!(para.alignment, Alignment::Left);
         assert!(para.runs.iter().all(|r| r.size == 26));
         assert!(para.runs.iter().all(|r| r.bold));
@@ -18602,19 +18636,19 @@ mod tests {
         state.tag_size_half_points = 20;
 
         state.apply_card_style(CardStyleKind::Pocket);
-        assert!(state.workspace.tabs[0].document.paragraphs[0]
+        assert!(state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .all(|r| r.size == 60));
 
         state.apply_card_style(CardStyleKind::Block);
-        assert!(state.workspace.tabs[0].document.paragraphs[0]
+        assert!(state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .all(|r| r.size == 40));
 
         state.apply_card_style(CardStyleKind::Tag);
-        assert!(state.workspace.tabs[0].document.paragraphs[0]
+        assert!(state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .all(|r| r.size == 20));
@@ -18628,7 +18662,7 @@ mod tests {
         state.cite_size_half_points = 30;
         state.apply_cite_style();
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert!(para.runs.iter().all(|r| r.bold));
         assert!(para.runs.iter().all(|r| r.size == 30));
     }
@@ -18701,7 +18735,7 @@ mod tests {
 
         assert_eq!(state.workspace.tabs[0].document.content(), "one¶two¶three");
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             1,
             "should be one paragraph now"
         );
@@ -18738,7 +18772,7 @@ mod tests {
         state.condense_with_pilcrows();
 
         assert_eq!(state.workspace.tabs[0].document.content(), "bold¶plain");
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(runs.iter().find(|r| r.text.contains("bold")).unwrap().bold);
         assert!(!runs.iter().find(|r| r.text.contains("plain")).unwrap().bold);
     }
@@ -18783,16 +18817,16 @@ mod tests {
         state.remove_emphasis();
 
         assert!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].bold,
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].bold,
             "manually-bolded text must survive"
         );
         assert!(
-            !state.workspace.tabs[0].document.paragraphs[2].runs[0].bold,
+            !state.workspace.tabs[0].document.paragraphs()[2].runs[0].bold,
             "the marked emphasis run should be cleared"
         );
-        assert!(!state.workspace.tabs[0].document.paragraphs[2].runs[0].emphasis);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[2].runs[0].emphasis);
         assert!(
-            state.workspace.tabs[0].document.paragraphs[3].runs[0].bold,
+            state.workspace.tabs[0].document.paragraphs()[3].runs[0].bold,
             "a Tag's own bold must survive"
         );
     }
@@ -18856,9 +18890,9 @@ mod tests {
 
         state.remove_emphasis();
 
-        assert!(!state.workspace.tabs[0].document.paragraphs[0].runs[0].bold);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[0].runs[0].bold);
         assert!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].bold,
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].bold,
             "unselected line must survive"
         );
     }
@@ -18888,7 +18922,7 @@ mod tests {
 
         state.remove_non_highlighted_underlining();
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(
             !runs
                 .iter()
@@ -18936,9 +18970,9 @@ mod tests {
 
         state.remove_non_highlighted_underlining();
 
-        assert!(!state.workspace.tabs[0].document.paragraphs[0].runs[0].underline);
+        assert!(!state.workspace.tabs[0].document.paragraphs()[0].runs[0].underline);
         assert!(
-            state.workspace.tabs[0].document.paragraphs[1].runs[0].underline,
+            state.workspace.tabs[0].document.paragraphs()[1].runs[0].underline,
             "unselected line must survive"
         );
     }
@@ -18989,7 +19023,7 @@ mod tests {
         state.remove_pilcrows();
 
         assert_eq!(state.workspace.tabs[0].document.content(), "boldtext");
-        assert!(state.workspace.tabs[0].document.paragraphs[0]
+        assert!(state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .all(|r| r.bold));
@@ -19042,7 +19076,7 @@ mod tests {
             state.workspace.tabs[0].document.content(),
             "body\nA tag\nmore body"
         );
-        let tag = &state.workspace.tabs[0].document.paragraphs[1];
+        let tag = &state.workspace.tabs[0].document.paragraphs()[1];
         assert_eq!(tag.heading, 0, "the heading marker is what made it a tag");
         assert_eq!(tag.runs[0].text, "A tag");
         assert!(!tag.runs[0].bold);
@@ -19063,11 +19097,11 @@ mod tests {
         state.delete_tags();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             None
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].size,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].size,
             state.normal_text_size_half_points
         );
     }
@@ -19083,7 +19117,7 @@ mod tests {
         state.delete_tags();
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].runs[0].style,
+            state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
             Some(CardStyle::Cite)
         );
         assert!(
@@ -19216,7 +19250,7 @@ mod tests {
 
         let tags: Vec<&Run> = state.workspace.tabs[0]
             .document
-            .paragraphs
+            .paragraphs()
             .iter()
             .flat_map(|p| p.runs.iter())
             .filter(|r| r.text == "TAG")
@@ -19226,7 +19260,7 @@ mod tests {
         // Everything else untouched.
         assert!(state.workspace.tabs[0]
             .document
-            .paragraphs
+            .paragraphs()
             .iter()
             .flat_map(|p| p.runs.iter())
             .filter(|r| r.text == " body")
@@ -19243,12 +19277,12 @@ mod tests {
 
         // One match un-bolded by hand: the next apply must bold *it*, not
         // un-bold the other one.
-        state.workspace.tabs[0].document.paragraphs[1].runs[0].bold = false;
+        state.workspace.tabs[0].document.paragraphs_mut()[1].runs[0].bold = false;
         state.apply_formatting_to_selection(FormatOp::Bold(true));
 
         assert!(state.workspace.tabs[0]
             .document
-            .paragraphs
+            .paragraphs()
             .iter()
             .flat_map(|p| p.runs.iter())
             .filter(|r| r.text == "TAG")
@@ -19320,7 +19354,7 @@ mod tests {
             state.workspace.tabs[0].document.content(),
             "bold\u{200B} plain"
         );
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         let bold_run = runs.iter().find(|r| r.text.contains("bold")).unwrap();
         assert!(bold_run.bold, "bold formatting should survive condensing");
         let plain_run = runs.iter().find(|r| r.text.contains("plain")).unwrap();
@@ -19335,7 +19369,7 @@ mod tests {
         state.small_size_half_points = 8;
         state.shrink_text();
 
-        let para = &state.workspace.tabs[0].document.paragraphs[0];
+        let para = &state.workspace.tabs[0].document.paragraphs()[0];
         assert!(para.runs.iter().all(|r| r.size == 8));
     }
 
@@ -19353,7 +19387,7 @@ mod tests {
 
         state.workspace.tabs[0].selection = Some((0, 11));
         state.shrink_text();
-        assert!(state.workspace.tabs[0].document.paragraphs[0]
+        assert!(state.workspace.tabs[0].document.paragraphs()[0]
             .runs
             .iter()
             .all(|r| r.size == 8));
@@ -19361,7 +19395,7 @@ mod tests {
         state.workspace.tabs[0].selection = Some((0, 11));
         state.apply_formatting_to_selection(FormatOp::Underline(true));
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(
             runs.iter().all(|r| r.underline),
             "the run must actually be underlined"
@@ -19402,7 +19436,7 @@ mod tests {
 
         state.apply_formatting_to_selection(FormatOp::Underline(true));
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert_eq!(runs[0].size, 52, "a Pocket-sized run must keep its size");
         assert_eq!(runs[1].size, 22, "the shrunk run returns to body size");
     }
@@ -19432,7 +19466,7 @@ mod tests {
         // Already uniformly underlined, so this toggles off.
         state.apply_formatting_to_selection(FormatOp::Underline(true));
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert!(!runs[0].underline, "underline should have toggled off");
         assert_eq!(runs[0].size, 8, "toggling off must not resize");
     }
@@ -19467,7 +19501,7 @@ mod tests {
         state.small_size_half_points = 8;
         state.shrink_text();
 
-        let runs = &state.workspace.tabs[0].document.paragraphs[0].runs;
+        let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
         assert_eq!(runs[0].size, 24, "underlined run must be left alone");
         assert_eq!(
             runs[1].size, 8,
@@ -19498,11 +19532,13 @@ mod tests {
         state.apply_card_style(CardStyleKind::Hat);
 
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[0].heading, 0,
+            state.workspace.tabs[0].document.paragraphs()[0].heading,
+            0,
             "first line untouched"
         );
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs[1].heading, 2,
+            state.workspace.tabs[0].document.paragraphs()[1].heading,
+            2,
             "second line marked Hat"
         );
     }
@@ -19578,7 +19614,7 @@ mod tests {
 
         let tab = &state.workspace.tabs[0];
         let markdown = crate::wikifi_export::export_to_markdown(
-            &tab.document.paragraphs,
+            tab.document.paragraphs(),
             &tab.document.content(),
         );
         assert_eq!(
@@ -19628,7 +19664,7 @@ mod tests {
         let runs_of = |st: &AppState| -> usize {
             st.workspace.tabs[0]
                 .document
-                .paragraphs
+                .paragraphs()
                 .iter()
                 .map(|p| p.runs.len())
                 .sum()
@@ -19636,7 +19672,7 @@ mod tests {
         let bytes_of = |st: &AppState| -> usize {
             st.workspace.tabs[0]
                 .document
-                .paragraphs
+                .paragraphs()
                 .iter()
                 .flat_map(|p| &p.runs)
                 .map(|r| r.text.len())
@@ -19649,7 +19685,7 @@ mod tests {
 
         println!(
             "\nbench_diagnostic_editing_session: {} paragraphs, {} runs, {} bytes at open",
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             runs_of(&state),
             bytes_of(&state),
         );
@@ -19825,16 +19861,16 @@ mod tests {
             std::mem::size_of::<Paragraph>(),
             state.workspace.tabs[0]
                 .document
-                .paragraphs
+                .paragraphs()
                 .iter()
                 .map(|p| p.runs.len())
                 .sum::<usize>(),
-            state.workspace.tabs[0].document.paragraphs.len(),
+            state.workspace.tabs[0].document.paragraphs().len(),
             state.workspace.tabs[0].document.content().len(),
         );
         let estimate = snapshot_byte_estimate(
             &state.workspace.tabs[0].document.content(),
-            &state.workspace.tabs[0].document.paragraphs,
+            state.workspace.tabs[0].document.paragraphs(),
         );
         println!(
             "\n  snapshot_byte_estimate says {:.2}MB per snapshot -> cap {} entries",
@@ -20011,7 +20047,12 @@ mod tests {
         let dir = temp_test_dir("line_spacing_missing_key");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "theme=dark\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path).unwrap().line_spacing, DEFAULT_LINE_SPACING);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            DEFAULT_LINE_SPACING
+        );
     }
 
     #[test]
@@ -20019,12 +20060,27 @@ mod tests {
         let dir = temp_test_dir("line_spacing_load");
         let conf_path = dir.join("settings.conf");
         std::fs::write(&conf_path, "line_spacing=1.5\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path), 1.5);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            1.5
+        );
         std::fs::write(&conf_path, "line_spacing=9.9\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path), 3.0);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            3.0
+        );
         // Garbage falls back rather than panicking, same as every other loader.
         std::fs::write(&conf_path, "line_spacing=wide\n").unwrap();
-        assert_eq!(crate::preferences::Preferences::load(&conf_path), DEFAULT_LINE_SPACING);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            DEFAULT_LINE_SPACING
+        );
     }
 
     /// What the future line-spacing button actually calls: sets the live value
@@ -20039,13 +20095,23 @@ mod tests {
 
         state.set_line_spacing(1.5);
         assert_eq!(state.line_spacing, 1.5);
-        assert_eq!(crate::preferences::Preferences::load(&conf_path), 1.5);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            1.5
+        );
 
         // Out-of-range input is clamped before it is stored *or* written, so
         // the file can never hold a value the loader would have to fix up.
         state.set_line_spacing(99.0);
         assert_eq!(state.line_spacing, 3.0);
-        assert_eq!(crate::preferences::Preferences::load(&conf_path), 3.0);
+        assert_eq!(
+            crate::preferences::Preferences::load(&conf_path)
+                .unwrap()
+                .line_spacing,
+            3.0
+        );
     }
 
     // ── sidebar mode toggle (beta feedback: toggle files/nav) ─────────────
@@ -20493,16 +20559,17 @@ mod tests {
             let before = read(&state);
             toggle(&mut state);
             assert_eq!(read(&state), !before, "{key} did not flip");
-            let prefs = crate::preferences::Preferences::load(&conf);
+            let prefs = crate::preferences::Preferences::load(&conf).unwrap();
             let persisted = match key {
-                "invisibility_mode" => prefs.unwrap().invisibility_mode,
-                "word_count" => prefs.unwrap().word_count,
-                "timer" => prefs.unwrap().timer,
-                _ => panic!("unknown key: {}", key),
+                "spellcheck" => prefs.spellcheck_enabled,
+                "nav_fold_buttons" => prefs.nav_fold_buttons,
+                "search_from_list" => prefs.search_from_list_enabled,
+                "search_list_whole_words" => prefs.search_list_whole_words,
+                "command_palette" => prefs.command_palette_enabled,
+                _ => panic!("unknown key: {key}"),
             };
             assert_eq!(
-                persisted,
-                !before,
+                persisted, !before,
                 "{key} flipped in memory but was not written to settings.conf",
             );
         }
@@ -21660,10 +21727,6 @@ mod tests {
         let state = make_state("hello", 0, None);
         assert!(state.dirty_tab_snapshots().is_empty());
     }
-
-
-
-
 }
 
 impl AppState {
@@ -21760,10 +21823,12 @@ impl AppState {
                     .tabs
                     .get(self.workspace.active_tab)
                     .is_some_and(|t| {
-                        let (para_idx, ..) =
-                            crate::document_ops::resolve_position(&t.document.paragraphs, t.cursor);
+                        let (para_idx, ..) = crate::document_ops::resolve_position(
+                            t.document.paragraphs(),
+                            t.cursor,
+                        );
                         t.document
-                            .paragraphs
+                            .paragraphs()
                             .get(para_idx)
                             .is_some_and(|p| p.list.is_some())
                     });

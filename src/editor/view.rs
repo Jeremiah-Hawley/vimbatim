@@ -801,7 +801,7 @@ impl TextEditor {
         let content = state.pane_content(self.pane).to_string();
         let paragraphs = idx
             .and_then(|i| state.workspace.tabs.get(i))
-            .map(|t| t.document.paragraphs.clone())
+            .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let lines = document_lines(&content);
@@ -934,7 +934,7 @@ impl TextEditor {
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
             .and_then(|i| state.workspace.tabs.get(i))
-            .map(|t| t.document.paragraphs.clone())
+            .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let _ = state;
 
@@ -993,7 +993,7 @@ impl TextEditor {
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
             .and_then(|i| state.workspace.tabs.get(i))
-            .map(|t| t.document.paragraphs.clone())
+            .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let _ = state;
 
@@ -1282,7 +1282,7 @@ impl Render for TextEditor {
                     .workspace
                     .tabs
                     .get(idx.unwrap_or(usize::MAX))
-                    .map(|t| t.document.paragraphs.clone())
+                    .map(|t| t.document.paragraphs().to_vec())
                     .unwrap_or_default(),
             )
         });
@@ -1461,7 +1461,7 @@ impl Render for TextEditor {
                 line_chars: Rc::new(line_chars),
                 line_byte_starts: Rc::new(line_byte_starts),
                 rows: Rc::new(rows),
-                paragraphs: Rc::new(paragraphs),
+                paragraphs: Rc::new(paragraphs.to_vec()),
                 display_to_wrap: Rc::new(display_to_wrap),
                 wrap_to_display: Rc::new(wrap_to_display),
             });
@@ -1582,7 +1582,7 @@ impl Render for TextEditor {
                                 let st = this.state.read(cx);
                                 pane_idx
                                     .and_then(|i| st.workspace.tabs.get(i))
-                                    .map(|t| t.document.paragraphs.clone())
+                                    .map(|t| t.document.paragraphs().to_vec())
                                     .unwrap_or_default()
                             };
                             let (rows, display_to_wrap, _) =
@@ -1681,7 +1681,7 @@ impl Render for TextEditor {
                                 let st = this.state.read(cx);
                                 pane_idx
                                     .and_then(|i| st.workspace.tabs.get(i))
-                                    .map(|t| t.document.paragraphs.clone())
+                                    .map(|t| t.document.paragraphs().to_vec())
                                     .unwrap_or_default()
                             };
                             let (rows, display_to_wrap, _) =
@@ -1802,7 +1802,7 @@ impl Render for TextEditor {
                             let st = this.state.read(cx);
                             pane_idx
                                 .and_then(|i| st.workspace.tabs.get(i))
-                                .map(|t| t.document.paragraphs.clone())
+                                .map(|t| t.document.paragraphs().to_vec())
                                 .unwrap_or_default()
                         };
                         let (rows, display_to_wrap, _) =
@@ -5042,7 +5042,7 @@ mod tests {
         }];
 
         let mut state = AppState::new();
-        state.workspace.tabs[0].document.paragraphs = paragraphs;
+        *state.workspace.tabs[0].document.paragraphs_mut() = paragraphs;
         state.workspace.tabs[0].cursor = big_text.len();
 
         // (1) 100x insert_char: covers push_undo_snapshot + sync_insert_char
@@ -5057,7 +5057,7 @@ mod tests {
         //     TextEditor::render() both pay on every non-coalesced keystroke
         //     and every frame respectively.
         let t1 = Instant::now();
-        let _cloned = state.workspace.tabs[0].document.paragraphs.clone();
+        let _cloned = state.workspace.tabs[0].document.paragraphs().to_vec();
         let clone_elapsed = t1.elapsed();
 
         // (3) build_visual_rows over the full document with a synthetic,

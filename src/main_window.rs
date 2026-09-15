@@ -174,7 +174,7 @@ impl MainWindow {
                             (
                                 t.id,
                                 t.document.content_version,
-                                t.document.paragraphs.clone(),
+                                t.document.paragraphs().to_vec(),
                                 t.docx_origin.clone(),
                                 t.file_path.clone(),
                                 t.title.clone(),
@@ -459,7 +459,8 @@ impl MainWindow {
                                 p
                             });
 
-                            if let Ok(Some((tab_id, paragraphs, _origin, p, doc_style))) = prepared {
+                            if let Ok(Some((tab_id, paragraphs, _origin, p, doc_style))) = prepared
+                            {
                                 let start = std::time::Instant::now();
                                 let result = cx
                                     .background_executor()

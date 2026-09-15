@@ -3,11 +3,11 @@ pub mod app;
 #[doc(hidden)]
 pub mod testing {
     pub use crate::app::command::{AppCommand, AppEffect};
-    pub use crate::app::repository::{DocumentRepository, InMemoryDocumentRepository};
     pub use crate::app::error::AppError;
-    pub use crate::state::{AppState, Tab, Pane, UiState};
+    pub use crate::app::repository::{DocumentRepository, InMemoryDocumentRepository};
     pub use crate::document::TabId;
     pub use crate::preferences::Preferences;
+    pub use crate::state::{AppState, Pane, Tab, UiState};
 }
 
 mod app_toolbar;

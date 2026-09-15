@@ -198,7 +198,7 @@ impl AutoScroller {
             .workspace
             .tabs
             .get(self.state.read(cx).workspace.active_tab)
-            .map(|t| t.document.paragraphs.clone())
+            .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let lines = document_lines(&content);
         let rows = visual_rows_for_viewport(

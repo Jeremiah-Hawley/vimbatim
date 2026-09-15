@@ -1,5 +1,5 @@
 use std::path::Path;
-use vimbatim::preferences::Preferences;
+use vimbatim::testing::Preferences;
 
 const FIXTURE: &str = "tests/fixtures/settings.conf";
 

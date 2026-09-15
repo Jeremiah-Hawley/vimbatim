@@ -148,7 +148,9 @@ impl Preferences {
                 .get(key)
                 .map(|v| {
                     v.split('|')
-                        .filter_map(|c| u32::from_str_radix(c.trim(), 16).ok())
+                        .map(str::trim)
+                        .filter(|c| c.len() == 6)
+                        .filter_map(|c| u32::from_str_radix(c, 16).ok())
                         .collect()
                 })
                 .unwrap_or_default()

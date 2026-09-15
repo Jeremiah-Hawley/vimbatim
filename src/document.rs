@@ -2,11 +2,19 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TabId(pub usize);
 
+#[derive(Clone, Debug)]
+pub struct PlainTextIndex {
+    pub text: String,
+    pub paragraph_starts: Vec<usize>,
+    pub run_starts: Vec<Vec<usize>>,
+}
+
 /// The editable document state kept together so text, formatting, and history
 /// cannot be independently replaced by a future caller.
 #[derive(Clone, Debug)]
 pub struct DocumentBuffer {
-    pub paragraphs: Vec<Paragraph>,
+    paragraphs: Vec<Paragraph>,
+    index: std::cell::RefCell<Option<std::sync::Arc<PlainTextIndex>>>,
     pub content_version: u64,
     pub is_modified: bool,
     pub undo_stack: Vec<Vec<Paragraph>>,
@@ -18,6 +26,7 @@ impl DocumentBuffer {
     pub fn new(paragraphs: Vec<Paragraph>) -> Self {
         Self {
             paragraphs,
+            index: std::cell::RefCell::new(None),
             content_version: 0,
             is_modified: false,
             undo_stack: Vec::new(),
@@ -26,9 +35,83 @@ impl DocumentBuffer {
         }
     }
 
+    pub fn paragraphs(&self) -> &[Paragraph] {
+        &self.paragraphs
+    }
+
+    pub fn paragraphs_mut(&mut self) -> &mut Vec<Paragraph> {
+        *self.index.borrow_mut() = None;
+        &mut self.paragraphs
+    }
+
+    pub fn plain_text_index(&self) -> std::sync::Arc<PlainTextIndex> {
+        if let Some(index) = self.index.borrow().as_ref() {
+            return index.clone();
+        }
+
+        let mut text = String::with_capacity(32 * 1024);
+        let mut paragraph_starts = Vec::with_capacity(self.paragraphs.len() + 1);
+        let mut run_starts = Vec::with_capacity(self.paragraphs.len());
+
+        for p in &self.paragraphs {
+            paragraph_starts.push(text.len());
+            let mut p_run_starts = Vec::with_capacity(p.runs.len());
+            for r in &p.runs {
+                p_run_starts.push(text.len());
+                text.push_str(&r.text);
+            }
+            run_starts.push(p_run_starts);
+            text.push('\n');
+        }
+        if !self.paragraphs.is_empty() {
+            text.pop();
+        }
+        paragraph_starts.push(text.len());
+
+        let idx = std::sync::Arc::new(PlainTextIndex {
+            text,
+            paragraph_starts,
+            run_starts,
+        });
+        *self.index.borrow_mut() = Some(idx.clone());
+        idx
+    }
+
+    /// Resolves a byte offset into `content()` into a `(paragraph_index, run_index, byte_offset_within_run)` triple.
+    /// Fast O(log N) lookup using the cached text index mappings.
+    pub fn resolve_position(&self, byte_offset: usize) -> (usize, usize, usize) {
+        let idx = self.plain_text_index();
+        let p_idx = match idx.paragraph_starts.binary_search(&byte_offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+        .min(self.paragraphs.len().saturating_sub(1));
+
+        if self.paragraphs.is_empty() {
+            return (0, 0, 0);
+        }
+
+        let runs = &idx.run_starts[p_idx];
+        if runs.is_empty() {
+            return (p_idx, 0, 0);
+        }
+
+        let r_idx = match runs.binary_search(&byte_offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+        .min(self.paragraphs[p_idx].runs.len().saturating_sub(1));
+
+        let run_start = runs[r_idx];
+        let offset = byte_offset
+            .saturating_sub(run_start)
+            .min(self.paragraphs[p_idx].runs[r_idx].text.len());
+        (p_idx, r_idx, offset)
+    }
+
     /// Plain text derived from the canonical rich paragraph representation.
     pub fn content(&self) -> String {
-        crate::docx_parser::paragraphs_to_plain_text(&self.paragraphs)
+        self.plain_text_index().text.clone()
     }
 
     pub fn debug_assert_valid(&self, cursor: usize, selection: Option<(usize, usize)>) {
@@ -479,5 +562,49 @@ mod tests {
             unsupported_xml: None,
         }]);
         buffer.debug_assert_valid(5, Some((0, 5)));
+    }
+
+    #[test]
+    fn plain_text_index_handles_unicode_and_invalidates_after_edits() {
+        let mut buffer = DocumentBuffer::new(vec![
+            Paragraph {
+                runs: vec![Run {
+                    text: "aé".into(),
+                    ..Run::default()
+                }],
+                ..Paragraph::default()
+            },
+            Paragraph {
+                runs: vec![Run {
+                    text: "文".into(),
+                    ..Run::default()
+                }],
+                ..Paragraph::default()
+            },
+        ]);
+
+        let first = buffer.plain_text_index();
+        assert_eq!(first.text, "aé\n文");
+        assert_eq!(buffer.resolve_position("aé\n".len()), (1, 0, 0));
+        assert!(std::sync::Arc::ptr_eq(&first, &buffer.plain_text_index()));
+
+        buffer.paragraphs_mut()[0].runs[0].text.push('!');
+        assert_eq!(buffer.content(), "aé!\n文");
+    }
+
+    #[test]
+    fn cloned_buffers_do_not_share_mutable_index_state() {
+        let original = DocumentBuffer::new(vec![Paragraph {
+            runs: vec![Run {
+                text: "original".into(),
+                ..Run::default()
+            }],
+            ..Paragraph::default()
+        }]);
+        let mut cloned = original.clone();
+        cloned.paragraphs_mut()[0].runs[0].text = "clone".into();
+
+        assert_eq!(cloned.content(), "clone");
+        assert_eq!(original.content(), "original");
     }
 }
