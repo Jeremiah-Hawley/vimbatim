@@ -1,6 +1,6 @@
 # Architecture Inventory
 
-51 Rust files; 60,211 lines.
+51 Rust files; 60,215 lines.
 
 | Lines | File |
 |---:|---|
@@ -33,7 +33,7 @@
 | 382 | `src/lib.rs` |
 | 375 | `src/state/preferences.rs` |
 | 348 | `src/app_toolbar.rs` |
-| 315 | `src/state/ui.rs` |
+| 319 | `src/state/ui.rs` |
 | 270 | `src/rich_clipboard.rs` |
 | 263 | `src/spellcheck.rs` |
 | 244 | `src/auto_scroll.rs` |
