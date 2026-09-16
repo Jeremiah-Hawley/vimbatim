@@ -84,10 +84,10 @@ fn test_save_then_load_custom_colors_round_trips() {
 #[test]
 fn test_add_custom_color_dedups_by_moving_to_the_end() {
     let mut state = make_state("", 0, None);
-    state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+    state.preferences.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
     state.add_custom_color(CustomColorTarget::Highlight, 0x222222);
     assert_eq!(
-        state.custom_highlight_colors,
+        state.preferences.custom_highlight_colors,
         vec![0x111111, 0x333333, 0x222222]
     );
 }
@@ -98,50 +98,62 @@ fn test_add_custom_color_caps_the_list_dropping_oldest() {
     for i in 0..MAX_CUSTOM_COLORS as u32 {
         state.add_custom_color(CustomColorTarget::Font, i);
     }
-    assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
-    assert_eq!(state.custom_font_colors[0], 0);
+    assert_eq!(
+        state.preferences.custom_font_colors.len(),
+        MAX_CUSTOM_COLORS
+    );
+    assert_eq!(state.preferences.custom_font_colors[0], 0);
 
     state.add_custom_color(CustomColorTarget::Font, 0xFFFFFF);
-    assert_eq!(state.custom_font_colors.len(), MAX_CUSTOM_COLORS);
     assert_eq!(
-        state.custom_font_colors[0], 1,
+        state.preferences.custom_font_colors.len(),
+        MAX_CUSTOM_COLORS
+    );
+    assert_eq!(
+        state.preferences.custom_font_colors[0], 1,
         "oldest entry should be dropped"
     );
-    assert_eq!(*state.custom_font_colors.last().unwrap(), 0xFFFFFF);
+    assert_eq!(
+        *state.preferences.custom_font_colors.last().unwrap(),
+        0xFFFFFF
+    );
 }
 
 #[test]
 fn test_remove_custom_color_drops_it_and_leaves_the_rest() {
     let mut state = make_state("", 0, None);
-    state.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
+    state.preferences.custom_highlight_colors = vec![0x111111, 0x222222, 0x333333];
     state.remove_custom_color(CustomColorTarget::Highlight, 0x222222);
-    assert_eq!(state.custom_highlight_colors, vec![0x111111, 0x333333]);
+    assert_eq!(
+        state.preferences.custom_highlight_colors,
+        vec![0x111111, 0x333333]
+    );
 }
 
 #[test]
 fn test_remove_custom_color_is_a_noop_for_an_absent_color() {
     let mut state = make_state("", 0, None);
-    state.custom_font_colors = vec![0x111111];
+    state.preferences.custom_font_colors = vec![0x111111];
     state.remove_custom_color(CustomColorTarget::Font, 0x999999);
-    assert_eq!(state.custom_font_colors, vec![0x111111]);
+    assert_eq!(state.preferences.custom_font_colors, vec![0x111111]);
 }
 
 #[test]
 fn test_remove_custom_color_only_touches_its_own_list() {
     let mut state = make_state("", 0, None);
-    state.custom_font_colors = vec![0x00ff88];
-    state.custom_highlight_colors = vec![0x00ff88];
+    state.preferences.custom_font_colors = vec![0x00ff88];
+    state.preferences.custom_highlight_colors = vec![0x00ff88];
     state.remove_custom_color(CustomColorTarget::Highlight, 0x00ff88);
-    assert!(state.custom_highlight_colors.is_empty());
-    assert_eq!(state.custom_font_colors, vec![0x00ff88]);
+    assert!(state.preferences.custom_highlight_colors.is_empty());
+    assert_eq!(state.preferences.custom_font_colors, vec![0x00ff88]);
 }
 
 #[test]
 fn test_add_custom_color_keeps_the_two_lists_separate() {
     let mut state = make_state("", 0, None);
     state.add_custom_color(CustomColorTarget::Highlight, 0x00ff88);
-    assert_eq!(state.custom_highlight_colors, vec![0x00ff88]);
-    assert!(state.custom_font_colors.is_empty());
+    assert_eq!(state.preferences.custom_highlight_colors, vec![0x00ff88]);
+    assert!(state.preferences.custom_font_colors.is_empty());
 }
 
 fn plain_paragraphs(content: &str) -> Vec<Paragraph> {
@@ -217,55 +229,23 @@ fn make_state(content: &str, cursor: usize, selection: Option<(usize, usize)>) -
             vim_enabled: true,
             ..Default::default()
         },
-        preferences: crate::preferences::Preferences::default(),
-        sidebar_visible: false,
+        // Off in tests: on would mean every fixture string gets run
+        // through the bundled dictionary, for no assertion's benefit.
+        preferences: crate::preferences::Preferences {
+            spellcheck_enabled: false,
+            ..Default::default()
+        },
         sidebar_width: DEFAULT_SIDEBAR_WIDTH,
         copied_file: None,
-        nav_fold_buttons: false,
-        search_from_list_enabled: false,
         search_word_list: Vec::new(),
-        search_list_whole_words: true,
-        command_palette_enabled: false,
-        word_count_visible: false,
-        timer: crate::timer::TimerState::default(),
-        spreading_wpm: DEFAULT_SPREADING_WPM,
-        custom_font_colors: Vec::new(),
-        custom_highlight_colors: Vec::new(),
         sidebar_mode: SidebarMode::default(),
         recovery: RecoveryState::default(),
         keybinds: crate::keybinds::Keybinds::defaults(),
-        theme: crate::theme::ThemeKind::WorkbenchDark,
-        theme_mode: crate::theme::ThemeMode::Dark,
-        theme_color_mode: crate::theme::ThemeColorMode::Minimal,
         custom_theme: None,
-        normal_text_size_half_points: 22,
-        line_spacing: DEFAULT_LINE_SPACING,
-        pocket_size_half_points: 52,
-        hat_size_half_points: 44,
-        block_size_half_points: 32,
-        tag_size_half_points: 26,
-        cite_size_half_points: 26,
-        small_size_half_points: 12,
         zoom: 1.0,
-        paragraph_integrity: false,
-        pilcrows: false,
-        highlight_color: "yellow".to_string(),
-        analytic_color: "0000ff".to_string(),
-        standardize_highlight_exception: String::new(),
-        emphasis_bold: true,
-        emphasis_underline: false,
-        emphasis_box: false,
-        emphasis_change_size: false,
-        emphasis_size_half_points: 24,
-        paste_condense: false,
-        paste_condense_pilcrow: false,
         // A temp file, never the real ~/.vimbatim/settings.conf — see
         // the field's doc comment.
         settings_path: std::env::temp_dir().join("vimbatim_test_settings.conf"),
-        // Off in tests: on would mean every fixture string gets run
-        // through the bundled dictionary, for no assertion's benefit.
-        spellcheck_enabled: false,
-        spellcheck_underline_color: "red".to_string(),
         user_dictionary: Rc::new(HashSet::new()),
     }
 }
@@ -549,7 +529,7 @@ fn delete_analytics_removes_whole_lines() {
         para_plain("and this"),
     ];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.delete_analytics();
@@ -571,7 +551,7 @@ fn delete_analytics_removes_whole_lines() {
 fn delete_analytics_leaves_other_formatting_alone() {
     let paragraphs = vec![analytic_para("wrong color", 26, "c00000")];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.delete_analytics();
@@ -588,7 +568,7 @@ fn deleting_every_paragraph_leaves_a_blank_one() {
         analytic_para("two", 26, "0000ff"),
     ];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.delete_analytics();
@@ -611,7 +591,7 @@ fn delete_analytics_clamps_the_cursor() {
         analytic_para("long analytic", 26, "0000ff"),
     ];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
     state.workspace.tabs[0].cursor = state.workspace.tabs[0].document.content().len();
     state.workspace.tabs[0].selection = Some((0, state.workspace.tabs[0].document.content().len()));
@@ -686,7 +666,7 @@ fn a_marked_cite_is_not_mistaken_for_an_analytic() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.convert_analytics_to_tags();
@@ -751,7 +731,7 @@ fn convert_analytics_promotes_them_to_tags() {
         para_plain("ordinary body text"),
     ];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.convert_analytics_to_tags();
@@ -773,7 +753,7 @@ fn convert_analytics_promotes_them_to_tags() {
 fn convert_analytics_ignores_other_colored_text() {
     let paragraphs = vec![analytic_para("not an analytic", 26, "c00000")];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.convert_analytics_to_tags();
@@ -807,7 +787,7 @@ fn convert_analytics_is_a_no_op_when_there_are_none() {
 #[test]
 fn a_freshly_applied_analytic_converts() {
     let mut state = make_state_with_paragraphs(vec![para_plain("some analysis")], 0);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("0000ff");
 
     state.apply_analytic_style();
@@ -841,7 +821,7 @@ fn convert_analytics_skips_blank_lines() {
 #[test]
 fn analytic_applies_tag_weight_and_size_in_the_configured_color() {
     let mut state = make_state("an analytic", 0, None);
-    state.tag_size_half_points = 26;
+    state.preferences.tag_size_half_points = 26;
     state.set_analytic_color("c00000");
 
     state.apply_analytic_style();
@@ -880,15 +860,15 @@ fn analytic_clears_an_existing_card_style_heading() {
 #[test]
 fn setting_the_highlight_color_is_what_later_operations_read() {
     let mut state = make_state("", 0, None);
-    assert_eq!(state.highlight_color, "yellow");
+    assert_eq!(state.preferences.highlight_color, "yellow");
 
     state.set_highlight_color("cyan");
-    assert_eq!(state.highlight_color, "cyan");
+    assert_eq!(state.preferences.highlight_color, "cyan");
 
     // A custom color is stored as a bare hex, which
     // `text_editor::highlight_color_hex` also parses.
     state.set_highlight_color("86f2ef");
-    assert_eq!(state.highlight_color, "86f2ef");
+    assert_eq!(state.preferences.highlight_color, "86f2ef");
 }
 
 /// Picking a color and then standardizing must use the picked one — the
@@ -946,7 +926,7 @@ fn standardize_repaints_every_highlight_to_the_current_color() {
         },
     ];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
 
     state.standardize_highlighting();
 
@@ -976,7 +956,7 @@ fn standardize_leaves_unhighlighted_text_alone() {
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
     let content_before = state.workspace.tabs[0].document.content().to_owned();
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
 
     state.standardize_highlighting();
 
@@ -1003,7 +983,7 @@ fn standardize_merges_runs_that_now_match() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
 
     state.standardize_highlighting();
 
@@ -1059,7 +1039,7 @@ fn standardize_with_no_exception_repaints_everything() {
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
     state.set_highlight_color("yellow");
-    assert!(state.standardize_highlight_exception.is_empty());
+    assert!(state.preferences.standardize_highlight_exception.is_empty());
 
     state.standardize_highlighting_with_exception();
 
@@ -1109,7 +1089,7 @@ fn standardize_is_undoable() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
     let version_before = state.workspace.tabs[0].document.content_version;
 
     state.standardize_highlighting();
@@ -1133,7 +1113,7 @@ fn standardize_is_a_no_op_when_already_uniform() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
     let version_before = state.workspace.tabs[0].document.content_version;
 
     state.standardize_highlighting();
@@ -1150,13 +1130,16 @@ fn shrink_size_setter_stores_half_points_and_clamps() {
     let mut state = make_state("", 0, None);
 
     state.set_shrink_size_points(8);
-    assert_eq!(state.small_size_half_points, 16, "stored in half-points");
+    assert_eq!(
+        state.preferences.small_size_half_points, 16,
+        "stored in half-points"
+    );
 
     // Clamped at both ends rather than walking somewhere unusable.
     state.set_shrink_size_points(0);
-    assert_eq!(state.small_size_half_points, 8); // 4pt floor
+    assert_eq!(state.preferences.small_size_half_points, 8); // 4pt floor
     state.set_shrink_size_points(999);
-    assert_eq!(state.small_size_half_points, 96); // 48pt ceiling
+    assert_eq!(state.preferences.small_size_half_points, 96); // 48pt ceiling
 }
 
 #[test]
@@ -1164,20 +1147,23 @@ fn emphasis_size_setter_stores_half_points_and_clamps() {
     let mut state = make_state("", 0, None);
 
     state.set_emphasis_size_points(8);
-    assert_eq!(state.emphasis_size_half_points, 16, "stored in half-points");
+    assert_eq!(
+        state.preferences.emphasis_size_half_points, 16,
+        "stored in half-points"
+    );
 
     state.set_emphasis_size_points(0);
-    assert_eq!(state.emphasis_size_half_points, 8); // 4pt floor
+    assert_eq!(state.preferences.emphasis_size_half_points, 8); // 4pt floor
     state.set_emphasis_size_points(999);
-    assert_eq!(state.emphasis_size_half_points, 96); // 48pt ceiling
+    assert_eq!(state.preferences.emphasis_size_half_points, 96); // 48pt ceiling
 }
 
 #[test]
 fn emphasis_change_size_setter_persists() {
     let mut state = make_state("", 0, None);
-    assert!(!state.emphasis_change_size);
+    assert!(!state.preferences.emphasis_change_size);
     state.set_emphasis_change_size(true);
-    assert!(state.emphasis_change_size);
+    assert!(state.preferences.emphasis_change_size);
 }
 
 /// Shrink applies whatever the setting currently says, not a fixed size.
@@ -1237,7 +1223,7 @@ fn text_settings_load_from_settings_conf() {
 #[test]
 fn paste_keeps_newlines_when_condense_is_off() {
     let mut state = make_state("", 0, None);
-    state.paste_condense = false;
+    state.preferences.paste_condense = false;
     state.paste_text("one\ntwo");
     assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
 }
@@ -1245,7 +1231,7 @@ fn paste_keeps_newlines_when_condense_is_off() {
 #[test]
 fn paste_condenses_newlines_to_spaces() {
     let mut state = make_state("", 0, None);
-    state.paste_condense = true;
+    state.preferences.paste_condense = true;
     state.paste_text("one\ntwo");
     assert_eq!(state.workspace.tabs[0].document.content(), "one two");
 }
@@ -1253,8 +1239,8 @@ fn paste_condenses_newlines_to_spaces() {
 #[test]
 fn paste_condense_marks_newlines_with_a_pilcrow_when_asked() {
     let mut state = make_state("", 0, None);
-    state.paste_condense = true;
-    state.paste_condense_pilcrow = true;
+    state.preferences.paste_condense = true;
+    state.preferences.paste_condense_pilcrow = true;
     state.paste_text("one\ntwo");
     assert_eq!(state.workspace.tabs[0].document.content(), "one¶two");
 }
@@ -1264,8 +1250,8 @@ fn paste_condense_marks_newlines_with_a_pilcrow_when_asked() {
 #[test]
 fn the_pilcrow_setting_does_nothing_while_condense_is_off() {
     let mut state = make_state("", 0, None);
-    state.paste_condense = false;
-    state.paste_condense_pilcrow = true;
+    state.preferences.paste_condense = false;
+    state.preferences.paste_condense_pilcrow = true;
     state.paste_text("one\ntwo");
     assert_eq!(state.workspace.tabs[0].document.content(), "one\ntwo");
 }
@@ -1276,12 +1262,12 @@ fn the_pilcrow_setting_does_nothing_while_condense_is_off() {
 #[test]
 fn paragraph_integrity_turns_condense_off() {
     let mut state = make_state("", 0, None);
-    state.paste_condense = true;
+    state.preferences.paste_condense = true;
 
     state.toggle_paragraph_integrity();
 
-    assert!(state.paragraph_integrity);
-    assert!(!state.paste_condense);
+    assert!(state.preferences.paragraph_integrity);
+    assert!(!state.preferences.paste_condense);
 }
 
 #[test]
@@ -1292,9 +1278,9 @@ fn turning_paragraph_integrity_back_off_leaves_condense_alone() {
 
     state.toggle_paragraph_integrity(); // off again
 
-    assert!(!state.paragraph_integrity);
+    assert!(!state.preferences.paragraph_integrity);
     assert!(
-        state.paste_condense,
+        state.preferences.paste_condense,
         "toggling integrity off should not undo a deliberate choice"
     );
 }
@@ -1304,24 +1290,32 @@ fn turning_paragraph_integrity_back_off_leaves_condense_alone() {
 #[test]
 fn the_pilcrow_button_drives_the_pilcrow_setting() {
     let mut state = make_state("", 0, None);
-    assert!(!state.paste_condense_pilcrow);
+    assert!(!state.preferences.paste_condense_pilcrow);
 
     state.toggle_pilcrows();
-    assert!(state.pilcrows);
-    assert!(state.paste_condense_pilcrow);
+    assert!(state.preferences.pilcrows);
+    assert!(state.preferences.paste_condense_pilcrow);
 
     state.toggle_pilcrows();
-    assert!(!state.paste_condense_pilcrow);
+    assert!(!state.preferences.paste_condense_pilcrow);
 }
 
 #[test]
 fn emphasis_options_are_independent() {
     let mut state = make_state("", 0, None);
     state.set_emphasis(true, true, false);
-    assert!(state.emphasis_bold && state.emphasis_underline && !state.emphasis_box);
+    assert!(
+        state.preferences.emphasis_bold
+            && state.preferences.emphasis_underline
+            && !state.preferences.emphasis_box
+    );
 
     state.set_emphasis(false, true, true);
-    assert!(!state.emphasis_bold && state.emphasis_underline && state.emphasis_box);
+    assert!(
+        !state.preferences.emphasis_bold
+            && state.preferences.emphasis_underline
+            && state.preferences.emphasis_box
+    );
 }
 
 #[test]
@@ -2245,7 +2239,7 @@ fn a_new_document_is_a_complete_package_with_no_dangling_references() {
     let path = dir.join("New.docx");
 
     let mut state = make_state("", 0, None);
-    state.normal_text_size_half_points = 26;
+    state.preferences.normal_text_size_half_points = 26;
     state.set_card_size_points(CardStyleKind::Hat, 19);
     crate::docx_parser::create_new_docx(&default_paragraphs(), &path, state.new_doc_style())
         .unwrap();
@@ -2625,7 +2619,7 @@ fn card_menu_standardize_highlighting_works_after_a_round_trip() {
         }],
         "highlight",
     );
-    state.highlight_color = "yellow".to_string();
+    state.preferences.highlight_color = "yellow".to_string();
     state.standardize_highlighting();
     assert!(
         state.workspace.tabs[0].document.paragraphs()[0]
@@ -8919,9 +8913,9 @@ fn test_clear_formatting_resets_pocket_heading_alignment_and_size() {
     // apply_card_style also sets.
     let mut state = make_state("hello world", 0, None);
     state.apply_card_style(CardStyleKind::Pocket);
-    state.normal_text_size_half_points = 22; // 11pt, settings.conf's default
+    state.preferences.normal_text_size_half_points = 22; // 11pt, settings.conf's default
 
-    let default_size = state.normal_text_size_half_points;
+    let default_size = state.preferences.normal_text_size_half_points;
     state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
     let para = &state.workspace.tabs[0].document.paragraphs()[0];
@@ -8948,7 +8942,7 @@ fn test_clear_formatting_via_selection_resets_pocket_heading_and_alignment() {
     // inside a Pocket-styled line left it still boxed/centered.
     let mut state = make_state("hello world", 0, None);
     state.apply_card_style(CardStyleKind::Pocket);
-    state.normal_text_size_half_points = 22; // 11pt, settings.conf's default
+    state.preferences.normal_text_size_half_points = 22; // 11pt, settings.conf's default
 
     // Selection entirely inside the one (Pocket) paragraph.
     state.workspace.tabs[0].selection = Some((0, 5));
@@ -8991,7 +8985,7 @@ fn test_clear_formatting_on_empty_line_clears_stale_pending_format() {
     // branch (gated on `is_line_empty`) never even runs.
     let mut state = make_state("", 0, None);
     state.apply_card_style(CardStyleKind::Pocket);
-    let default_size = state.normal_text_size_half_points;
+    let default_size = state.preferences.normal_text_size_half_points;
     state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
     assert_eq!(
@@ -9015,7 +9009,7 @@ fn test_clear_formatting_on_empty_line_does_not_leak_box_across_newline() {
     // "cleared" line still ended up boxed too.
     let mut state = make_state("", 0, None);
     state.apply_card_style(CardStyleKind::Pocket);
-    let default_size = state.normal_text_size_half_points;
+    let default_size = state.preferences.normal_text_size_half_points;
     state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
     state.insert_char('a');
@@ -9156,7 +9150,7 @@ fn test_clear_formatting_on_hat_line_removes_double_underline_and_heading() {
     let mut state = make_state("hello world", 0, None);
     state.apply_card_style(CardStyleKind::Hat);
 
-    let default_size = state.normal_text_size_half_points;
+    let default_size = state.preferences.normal_text_size_half_points;
     state.apply_formatting_to_line(FormatOp::ClearAll { default_size });
 
     let para = &state.workspace.tabs[0].document.paragraphs()[0];
@@ -9214,9 +9208,9 @@ fn test_apply_card_style_pocket_block_tag_use_configured_sizes_not_hardcoded() {
     // CardStyleKind::font_size()'s fixed table — a changed setting must
     // actually take effect the next time the style is applied.
     let mut state = make_state("hello world", 0, None);
-    state.pocket_size_half_points = 60;
-    state.block_size_half_points = 40;
-    state.tag_size_half_points = 20;
+    state.preferences.pocket_size_half_points = 60;
+    state.preferences.block_size_half_points = 40;
+    state.preferences.tag_size_half_points = 20;
 
     state.apply_card_style(CardStyleKind::Pocket);
     assert!(state.workspace.tabs[0].document.paragraphs()[0]
@@ -9242,7 +9236,7 @@ fn test_apply_cite_style_applies_bold_and_configured_size_to_selection() {
     let paragraphs = vec![para_plain("hello")];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
     state.workspace.tabs[0].selection = Some((0, 5));
-    state.cite_size_half_points = 30;
+    state.preferences.cite_size_half_points = 30;
     state.apply_cite_style();
 
     let para = &state.workspace.tabs[0].document.paragraphs()[0];
@@ -9662,7 +9656,10 @@ fn delete_tags_strips_formatting_but_keeps_the_line() {
     assert_eq!(tag.runs[0].text, "A tag");
     assert!(!tag.runs[0].bold);
     assert_eq!(tag.runs[0].style, None);
-    assert_eq!(tag.runs[0].size, state.normal_text_size_half_points);
+    assert_eq!(
+        tag.runs[0].size,
+        state.preferences.normal_text_size_half_points
+    );
 }
 
 /// The marker is authoritative, exactly as it is for analytics: a
@@ -9683,7 +9680,7 @@ fn delete_tags_finds_a_marked_tag_whose_formatting_was_changed() {
     );
     assert_eq!(
         state.workspace.tabs[0].document.paragraphs()[0].runs[0].size,
-        state.normal_text_size_half_points
+        state.preferences.normal_text_size_half_points
     );
 }
 
@@ -9946,7 +9943,7 @@ fn test_shrink_text_sets_non_underlined_selection_to_small_size() {
     let paragraphs = vec![para_plain("hello world")];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
     state.workspace.tabs[0].selection = Some((0, 11));
-    state.small_size_half_points = 8;
+    state.preferences.small_size_half_points = 8;
     state.shrink_text();
 
     let para = &state.workspace.tabs[0].document.paragraphs()[0];
@@ -9962,8 +9959,8 @@ fn test_shrink_text_sets_non_underlined_selection_to_small_size() {
 fn underlining_a_shrunk_run_restores_it_to_body_size() {
     let paragraphs = vec![para_plain("hello world")];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.small_size_half_points = 8;
-    state.normal_text_size_half_points = 22;
+    state.preferences.small_size_half_points = 8;
+    state.preferences.normal_text_size_half_points = 22;
 
     state.workspace.tabs[0].selection = Some((0, 11));
     state.shrink_text();
@@ -10010,8 +10007,8 @@ fn underlining_leaves_sizes_that_are_not_the_shrink_size_alone() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.small_size_half_points = 8;
-    state.normal_text_size_half_points = 22;
+    state.preferences.small_size_half_points = 8;
+    state.preferences.normal_text_size_half_points = 22;
     state.workspace.tabs[0].selection = Some((0, 8)); // "bigsmall"
 
     state.apply_formatting_to_selection(FormatOp::Underline(true));
@@ -10039,8 +10036,8 @@ fn un_underlining_does_not_resize() {
         unsupported_xml: None,
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
-    state.small_size_half_points = 8;
-    state.normal_text_size_half_points = 22;
+    state.preferences.small_size_half_points = 8;
+    state.preferences.normal_text_size_half_points = 22;
     state.workspace.tabs[0].selection = Some((0, 4));
 
     // Already uniformly underlined, so this toggles off.
@@ -10078,7 +10075,7 @@ fn test_shrink_text_leaves_underlined_runs_untouched() {
     }];
     let mut state = make_state_with_paragraphs(paragraphs, 0);
     state.workspace.tabs[0].selection = Some((0, 10)); // whole line: "underplain"
-    state.small_size_half_points = 8;
+    state.preferences.small_size_half_points = 8;
     state.shrink_text();
 
     let runs = &state.workspace.tabs[0].document.paragraphs()[0].runs;
@@ -10671,7 +10668,7 @@ fn set_line_spacing_persists_and_round_trips() {
     state.settings_path = conf_path.clone();
 
     state.set_line_spacing(1.5);
-    assert_eq!(state.line_spacing, 1.5);
+    assert_eq!(state.preferences.line_spacing, 1.5);
     assert_eq!(
         crate::preferences::Preferences::load(&conf_path)
             .unwrap()
@@ -10682,7 +10679,7 @@ fn set_line_spacing_persists_and_round_trips() {
     // Out-of-range input is clamped before it is stored *or* written, so
     // the file can never hold a value the loader would have to fix up.
     state.set_line_spacing(99.0);
-    assert_eq!(state.line_spacing, 3.0);
+    assert_eq!(state.preferences.line_spacing, 3.0);
     assert_eq!(
         crate::preferences::Preferences::load(&conf_path)
             .unwrap()
@@ -11085,12 +11082,12 @@ fn test_palette_and_find_bar_are_mutually_exclusive() {
 fn test_disabling_the_palette_closes_an_open_one() {
     let mut state = make_state("", 0, None);
     state.settings_path = temp_test_dir("palette_disable").join("settings.conf");
-    state.command_palette_enabled = true;
+    state.preferences.command_palette_enabled = true;
     state.open_command_palette();
 
     state.toggle_command_palette_enabled();
 
-    assert!(!state.command_palette_enabled);
+    assert!(!state.preferences.command_palette_enabled);
     assert!(
         state.ui.command_palette.is_none(),
         "a panel its keybind can't reopen must not be left up"
@@ -11112,23 +11109,23 @@ fn test_feature_toggles_flip_and_persist() {
 
     let cases: Vec<(&str, fn(&mut AppState), fn(&AppState) -> bool)> = vec![
         ("spellcheck", AppState::toggle_spellcheck, |s| {
-            s.spellcheck_enabled
+            s.preferences.spellcheck_enabled
         }),
         ("nav_fold_buttons", AppState::toggle_nav_fold_buttons, |s| {
-            s.nav_fold_buttons
+            s.preferences.nav_fold_buttons
         }),
         ("search_from_list", AppState::toggle_search_from_list, |s| {
-            s.search_from_list_enabled
+            s.preferences.search_from_list_enabled
         }),
         (
             "search_list_whole_words",
             AppState::toggle_search_list_whole_words,
-            |s| s.search_list_whole_words,
+            |s| s.preferences.search_list_whole_words,
         ),
         (
             "command_palette",
             AppState::toggle_command_palette_enabled,
-            |s| s.command_palette_enabled,
+            |s| s.preferences.command_palette_enabled,
         ),
     ];
 
@@ -11332,7 +11329,7 @@ fn test_list_matches_does_not_rescan_per_match() {
 fn make_list_search_state(content: &str, list: &[&str], whole_words: bool) -> AppState {
     let mut state = make_state(content, 0, None);
     state.search_word_list = words(list);
-    state.search_list_whole_words = whole_words;
+    state.preferences.search_list_whole_words = whole_words;
     state.open_search_from_list();
     state
 }

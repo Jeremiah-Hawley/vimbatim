@@ -642,7 +642,7 @@ impl SettingsModal {
 
     fn set_spellcheck_color(&mut self, name: &'static str, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.spellcheck_underline_color = name.to_string();
+            s.preferences.spellcheck_underline_color = name.to_string();
             if let Err(error) = crate::theme::save_setting_line(
                 &settings_path(),
                 "spellcheck_underline_color",
@@ -667,7 +667,7 @@ impl SettingsModal {
     /// settings.conf stays hand-editable for an exact value.
     fn adjust_shrink_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let current = (s.small_size_half_points / 2) as i32;
+            let current = (s.preferences.small_size_half_points / 2) as i32;
             s.set_shrink_size_points((current + delta).max(0) as u16);
             cx.notify();
         });
@@ -686,7 +686,7 @@ impl SettingsModal {
         self.state.update(cx, |s, cx| {
             let current = match kind {
                 Some(kind) => s.card_size_half_points(kind),
-                None => s.cite_size_half_points,
+                None => s.preferences.cite_size_half_points,
             } as i32
                 / 2;
             let points = (current + delta).max(0) as u16;
@@ -701,7 +701,7 @@ impl SettingsModal {
 
     fn adjust_emphasis_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let current = (s.emphasis_size_half_points / 2) as i32;
+            let current = (s.preferences.emphasis_size_half_points / 2) as i32;
             s.set_emphasis_size_points((current + delta).max(0) as u16);
             cx.notify();
         });
@@ -710,9 +710,10 @@ impl SettingsModal {
 
     fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let next =
-                crate::state::clamp_spreading_wpm((s.spreading_wpm as i32 + delta).max(0) as u32);
-            s.spreading_wpm = next;
+            let next = crate::state::clamp_spreading_wpm(
+                (s.preferences.spreading_wpm as i32 + delta).max(0) as u32,
+            );
+            s.preferences.spreading_wpm = next;
             if let Err(error) = crate::theme::save_setting_line(
                 &settings_path(),
                 "spreading_wpm",
@@ -812,7 +813,7 @@ impl SettingsModal {
 
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.theme = theme;
+            s.preferences.theme = theme;
             if let Err(error) = save_theme(&settings_path(), theme) {
                 s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                     "Could not save theme: {error}"
@@ -825,7 +826,7 @@ impl SettingsModal {
 
     fn set_theme_color_mode(&mut self, mode: ThemeColorMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.theme_color_mode = mode;
+            s.preferences.theme_color_mode = mode;
             if let Err(error) = save_theme_color_mode(&settings_path(), mode) {
                 s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                     "Could not save theme color mode: {error}"
@@ -872,7 +873,7 @@ impl SettingsModal {
 
     fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.theme_mode = mode;
+            s.preferences.theme_mode = mode;
             if let Err(error) = save_theme_mode(&settings_path(), mode) {
                 s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                     "Could not save theme mode: {error}"
@@ -916,9 +917,9 @@ impl SettingsModal {
             s.keybinds = keybinds;
             s.global_vim.vim_keybinds = vim_keybinds;
             s.global_vim.vim_enabled = vim_enabled;
-            s.theme = theme;
-            s.theme_mode = theme_mode;
-            s.theme_color_mode = theme_color_mode;
+            s.preferences.theme = theme;
+            s.preferences.theme_mode = theme_mode;
+            s.preferences.theme_color_mode = theme_color_mode;
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
         self.cancel_vim_capture();
@@ -2623,13 +2624,18 @@ impl Render for SettingsModal {
             .preferences
             .spellcheck_underline_color
             .clone();
-        let spreading_wpm = self.state.read(cx).spreading_wpm;
+        let spreading_wpm = self.state.read(cx).preferences.spreading_wpm;
         let nav_fold_buttons = self.state.read(cx).preferences.nav_fold_buttons;
         let search_from_list_enabled = self.state.read(cx).preferences.search_from_list_enabled;
         let search_list_whole_words = self.state.read(cx).preferences.search_list_whole_words;
         let command_palette_enabled = self.state.read(cx).preferences.command_palette_enabled;
         let shrink_points = self.state.read(cx).preferences.small_size_half_points / 2;
-        let exception = self.state.read(cx).standardize_highlight_exception.clone();
+        let exception = self
+            .state
+            .read(cx)
+            .preferences
+            .standardize_highlight_exception
+            .clone();
         let analytic_color = self.state.read(cx).preferences.analytic_color.clone();
         // The same colors the HL Color dropdown offers — built-ins plus
         // whatever the user has saved — so the exception can name any highlight
@@ -2646,7 +2652,7 @@ impl Render for SettingsModal {
                 st.card_size_half_points(CardStyleKind::Hat) / 2,
                 st.card_size_half_points(CardStyleKind::Block) / 2,
                 st.card_size_half_points(CardStyleKind::Tag) / 2,
-                st.cite_size_half_points / 2,
+                st.preferences.cite_size_half_points / 2,
             ]
         };
         let (
@@ -2658,11 +2664,15 @@ impl Render for SettingsModal {
         ) = {
             let st = self.state.read(cx);
             (
-                (st.emphasis_bold, st.emphasis_underline, st.emphasis_box),
-                st.emphasis_change_size,
-                st.emphasis_size_half_points / 2,
-                st.paste_condense,
-                st.paste_condense_pilcrow,
+                (
+                    st.preferences.emphasis_bold,
+                    st.preferences.emphasis_underline,
+                    st.preferences.emphasis_box,
+                ),
+                st.preferences.emphasis_change_size,
+                st.preferences.emphasis_size_half_points / 2,
+                st.preferences.paste_condense,
+                st.preferences.paste_condense_pilcrow,
             )
         };
         let current_theme = self.state.read(cx).preferences.theme;

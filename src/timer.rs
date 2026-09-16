@@ -308,7 +308,7 @@ impl Timer {
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(cx.listener(move |this, _ev, _window, cx| {
                         this.state.update(cx, |state, cx| {
-                            on_click(&mut state.timer);
+                            on_click(&mut state.ui.timer);
                             cx.notify();
                         });
                         // Cheap to call when nothing started: it returns
@@ -409,6 +409,7 @@ impl Render for Timer {
         let unparseable = mode == TimerMode::Countdown && state.ui.timer.target().is_none();
         // Newest first: the lap you just took is the one you're reading.
         let laps: Vec<(usize, String)> = state
+            .ui
             .timer
             .laps
             .iter()

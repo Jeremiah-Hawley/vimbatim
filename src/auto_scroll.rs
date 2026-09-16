@@ -189,8 +189,9 @@ impl AutoScroller {
         // through the cache too if edge-drag scrolling ever measures as a real cost.
         let scroll_y = self.scroll_handle.offset().y.as_f32();
         let zoom = self.state.read(cx).zoom;
-        let font_size_px = self.state.read(cx).normal_text_size_half_points as f32 / 2.0;
-        let line_spacing = self.state.read(cx).line_spacing;
+        let font_size_px =
+            self.state.read(cx).preferences.normal_text_size_half_points as f32 / 2.0;
+        let line_spacing = self.state.read(cx).preferences.line_spacing;
         let content = self.state.read(cx).active_content().to_string();
         let paragraphs = self
             .state
@@ -215,7 +216,7 @@ impl AutoScroller {
             let st = self.state.read(cx);
             (
                 st.ui.invisibility_mode,
-                st.cite_size_half_points,
+                st.preferences.cite_size_half_points,
                 st.workspace
                     .tabs
                     .get(st.workspace.active_tab)

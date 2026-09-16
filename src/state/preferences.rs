@@ -10,39 +10,40 @@ impl AppState {
     }
 
     pub fn toggle_spellcheck(&mut self) {
-        self.spellcheck_enabled = !self.spellcheck_enabled;
-        self.preferences.spellcheck_enabled = self.spellcheck_enabled;
-        self.save_flag("spellcheck", self.spellcheck_enabled);
+        self.preferences.spellcheck_enabled = !self.preferences.spellcheck_enabled;
+        self.save_flag("spellcheck", self.preferences.spellcheck_enabled);
     }
 
     pub fn toggle_nav_fold_buttons(&mut self) {
-        self.nav_fold_buttons = !self.nav_fold_buttons;
-        self.preferences.nav_fold_buttons = self.nav_fold_buttons;
-        self.save_flag("nav_fold_buttons", self.nav_fold_buttons);
+        self.preferences.nav_fold_buttons = !self.preferences.nav_fold_buttons;
+        self.save_flag("nav_fold_buttons", self.preferences.nav_fold_buttons);
     }
 
     pub fn toggle_search_from_list(&mut self) {
-        self.search_from_list_enabled = !self.search_from_list_enabled;
-        self.preferences.search_from_list_enabled = self.search_from_list_enabled;
-        self.save_flag("search_from_list", self.search_from_list_enabled);
+        self.preferences.search_from_list_enabled = !self.preferences.search_from_list_enabled;
+        self.save_flag(
+            "search_from_list",
+            self.preferences.search_from_list_enabled,
+        );
     }
 
     pub fn toggle_search_list_whole_words(&mut self) {
-        self.search_list_whole_words = !self.search_list_whole_words;
-        self.preferences.search_list_whole_words = self.search_list_whole_words;
-        self.save_flag("search_list_whole_words", self.search_list_whole_words);
+        self.preferences.search_list_whole_words = !self.preferences.search_list_whole_words;
+        self.save_flag(
+            "search_list_whole_words",
+            self.preferences.search_list_whole_words,
+        );
         // The match count depends on this, so an open Search From List panel's
         // readout must follow the flip rather than going stale.
         self.refresh_find_matches();
     }
 
     pub fn toggle_command_palette_enabled(&mut self) {
-        self.command_palette_enabled = !self.command_palette_enabled;
-        self.preferences.command_palette_enabled = self.command_palette_enabled;
-        self.save_flag("command_palette", self.command_palette_enabled);
+        self.preferences.command_palette_enabled = !self.preferences.command_palette_enabled;
+        self.save_flag("command_palette", self.preferences.command_palette_enabled);
         // Turning the feature off closes an already-open palette, rather than
         // leaving a panel up that its keybind can no longer reopen.
-        if !self.command_palette_enabled {
+        if !self.preferences.command_palette_enabled {
             self.ui.command_palette = None;
         }
     }
@@ -70,8 +71,8 @@ impl AppState {
     /// symmetrically in `open_find_bar`) rather than at the call sites, so a
     /// future third opener can't forget it.
     pub fn toggle_paragraph_integrity(&mut self) {
-        self.paragraph_integrity = !self.paragraph_integrity;
-        if self.paragraph_integrity {
+        self.preferences.paragraph_integrity = !self.preferences.paragraph_integrity;
+        if self.preferences.paragraph_integrity {
             self.set_paste_condense(false);
         }
     }
@@ -81,21 +82,21 @@ impl AppState {
     /// Drives the `paste_condense_pilcrow` setting so the ribbon toggle and
     /// the settings modal are the same switch rather than two that disagree.
     pub fn toggle_pilcrows(&mut self) {
-        self.pilcrows = !self.pilcrows;
-        self.set_paste_condense_pilcrow(self.pilcrows);
+        self.preferences.pilcrows = !self.preferences.pilcrows;
+        self.set_paste_condense_pilcrow(self.preferences.pilcrows);
     }
 
     /// Setters for the text settings that persist to settings.conf, so a
     /// change made from the ribbon survives a restart exactly like one made in
     /// the settings modal.
     pub fn set_paste_condense(&mut self, on: bool) {
-        self.paste_condense = on;
+        self.preferences.paste_condense = on;
         self.preferences.paste_condense = on;
         self.save_setting("paste_condense", if on { "true" } else { "false" });
     }
 
     pub fn set_paste_condense_pilcrow(&mut self, on: bool) {
-        self.paste_condense_pilcrow = on;
+        self.preferences.paste_condense_pilcrow = on;
         self.preferences.paste_condense_pilcrow = on;
         self.save_setting("paste_condense_pilcrow", if on { "true" } else { "false" });
     }
@@ -105,7 +106,7 @@ impl AppState {
     /// what `small_size` has always held and what the user reads.
     pub fn set_shrink_size_points(&mut self, points: u16) {
         let points = clamp_shrink_size_points(points);
-        self.small_size_half_points = points * 2;
+        self.preferences.small_size_half_points = points * 2;
         self.preferences.small_size_half_points = points * 2;
         self.save_setting("small_size", &points.to_string());
     }
@@ -127,7 +128,7 @@ impl AppState {
             .and_then(|t| t.docx_origin.as_ref())
             .map(|o| o.doc_defaults.size)
             .filter(|&size| size > 0)
-            .unwrap_or(self.normal_text_size_half_points)
+            .unwrap_or(self.preferences.normal_text_size_half_points)
     }
 
     /// The active document's own default body font, if it declares one — the
@@ -152,19 +153,20 @@ impl AppState {
     /// normal save instead of quietly writing the defaults.
     pub fn new_doc_style(&self) -> crate::docx_parser::NewDocStyle {
         crate::docx_parser::NewDocStyle {
-            normal_size: self.normal_text_size_half_points,
-            line_spacing: self.line_spacing,
-            pocket_size: self.pocket_size_half_points,
-            hat_size: self.hat_size_half_points,
-            block_size: self.block_size_half_points,
-            tag_size: self.tag_size_half_points,
-            cite_size: self.cite_size_half_points,
-            emphasis_bold: self.emphasis_bold,
-            emphasis_underline: self.emphasis_underline,
-            emphasis_box: self.emphasis_box,
+            normal_size: self.preferences.normal_text_size_half_points,
+            line_spacing: self.preferences.line_spacing,
+            pocket_size: self.preferences.pocket_size_half_points,
+            hat_size: self.preferences.hat_size_half_points,
+            block_size: self.preferences.block_size_half_points,
+            tag_size: self.preferences.tag_size_half_points,
+            cite_size: self.preferences.cite_size_half_points,
+            emphasis_bold: self.preferences.emphasis_bold,
+            emphasis_underline: self.preferences.emphasis_underline,
+            emphasis_box: self.preferences.emphasis_box,
             emphasis_size: self
+                .preferences
                 .emphasis_change_size
-                .then_some(self.emphasis_size_half_points),
+                .then_some(self.preferences.emphasis_size_half_points),
         }
     }
 
@@ -174,10 +176,10 @@ impl AppState {
     /// size actually applied to the runs.
     pub fn card_size_half_points(&self, kind: CardStyleKind) -> u16 {
         match kind {
-            CardStyleKind::Pocket => self.pocket_size_half_points,
-            CardStyleKind::Hat => self.hat_size_half_points,
-            CardStyleKind::Block => self.block_size_half_points,
-            CardStyleKind::Tag => self.tag_size_half_points,
+            CardStyleKind::Pocket => self.preferences.pocket_size_half_points,
+            CardStyleKind::Hat => self.preferences.hat_size_half_points,
+            CardStyleKind::Block => self.preferences.block_size_half_points,
+            CardStyleKind::Tag => self.preferences.tag_size_half_points,
         }
     }
 
@@ -188,10 +190,10 @@ impl AppState {
     pub fn set_card_size_points(&mut self, kind: CardStyleKind, points: u16) {
         let points = clamp_card_size_points(points);
         match kind {
-            CardStyleKind::Pocket => self.pocket_size_half_points = points * 2,
-            CardStyleKind::Hat => self.hat_size_half_points = points * 2,
-            CardStyleKind::Block => self.block_size_half_points = points * 2,
-            CardStyleKind::Tag => self.tag_size_half_points = points * 2,
+            CardStyleKind::Pocket => self.preferences.pocket_size_half_points = points * 2,
+            CardStyleKind::Hat => self.preferences.hat_size_half_points = points * 2,
+            CardStyleKind::Block => self.preferences.block_size_half_points = points * 2,
+            CardStyleKind::Tag => self.preferences.tag_size_half_points = points * 2,
         }
         match kind {
             CardStyleKind::Pocket => self.preferences.pocket_size_half_points = points * 2,
@@ -212,7 +214,7 @@ impl AppState {
     /// not the whole line) and so keeps its own setter.
     pub fn set_cite_size_points(&mut self, points: u16) {
         let points = clamp_card_size_points(points);
-        self.cite_size_half_points = points * 2;
+        self.preferences.cite_size_half_points = points * 2;
         self.preferences.cite_size_half_points = points * 2;
         self.save_setting("cite_size", &points.to_string());
     }
@@ -222,7 +224,7 @@ impl AppState {
     /// `set_shrink_size_points`.
     pub fn set_emphasis_size_points(&mut self, points: u16) {
         let points = clamp_emphasis_size_points(points);
-        self.emphasis_size_half_points = points * 2;
+        self.preferences.emphasis_size_half_points = points * 2;
         self.preferences.emphasis_size_half_points = points * 2;
         self.save_setting("emphasis_size", &points.to_string());
     }
@@ -244,13 +246,13 @@ impl AppState {
     /// settings.conf is a file users read and hand-edit.
     pub fn set_line_spacing(&mut self, spacing: f32) {
         let spacing = clamp_line_spacing(spacing);
-        self.line_spacing = spacing;
+        self.preferences.line_spacing = spacing;
         self.preferences.line_spacing = spacing;
         self.save_setting("line_spacing", &format!("{spacing:.1}"));
     }
 
     pub fn set_emphasis_change_size(&mut self, on: bool) {
-        self.emphasis_change_size = on;
+        self.preferences.emphasis_change_size = on;
         self.preferences.emphasis_change_size = on;
         self.save_setting("emphasis_change_size", if on { "true" } else { "false" });
     }
@@ -265,13 +267,13 @@ impl AppState {
     /// `name` is a Word highlight-color name or a bare 6-digit hex, matching
     /// what `Run.highlight_color` stores.
     pub fn set_highlight_color(&mut self, name: &str) {
-        self.highlight_color = name.to_string();
+        self.preferences.highlight_color = name.to_string();
         self.preferences.highlight_color = name.to_string();
         self.save_setting("highlight_color", name);
     }
 
     pub fn set_analytic_color(&mut self, hex: &str) {
-        self.analytic_color = hex.to_string();
+        self.preferences.analytic_color = hex.to_string();
         self.preferences.analytic_color = hex.to_string();
         self.save_setting("analytic_color", hex);
     }
@@ -279,15 +281,15 @@ impl AppState {
     /// The highlight color "Standardize highlighting with exception" spares.
     /// An empty string clears it.
     pub fn set_standardize_exception(&mut self, name: &str) {
-        self.standardize_highlight_exception = name.to_string();
+        self.preferences.standardize_highlight_exception = name.to_string();
         self.preferences.standardize_highlight_exception = name.to_string();
         self.save_setting("standardize_highlight_exception", name);
     }
 
     pub fn set_emphasis(&mut self, bold: bool, underline: bool, boxed: bool) {
-        self.emphasis_bold = bold;
-        self.emphasis_underline = underline;
-        self.emphasis_box = boxed;
+        self.preferences.emphasis_bold = bold;
+        self.preferences.emphasis_underline = underline;
+        self.preferences.emphasis_box = boxed;
         self.preferences.emphasis_bold = bold;
         self.preferences.emphasis_underline = underline;
         self.preferences.emphasis_box = boxed;
@@ -319,8 +321,8 @@ impl AppState {
     /// mode nobody can see would look like the key did nothing.
     pub fn custom_colors(&self, target: CustomColorTarget) -> &[u32] {
         match target {
-            CustomColorTarget::Font => &self.custom_font_colors,
-            CustomColorTarget::Highlight => &self.custom_highlight_colors,
+            CustomColorTarget::Font => &self.preferences.custom_font_colors,
+            CustomColorTarget::Highlight => &self.preferences.custom_highlight_colors,
         }
     }
 
@@ -328,8 +330,8 @@ impl AppState {
     /// color moves it to the end (most recent) rather than duplicating it.
     pub fn add_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
         let list = match target {
-            CustomColorTarget::Font => &mut self.custom_font_colors,
-            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+            CustomColorTarget::Font => &mut self.preferences.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.preferences.custom_highlight_colors,
         };
         if let Some(pos) = list.iter().position(|c| *c == hex) {
             list.remove(pos);
@@ -346,8 +348,8 @@ impl AppState {
     /// in the picker.
     pub fn remove_custom_color(&mut self, target: CustomColorTarget, hex: u32) {
         let list = match target {
-            CustomColorTarget::Font => &mut self.custom_font_colors,
-            CustomColorTarget::Highlight => &mut self.custom_highlight_colors,
+            CustomColorTarget::Font => &mut self.preferences.custom_font_colors,
+            CustomColorTarget::Highlight => &mut self.preferences.custom_highlight_colors,
         };
         let Some(pos) = list.iter().position(|c| *c == hex) else {
             return;

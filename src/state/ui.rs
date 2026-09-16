@@ -85,7 +85,7 @@ impl AppState {
         // Cloned up front so the `self.workspace.tabs` borrow below doesn't overlap the
         // word list's own `&self` borrow.
         let words = self.search_word_list.clone();
-        let whole_words = self.search_list_whole_words;
+        let whole_words = self.preferences.search_list_whole_words;
 
         let (count, current) = match self.workspace.tabs.get(self.workspace.active_tab) {
             // List mode walks every word's matches merged into document order.
@@ -136,7 +136,7 @@ impl AppState {
         };
         let (query, list_mode) = (bar.query.clone(), bar.list_mode);
         let words = self.search_word_list.clone();
-        let whole_words = self.search_list_whole_words;
+        let whole_words = self.preferences.search_list_whole_words;
         if list_mode {
             if words.is_empty() {
                 return false;
@@ -264,15 +264,15 @@ impl AppState {
     /// which is a `const fn` with no access to `custom_theme` and would
     /// silently fall back to a placeholder for `ThemeKind::Custom`.
     pub fn current_palette(&self) -> crate::theme::Palette {
-        if self.theme == crate::theme::ThemeKind::Custom {
+        if self.preferences.theme == crate::theme::ThemeKind::Custom {
             if let Some((dark, light)) = self.custom_theme {
-                return match self.theme_mode {
+                return match self.preferences.theme_mode {
                     crate::theme::ThemeMode::Dark => dark,
                     crate::theme::ThemeMode::Light => light,
                 };
             }
         }
-        crate::theme::palette(self.theme, self.theme_mode)
+        crate::theme::palette(self.preferences.theme, self.preferences.theme_mode)
     }
 
     /// Settings -> Themes -> Import Theme: parses `content` (the picked
@@ -287,9 +287,9 @@ impl AppState {
             return false;
         };
         self.custom_theme = Some(parsed);
-        self.theme = crate::theme::ThemeKind::Custom;
+        self.preferences.theme = crate::theme::ThemeKind::Custom;
         let _ = std::fs::write(custom_theme_path(), content);
-        let _ = crate::theme::save_theme(&settings_conf_path(), self.theme);
+        let _ = crate::theme::save_theme(&settings_conf_path(), self.preferences.theme);
         true
     }
 

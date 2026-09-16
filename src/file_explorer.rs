@@ -1484,7 +1484,7 @@ impl Render for FileExplorer {
         let sidebar_width = state.sidebar_width;
         let has_copied_file = state.copied_file.is_some();
         let pending_cut = state.copied_file.as_ref().is_some_and(|(_, cut)| *cut);
-        let nav_fold_buttons = state.nav_fold_buttons;
+        let nav_fold_buttons = state.preferences.nav_fold_buttons;
         let _ = state;
 
         let state_handle = self.state.clone();

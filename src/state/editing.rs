@@ -42,9 +42,6 @@ impl AppState {
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_keybinds = crate::vim_keybinds::VimKeybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);
-        let theme = preferences.theme;
-        let theme_mode = preferences.theme_mode;
-        let theme_color_mode = preferences.theme_color_mode;
         // Present only if the user has actually imported one — a missing
         // file is the normal "never imported" state, not an error. Like
         // `user_dictionary_path()`, always the real global path regardless
@@ -52,15 +49,8 @@ impl AppState {
         let custom_theme = std::fs::read_to_string(custom_theme_path())
             .ok()
             .and_then(|s| crate::theme::parse_custom_theme_toml(&s));
-        let normal_text_size_half_points = preferences.normal_text_size_half_points;
         // `CardStyleKind::font_size` is the one place these defaults live, so
         // an absent settings key and the enum can't disagree.
-        let pocket_size_half_points = preferences.pocket_size_half_points;
-        let hat_size_half_points = preferences.hat_size_half_points;
-        let block_size_half_points = preferences.block_size_half_points;
-        let tag_size_half_points = preferences.tag_size_half_points;
-        let cite_size_half_points = preferences.cite_size_half_points;
-        let small_size_half_points = preferences.small_size_half_points;
 
         AppState {
             workspace: WorkspaceState {
@@ -84,20 +74,10 @@ impl AppState {
                 vim_keybinds,
                 ..Default::default()
             },
-            preferences: preferences.clone(),
-            sidebar_visible: true,
+            preferences,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             copied_file: None,
-            nav_fold_buttons: preferences.nav_fold_buttons,
-            search_from_list_enabled: preferences.search_from_list_enabled,
             search_word_list: load_word_list(&search_word_list_path()),
-            search_list_whole_words: preferences.search_list_whole_words,
-            command_palette_enabled: preferences.command_palette_enabled,
-            word_count_visible: false,
-            timer: crate::timer::TimerState::default(),
-            spreading_wpm: preferences.spreading_wpm,
-            custom_font_colors: preferences.custom_font_colors,
-            custom_highlight_colors: preferences.custom_highlight_colors,
             sidebar_mode: SidebarMode::default(),
             // Recovery scanning happens after the window opens on GPUI's
             // background executor; startup must not recursively walk the
@@ -106,34 +86,9 @@ impl AppState {
                 pending_entries: Vec::new(),
             },
             keybinds,
-            theme,
-            theme_mode,
-            theme_color_mode,
             custom_theme,
-            normal_text_size_half_points,
-            line_spacing: preferences.line_spacing,
-            pocket_size_half_points,
-            hat_size_half_points,
-            block_size_half_points,
-            tag_size_half_points,
-            cite_size_half_points,
-            small_size_half_points,
             zoom: 1.0,
-            paragraph_integrity: preferences.paragraph_integrity,
-            pilcrows: preferences.pilcrows,
-            highlight_color: preferences.highlight_color,
-            analytic_color: preferences.analytic_color,
-            standardize_highlight_exception: preferences.standardize_highlight_exception,
-            emphasis_bold: preferences.emphasis_bold,
-            emphasis_underline: preferences.emphasis_underline,
-            emphasis_box: preferences.emphasis_box,
-            emphasis_change_size: preferences.emphasis_change_size,
-            emphasis_size_half_points: preferences.emphasis_size_half_points,
-            paste_condense: preferences.paste_condense,
-            paste_condense_pilcrow: preferences.paste_condense_pilcrow,
             settings_path: settings_path.to_path_buf(),
-            spellcheck_enabled: preferences.spellcheck_enabled,
-            spellcheck_underline_color: preferences.spellcheck_underline_color,
             user_dictionary: Rc::new(load_user_dictionary(&user_dictionary_path())),
         }
     }
@@ -277,7 +232,7 @@ impl AppState {
         }
 
         self.push_undo_snapshot();
-        let default_size = self.normal_text_size_half_points;
+        let default_size = self.preferences.normal_text_size_half_points;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             for para in tab.document.paragraphs_mut() {
                 if !is_tag(para) {
@@ -778,8 +733,8 @@ impl AppState {
                         op.clone()
                     };
                     let (small, normal) = (
-                        self.small_size_half_points,
-                        self.normal_text_size_half_points,
+                        self.preferences.small_size_half_points,
+                        self.preferences.normal_text_size_half_points,
                     );
                     for &(start, end) in &ranges {
                         apply_formatting(
@@ -853,8 +808,8 @@ impl AppState {
                     };
                     self.push_undo_snapshot();
                     let (small, normal) = (
-                        self.small_size_half_points,
-                        self.normal_text_size_half_points,
+                        self.preferences.small_size_half_points,
+                        self.preferences.normal_text_size_half_points,
                     );
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                         let unshrink = matches!(effective_op, FormatOp::Underline(true));
@@ -903,7 +858,7 @@ impl AppState {
          * line — a multi-paragraph selection left every other paragraph
          * still formatted.
          */
-        let default_size = self.normal_text_size_half_points;
+        let default_size = self.preferences.normal_text_size_half_points;
         let has_selection = self
             .workspace
             .tabs
@@ -930,8 +885,8 @@ impl AppState {
         if text.is_empty() {
             return;
         }
-        let processed = if self.paste_condense {
-            let replacement = if self.paste_condense_pilcrow {
+        let processed = if self.preferences.paste_condense {
+            let replacement = if self.preferences.paste_condense_pilcrow {
                 "¶"
             } else {
                 " "
@@ -957,7 +912,7 @@ impl AppState {
     /// the ordinary highlighting. With no exception configured this is exactly
     /// the plain command.
     pub fn standardize_highlighting_with_exception(&mut self) {
-        let exception = self.standardize_highlight_exception.clone();
+        let exception = self.preferences.standardize_highlight_exception.clone();
         let exception = (!exception.is_empty()).then_some(exception);
         self.standardize_highlights(exception.as_deref());
     }
@@ -970,7 +925,7 @@ impl AppState {
     /// that are not highlighted are untouched; this only changes *which*
     /// highlight, never adds or removes one.
     fn standardize_highlights(&mut self, except: Option<&str>) {
-        let color = self.highlight_color.clone();
+        let color = self.preferences.highlight_color.clone();
         let repaints = |run: &Run| {
             run.highlight
                 && run.highlight_color != color
@@ -1442,7 +1397,7 @@ impl AppState {
          * touched when they fall fully inside the selection (no splitting
          * at partial overlaps), matching this method's pre-existing scan.
          */
-        let small_size = self.small_size_half_points;
+        let small_size = self.preferences.small_size_half_points;
         let selection = self
             .workspace
             .tabs
@@ -1825,8 +1780,8 @@ impl AppState {
     /// clears that marker rather than leaving a heading that no longer looks
     /// like one.
     pub fn apply_analytic_style(&mut self) {
-        let size = self.tag_size_half_points;
-        let color = self.analytic_color.clone();
+        let size = self.preferences.tag_size_half_points;
+        let color = self.preferences.analytic_color.clone();
         self.apply_formatting_to_line(FormatOp::Bold(true));
         self.apply_formatting_to_line(FormatOp::FontSize(size));
         self.apply_formatting_to_line(FormatOp::Color(Some(color)));
@@ -1854,8 +1809,8 @@ impl AppState {
     /// Returns a closure so the borrow of `self` ends before callers mutate
     /// `tabs`.
     fn analytic_paragraph_test(&self) -> impl Fn(&Paragraph) -> bool {
-        let size = self.tag_size_half_points;
-        let color = self.analytic_color.clone();
+        let size = self.preferences.tag_size_half_points;
+        let color = self.preferences.analytic_color.clone();
         move |para: &Paragraph| {
             // A blank line is never an analytic, however its runs are styled.
             let has_text = !para.runs.iter().all(|r| r.text.trim().is_empty());
@@ -2007,12 +1962,13 @@ impl AppState {
                 }
             });
 
-        let bold = self.emphasis_bold;
-        let underline = self.emphasis_underline;
-        let boxed = self.emphasis_box;
+        let bold = self.preferences.emphasis_bold;
+        let underline = self.preferences.emphasis_underline;
+        let boxed = self.preferences.emphasis_box;
         let size = self
+            .preferences
             .emphasis_change_size
-            .then_some(self.emphasis_size_half_points);
+            .then_some(self.preferences.emphasis_size_half_points);
 
         let apply_all = |paragraphs: &mut Vec<Paragraph>, start: usize, end: usize| {
             if bold {
@@ -2065,7 +2021,7 @@ impl AppState {
 
     pub fn apply_cite_style(&mut self) {
         self.apply_formatting_to_selection(FormatOp::Bold(true));
-        let size = self.cite_size_half_points;
+        let size = self.preferences.cite_size_half_points;
         self.apply_formatting_to_selection(FormatOp::FontSize(size));
         self.apply_formatting_to_selection(FormatOp::Style(Some(CardStyle::Cite)));
     }

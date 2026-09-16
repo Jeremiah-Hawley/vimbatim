@@ -969,7 +969,9 @@ impl FormattingRibbon {
                                     // keep naming their own color.
                                     let op = match (act, op) {
                                         (FormatAction::Highlight, FormatOp::Highlight(_)) => {
-                                            FormatOp::Highlight(Some(state.highlight_color.clone()))
+                                            FormatOp::Highlight(Some(
+                                                state.preferences.highlight_color.clone(),
+                                            ))
                                         }
                                         (_, op) => op,
                                     };
@@ -1084,7 +1086,7 @@ impl FormattingRibbon {
         // it displays as the configured body size, which is what it paints at.
         let current_points = {
             let state = self.state.read(cx);
-            let default_points = state.normal_text_size_half_points as f32 / 2.0;
+            let default_points = state.preferences.normal_text_size_half_points as f32 / 2.0;
             state.selection_font_size_half_points().map(|half| {
                 if half == 0 {
                     default_points
@@ -1190,7 +1192,7 @@ impl FormattingRibbon {
     /// Clamped to 1..=409pt, Word's own range.
     fn step_font_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |state, _cx| {
-            let default_half = state.normal_text_size_half_points;
+            let default_half = state.preferences.normal_text_size_half_points;
             let current_half = match state.selection_font_size_half_points() {
                 Some(0) | None => default_half,
                 Some(half) => half,
@@ -2361,7 +2363,10 @@ impl Render for FormattingRibbon {
         let state = self.state.clone();
         let (p, color_mode) = {
             let state_read = state.read(cx);
-            (state_read.current_palette(), state_read.theme_color_mode)
+            (
+                state_read.current_palette(),
+                state_read.preferences.theme_color_mode,
+            )
         };
         let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
         // let print_layout = self.state.read(cx).ui.print_layout; // see the

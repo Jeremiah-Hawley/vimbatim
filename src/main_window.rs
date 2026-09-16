@@ -569,7 +569,7 @@ impl MainWindow {
             // it conditional would mean rebuilding the keymap on every toggle
             // flip. Nothing else claims Ctrl+P, so swallowing the keystroke
             // while the feature is off costs nothing.
-            if !s.read(cx).command_palette_enabled {
+            if !s.read(cx).preferences.command_palette_enabled {
                 return;
             }
             s.update(cx, |st, cx| {
@@ -975,7 +975,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &HighlightAction, cx| {
             s.update(cx, |st, cx| {
-                let color = st.highlight_color.clone();
+                let color = st.preferences.highlight_color.clone();
                 st.dispatch(crate::app::command::AppCommand::ApplyFormatting(
                     FormatOp::Highlight(Some(color)),
                 ));

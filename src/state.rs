@@ -954,7 +954,6 @@ pub struct AppState {
     /// Typed persisted settings. Legacy mirrors remain until their setters
     /// are migrated, avoiding a behavior-changing bulk rewrite.
     pub preferences: crate::preferences::Preferences,
-    pub sidebar_visible: bool,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
     /// settings.conf — resets to `DEFAULT_SIDEBAR_WIDTH` every launch.
@@ -979,7 +978,6 @@ pub struct AppState {
     /// same "Show Heading Level N" filter the Nav right-click menu offers.
     /// Off by default — the right-click menu is always available, this is
     /// just a shortcut for people who use it constantly.
-    pub nav_fold_buttons: bool,
     /// Open state of the text editor's right-click menu, `None` when closed.
     /// See `EditorContextMenu`.
 
@@ -987,7 +985,6 @@ pub struct AppState {
 
     /// Settings → Toggle Features "Search From List": gates the toolbar button
     /// and the word-list editor. Off by default.
-    pub search_from_list_enabled: bool,
     /// The words Search From List looks for, one per line as the user typed
     /// them, already trimmed of blanks (`parse_word_list`).
     ///
@@ -1000,31 +997,20 @@ pub struct AppState {
     /// Whether list search requires whole-word matches ("war" not matching
     /// "warming"). On by default — a curated word list almost always means
     /// whole words, unlike the substring semantics Find uses.
-    pub search_list_whole_words: bool,
     /// Settings → Toggle Features "Command Palette": gates the Ctrl+P handler
     /// and the palette's own row in Settings → Keybinds. Off by default.
-    pub command_palette_enabled: bool,
     /// Open state of the command palette, `None` when closed. Shares its slot
     /// under the ribbon with `find_bar` — see `open_command_palette`.
 
-    /// Whether the word-count panel (`src/word_count.rs`) is showing.
-    pub word_count_visible: bool,
-    /// The speech timer popup and its clock (`src/timer.rs`). Lives here
-    /// rather than in the view so the `start_timer` keybind and the ribbon's
-    /// Timer button reach the same state.
-    pub timer: crate::timer::TimerState,
     /// settings.conf `[FORMATTING] spreading_wpm` — the reading rate the word
     /// count panel divides by for its time estimate. "Spreading" is debate's
     /// term for reading at speed, so this is deliberately not a prose-reading
     /// default.
-    pub spreading_wpm: u32,
     /// Colors the user added from the Font Color and HL Color dropdowns'
     /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
     /// `[FORMATTING]` section so they survive a restart, capped at
     /// `MAX_CUSTOM_COLORS`. Kept as two lists on purpose — see
     /// `CustomColorTarget`.
-    pub custom_font_colors: Vec<u32>,
-    pub custom_highlight_colors: Vec<u32>,
     /// Which view the left sidebar shows — the file tree, or (Nav) a
     /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
     /// Toggled from two places that both flip the same field: the ribbon's
@@ -1061,12 +1047,9 @@ pub struct AppState {
     /// `pending_clipboard_sync` below. Drained by `text_editor.rs`'s
     /// `process_key_plain`, immediately after a vim keystroke is handled,
     /// via `take_pending_vim_action` + `window.dispatch_action`.
-    pub theme: crate::theme::ThemeKind,
     /// Light or dark variant of `theme`. Orthogonal to the theme itself —
     /// every `ThemeKind` ships both, so this only swaps the palette's
     /// lightness, keeping the user's chosen color family.
-    pub theme_mode: crate::theme::ThemeMode,
-    pub theme_color_mode: crate::theme::ThemeColorMode,
     /// The user's imported theme (Settings -> Themes -> Import Theme),
     /// `(dark, light)`, loaded from `custom_theme_path()` at startup if that
     /// file exists. `None` until an import happens; only one at a time —
@@ -1081,14 +1064,12 @@ pub struct AppState {
     /// which covers a brand-new document's single default run same as any
     /// other plain-typed text), and the size "Clear Formatting" resets a
     /// line back to. See `load_normal_text_size_half_points`.
-    pub normal_text_size_half_points: u16,
     /// `line_spacing` from settings.conf — the multiplier applied to every
     /// row's height, in Word's own unit (1.0 = single, 1.5, 2.0 = double).
     /// Multiplies `text_editor::LINE_HEIGHT_RATIO` rather than replacing it,
     /// so 1.0 keeps exactly the spacing this app already shipped and the
     /// setting scales relative to whatever `normal_text_size` is set to.
     /// See `load_line_spacing` and `set_line_spacing`.
-    pub line_spacing: f32,
     /// `pocket_size`/`hat_size`/`block_size`/`tag_size`/`cite_size` from
     /// settings.conf, in half-points (`Run.size`'s unit) — the font sizes
     /// `apply_card_style` applies for those styles. See
@@ -1100,18 +1081,12 @@ pub struct AppState {
     /// hardcode `CardStyleKind::font_size`'s constants — invisible while direct
     /// run formatting wins in Word, but two sources of truth for the same
     /// number.
-    pub pocket_size_half_points: u16,
-    pub hat_size_half_points: u16,
-    pub block_size_half_points: u16,
-    pub tag_size_half_points: u16,
     /// The size Cite applies alongside bold (`main_window.rs`'s `CiteAction`
     /// handler and the ribbon's Cite button, `formatting_ribbon.rs`) — Cite
     /// isn't a `CardStyleKind` (it targets the selection, not the whole
     /// line), so it keeps its own field rather than sharing the enum.
-    pub cite_size_half_points: u16,
     /// `small_size` from settings.conf, in half-points (`Run.size`'s unit) —
     /// the size Shrink (`shrink_text`) sets non-underlined selected text to.
-    pub small_size_half_points: u16,
     /// Editor text zoom multiplier (`found_bugs.md`'s Ctrl+=/Ctrl+-/Ctrl+0
     /// zoom, rebuilt from scratch — no trace of a prior implementation
     /// survived in git history). Applied only to the document text
@@ -1189,8 +1164,6 @@ pub struct AppState {
     /// until that Insert session ends so the two can be combined into one
     /// `VimChange::OperatorInsert` — real vim's `.` after `cw<text><Esc>`
     /// repeats both the deletion and the retyped text.
-    pub paragraph_integrity: bool,
-    pub pilcrows: bool,
     /// settings.conf `highlight_color` — the color the Highlight button and
     /// keybind apply. A Word highlight-color name (any of the six the ribbon's
     /// HL Color dropdown offers), or a bare 6-digit hex; resolved by
@@ -1198,34 +1171,24 @@ pub struct AppState {
     ///
     /// Edited by hand in settings.conf, not in the settings modal — the
     /// dropdown is where colors get picked.
-    pub highlight_color: String,
     /// settings.conf `analytic_color` — the text color the Analytic style
     /// applies, as a 6-digit hex (`Run.color`'s own form, no leading `#`).
-    pub analytic_color: String,
     /// settings.conf `standardize_highlight_exception` — a highlight color
     /// that "Standardize highlighting with exception" leaves alone. Empty
     /// means no exception, and that command behaves like the plain one.
-    pub standardize_highlight_exception: String,
     /// Which run formatting the Emphasis command applies. Independent, not
     /// mutually exclusive — Word's own "emphasis" is whatever combination a
     /// squad has standardised on. Read by `AppState::apply_emphasis_style`.
-    pub emphasis_bold: bool,
-    pub emphasis_underline: bool,
-    pub emphasis_box: bool,
     /// Whether Emphasis also resizes text to `emphasis_size_half_points` —
     /// its own toggle rather than always-on, so emphasizing doesn't force a
     /// size change on documents that don't want one.
-    pub emphasis_change_size: bool,
     /// The point size (half-points, `Run.size`'s unit) Emphasis resizes text
     /// to when `emphasis_change_size` is on. Same stepper-clamped shape as
     /// `small_size_half_points`.
-    pub emphasis_size_half_points: u16,
     /// Whether the paste command (f2 / the ribbon's Paste button) condenses
     /// the pasted text, collapsing its newlines instead of keeping them.
-    pub paste_condense: bool,
     /// When condensing, mark each collapsed newline with a pilcrow instead of
     /// a plain space. Only meaningful while `paste_condense` is on.
-    pub paste_condense_pilcrow: bool,
     /// The settings.conf this state reads from and writes back to.
     ///
     /// Held as a field rather than calling `settings_conf_path()` at each
@@ -1236,12 +1199,10 @@ pub struct AppState {
     pub settings_path: PathBuf,
     /// settings.conf `[SPELLCHECK]`. When false the editor skips the whole
     /// spellcheck path for the cost of one bool check per row.
-    pub spellcheck_enabled: bool,
     /// The squiggle color, kept as the raw settings.conf string (a Word
     /// color name like `red`, or a bare 6-digit hex) and resolved through
     /// `text_editor::highlight_color_hex` at paint time — that function
     /// already handles both forms, so there's nothing to parse here.
-    pub spellcheck_underline_color: String,
     /// Words the user added via the right-click menu's "Add to Dictionary",
     /// lowercased. Backed by `user_dictionary.txt` next to settings.conf.
     ///
@@ -1482,12 +1443,6 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
 /// anything after the last dot: `set_extension` turns "neg.v2" into "neg.docx",
 /// silently eating part of the name. An existing `.docx` (in any case — Windows
 /// pickers hand back `.DOCX`) is left exactly as the user wrote it.
-/// Reading rate used when settings.conf has no `spreading_wpm`. Conversational
-/// speech is ~150 wpm and prose reading ~250; competitive debate "spreading"
-/// sits far above both, and 300 is a common mid-range figure to start from.
-#[cfg(test)]
-pub const DEFAULT_SPREADING_WPM: u32 = 300;
-
 /// Clamps the shrink size (points) to something a document can actually use.
 /// Wide enough for any real "small text" convention, narrow enough that the
 /// stepper can't walk it somewhere unreadable.

@@ -652,7 +652,7 @@ impl TextEditor {
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let line_spacing = state.line_spacing;
+        let line_spacing = state.preferences.line_spacing;
         let _ = state;
 
         // `scroll_to_cursor` calls this on essentially every key event, so
@@ -719,7 +719,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let dragging = state.workspace.split_dragging;
         let invisibility = state.ui.invisibility_mode;
-        let cite_size = state.cite_size_half_points;
+        let cite_size = state.preferences.cite_size_half_points;
         let fold_version = idx
             .and_then(|i| state.workspace.tabs.get(i))
             .map(|t| t.fold_version)
@@ -737,7 +737,7 @@ impl TextEditor {
             .map(|t| t.document.content_version)
             .unwrap_or(0);
         let zoom = state.zoom;
-        let line_spacing = state.line_spacing;
+        let line_spacing = state.preferences.line_spacing;
         if let Some(cache) = self.row_cache.as_ref() {
             if row_cache_is_valid_for(
                 cache,
@@ -812,7 +812,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let row_height = row_slot_px(normal_size_px, state.line_spacing, zoom);
+        let row_height = row_slot_px(normal_size_px, state.preferences.line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
         }
@@ -1166,7 +1166,7 @@ impl Render for TextEditor {
         // below comes from the palette so light mode reaches the document
         // surface too, not just the frame around it.
         let p = state.current_palette();
-        let theme_mode = state.theme_mode;
+        let theme_mode = state.preferences.theme_mode;
         let cursor_style = if state.global_vim.vim_enabled {
             CursorStyle::Block
         } else {
@@ -1184,7 +1184,7 @@ impl Render for TextEditor {
             .filter(|name| is_curated_font(name))
             .map(|name| SharedString::from(name.to_string()))
             .unwrap_or_else(|| SharedString::from(FONT_FAMILY));
-        let line_spacing = state.line_spacing;
+        let line_spacing = state.preferences.line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let dragging = state.workspace.split_dragging;
         // Scroll movement re-arms the scrollbar's fade. Compared with a small
@@ -1200,7 +1200,7 @@ impl Render for TextEditor {
         }
         let scrollbar_activity = self.scrollbar_activity;
         let invisibility = state.ui.invisibility_mode;
-        let cite_size = state.cite_size_half_points;
+        let cite_size = state.preferences.cite_size_half_points;
         let fold_version = idx
             .and_then(|i| state.workspace.tabs.get(i))
             .map(|t| t.fold_version)
@@ -1674,7 +1674,7 @@ impl Render for TextEditor {
                             // slower than the per-word `check` the squiggles use.
                             let spell_target = {
                                 let st = this.state.read(cx);
-                                if !st.spellcheck_enabled {
+                                if !st.preferences.spellcheck_enabled {
                                     None
                                 } else {
                                     let content = pane_idx
@@ -1871,7 +1871,8 @@ impl Render for TextEditor {
                                 &self.state.read(cx).preferences.spellcheck_underline_color,
                             );
                             let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
-                            let cite_size_half_points = self.state.read(cx).cite_size_half_points;
+                            let cite_size_half_points =
+                                self.state.read(cx).preferences.cite_size_half_points;
                             let folded_headings = {
                                 let st = self.state.read(cx);
                                 st.workspace

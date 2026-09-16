@@ -59,7 +59,7 @@ impl Render for WordCount {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let wpm = state.spreading_wpm;
+        let wpm = state.preferences.spreading_wpm;
         let stats = state.document_stats();
         let (minutes, seconds) = stats.estimated_time(wpm);
 
@@ -78,7 +78,7 @@ impl Render for WordCount {
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
                     this.state.update(cx, |s, cx| {
-                        s.word_count_visible = false;
+                        s.ui.word_count_visible = false;
                         cx.notify();
                     });
                 }),
@@ -131,7 +131,7 @@ impl Render for WordCount {
                                     })
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.state.update(cx, |s, cx| {
-                                            s.word_count_visible = false;
+                                            s.ui.word_count_visible = false;
                                             cx.notify();
                                         });
                                     }))
