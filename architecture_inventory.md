@@ -1,17 +1,19 @@
 # Architecture Inventory
 
-51 Rust files; 60,284 lines.
+53 Rust files; 60,283 lines.
 
 | Lines | File |
 |---:|---|
 | 12,330 | `src/state/editing_tests.rs` |
-| 6,714 | `src/editor/view.rs` |
-| 5,089 | `src/docx_parser.rs` |
 | 4,978 | `src/state/vim.rs` |
+| 3,686 | `src/editor/view.rs` |
+| 3,017 | `src/editor/view_tests.rs` |
 | 2,956 | `src/settings_modal.rs` |
-| 2,586 | `src/formatting_ribbon.rs` |
-| 2,531 | `src/state/editing.rs` |
-| 2,004 | `src/file_explorer.rs` |
+| 2,910 | `src/docx_parser_tests.rs` |
+| 2,596 | `src/formatting_ribbon.rs` |
+| 2,514 | `src/state/editing.rs` |
+| 2,170 | `src/docx_parser.rs` |
+| 2,011 | `src/file_explorer.rs` |
 | 1,907 | `src/document_ops.rs` |
 | 1,813 | `src/state.rs` |
 | 1,480 | `src/state/workspace.rs` |
@@ -21,8 +23,8 @@
 | 970 | `src/recovery.rs` |
 | 934 | `src/tab_bar.rs` |
 | 866 | `src/editor/layout.rs` |
+| 751 | `src/command_palette.rs` |
 | 737 | `src/timer.rs` |
-| 729 | `src/command_palette.rs` |
 | 649 | `src/document.rs` |
 | 639 | `src/editor/input_adapter.rs` |
 | 553 | `src/vim_keybinds.rs` |
@@ -47,7 +49,7 @@
 | 113 | `src/case_converter.rs` |
 | 88 | `src/editor/input.rs` |
 | 78 | `src/wikifi_export.rs` |
-| 64 | `src/app/command.rs` |
+| 61 | `src/app/command.rs` |
 | 57 | `src/editor/color.rs` |
 | 56 | `src/editor/geometry.rs` |
 | 26 | `src/app/error.rs` |
