@@ -1,4 +1,4 @@
-use super::vim::{char_right, clamp_to_char_boundary, word_backward};
+use super::vim_motion::{char_right, clamp_to_char_boundary, word_backward};
 use super::*;
 use crate::app::command::AppCommand;
 use crate::app::repository::{SettingsRepository, WorkspaceRepository};

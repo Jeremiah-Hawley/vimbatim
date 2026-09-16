@@ -1,27 +1,28 @@
 # Architecture Inventory
 
-56 Rust files; 60,328 lines.
+57 Rust files; 60,334 lines.
 
 | Lines | File |
 |---:|---|
 | 12,330 | `src/state/editing_tests.rs` |
 | 3,003 | `src/editor/view_tests.rs` |
 | 2,910 | `src/docx_parser_tests.rs` |
-| 2,638 | `src/state/vim.rs` |
 | 2,596 | `src/formatting_ribbon.rs` |
 | 2,514 | `src/state/editing.rs` |
 | 2,415 | `src/editor/view.rs` |
-| 2,382 | `src/state/vim_dispatch.rs` |
+| 2,383 | `src/state/vim_dispatch.rs` |
 | 2,170 | `src/docx_parser.rs` |
 | 1,937 | `src/file_explorer.rs` |
 | 1,907 | `src/document_ops.rs` |
-| 1,829 | `src/state.rs` |
+| 1,832 | `src/state.rs` |
 | 1,556 | `src/state/workspace.rs` |
 | 1,493 | `src/settings_modal/view.rs` |
 | 1,465 | `src/settings_modal.rs` |
+| 1,434 | `src/state/vim.rs` |
 | 1,409 | `src/keybinds.rs` |
 | 1,334 | `src/main_window.rs` |
 | 1,261 | `src/editor/view/render.rs` |
+| 1,206 | `src/state/vim_motion.rs` |
 | 1,132 | `src/theme.rs` |
 | 970 | `src/recovery.rs` |
 | 934 | `src/tab_bar.rs` |

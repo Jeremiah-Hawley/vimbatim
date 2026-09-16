@@ -1,6 +1,6 @@
 use super::*;
 use crate::docx_parser::{create_new_docx, paragraphs_to_plain_text};
-use crate::state::vim::*;
+use crate::state::vim_motion::*;
 use crate::state::workspace::unique_path_in;
 
 /// Makes a unique temp dir for one test. Mirrors `recovery.rs`'s helper —

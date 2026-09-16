@@ -1,4 +1,5 @@
 use super::vim::*;
+use super::vim_motion::*;
 use super::*;
 
 impl AppState {
