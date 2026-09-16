@@ -1,13 +1,12 @@
 # Architecture Inventory
 
-54 Rust files; 60,323 lines.
+55 Rust files; 60,326 lines.
 
 | Lines | File |
 |---:|---|
 | 12,330 | `src/state/editing_tests.rs` |
 | 3,674 | `src/editor/view.rs` |
 | 3,003 | `src/editor/view_tests.rs` |
-| 2,955 | `src/settings_modal.rs` |
 | 2,910 | `src/docx_parser_tests.rs` |
 | 2,638 | `src/state/vim.rs` |
 | 2,596 | `src/formatting_ribbon.rs` |
@@ -18,6 +17,8 @@
 | 1,907 | `src/document_ops.rs` |
 | 1,829 | `src/state.rs` |
 | 1,556 | `src/state/workspace.rs` |
+| 1,493 | `src/settings_modal/view.rs` |
+| 1,465 | `src/settings_modal.rs` |
 | 1,409 | `src/keybinds.rs` |
 | 1,334 | `src/main_window.rs` |
 | 1,132 | `src/theme.rs` |
