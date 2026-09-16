@@ -1823,6 +1823,7 @@ mod editing;
 mod preferences;
 mod ui;
 mod vim;
+mod vim_dispatch;
 mod workspace;
 
 pub(crate) use vim::{is_vim_reserved_normal_key, matches_shifted_symbol, vim_find_target_char};
