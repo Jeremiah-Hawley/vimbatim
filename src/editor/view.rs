@@ -545,10 +545,20 @@ impl TextEditor {
         let focus_handle = cx.focus_handle();
         let uniform_list_scroll_handle = UniformListScrollHandle::new();
         let scroll_handle = uniform_list_scroll_handle.0.borrow().base_handle.clone();
+        let auto_scroll_state = state.clone();
+        let auto_scroll_list = uniform_list_scroll_handle.clone();
         let auto_scroller = AutoScroller::new(
             scroll_handle.clone(),
-            uniform_list_scroll_handle.clone(),
-            state.clone(),
+            Rc::new(move |position, bounds, scroll_y, cx| {
+                extend_auto_scroll_selection(
+                    &auto_scroll_state,
+                    &auto_scroll_list,
+                    position,
+                    bounds,
+                    scroll_y,
+                    cx,
+                );
+            }),
         );
         TextEditor {
             state,
@@ -3446,6 +3456,79 @@ fn visual_row_step(
 /// computed value before any layout has run yet (`last_item_size` is
 /// `None` until then) or when `item_count` is 0, same "not laid out yet"
 /// sentinel pattern `usable_wrap_width` already uses.
+fn extend_auto_scroll_selection(
+    state: &Entity<AppState>,
+    list_handle: &UniformListScrollHandle,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    scroll_y: f32,
+    cx: &mut App,
+) {
+    // ponytail: uncached full-document rewrap once per animation frame while
+    // edge-dragging; thread RowCache through only if this measures as a cost.
+    let st = state.read(cx);
+    let zoom = st.zoom;
+    let font_size_px = st.preferences.normal_text_size_half_points as f32 / 2.0;
+    let line_spacing = st.preferences.line_spacing;
+    let content = st.active_content().to_string();
+    let paragraphs = st
+        .workspace
+        .tabs
+        .get(st.workspace.active_tab)
+        .map(|tab| tab.document.paragraphs().to_vec())
+        .unwrap_or_default();
+    let invisibility = st.ui.invisibility_mode;
+    let cite_size = st.preferences.cite_size_half_points;
+    let folds = st
+        .workspace
+        .tabs
+        .get(st.workspace.active_tab)
+        .map(|tab| tab.folded_headings.clone())
+        .unwrap_or_default();
+
+    let lines = document_lines(&content);
+    let rows = visual_rows_for_viewport(
+        cx,
+        &lines,
+        bounds.size.width.as_f32(),
+        zoom,
+        &paragraphs,
+        font_size_px,
+    );
+    let folded_paras = AppState::folded_paragraphs(&paragraphs, &folds);
+    let hidden = hidden_wrap_rows(&rows, &paragraphs, invisibility, cite_size, &folded_paras);
+    let (display_to_wrap, _) = expand_rows_for_display(
+        &rows,
+        &paragraphs,
+        zoom,
+        &hidden,
+        font_size_px,
+        line_spacing,
+    );
+    let row_height_px = real_row_height_px(
+        list_handle,
+        display_to_wrap.len(),
+        font_size_px,
+        zoom,
+        line_spacing,
+    );
+    let (line, col) = line_col_from_mouse_position(
+        position,
+        bounds,
+        scroll_y,
+        &rows,
+        &display_to_wrap,
+        zoom,
+        font_size_px,
+        &paragraphs,
+        row_height_px,
+    );
+    state.update(cx, |state, cx| {
+        state.extend_selection_to_line_col(line, col);
+        cx.notify();
+    });
+}
+
 pub(crate) fn real_row_height_px(
     handle: &UniformListScrollHandle,
     item_count: usize,

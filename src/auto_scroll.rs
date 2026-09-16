@@ -1,13 +1,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use gpui::{point, px, App, Entity, Pixels, Point, ScrollHandle, UniformListScrollHandle, Window};
+use gpui::{point, px, App, Bounds, Pixels, Point, ScrollHandle, Window};
 
-use crate::state::AppState;
-use crate::text_editor::{
-    document_lines, expand_rows_for_display, line_col_from_mouse_position, real_row_height_px,
-    visual_rows_for_viewport,
-};
+type TickHandler = Rc<dyn Fn(Point<Pixels>, Bounds<Pixels>, f32, &mut App)>;
 
 /// How close a click-drag has to get to the top/bottom of the viewport
 /// before auto-scroll kicks in.
@@ -71,23 +67,13 @@ fn clamp_scroll_offset(offset_y: f32, max_offset_y: f32) -> f32 {
 #[derive(Clone)]
 pub struct AutoScroller {
     scroll_handle: ScrollHandle,
-    // Shares the same underlying `Rc<RefCell<..>>` as the owning TextEditor's
-    // own copy (both are clones of the one `UniformListScrollHandle` created
-    // in `TextEditor::new()`) — so `real_row_height_px` here always reads the
-    // same GPUI-measured row height the editor's own click handlers do,
-    // rather than resolving a click position against a different height.
-    uniform_list_scroll_handle: UniformListScrollHandle,
-    state: Entity<AppState>,
+    on_tick: TickHandler,
     last_mouse_position: Rc<Cell<Point<Pixels>>>,
     running: Rc<Cell<bool>>,
 }
 
 impl AutoScroller {
-    pub fn new(
-        scroll_handle: ScrollHandle,
-        uniform_list_scroll_handle: UniformListScrollHandle,
-        state: Entity<AppState>,
-    ) -> Self {
+    pub fn new(scroll_handle: ScrollHandle, on_tick: TickHandler) -> Self {
         /*
          * Constructs an idle AutoScroller. `scroll_handle` should be the
          * same handle the owning TextEditor tracks via `.track_scroll()`,
@@ -100,8 +86,7 @@ impl AutoScroller {
          */
         AutoScroller {
             scroll_handle,
-            uniform_list_scroll_handle,
-            state,
+            on_tick,
             last_mouse_position: Rc::new(Cell::new(Point::default())),
             running: Rc::new(Cell::new(false)),
         }
@@ -181,87 +166,7 @@ impl AutoScroller {
         let new_y = clamp_scroll_offset(current.y.as_f32() + delta, max_y);
         self.scroll_handle.set_offset(point(current.x, px(new_y)));
 
-        // ponytail: still an uncached full-document rewrap per tick, unlike
-        // TextEditor's on_mouse_down/on_mouse_move (see `cached_or_fresh_row_tables`)
-        // — AutoScroller only holds `state`/`scroll_handle`, not a reference to
-        // TextEditor's RowCache, and this only fires once per animation frame
-        // during an edge-drag rather than on every mouse-move pixel. Route
-        // through the cache too if edge-drag scrolling ever measures as a real cost.
-        let scroll_y = self.scroll_handle.offset().y.as_f32();
-        let zoom = self.state.read(cx).zoom;
-        let font_size_px =
-            self.state.read(cx).preferences.normal_text_size_half_points as f32 / 2.0;
-        let line_spacing = self.state.read(cx).preferences.line_spacing;
-        let content = self.state.read(cx).active_content().to_string();
-        let paragraphs = self
-            .state
-            .read(cx)
-            .workspace
-            .tabs
-            .get(self.state.read(cx).workspace.active_tab)
-            .map(|t| t.document.paragraphs().to_vec())
-            .unwrap_or_default();
-        let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(
-            cx,
-            &lines,
-            bounds.size.width.as_f32(),
-            zoom,
-            &paragraphs,
-            font_size_px,
-        );
-        // Same filtered display table the editor paints from, or a drag-select
-        // would resolve rows the user cannot see.
-        let (invisibility, cite_size, folds) = {
-            let st = self.state.read(cx);
-            (
-                st.ui.invisibility_mode,
-                st.preferences.cite_size_half_points,
-                st.workspace
-                    .tabs
-                    .get(st.workspace.active_tab)
-                    .map(|t| t.folded_headings.clone())
-                    .unwrap_or_default(),
-            )
-        };
-        let folded_paras = crate::state::AppState::folded_paragraphs(&paragraphs, &folds);
-        let hidden = crate::text_editor::hidden_wrap_rows(
-            &rows,
-            &paragraphs,
-            invisibility,
-            cite_size,
-            &folded_paras,
-        );
-        let (display_to_wrap, _) = expand_rows_for_display(
-            &rows,
-            &paragraphs,
-            zoom,
-            &hidden,
-            font_size_px,
-            line_spacing,
-        );
-        let row_height_px = real_row_height_px(
-            &self.uniform_list_scroll_handle,
-            display_to_wrap.len(),
-            font_size_px,
-            zoom,
-            line_spacing,
-        );
-        let (line, col) = line_col_from_mouse_position(
-            position,
-            bounds,
-            scroll_y,
-            &rows,
-            &display_to_wrap,
-            zoom,
-            font_size_px,
-            &paragraphs,
-            row_height_px,
-        );
-        self.state.update(cx, |state, cx| {
-            state.extend_selection_to_line_col(line, col);
-            cx.notify();
-        });
+        (self.on_tick)(position, bounds, self.scroll_handle.offset().y.as_f32(), cx);
 
         self.arm(window);
     }
