@@ -306,9 +306,10 @@ impl MainWindow {
                         cx.notify();
                     });
                 }
-                crate::app::command::AppEffect::ShowError(message) => {
+                effect @ (crate::app::command::AppEffect::ReportError(_)
+                | crate::app::command::AppEffect::ShowError(_)) => {
                     state.update(cx, |st, cx| {
-                        st.apply_effect(crate::app::command::AppEffect::ShowError(message));
+                        st.apply_effect(effect);
                         cx.notify();
                     });
                 }
@@ -353,18 +354,22 @@ impl MainWindow {
                     let s = state.clone();
                     cx.spawn(async move |cx| {
                         let scan_dir_clone = scan_dir.clone();
-                        let file_tree = cx
+                        let result = cx
                             .background_executor()
                             .spawn(async move {
                                 crate::app::repository::WorkspaceRepository::scan_directory(
                                     &crate::app::store::WorkspaceFs,
                                     &scan_dir_clone,
                                 )
-                                .unwrap_or_default()
                             })
                             .await;
                         s.update(cx, |st, cx| {
-                            st.complete_file_tree_scan(&scan_dir, file_tree);
+                            match result {
+                                Ok(file_tree) => st.complete_file_tree_scan(&scan_dir, file_tree),
+                                Err(error) => st.apply_effect(
+                                    crate::app::command::AppEffect::ReportError(error),
+                                ),
+                            }
                             cx.notify();
                         });
                     })
@@ -415,18 +420,24 @@ impl MainWindow {
                                     cx.notify();
                                 });
                                 let scan_dir_clone = scan_dir.clone();
-                                let file_tree = cx
+                                let result = cx
                                     .background_executor()
                                     .spawn(async move {
                                         crate::app::repository::WorkspaceRepository::scan_directory(
                                             &crate::app::store::WorkspaceFs,
                                             &scan_dir_clone,
                                         )
-                                        .unwrap_or_default()
                                     })
                                     .await;
                                 s.update(cx, |st, cx| {
-                                    st.complete_file_tree_scan(&scan_dir, file_tree);
+                                    match result {
+                                        Ok(file_tree) => {
+                                            st.complete_file_tree_scan(&scan_dir, file_tree)
+                                        }
+                                        Err(error) => st.apply_effect(
+                                            crate::app::command::AppEffect::ReportError(error),
+                                        ),
+                                    }
                                     cx.notify();
                                 });
                             }

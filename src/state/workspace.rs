@@ -225,10 +225,7 @@ impl AppState {
         let tab = tab_from_loaded_docx(TabId(self.workspace.next_tab_id), &path, result);
         self.workspace.next_tab_id += 1;
         if let Some(error) = load_error {
-            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                "Could not open {}: {error}",
-                path.display()
-            )));
+            self.apply_effect(crate::app::command::AppEffect::ReportError(error));
         }
         if tab.opened_detached {
             self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
@@ -409,7 +406,7 @@ impl AppState {
                     tab.is_saving = false;
                     tab.saving_version = None;
                 }
-                self.apply_effect(crate::app::command::AppEffect::ShowError(e.to_string()));
+                self.apply_effect(crate::app::command::AppEffect::ReportError(e));
             }
         }
     }
@@ -1107,10 +1104,7 @@ impl AppState {
         let tab = tab_from_loaded_docx(TabId(self.workspace.next_tab_id), &path, result);
         self.workspace.next_tab_id += 1;
         if let Some(error) = load_error {
-            self.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                "Could not open {}: {error}",
-                path.display()
-            )));
+            self.apply_effect(crate::app::command::AppEffect::ReportError(error));
         }
         if tab.opened_detached {
             self.apply_effect(crate::app::command::AppEffect::ShowError(format!(

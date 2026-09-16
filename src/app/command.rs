@@ -50,6 +50,7 @@ pub enum AppCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppEffect {
+    ReportError(crate::app::error::AppError),
     ShowError(String),
     WriteClipboard { text: String, metadata: String },
     DispatchKeybind(crate::keybinds::KeybindAction),

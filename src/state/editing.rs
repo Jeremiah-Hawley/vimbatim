@@ -2505,6 +2505,12 @@ impl AppState {
 
     pub fn apply_effect(&mut self, effect: crate::app::command::AppEffect) {
         match effect {
+            crate::app::command::AppEffect::ReportError(error) => {
+                self.ui.notifications.push(crate::state::Notification {
+                    severity: crate::state::NotificationSeverity::Error,
+                    message: error.to_string(),
+                });
+            }
             crate::app::command::AppEffect::ShowError(message) => {
                 self.ui.notifications.push(crate::state::Notification {
                     severity: crate::state::NotificationSeverity::Error,
