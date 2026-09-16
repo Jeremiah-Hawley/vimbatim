@@ -78,7 +78,7 @@ impl Render for WordCount {
                 MouseButton::Left,
                 cx.listener(|this, _ev, _window, cx| {
                     this.state.update(cx, |s, cx| {
-                        s.ui.word_count_visible = false;
+                        s.close_word_count();
                         cx.notify();
                     });
                 }),
@@ -131,7 +131,7 @@ impl Render for WordCount {
                                     })
                                     .on_click(cx.listener(|this, _ev, _window, cx| {
                                         this.state.update(cx, |s, cx| {
-                                            s.ui.word_count_visible = false;
+                                            s.close_word_count();
                                             cx.notify();
                                         });
                                     }))

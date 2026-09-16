@@ -1025,7 +1025,7 @@ impl TextEditor {
         // shouldn't pay for the check per replayed keystroke.
         if self.state.read(cx).ui.editor_context_menu.is_some() {
             self.state.update(cx, |s, cx| {
-                s.ui.editor_context_menu = None;
+                s.close_editor_context_menu();
                 cx.notify();
             });
         }
@@ -1115,9 +1115,10 @@ impl Render for TextEditor {
         // Only when *this* pane is the one being asked for — with two editors
         // mounted, an unqualified flag lets whichever renders first steal the
         // keyboard from the pane the user actually acted on.
-        if self.state.read(cx).workspace.pending_focus_editor == Some(self.pane) {
-            self.state
-                .update(cx, |state, _cx| state.workspace.pending_focus_editor = None);
+        if self
+            .state
+            .update(cx, |state, _cx| state.take_pending_editor_focus(self.pane))
+        {
             self.focus_handle.clone().focus(window, cx);
         }
 
@@ -1577,7 +1578,7 @@ impl Render for TextEditor {
                             let click_count = ev.click_count;
                             let shift_click = ev.modifiers.shift && click_count == 1;
                             this.state.update(cx, |state, cx| {
-                                state.ui.editor_context_menu = None;
+                                state.close_editor_context_menu();
                                 state.clear_similar_selection();
                                 if shift_click {
                                     // Shift+Click: extend the selection from wherever the
@@ -1721,7 +1722,7 @@ impl Render for TextEditor {
                             };
 
                             this.state.update(cx, |state, cx| {
-                                state.ui.editor_context_menu = Some(EditorContextMenu {
+                                state.open_editor_context_menu(EditorContextMenu {
                                     position: (ev.position.x.as_f32(), ev.position.y.as_f32()),
                                     spell_target,
                                 });
@@ -2405,7 +2406,7 @@ fn render_context_menu(
         row(id.into(), label.to_string(), enabled, p.text).when(enabled, |d| {
             d.on_click(move |_ev, window, cx| {
                 state.update(cx, |s, cx| {
-                    s.ui.editor_context_menu = None;
+                    s.close_editor_context_menu();
                     cx.notify();
                 });
                 window.dispatch_action(action(), cx);
@@ -2460,7 +2461,7 @@ fn render_context_menu(
                     .on_click(move |_ev, _window, cx| {
                         state.update(cx, |s, cx| {
                             s.replace_spell_target(&target, &replacement);
-                            s.ui.editor_context_menu = None;
+                            s.close_editor_context_menu();
                             cx.notify();
                         });
                     }),
@@ -2508,7 +2509,7 @@ fn render_context_menu(
             .on_click(move |_ev, _window, cx| {
                 state.update(cx, |s, cx| {
                     s.add_to_user_dictionary(&word);
-                    s.ui.editor_context_menu = None;
+                    s.close_editor_context_menu();
                     cx.notify();
                 });
             }),
@@ -2526,7 +2527,7 @@ fn render_context_menu(
                     .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                         dismiss_state.update(cx, |s, cx| {
                             if s.ui.editor_context_menu.is_some() {
-                                s.ui.editor_context_menu = None;
+                                s.close_editor_context_menu();
                                 cx.notify();
                             }
                         });

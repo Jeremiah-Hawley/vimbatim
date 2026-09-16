@@ -3,10 +3,7 @@ use gpui::*;
 
 use crate::keybinds::{rebuild_keymap, KeyCombo, KeybindAction, KeybindCategory, Keybinds};
 use crate::state::{bundled_default_settings_path, settings_conf_path, AppState, CardStyleKind};
-use crate::theme::{
-    palette, save_theme, save_theme_color_mode, save_theme_mode, ThemeColorMode, ThemeKind,
-    ThemeMode,
-};
+use crate::theme::{palette, ThemeColorMode, ThemeKind, ThemeMode};
 
 /// Where this modal *writes* every setting it changes.
 ///
@@ -259,7 +256,7 @@ impl SettingsModal {
         self.cancel_word_list_edit();
         self.theme_preview = false;
         self.state.update(cx, |s, cx| {
-            s.ui.settings_visible = false;
+            s.close_settings();
             cx.notify();
         });
         cx.notify();
@@ -642,16 +639,7 @@ impl SettingsModal {
 
     fn set_spellcheck_color(&mut self, name: &'static str, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.preferences.spellcheck_underline_color = name.to_string();
-            if let Err(error) = crate::theme::save_setting_line(
-                &settings_path(),
-                "spellcheck_underline_color",
-                name,
-            ) {
-                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                    "Could not save spellcheck color: {error}"
-                )));
-            }
+            s.set_spellcheck_underline_color(name);
             cx.notify();
         });
         cx.notify();
@@ -713,16 +701,7 @@ impl SettingsModal {
             let next = crate::state::clamp_spreading_wpm(
                 (s.preferences.spreading_wpm as i32 + delta).max(0) as u32,
             );
-            s.preferences.spreading_wpm = next;
-            if let Err(error) = crate::theme::save_setting_line(
-                &settings_path(),
-                "spreading_wpm",
-                &next.to_string(),
-            ) {
-                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                    "Could not save reading speed: {error}"
-                )));
-            }
+            s.set_spreading_wpm(next);
             cx.notify();
         });
         cx.notify();
@@ -813,12 +792,7 @@ impl SettingsModal {
 
     fn set_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.preferences.theme = theme;
-            if let Err(error) = save_theme(&settings_path(), theme) {
-                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                    "Could not save theme: {error}"
-                )));
-            }
+            s.set_theme(theme);
             cx.notify();
         });
         cx.notify();
@@ -826,12 +800,7 @@ impl SettingsModal {
 
     fn set_theme_color_mode(&mut self, mode: ThemeColorMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.preferences.theme_color_mode = mode;
-            if let Err(error) = save_theme_color_mode(&settings_path(), mode) {
-                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                    "Could not save theme color mode: {error}"
-                )));
-            }
+            s.set_theme_color_mode(mode);
             cx.notify();
         });
         cx.notify();
@@ -873,12 +842,7 @@ impl SettingsModal {
 
     fn set_theme_mode(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            s.preferences.theme_mode = mode;
-            if let Err(error) = save_theme_mode(&settings_path(), mode) {
-                s.apply_effect(crate::app::command::AppEffect::ShowError(format!(
-                    "Could not save theme mode: {error}"
-                )));
-            }
+            s.set_theme_mode(mode);
             cx.notify();
         });
         cx.notify();
@@ -917,9 +881,7 @@ impl SettingsModal {
             s.keybinds = keybinds;
             s.global_vim.vim_keybinds = vim_keybinds;
             s.global_vim.vim_enabled = vim_enabled;
-            s.preferences.theme = theme;
-            s.preferences.theme_mode = theme_mode;
-            s.preferences.theme_color_mode = theme_color_mode;
+            s.apply_theme_preferences(theme, theme_mode, theme_color_mode);
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
         self.cancel_vim_capture();

@@ -5,6 +5,34 @@ impl AppState {
         &self.ui.notifications
     }
 
+    pub fn close_settings(&mut self) {
+        self.ui.settings_visible = false;
+    }
+
+    pub fn toggle_settings(&mut self) {
+        self.ui.settings_visible = !self.ui.settings_visible;
+    }
+
+    pub fn close_word_count(&mut self) {
+        self.ui.word_count_visible = false;
+    }
+
+    pub fn toggle_word_count(&mut self) {
+        self.ui.word_count_visible = !self.ui.word_count_visible;
+    }
+
+    pub fn show_sidebar(&mut self) {
+        self.ui.sidebar_visible = true;
+    }
+
+    pub fn close_editor_context_menu(&mut self) {
+        self.ui.editor_context_menu = None;
+    }
+
+    pub fn open_editor_context_menu(&mut self, menu: EditorContextMenu) {
+        self.ui.editor_context_menu = Some(menu);
+    }
+
     pub fn open_find_bar(&mut self) {
         // Mutually exclusive with the command palette — see
         // `open_command_palette` for why this lives here and not at the call

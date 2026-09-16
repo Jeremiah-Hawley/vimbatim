@@ -12317,3 +12317,14 @@ fn commands_keep_stable_tab_identity_after_reordering() {
         vec![crate::app::command::AppEffect::PerformSave(original_id)]
     );
 }
+
+#[test]
+fn split_drag_updates_are_owned_by_workspace_state() {
+    let mut state = make_state("", 0, None);
+    assert!(state.update_split_drag(0.6));
+    assert!(state.workspace.split_dragging);
+    assert_eq!(state.workspace.split_ratio, 0.6);
+    assert!(!state.update_split_drag(0.6));
+    assert!(state.end_split_drag());
+    assert!(!state.end_split_drag());
+}

@@ -301,6 +301,55 @@ impl AppState {
         self.save_setting("emphasis_box", if boxed { "true" } else { "false" });
     }
 
+    pub fn set_spellcheck_underline_color(&mut self, color: &str) {
+        self.preferences.spellcheck_underline_color = color.to_string();
+        self.save_setting("spellcheck_underline_color", color);
+    }
+
+    pub fn set_spreading_wpm(&mut self, wpm: u32) {
+        let wpm = clamp_spreading_wpm(wpm);
+        self.preferences.spreading_wpm = wpm;
+        self.save_setting("spreading_wpm", &wpm.to_string());
+    }
+
+    pub fn set_theme(&mut self, theme: crate::theme::ThemeKind) {
+        self.preferences.theme = theme;
+        if let Err(error) = crate::theme::save_theme(&self.settings_path, theme) {
+            self.report_settings_error(error);
+        }
+    }
+
+    pub fn set_theme_mode(&mut self, mode: crate::theme::ThemeMode) {
+        self.preferences.theme_mode = mode;
+        if let Err(error) = crate::theme::save_theme_mode(&self.settings_path, mode) {
+            self.report_settings_error(error);
+        }
+    }
+
+    pub fn set_theme_color_mode(&mut self, mode: crate::theme::ThemeColorMode) {
+        self.preferences.theme_color_mode = mode;
+        if let Err(error) = crate::theme::save_theme_color_mode(&self.settings_path, mode) {
+            self.report_settings_error(error);
+        }
+    }
+
+    pub fn apply_theme_preferences(
+        &mut self,
+        theme: crate::theme::ThemeKind,
+        mode: crate::theme::ThemeMode,
+        color_mode: crate::theme::ThemeColorMode,
+    ) {
+        self.preferences.theme = theme;
+        self.preferences.theme_mode = mode;
+        self.preferences.theme_color_mode = color_mode;
+    }
+
+    fn report_settings_error(&mut self, error: impl std::fmt::Display) {
+        self.apply_effect(crate::app::command::AppEffect::ReportError(
+            crate::app::error::AppError::Settings(error.to_string()),
+        ));
+    }
+
     /// Writes one key to this state's settings.conf. Best-effort, matching
     /// every other settings write in this file — an unwritable directory must
     /// not break the in-memory change.

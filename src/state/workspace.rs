@@ -69,6 +69,28 @@ impl AppState {
         self.workspace.tabs.iter().position(|tab| tab.id == id)
     }
 
+    pub fn take_pending_editor_focus(&mut self, pane: Pane) -> bool {
+        if self.workspace.pending_focus_editor == Some(pane) {
+            self.workspace.pending_focus_editor = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn end_split_drag(&mut self) -> bool {
+        std::mem::take(&mut self.workspace.split_dragging)
+    }
+
+    pub fn update_split_drag(&mut self, ratio: f32) -> bool {
+        if self.workspace.split_ratio == ratio && self.workspace.split_dragging {
+            return false;
+        }
+        self.workspace.split_ratio = ratio;
+        self.workspace.split_dragging = true;
+        true
+    }
+
     pub fn pane_tab_index(&self, pane: Pane) -> Option<usize> {
         match pane {
             // While the secondary pane holds focus, `active_tab` names *its*

@@ -600,7 +600,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &ToggleSettingsAction, cx| {
             s.update(cx, |st, cx| {
-                st.ui.settings_visible = !st.ui.settings_visible;
+                st.toggle_settings();
                 cx.notify();
             });
         });
@@ -1024,7 +1024,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &OpenStatsAction, cx| {
             s.update(cx, |st, cx| {
-                st.ui.word_count_visible = !st.ui.word_count_visible;
+                st.toggle_word_count();
                 cx.notify();
             });
         });
@@ -1104,8 +1104,7 @@ impl Render for MainWindow {
                 let s = drag_end_state.clone();
                 move |_ev, _window, cx| {
                     s.update(cx, |st, cx| {
-                        if st.workspace.split_dragging {
-                            st.workspace.split_dragging = false;
+                        if st.end_split_drag() {
                             cx.notify();
                         }
                     });
@@ -1120,7 +1119,7 @@ impl Render for MainWindow {
                     {
                         s.close_file_context_menu();
                         s.close_nav_context_menu();
-                        s.ui.editor_context_menu = None;
+                        s.close_editor_context_menu();
                         cx.notify();
                     }
                 });
@@ -1147,14 +1146,11 @@ impl Render for MainWindow {
                     };
                     let width = (window_width - left).max(1.0);
                     let next = clamp_split_ratio((x - left) / width);
-                    if s.workspace.split_ratio == next && s.workspace.split_dragging {
-                        return; // no movement worth a repaint
-                    }
-                    s.workspace.split_ratio = next;
                     // Suspends the editors' full-document re-wrap for the
                     // duration of the drag — see `AppState.split_dragging`.
-                    s.workspace.split_dragging = true;
-                    cx.notify();
+                    if s.update_split_drag(next) {
+                        cx.notify();
+                    }
                 });
             })
             .on_drag_move(

@@ -850,7 +850,7 @@ impl FormattingRibbon {
                             // its mode while it might be collapsed.
                             st.update(cx, |state, _cx| {
                                 state.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
-                                state.ui.sidebar_visible = true;
+                                state.show_sidebar();
                             });
                             cx.notify();
                         }
