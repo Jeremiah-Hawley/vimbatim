@@ -39,9 +39,46 @@ impl DocumentBuffer {
         &self.paragraphs
     }
 
-    pub fn paragraphs_mut(&mut self) -> &mut Vec<Paragraph> {
+    /// Mutates text or formatting without allowing callers to change the
+    /// paragraph count. Structural edits use the focused methods below.
+    pub fn paragraphs_mut_slice(&mut self) -> &mut [Paragraph] {
         *self.index.borrow_mut() = None;
         &mut self.paragraphs
+    }
+
+    pub fn replace_paragraphs(&mut self, paragraphs: Vec<Paragraph>) -> Vec<Paragraph> {
+        *self.index.borrow_mut() = None;
+        std::mem::replace(&mut self.paragraphs, paragraphs)
+    }
+
+    pub fn retain_paragraphs(&mut self, keep: impl FnMut(&Paragraph) -> bool) {
+        *self.index.borrow_mut() = None;
+        self.paragraphs.retain(keep);
+    }
+
+    pub fn insert_char(&mut self, byte_offset: usize, ch: char) {
+        *self.index.borrow_mut() = None;
+        crate::document_ops::sync_insert_char(&mut self.paragraphs, byte_offset, ch);
+    }
+
+    pub fn insert_str(&mut self, byte_offset: usize, text: &str) {
+        *self.index.borrow_mut() = None;
+        crate::document_ops::sync_insert_str(&mut self.paragraphs, byte_offset, text);
+    }
+
+    pub fn insert_str_with_runs(&mut self, byte_offset: usize, text: &str, runs: &[Run]) {
+        *self.index.borrow_mut() = None;
+        crate::document_ops::sync_insert_str_with_runs(
+            &mut self.paragraphs,
+            byte_offset,
+            text,
+            runs,
+        );
+    }
+
+    pub fn delete_range(&mut self, start: usize, end: usize) {
+        *self.index.borrow_mut() = None;
+        crate::document_ops::sync_delete_range(&mut self.paragraphs, start, end);
     }
 
     pub fn plain_text_index(&self) -> std::sync::Arc<PlainTextIndex> {
@@ -588,8 +625,30 @@ mod tests {
         assert_eq!(buffer.resolve_position("aé\n".len()), (1, 0, 0));
         assert!(std::sync::Arc::ptr_eq(&first, &buffer.plain_text_index()));
 
-        buffer.paragraphs_mut()[0].runs[0].text.push('!');
+        buffer.paragraphs_mut_slice()[0].runs[0].text.push('!');
         assert_eq!(buffer.content(), "aé!\n文");
+    }
+
+    #[test]
+    fn focused_structural_edits_invalidate_the_plain_text_index() {
+        let mut buffer = DocumentBuffer::new(vec![Paragraph {
+            runs: vec![Run {
+                text: "ab".into(),
+                ..Run::default()
+            }],
+            ..Paragraph::default()
+        }]);
+        let original = buffer.plain_text_index();
+
+        buffer.insert_char(1, '\n');
+        assert_eq!(buffer.content(), "a\nb");
+        assert!(!std::sync::Arc::ptr_eq(
+            &original,
+            &buffer.plain_text_index()
+        ));
+        buffer.delete_range(1, 2);
+        assert_eq!(buffer.content(), "ab");
+        assert_eq!(buffer.paragraphs().len(), 1);
     }
 
     #[test]
@@ -602,7 +661,7 @@ mod tests {
             ..Paragraph::default()
         }]);
         let mut cloned = original.clone();
-        cloned.paragraphs_mut()[0].runs[0].text = "clone".into();
+        cloned.paragraphs_mut_slice()[0].runs[0].text = "clone".into();
 
         assert_eq!(cloned.content(), "clone");
         assert_eq!(original.content(), "original");

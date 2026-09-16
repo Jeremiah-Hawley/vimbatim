@@ -234,7 +234,7 @@ impl AppState {
         self.push_undo_snapshot();
         let default_size = self.preferences.normal_text_size_half_points;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in tab.document.paragraphs_mut() {
+            for para in tab.document.paragraphs_mut_slice() {
                 if !is_tag(para) {
                     continue;
                 }
@@ -336,7 +336,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             if let Some((a, f)) = tab.selection.take() {
                 let (start, end) = (a.min(f), a.max(f));
-                sync_delete_range(tab.document.paragraphs_mut(), start, end);
+                tab.document.delete_range(start, end);
                 tab.cursor = start;
                 tab.document.is_modified = true;
             }
@@ -363,7 +363,7 @@ impl AppState {
         }
         let mut inserted_range = None;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_insert_char(tab.document.paragraphs_mut(), tab.cursor, ch);
+            tab.document.insert_char(tab.cursor, ch);
             let start = tab.cursor;
             tab.cursor += ch.len_utf8();
             tab.document.is_modified = true;
@@ -380,7 +380,7 @@ impl AppState {
                 .and_then(|t| t.pending_format.clone());
             if let Some(op) = pending {
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    apply_formatting(tab.document.paragraphs_mut(), start, end, op);
+                    apply_formatting(tab.document.paragraphs_mut_slice(), start, end, op);
                 }
             }
         }
@@ -434,7 +434,7 @@ impl AppState {
             {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
+                    if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(para_idx) {
                         para.list = None;
                     }
                     tab.document.is_modified = true;
@@ -451,7 +451,7 @@ impl AppState {
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            sync_delete_range(tab.document.paragraphs_mut(), prev, tab.cursor);
+            tab.document.delete_range(prev, tab.cursor);
             tab.cursor = prev;
             tab.document.is_modified = true;
         }
@@ -489,7 +489,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             let next = char_right(&tab.document.content(), tab.cursor);
-            sync_delete_range(tab.document.paragraphs_mut(), tab.cursor, next);
+            tab.document.delete_range(tab.cursor, next);
             tab.document.is_modified = true;
         }
     }
@@ -555,7 +555,7 @@ impl AppState {
         let mut deleted_chars = 0;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             deleted_chars = tab.document.content()[start..cursor].chars().count();
-            sync_delete_range(tab.document.paragraphs_mut(), start, cursor);
+            tab.document.delete_range(start, cursor);
             tab.cursor = start;
             tab.selection = None;
             tab.document.is_modified = true;
@@ -625,7 +625,7 @@ impl AppState {
                 op.clone()
             };
         apply_formatting(
-            tab.document.paragraphs_mut(),
+            tab.document.paragraphs_mut_slice(),
             line_start,
             line_end,
             effective_op.clone(),
@@ -641,7 +641,7 @@ impl AppState {
         // cause behind found_bugs.md's "Clear... fails to clear pocket,
         // hat, and block formatting".
         if let FormatOp::ClearAll { .. } = effective_op {
-            reset_card_style_in_range(tab.document.paragraphs_mut(), line_start, line_end);
+            reset_card_style_in_range(tab.document.paragraphs_mut_slice(), line_start, line_end);
             // A prior card-style/formatting op on this same empty line (e.g.
             // apply_card_style's Bold+FontSize+Box sequence) may have armed
             // `pending_format`, which otherwise keeps force-applying to
@@ -665,7 +665,7 @@ impl AppState {
         // last-applied op ever survived to the first keystroke.
         if is_line_empty {
             let (para_idx, _, _) = tab.document.resolve_position(line_start);
-            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
+            if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(para_idx) {
                 for run in para.runs.iter_mut() {
                     apply_format_op(&mut *run, &effective_op);
                 }
@@ -738,7 +738,7 @@ impl AppState {
                     );
                     for &(start, end) in &ranges {
                         apply_formatting(
-                            tab.document.paragraphs_mut(),
+                            tab.document.paragraphs_mut_slice(),
                             start,
                             end,
                             effective_op.clone(),
@@ -753,7 +753,7 @@ impl AppState {
                         // so toggling underline *off* doesn't also resize.
                         if matches!(effective_op, FormatOp::Underline(true)) {
                             Self::unshrink_range(
-                                tab.document.paragraphs_mut(),
+                                tab.document.paragraphs_mut_slice(),
                                 start,
                                 end,
                                 small,
@@ -776,9 +776,13 @@ impl AppState {
                             let card_paragraphs: Vec<_> = (first..=last)
                                 .filter(|&i| tab.document.paragraphs()[i].heading != 0)
                                 .collect();
-                            reset_card_style_in_range(tab.document.paragraphs_mut(), start, end);
+                            reset_card_style_in_range(
+                                tab.document.paragraphs_mut_slice(),
+                                start,
+                                end,
+                            );
                             for i in card_paragraphs {
-                                for run in &mut tab.document.paragraphs_mut()[i].runs {
+                                for run in &mut tab.document.paragraphs_mut_slice()[i].runs {
                                     apply_format_op(&mut *run, &effective_op);
                                 }
                             }
@@ -814,7 +818,7 @@ impl AppState {
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                         let unshrink = matches!(effective_op, FormatOp::Underline(true));
                         apply_formatting(
-                            tab.document.paragraphs_mut(),
+                            tab.document.paragraphs_mut_slice(),
                             cursor,
                             next_char_boundary,
                             effective_op,
@@ -823,7 +827,7 @@ impl AppState {
                         // with no selection behaves the same way.
                         if unshrink {
                             Self::unshrink_range(
-                                tab.document.paragraphs_mut(),
+                                tab.document.paragraphs_mut_slice(),
                                 cursor,
                                 next_char_boundary,
                                 small,
@@ -951,7 +955,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in tab.document.paragraphs_mut() {
+            for para in tab.document.paragraphs_mut_slice() {
                 for run in &mut para.runs {
                     if repaints(run) {
                         run.highlight_color = color.clone();
@@ -1031,13 +1035,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(tab.document.paragraphs_mut(), start, end);
-            sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                start,
-                &condensed,
-                &condensed_runs,
-            );
+            tab.document.delete_range(start, end);
+            tab.document
+                .insert_str_with_runs(start, &condensed, &condensed_runs);
             tab.cursor = start;
             tab.selection = Some((start, start + condensed.len()));
             tab.document.is_modified = true;
@@ -1078,13 +1078,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(tab.document.paragraphs_mut(), start, end);
-            sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                start,
-                &uncondensed,
-                &uncondensed_runs,
-            );
+            tab.document.delete_range(start, end);
+            tab.document
+                .insert_str_with_runs(start, &uncondensed, &uncondensed_runs);
             tab.cursor = start;
             tab.selection = Some((start, start + uncondensed.len()));
             tab.document.is_modified = true;
@@ -1121,7 +1117,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             for i in start_para..=end_para {
-                if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
+                if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(i) {
                     para.list = if already_this_style {
                         None
                     } else {
@@ -1167,7 +1163,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             for i in start_para..=end_para {
-                if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
+                if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(i) {
                     para.list = None;
                 }
             }
@@ -1193,7 +1189,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
+            if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(para_idx) {
                 para.list = Some(ListItem {
                     level: item.level + 1,
                     ..item
@@ -1217,7 +1213,7 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            if let Some(para) = tab.document.paragraphs_mut().get_mut(para_idx) {
+            if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(para_idx) {
                 para.list = if item.level == 0 {
                     None
                 } else {
@@ -1408,7 +1404,7 @@ impl AppState {
             self.push_undo_snapshot();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                 let mut cumulative = 0usize;
-                for para in tab.document.paragraphs_mut() {
+                for para in tab.document.paragraphs_mut_slice() {
                     for run in &mut para.runs {
                         let run_start = cumulative;
                         let run_end = cumulative + run.text.len();
@@ -1448,20 +1444,20 @@ impl AppState {
                 // End before start so start's already-resolved indices
                 // aren't shifted by a run being inserted ahead of it.
                 crate::document_ops::split_run_at_position(
-                    tab.document.paragraphs_mut(),
+                    tab.document.paragraphs_mut_slice(),
                     end_para,
                     end_run,
                     end_char,
                 );
                 crate::document_ops::split_run_at_position(
-                    tab.document.paragraphs_mut(),
+                    tab.document.paragraphs_mut_slice(),
                     start_para,
                     start_run,
                     start_char,
                 );
 
                 let mut cumulative = 0usize;
-                for para in tab.document.paragraphs_mut() {
+                for para in tab.document.paragraphs_mut_slice() {
                     for run in &mut para.runs {
                         let run_start = cumulative;
                         let run_end = cumulative + run.text.len();
@@ -1655,7 +1651,12 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            apply_paragraph_alignment(tab.document.paragraphs_mut(), start, end, Alignment::Center);
+            apply_paragraph_alignment(
+                tab.document.paragraphs_mut_slice(),
+                start,
+                end,
+                Alignment::Center,
+            );
             tab.document.is_modified = true;
         }
     }
@@ -1685,7 +1686,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             apply_paragraph_alignment(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 line_start,
                 line_end,
                 alignment,
@@ -1740,7 +1741,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                if let Some(para) = tab.document.paragraphs_mut().get_mut(line_idx) {
+                if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(line_idx) {
                     para.heading = kind.heading_level();
                     para.list = None;
                 }
@@ -1790,7 +1791,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let line_idx = tab.document.content()[..tab.cursor].matches('\n').count();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                if let Some(para) = tab.document.paragraphs_mut().get_mut(line_idx) {
+                if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(line_idx) {
                     para.heading = 0;
                 }
             }
@@ -1857,13 +1858,11 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document
-                .paragraphs_mut()
-                .retain(|para| !is_analytic(para));
+            tab.document.retain_paragraphs(|para| !is_analytic(para));
             // Every rich-text-aware function assumes at least one paragraph and
             // one run always exist (`default_paragraphs`).
             if tab.document.paragraphs().is_empty() {
-                *tab.document.paragraphs_mut() = default_paragraphs();
+                tab.document.replace_paragraphs(default_paragraphs());
             }
             // The cursor and any selection pointed into text that is gone.
             tab.cursor = clamp_to_char_boundary(
@@ -1904,7 +1903,7 @@ impl AppState {
         self.push_undo_snapshot();
         let tag_heading = CardStyleKind::Tag.heading_level();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            for para in tab.document.paragraphs_mut() {
+            for para in tab.document.paragraphs_mut_slice() {
                 if !is_analytic(para) {
                     continue;
                 }
@@ -1970,7 +1969,7 @@ impl AppState {
             .emphasis_change_size
             .then_some(self.preferences.emphasis_size_half_points);
 
-        let apply_all = |paragraphs: &mut Vec<Paragraph>, start: usize, end: usize| {
+        let apply_all = |paragraphs: &mut [Paragraph], start: usize, end: usize| {
             if bold {
                 apply_formatting(paragraphs, start, end, FormatOp::Bold(true));
             }
@@ -1996,7 +1995,7 @@ impl AppState {
                 self.push_undo_snapshot();
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                     for &(start, end) in &ranges {
-                        apply_all(tab.document.paragraphs_mut(), start, end);
+                        apply_all(tab.document.paragraphs_mut_slice(), start, end);
                     }
                     tab.document.is_modified = true;
                 }
@@ -2011,7 +2010,11 @@ impl AppState {
                     let next_char_boundary = char_right(&tab.document.content(), cursor);
                     self.push_undo_snapshot();
                     if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                        apply_all(tab.document.paragraphs_mut(), cursor, next_char_boundary);
+                        apply_all(
+                            tab.document.paragraphs_mut_slice(),
+                            cursor,
+                            next_char_boundary,
+                        );
                         tab.document.is_modified = true;
                     }
                 }
@@ -2046,7 +2049,7 @@ impl AppState {
         };
         tab.document.content_version += 1;
 
-        let current_paragraphs = std::mem::replace(tab.document.paragraphs_mut(), previous);
+        let current_paragraphs = tab.document.replace_paragraphs(previous);
         tab.document.redo_stack.push(current_paragraphs);
         // Same size-aware cap as `push_undo_snapshot` — repeatedly undoing
         // a huge document without any new edit would otherwise let
@@ -2081,7 +2084,7 @@ impl AppState {
         };
         tab.document.content_version += 1;
 
-        let current_paragraphs = std::mem::replace(tab.document.paragraphs_mut(), next);
+        let current_paragraphs = tab.document.replace_paragraphs(next);
         tab.document.undo_stack.push(current_paragraphs);
         let cap = undo_stack_cap_for_snapshot_size(snapshot_byte_estimate(
             &tab.document.content(),
@@ -2194,7 +2197,7 @@ impl AppState {
         }
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
-            sync_insert_str(tab.document.paragraphs_mut(), tab.cursor, text);
+            tab.document.insert_str(tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.document.is_modified = true;
         }
@@ -2260,17 +2263,12 @@ impl AppState {
                 .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
-            crate::document_ops::sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                tab.cursor,
-                text,
-                runs,
-            );
+            tab.document.insert_str_with_runs(tab.cursor, text, runs);
             tab.cursor += text.len();
             tab.document.is_modified = true;
 
             crate::document_ops::apply_pasted_paragraph_attrs(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 first_para,
                 text.matches('\n').count() + 1,
                 paragraph_attrs,

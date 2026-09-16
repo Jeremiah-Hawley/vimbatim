@@ -755,7 +755,7 @@ impl AppState {
             // Never-saved tab: reopen untitled, exactly as it was pre-crash.
             None => Tab::new_empty(TabId(self.workspace.next_tab_id)),
         };
-        *tab.document.paragraphs_mut() = paragraphs;
+        tab.document.replace_paragraphs(paragraphs);
         tab.has_unsupported_blocks = origin.has_unsupported_blocks;
         tab.docx_origin = Some(Arc::new(origin));
         if entry.original_path.is_none() {
@@ -1411,7 +1411,7 @@ pub(super) fn tab_from_loaded_docx(
     let mut tab = Tab::from_path(id, path.to_path_buf());
     match result {
         Ok((paragraphs, origin)) => {
-            *tab.document.paragraphs_mut() = paragraphs;
+            tab.document.replace_paragraphs(paragraphs);
             tab.has_unsupported_blocks = origin.has_unsupported_blocks;
             tab.docx_origin = Some(Arc::new(origin));
         }

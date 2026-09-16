@@ -517,20 +517,20 @@ impl AppState {
             // Same end-then-start split order as `apply_formatting`, so the
             // already-resolved start position isn't shifted by the end split.
             crate::document_ops::split_run_at_position(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 end_para,
                 end_run,
                 end_char,
             );
             crate::document_ops::split_run_at_position(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 start_para,
                 start_run,
                 start_char,
             );
 
             let mut cumulative = 0usize;
-            for para in tab.document.paragraphs_mut().iter_mut() {
+            for para in tab.document.paragraphs_mut_slice().iter_mut() {
                 for run in para.runs.iter_mut() {
                     let run_start = cumulative;
                     let run_end = cumulative + run.text.len();
@@ -583,20 +583,20 @@ impl AppState {
             // Same end-then-start split order as `apply_formatting`, so the
             // already-resolved start position isn't shifted by the end split.
             crate::document_ops::split_run_at_position(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 end_para,
                 end_run,
                 end_char,
             );
             crate::document_ops::split_run_at_position(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 start_para,
                 start_run,
                 start_char,
             );
 
             let mut cumulative = 0usize;
-            for para in tab.document.paragraphs_mut().iter_mut() {
+            for para in tab.document.paragraphs_mut_slice().iter_mut() {
                 for run in para.runs.iter_mut() {
                     let run_start = cumulative;
                     let run_end = cumulative + run.text.len();
@@ -646,7 +646,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             let mut idx = 0usize;
-            tab.document.paragraphs_mut().retain(|p| {
+            tab.document.retain_paragraphs(|p| {
                 let drop = in_scope(idx) && is_blank(p);
                 idx += 1;
                 !drop
@@ -654,7 +654,7 @@ impl AppState {
             // Every rich-text-aware function assumes at least one paragraph
             // and one run always exist (`default_paragraphs`).
             if tab.document.paragraphs().is_empty() {
-                *tab.document.paragraphs_mut() = default_paragraphs();
+                tab.document.replace_paragraphs(default_paragraphs());
             }
             tab.cursor = clamp_to_char_boundary(
                 &tab.document.content(),
@@ -704,13 +704,9 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            sync_delete_range(tab.document.paragraphs_mut(), start, end);
-            sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                start,
-                &stripped,
-                &stripped_runs,
-            );
+            tab.document.delete_range(start, end);
+            tab.document
+                .insert_str_with_runs(start, &stripped, &stripped_runs);
             tab.cursor = start + stripped.len();
             tab.selection = None;
             tab.document.is_modified = true;
@@ -2512,15 +2508,11 @@ impl AppState {
                     },
                 );
             }
-            crate::document_ops::sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                insert_at,
-                &insertion,
-                &runs,
-            );
+            tab.document
+                .insert_str_with_runs(insert_at, &insertion, &runs);
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
             crate::document_ops::apply_pasted_paragraph_attrs(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 first_para + usize::from(needs_leading_newline),
                 spanned,
                 &attrs,
@@ -2539,14 +2531,9 @@ impl AppState {
                 .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
-            crate::document_ops::sync_insert_str_with_runs(
-                tab.document.paragraphs_mut(),
-                at,
-                &text,
-                &runs,
-            );
+            tab.document.insert_str_with_runs(at, &text, &runs);
             crate::document_ops::apply_pasted_paragraph_attrs(
-                tab.document.paragraphs_mut(),
+                tab.document.paragraphs_mut_slice(),
                 first_para,
                 spanned,
                 &attrs,
@@ -2979,8 +2966,8 @@ impl AppState {
         // ~/r/J) gets its formatting kept in sync for free via this one
         // choke point — reduces to the same delete+insert primitives every
         // other mutation site uses.
-        sync_delete_range(tab.document.paragraphs_mut(), start, end);
-        sync_insert_str(tab.document.paragraphs_mut(), start, &replacement);
+        tab.document.delete_range(start, end);
+        tab.document.insert_str(start, &replacement);
         tab.selection = None;
         tab.document.is_modified = true;
         original
@@ -3700,7 +3687,7 @@ impl AppState {
                 // touch keep their existing runs exactly.
                 for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
                     if old != new {
-                        if let Some(para) = tab.document.paragraphs_mut().get_mut(i) {
+                        if let Some(para) = tab.document.paragraphs_mut_slice().get_mut(i) {
                             para.runs = vec![Run {
                                 text: new.clone(),
                                 ..Run::default()

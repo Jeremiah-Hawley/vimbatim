@@ -5063,7 +5063,9 @@ mod tests {
         }];
 
         let mut state = AppState::new();
-        *state.workspace.tabs[0].document.paragraphs_mut() = paragraphs;
+        state.workspace.tabs[0]
+            .document
+            .replace_paragraphs(paragraphs);
         state.workspace.tabs[0].cursor = big_text.len();
 
         // (1) 100x insert_char: covers push_undo_snapshot + sync_insert_char

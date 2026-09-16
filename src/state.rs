@@ -8,8 +8,7 @@ use crate::case_converter;
 use crate::document::{DocumentBuffer, TabId};
 use crate::document_ops::{
     apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active,
-    ranges_matching_format, reset_card_style_in_range, runs_in_range, sync_delete_range,
-    sync_insert_char, sync_insert_str, sync_insert_str_with_runs, toggled_off, FormatOp,
+    ranges_matching_format, reset_card_style_in_range, runs_in_range, toggled_off, FormatOp,
 };
 use crate::docx_parser::{
     parse_docx, Alignment, CardStyle, DocxOrigin, ListItem, ListKind, Paragraph, Run,

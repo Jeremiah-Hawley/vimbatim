@@ -2974,7 +2974,9 @@ fn test_new_empty_tab_has_default_paragraphs_and_no_docx_origin() {
 fn make_state_with_paragraphs(paragraphs: Vec<Paragraph>, cursor: usize) -> AppState {
     let content = paragraphs_to_plain_text(&paragraphs);
     let mut state = make_state(&content, cursor, None);
-    *state.workspace.tabs[0].document.paragraphs_mut() = paragraphs;
+    state.workspace.tabs[0]
+        .document
+        .replace_paragraphs(paragraphs);
     state
 }
 
@@ -8866,7 +8868,7 @@ fn test_apply_card_style_pocket_sets_bold_size_box_and_center() {
 #[test]
 fn test_apply_card_style_clears_a_preexisting_list_marker() {
     let mut state = make_state("hello world", 0, None);
-    state.workspace.tabs[0].document.paragraphs_mut()[0].list = Some(ListItem {
+    state.workspace.tabs[0].document.paragraphs_mut_slice()[0].list = Some(ListItem {
         kind: ListKind::BulletSolid,
         level: 0,
     });
@@ -9854,7 +9856,7 @@ fn test_formatting_toggles_off_only_when_every_similar_range_matches() {
 
     // One match un-bolded by hand: the next apply must bold *it*, not
     // un-bold the other one.
-    state.workspace.tabs[0].document.paragraphs_mut()[1].runs[0].bold = false;
+    state.workspace.tabs[0].document.paragraphs_mut_slice()[1].runs[0].bold = false;
     state.apply_formatting_to_selection(FormatOp::Bold(true));
 
     assert!(state.workspace.tabs[0]
