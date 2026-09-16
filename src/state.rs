@@ -1850,5 +1850,9 @@ fn load_user_dictionary(path: &std::path::Path) -> HashSet<String> {
 }
 
 mod editing;
+mod preferences;
+mod ui;
+mod vim;
+mod workspace;
 
-pub(crate) use editing::*;
+pub(crate) use vim::{is_vim_reserved_normal_key, matches_shifted_symbol, vim_find_target_char};
