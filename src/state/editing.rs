@@ -2423,8 +2423,6 @@ impl AppState {
                 .get(self.workspace.active_tab)
                 .map(|tab| vec![crate::app::command::AppEffect::PromptSaveAs(tab.id)])
                 .unwrap_or_default(),
-            AppCommand::SaveTab(id) => vec![crate::app::command::AppEffect::PerformSave(id)],
-            AppCommand::SaveTabAs(id) => vec![crate::app::command::AppEffect::PromptSaveAs(id)],
             AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
             AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
             AppCommand::OpenFileAt(path) => {
@@ -2434,21 +2432,6 @@ impl AppState {
                 vec![crate::app::command::AppEffect::LoadDocumentInCurrentTab(
                     path,
                 )]
-            }
-            AppCommand::OpenFileInSidePane(path) => {
-                if !self.workspace.split_view {
-                    self.workspace.split_view = true;
-                    self.workspace
-                        .tabs
-                        .push(crate::state::Tab::new_empty(crate::document::TabId(
-                            self.workspace.next_tab_id,
-                        )));
-                    self.workspace.secondary_tab_id =
-                        Some(crate::document::TabId(self.workspace.next_tab_id));
-                    self.workspace.next_tab_id += 1;
-                }
-                self.focus_pane(crate::state::Pane::Secondary);
-                vec![crate::app::command::AppEffect::LoadDocument(path)]
             }
             AppCommand::RefreshFileTree => {
                 vec![crate::app::command::AppEffect::ScanWorkspace(

@@ -131,32 +131,54 @@ pub fn registry() -> Vec<PaletteCommand> {
                 FormatOp::Italic(true),
             ));
         }),
-        ("Strikethrough", AppState::toggle_strikethrough),
+        ("Strikethrough", |s| {
+            s.dispatch(crate::app::command::AppCommand::ToggleStrikethrough)
+        }),
         ("Normal Size", |s| {
             s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
                 FormatOp::FontSize(24),
             ));
         }),
         ("Change Case: Sentence", |s| {
-            s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
+            s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                crate::case_converter::CaseType::Sentence,
+            ))
         }),
         ("Change Case: lower", |s| {
-            s.apply_case_to_selection(crate::case_converter::CaseType::Lower)
+            s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                crate::case_converter::CaseType::Lower,
+            ))
         }),
         ("Change Case: UPPER", |s| {
-            s.apply_case_to_selection(crate::case_converter::CaseType::Upper)
+            s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                crate::case_converter::CaseType::Upper,
+            ))
         }),
         ("Change Case: Capitalize Each Word", |s| {
-            s.apply_case_to_selection(crate::case_converter::CaseType::Title)
+            s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                crate::case_converter::CaseType::Title,
+            ))
         }),
         ("Change Case: tOGGLE cASE", |s| {
-            s.apply_case_to_selection(crate::case_converter::CaseType::Toggle)
+            s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                crate::case_converter::CaseType::Toggle,
+            ))
         }),
-        ("Align Left", |s| s.apply_line_alignment(Alignment::Left)),
+        ("Align Left", |s| {
+            s.dispatch(crate::app::command::AppCommand::ApplyLineAlignment(
+                Alignment::Left,
+            ))
+        }),
         ("Align Center", |s| {
-            s.apply_line_alignment(Alignment::Center)
+            s.dispatch(crate::app::command::AppCommand::ApplyLineAlignment(
+                Alignment::Center,
+            ))
         }),
-        ("Align Right", |s| s.apply_line_alignment(Alignment::Right)),
+        ("Align Right", |s| {
+            s.dispatch(crate::app::command::AppCommand::ApplyLineAlignment(
+                Alignment::Right,
+            ))
+        }),
         ("Highlight Yellow", |s| {
             s.dispatch(crate::app::command::AppCommand::ApplyFormatting(
                 FormatOp::Highlight(Some("yellow".to_string())),

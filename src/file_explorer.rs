@@ -1598,7 +1598,14 @@ impl Render for FileExplorer {
                                             .active(move |s| s.bg(rgb(p.chrome_active)))
                                             .on_click(cx.listener(|this, _ev, _window, cx| {
                                                 this.state.update(cx, |s, cx| {
-                                                    s.refresh_file_tree();
+                                                    let effects = s.execute(
+                                                        crate::app::command::AppCommand::RefreshFileTree,
+                                                    );
+                                                    crate::main_window::MainWindow::handle_app_effects(
+                                                        this.state.clone(),
+                                                        effects,
+                                                        cx,
+                                                    );
                                                     cx.notify();
                                                 });
                                                 cx.notify();

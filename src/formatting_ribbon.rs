@@ -1287,7 +1287,9 @@ impl FormattingRibbon {
                         "Sentence",
                         Some(
                             (|s: &mut AppState| {
-                                s.apply_case_to_selection(crate::case_converter::CaseType::Sentence)
+                                s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                                    crate::case_converter::CaseType::Sentence,
+                                ))
                             }) as fn(&mut AppState),
                         ),
                     ),
@@ -1295,7 +1297,9 @@ impl FormattingRibbon {
                         "lower",
                         Some(
                             (|s: &mut AppState| {
-                                s.apply_case_to_selection(crate::case_converter::CaseType::Lower)
+                                s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                                    crate::case_converter::CaseType::Lower,
+                                ))
                             }) as fn(&mut AppState),
                         ),
                     ),
@@ -1303,7 +1307,9 @@ impl FormattingRibbon {
                         "UPPER",
                         Some(
                             (|s: &mut AppState| {
-                                s.apply_case_to_selection(crate::case_converter::CaseType::Upper)
+                                s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                                    crate::case_converter::CaseType::Upper,
+                                ))
                             }) as fn(&mut AppState),
                         ),
                     ),
@@ -1311,7 +1317,9 @@ impl FormattingRibbon {
                         "Capitalize Each Word",
                         Some(
                             (|s: &mut AppState| {
-                                s.apply_case_to_selection(crate::case_converter::CaseType::Title)
+                                s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                                    crate::case_converter::CaseType::Title,
+                                ))
                             }) as fn(&mut AppState),
                         ),
                     ),
@@ -1319,7 +1327,9 @@ impl FormattingRibbon {
                         "tOGGLE cASE",
                         Some(
                             (|s: &mut AppState| {
-                                s.apply_case_to_selection(crate::case_converter::CaseType::Toggle)
+                                s.dispatch(crate::app::command::AppCommand::ApplyCaseToSelection(
+                                    crate::case_converter::CaseType::Toggle,
+                                ))
                             }) as fn(&mut AppState),
                         ),
                     ),
