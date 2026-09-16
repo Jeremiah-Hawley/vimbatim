@@ -704,9 +704,8 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document.delete_range(start, end);
-            tab.document
-                .insert_str_with_runs(start, &stripped, &stripped_runs);
+            buffer_delete_range(&mut tab.document, start, end);
+            buffer_insert_str_with_runs(&mut tab.document, start, &stripped, &stripped_runs);
             tab.cursor = start + stripped.len();
             tab.selection = None;
             tab.document.is_modified = true;
@@ -2508,8 +2507,7 @@ impl AppState {
                     },
                 );
             }
-            tab.document
-                .insert_str_with_runs(insert_at, &insertion, &runs);
+            buffer_insert_str_with_runs(&mut tab.document, insert_at, &insertion, &runs);
             let landing_start = insert_at + if needs_leading_newline { 1 } else { 0 };
             crate::document_ops::apply_pasted_paragraph_attrs(
                 tab.document.paragraphs_mut_slice(),
@@ -2531,7 +2529,7 @@ impl AppState {
                 .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
-            tab.document.insert_str_with_runs(at, &text, &runs);
+            buffer_insert_str_with_runs(&mut tab.document, at, &text, &runs);
             crate::document_ops::apply_pasted_paragraph_attrs(
                 tab.document.paragraphs_mut_slice(),
                 first_para,
@@ -2966,8 +2964,8 @@ impl AppState {
         // ~/r/J) gets its formatting kept in sync for free via this one
         // choke point — reduces to the same delete+insert primitives every
         // other mutation site uses.
-        tab.document.delete_range(start, end);
-        tab.document.insert_str(start, &replacement);
+        buffer_delete_range(&mut tab.document, start, end);
+        buffer_insert_str(&mut tab.document, start, &replacement);
         tab.selection = None;
         tab.document.is_modified = true;
         original

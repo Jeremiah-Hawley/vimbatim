@@ -56,29 +56,9 @@ impl DocumentBuffer {
         self.paragraphs.retain(keep);
     }
 
-    pub fn insert_char(&mut self, byte_offset: usize, ch: char) {
+    pub(crate) fn edit_structure<R>(&mut self, edit: impl FnOnce(&mut Vec<Paragraph>) -> R) -> R {
         *self.index.borrow_mut() = None;
-        crate::document_ops::sync_insert_char(&mut self.paragraphs, byte_offset, ch);
-    }
-
-    pub fn insert_str(&mut self, byte_offset: usize, text: &str) {
-        *self.index.borrow_mut() = None;
-        crate::document_ops::sync_insert_str(&mut self.paragraphs, byte_offset, text);
-    }
-
-    pub fn insert_str_with_runs(&mut self, byte_offset: usize, text: &str, runs: &[Run]) {
-        *self.index.borrow_mut() = None;
-        crate::document_ops::sync_insert_str_with_runs(
-            &mut self.paragraphs,
-            byte_offset,
-            text,
-            runs,
-        );
-    }
-
-    pub fn delete_range(&mut self, start: usize, end: usize) {
-        *self.index.borrow_mut() = None;
-        crate::document_ops::sync_delete_range(&mut self.paragraphs, start, end);
+        edit(&mut self.paragraphs)
     }
 
     pub fn plain_text_index(&self) -> std::sync::Arc<PlainTextIndex> {
@@ -640,13 +620,13 @@ mod tests {
         }]);
         let original = buffer.plain_text_index();
 
-        buffer.insert_char(1, '\n');
+        crate::document_ops::buffer_insert_char(&mut buffer, 1, '\n');
         assert_eq!(buffer.content(), "a\nb");
         assert!(!std::sync::Arc::ptr_eq(
             &original,
             &buffer.plain_text_index()
         ));
-        buffer.delete_range(1, 2);
+        crate::document_ops::buffer_delete_range(&mut buffer, 1, 2);
         assert_eq!(buffer.content(), "ab");
         assert_eq!(buffer.paragraphs().len(), 1);
     }

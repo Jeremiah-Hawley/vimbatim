@@ -1,5 +1,5 @@
 pub(crate) use crate::document::normalize::merge_adjacent_same_format_runs;
-use crate::document::{Alignment, Paragraph, Run};
+use crate::document::{Alignment, DocumentBuffer, Paragraph, Run};
 
 /// Resolves a byte offset into `content` (the flat string vim-mode and the
 /// rest of the editor operate on) into a `(paragraph_index, run_index,
@@ -51,6 +51,29 @@ pub fn resolve_position(paragraphs: &[Paragraph], byte_offset: usize) -> (usize,
         ),
         None => (0, 0, 0),
     }
+}
+
+pub fn buffer_insert_char(buffer: &mut DocumentBuffer, byte_offset: usize, ch: char) {
+    buffer.edit_structure(|paragraphs| sync_insert_char(paragraphs, byte_offset, ch));
+}
+
+pub fn buffer_insert_str(buffer: &mut DocumentBuffer, byte_offset: usize, text: &str) {
+    buffer.edit_structure(|paragraphs| sync_insert_str(paragraphs, byte_offset, text));
+}
+
+pub fn buffer_insert_str_with_runs(
+    buffer: &mut DocumentBuffer,
+    byte_offset: usize,
+    text: &str,
+    runs: &[Run],
+) {
+    buffer.edit_structure(|paragraphs| {
+        sync_insert_str_with_runs(paragraphs, byte_offset, text, runs)
+    });
+}
+
+pub fn buffer_delete_range(buffer: &mut DocumentBuffer, start: usize, end: usize) {
+    buffer.edit_structure(|paragraphs| sync_delete_range(paragraphs, start, end));
 }
 
 /// Keeps `paragraphs` in sync with inserting `ch` at `byte_offset` into the

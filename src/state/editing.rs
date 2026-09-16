@@ -336,7 +336,7 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             if let Some((a, f)) = tab.selection.take() {
                 let (start, end) = (a.min(f), a.max(f));
-                tab.document.delete_range(start, end);
+                buffer_delete_range(&mut tab.document, start, end);
                 tab.cursor = start;
                 tab.document.is_modified = true;
             }
@@ -363,7 +363,7 @@ impl AppState {
         }
         let mut inserted_range = None;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document.insert_char(tab.cursor, ch);
+            buffer_insert_char(&mut tab.document, tab.cursor, ch);
             let start = tab.cursor;
             tab.cursor += ch.len_utf8();
             tab.document.is_modified = true;
@@ -451,7 +451,7 @@ impl AppState {
                 .last()
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            tab.document.delete_range(prev, tab.cursor);
+            buffer_delete_range(&mut tab.document, prev, tab.cursor);
             tab.cursor = prev;
             tab.document.is_modified = true;
         }
@@ -489,7 +489,7 @@ impl AppState {
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             let next = char_right(&tab.document.content(), tab.cursor);
-            tab.document.delete_range(tab.cursor, next);
+            buffer_delete_range(&mut tab.document, tab.cursor, next);
             tab.document.is_modified = true;
         }
     }
@@ -555,7 +555,7 @@ impl AppState {
         let mut deleted_chars = 0;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             deleted_chars = tab.document.content()[start..cursor].chars().count();
-            tab.document.delete_range(start, cursor);
+            buffer_delete_range(&mut tab.document, start, cursor);
             tab.cursor = start;
             tab.selection = None;
             tab.document.is_modified = true;
@@ -1035,9 +1035,8 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document.delete_range(start, end);
-            tab.document
-                .insert_str_with_runs(start, &condensed, &condensed_runs);
+            buffer_delete_range(&mut tab.document, start, end);
+            buffer_insert_str_with_runs(&mut tab.document, start, &condensed, &condensed_runs);
             tab.cursor = start;
             tab.selection = Some((start, start + condensed.len()));
             tab.document.is_modified = true;
@@ -1078,9 +1077,8 @@ impl AppState {
 
         self.push_undo_snapshot();
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            tab.document.delete_range(start, end);
-            tab.document
-                .insert_str_with_runs(start, &uncondensed, &uncondensed_runs);
+            buffer_delete_range(&mut tab.document, start, end);
+            buffer_insert_str_with_runs(&mut tab.document, start, &uncondensed, &uncondensed_runs);
             tab.cursor = start;
             tab.selection = Some((start, start + uncondensed.len()));
             tab.document.is_modified = true;
@@ -2197,7 +2195,7 @@ impl AppState {
         }
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.cursor = clamp_to_char_boundary(&tab.document.content(), tab.cursor);
-            tab.document.insert_str(tab.cursor, text);
+            buffer_insert_str(&mut tab.document, tab.cursor, text);
             tab.cursor += text.len(); // text is valid UTF-8 so len() == byte count
             tab.document.is_modified = true;
         }
@@ -2263,7 +2261,7 @@ impl AppState {
                 .paragraphs()
                 .get(first_para)
                 .map(|p| (p.heading, p.alignment));
-            tab.document.insert_str_with_runs(tab.cursor, text, runs);
+            buffer_insert_str_with_runs(&mut tab.document, tab.cursor, text, runs);
             tab.cursor += text.len();
             tab.document.is_modified = true;
 

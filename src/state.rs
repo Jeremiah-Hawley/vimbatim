@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use crate::case_converter;
 use crate::document::{DocumentBuffer, TabId};
 use crate::document_ops::{
-    apply_format_op, apply_formatting, apply_paragraph_alignment, is_uniformly_active,
+    apply_format_op, apply_formatting, apply_paragraph_alignment, buffer_delete_range,
+    buffer_insert_char, buffer_insert_str, buffer_insert_str_with_runs, is_uniformly_active,
     ranges_matching_format, reset_card_style_in_range, runs_in_range, toggled_off, FormatOp,
 };
 use crate::docx_parser::{
