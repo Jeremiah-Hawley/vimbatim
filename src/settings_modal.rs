@@ -375,7 +375,7 @@ impl SettingsModal {
             }
             let _ = s
                 .keybinds
-                .save_to(&settings_path(), s.global_vim.vim_enabled, &[]);
+                .save_to(&settings_path(), s.global_vim().vim_enabled, &[]);
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
         cx.notify();
@@ -455,7 +455,7 @@ impl SettingsModal {
                 let conflict = self
                     .state
                     .read(cx)
-                    .global_vim
+                    .global_vim()
                     .vim_keybinds
                     .find_overlap_conflict(&candidate, exclude);
                 if let Some((other, other_seq)) = conflict {
@@ -479,11 +479,12 @@ impl SettingsModal {
                 }
 
                 self.state.update(cx, |s, _cx| {
-                    if let Some(old) = &existing {
-                        s.global_vim.vim_keybinds.remove(old);
-                    }
-                    s.global_vim.vim_keybinds.add(action, candidate.clone());
-                    let _ = s.global_vim.vim_keybinds.save_to(&settings_path());
+                    s.set_vim_keybind(
+                        action,
+                        existing.as_deref(),
+                        candidate.clone(),
+                        &settings_path(),
+                    );
                 });
                 self.cancel_vim_capture();
                 cx.notify();
@@ -655,7 +656,7 @@ impl SettingsModal {
     /// settings.conf stays hand-editable for an exact value.
     fn adjust_shrink_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let current = (s.preferences.small_size_half_points / 2) as i32;
+            let current = (s.preferences().small_size_half_points / 2) as i32;
             s.set_shrink_size_points((current + delta).max(0) as u16);
             cx.notify();
         });
@@ -674,7 +675,7 @@ impl SettingsModal {
         self.state.update(cx, |s, cx| {
             let current = match kind {
                 Some(kind) => s.card_size_half_points(kind),
-                None => s.preferences.cite_size_half_points,
+                None => s.preferences().cite_size_half_points,
             } as i32
                 / 2;
             let points = (current + delta).max(0) as u16;
@@ -689,7 +690,7 @@ impl SettingsModal {
 
     fn adjust_emphasis_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
-            let current = (s.preferences.emphasis_size_half_points / 2) as i32;
+            let current = (s.preferences().emphasis_size_half_points / 2) as i32;
             s.set_emphasis_size_points((current + delta).max(0) as u16);
             cx.notify();
         });
@@ -699,7 +700,7 @@ impl SettingsModal {
     fn adjust_spreading_wpm(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             let next = crate::state::clamp_spreading_wpm(
-                (s.preferences.spreading_wpm as i32 + delta).max(0) as u32,
+                (s.preferences().spreading_wpm as i32 + delta).max(0) as u32,
             );
             s.set_spreading_wpm(next);
             cx.notify();
@@ -712,7 +713,7 @@ impl SettingsModal {
     /// `main_window.rs`), writes `theme::custom_theme_template()` verbatim —
     /// a blank starting point the user edits and re-imports.
     fn download_theme_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.state.read(cx).workspace.working_directory.clone();
+        let dir = self.state.read(cx).workspace().working_directory.clone();
         let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
         let state = self.state.clone();
         cx.spawn_in(window, async move |_this, cx| {
@@ -879,8 +880,7 @@ impl SettingsModal {
 
         self.state.update(cx, |s, _cx| {
             s.keybinds = keybinds;
-            s.global_vim.vim_keybinds = vim_keybinds;
-            s.global_vim.vim_enabled = vim_enabled;
+            s.replace_vim_settings(vim_keybinds, vim_enabled);
             s.apply_theme_preferences(theme, theme_mode, theme_color_mode);
         });
         self.cancel_capture(cx); // also rebuilds the keymap from the now-reset keybinds
@@ -952,7 +952,7 @@ impl SettingsModal {
                                 s.keybinds.remove_at(action, index);
                                 let _ = s.keybinds.save_to(
                                     &settings_path(),
-                                    s.global_vim.vim_enabled,
+                                    s.global_vim().vim_enabled,
                                     &[],
                                 );
                             });
@@ -1101,7 +1101,7 @@ impl SettingsModal {
         let is_collapsed = *self.collapsed.get(&category).unwrap_or(&false);
         let actions = Self::listed_actions(
             category,
-            self.state.read(cx).preferences.command_palette_enabled,
+            self.state.read(cx).preferences().command_palette_enabled,
         );
 
         div()
@@ -1224,8 +1224,7 @@ impl SettingsModal {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, _window, cx| {
                             this.state.update(cx, |s, _cx| {
-                                s.global_vim.vim_keybinds.remove(&sequence_owned);
-                                let _ = s.global_vim.vim_keybinds.save_to(&settings_path());
+                                s.remove_vim_keybind(&sequence_owned, &settings_path());
                             });
                             this.cancel_vim_capture();
                             cx.notify();
@@ -1355,7 +1354,7 @@ impl SettingsModal {
         let is_collapsed = *self.vim_collapsed.get(&category).unwrap_or(&false);
         let actions = Self::listed_actions(
             category,
-            self.state.read(cx).preferences.command_palette_enabled,
+            self.state.read(cx).preferences().command_palette_enabled,
         );
 
         div()
@@ -2578,27 +2577,27 @@ impl Render for SettingsModal {
          * receives the very next keystroke, regardless of which button was
          * clicked to arm capture.
          */
-        let vim_enabled = self.state.read(cx).global_vim.vim_enabled;
-        let spellcheck_enabled = self.state.read(cx).preferences.spellcheck_enabled;
+        let vim_enabled = self.state.read(cx).global_vim().vim_enabled;
+        let spellcheck_enabled = self.state.read(cx).preferences().spellcheck_enabled;
         let spellcheck_color = self
             .state
             .read(cx)
-            .preferences
+            .preferences()
             .spellcheck_underline_color
             .clone();
-        let spreading_wpm = self.state.read(cx).preferences.spreading_wpm;
-        let nav_fold_buttons = self.state.read(cx).preferences.nav_fold_buttons;
-        let search_from_list_enabled = self.state.read(cx).preferences.search_from_list_enabled;
-        let search_list_whole_words = self.state.read(cx).preferences.search_list_whole_words;
-        let command_palette_enabled = self.state.read(cx).preferences.command_palette_enabled;
-        let shrink_points = self.state.read(cx).preferences.small_size_half_points / 2;
+        let spreading_wpm = self.state.read(cx).preferences().spreading_wpm;
+        let nav_fold_buttons = self.state.read(cx).preferences().nav_fold_buttons;
+        let search_from_list_enabled = self.state.read(cx).preferences().search_from_list_enabled;
+        let search_list_whole_words = self.state.read(cx).preferences().search_list_whole_words;
+        let command_palette_enabled = self.state.read(cx).preferences().command_palette_enabled;
+        let shrink_points = self.state.read(cx).preferences().small_size_half_points / 2;
         let exception = self
             .state
             .read(cx)
-            .preferences
+            .preferences()
             .standardize_highlight_exception
             .clone();
-        let analytic_color = self.state.read(cx).preferences.analytic_color.clone();
+        let analytic_color = self.state.read(cx).preferences().analytic_color.clone();
         // The same colors the HL Color dropdown offers — built-ins plus
         // whatever the user has saved — so the exception can name any highlight
         // actually reachable in the document.
@@ -2614,7 +2613,7 @@ impl Render for SettingsModal {
                 st.card_size_half_points(CardStyleKind::Hat) / 2,
                 st.card_size_half_points(CardStyleKind::Block) / 2,
                 st.card_size_half_points(CardStyleKind::Tag) / 2,
-                st.preferences.cite_size_half_points / 2,
+                st.preferences().cite_size_half_points / 2,
             ]
         };
         let (
@@ -2627,21 +2626,21 @@ impl Render for SettingsModal {
             let st = self.state.read(cx);
             (
                 (
-                    st.preferences.emphasis_bold,
-                    st.preferences.emphasis_underline,
-                    st.preferences.emphasis_box,
+                    st.preferences().emphasis_bold,
+                    st.preferences().emphasis_underline,
+                    st.preferences().emphasis_box,
                 ),
-                st.preferences.emphasis_change_size,
-                st.preferences.emphasis_size_half_points / 2,
-                st.preferences.paste_condense,
-                st.preferences.paste_condense_pilcrow,
+                st.preferences().emphasis_change_size,
+                st.preferences().emphasis_size_half_points / 2,
+                st.preferences().paste_condense,
+                st.preferences().paste_condense_pilcrow,
             )
         };
-        let current_theme = self.state.read(cx).preferences.theme;
-        let current_theme_mode = self.state.read(cx).preferences.theme_mode;
-        let current_theme_color_mode = self.state.read(cx).preferences.theme_color_mode;
+        let current_theme = self.state.read(cx).preferences().theme;
+        let current_theme_mode = self.state.read(cx).preferences().theme_mode;
+        let current_theme_color_mode = self.state.read(cx).preferences().theme_color_mode;
         let keybinds = self.state.read(cx).keybinds.clone();
-        let vim_keybinds = self.state.read(cx).global_vim.vim_keybinds.clone();
+        let vim_keybinds = self.state.read(cx).global_vim().vim_keybinds.clone();
         let p = self.state.read(cx).current_palette();
         let theme_preview = self.theme_preview;
         let section = self.section;

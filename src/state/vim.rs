@@ -1,6 +1,38 @@
 use super::*;
 
 impl AppState {
+    pub fn set_vim_last_macro_register(&mut self, register: char) {
+        self.global_vim.vim_last_macro_register = Some(register);
+    }
+
+    pub fn set_vim_keybind(
+        &mut self,
+        action: crate::keybinds::KeybindAction,
+        old: Option<&str>,
+        sequence: String,
+        path: &Path,
+    ) {
+        if let Some(old) = old {
+            self.global_vim.vim_keybinds.remove(old);
+        }
+        self.global_vim.vim_keybinds.add(action, sequence);
+        let _ = self.global_vim.vim_keybinds.save_to(path);
+    }
+
+    pub fn remove_vim_keybind(&mut self, sequence: &str, path: &Path) {
+        self.global_vim.vim_keybinds.remove(sequence);
+        let _ = self.global_vim.vim_keybinds.save_to(path);
+    }
+
+    pub fn replace_vim_settings(
+        &mut self,
+        keybinds: crate::vim_keybinds::VimKeybinds,
+        enabled: bool,
+    ) {
+        self.global_vim.vim_keybinds = keybinds;
+        self.global_vim.vim_enabled = enabled;
+    }
+
     pub fn clear_vim_keybind_sequence(&mut self) {
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.vim_keybind_seq.clear();

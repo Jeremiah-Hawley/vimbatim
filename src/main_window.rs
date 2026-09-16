@@ -157,7 +157,7 @@ impl MainWindow {
                     // Read once per tick, not per tab: it is the same
                     // for every tab in the document.
                     let doc_style = s.new_doc_style();
-                    s.workspace
+                    s.workspace()
                         .tabs
                         .iter()
                         .filter(|t| {
@@ -224,30 +224,7 @@ impl MainWindow {
                     // surfaces an error to the user mid-edit.
                     if let Ok(cost) = cost {
                         let _ = snapshot_state.update(cx, |s, _| {
-                            // Look up by id, not index: the tab may have
-                            // moved, been saved, or closed while this write
-                            // was in flight.
-                            match s.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
-                                Some(tab) if tab.document.is_modified => {
-                                    tab.last_snapshot_version = version;
-                                    tab.last_snapshot_cost = Some(cost);
-                                }
-                                /*
-                                 * Saved (Ctrl+S) or closed during the await.
-                                 * Both call `delete_snapshot` on the
-                                 * foreground — but they ran before the write
-                                 * landed, so they deleted files that did not
-                                 * exist yet and the write has just recreated
-                                 * them. Nothing else would ever remove them:
-                                 * a clean tab is never due again, and a
-                                 * closed tab's id is swept by no quit path,
-                                 * so the next launch would prompt to recover
-                                 * work the user had already saved or
-                                 * deliberately discarded. Delete here, where
-                                 * both cases converge.
-                                 */
-                                _ => crate::recovery::delete_snapshot(tab_id),
-                            }
+                            s.complete_recovery_snapshot(tab_id, version, cost);
                         });
                     }
                 }
@@ -302,7 +279,7 @@ impl MainWindow {
                 }
                 crate::app::command::AppEffect::DispatchKeybind(action) => {
                     state.update(cx, |st, cx| {
-                        st.ui.pending_keybinds.push(action);
+                        st.push_pending_keybind(action);
                         cx.notify();
                     });
                 }
@@ -448,11 +425,13 @@ impl MainWindow {
                 crate::app::command::AppEffect::PromptSaveAs(id) => {
                     let (dir, suggested) = {
                         let st = state.read(cx);
-                        let tab = st.tab_index(id).and_then(|idx| st.workspace.tabs.get(idx));
+                        let tab = st
+                            .tab_index(id)
+                            .and_then(|idx| st.workspace().tabs.get(idx));
                         let dir = tab
                             .and_then(|t| t.file_path.as_ref())
                             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                            .unwrap_or_else(|| st.workspace.working_directory.clone());
+                            .unwrap_or_else(|| st.workspace().working_directory.clone());
                         let suggested = tab
                             .map(|t| t.title.clone())
                             .filter(|t| t.ends_with(".docx"))
@@ -564,7 +543,7 @@ impl MainWindow {
             // as the tab bar's × button (tab_bar.rs) when the tab is dirty
             // — otherwise this keybind would be a silent-discard backdoor
             // around the whole point of this confirmation flow.
-            let idx = s.read(cx).workspace.active_tab;
+            let idx = s.read(cx).workspace().active_tab;
             s.update(cx, |st, cx| {
                 st.request_close_tab(idx);
                 cx.notify();
@@ -588,7 +567,7 @@ impl MainWindow {
             // it conditional would mean rebuilding the keymap on every toggle
             // flip. Nothing else claims Ctrl+P, so swallowing the keystroke
             // while the feature is off costs nothing.
-            if !s.read(cx).preferences.command_palette_enabled {
+            if !s.read(cx).preferences().command_palette_enabled {
                 return;
             }
             s.update(cx, |st, cx| {
@@ -680,7 +659,7 @@ impl MainWindow {
 
         let s = state.clone();
         cx.on_action(move |_: &RefreshFileTreeAction, cx| {
-            let directory = s.read(cx).workspace.working_directory.clone();
+            let directory = s.read(cx).workspace().working_directory.clone();
             let state = s.clone();
             cx.spawn(async move |cx| {
                 let scan_dir = directory.clone();
@@ -715,7 +694,7 @@ impl MainWindow {
         cx.on_action(move |_: &FindReplaceAction, cx| {
             s.update(cx, |st, cx| {
                 st.open_find_bar();
-                if let Some(bar) = st.ui.find_bar.as_mut() {
+                if let Some(bar) = st.find_bar_mut() {
                     bar.focus = crate::state::FindField::Replace;
                 }
                 cx.notify();
@@ -994,7 +973,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &HighlightAction, cx| {
             s.update(cx, |st, cx| {
-                let color = st.preferences.highlight_color.clone();
+                let color = st.preferences().highlight_color.clone();
                 st.dispatch(crate::app::command::AppCommand::ApplyFormatting(
                     FormatOp::Highlight(Some(color)),
                 ));
@@ -1016,7 +995,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &StartTimerAction, cx| {
             s.update(cx, |st, cx| {
-                st.ui.timer.visible = !st.ui.timer.visible;
+                st.toggle_timer();
                 cx.notify();
             });
         });
@@ -1061,25 +1040,25 @@ impl Render for MainWindow {
          * The outer container has `.relative()` so the modal's `.absolute()` is
          * scoped to this window rather than the display.
          */
-        let pending_keybinds = self.state.update(cx, |state, _| {
-            std::mem::take(&mut state.ui.pending_keybinds)
-        });
+        let pending_keybinds = self
+            .state
+            .update(cx, |state, _| state.take_pending_keybinds());
         for action in pending_keybinds {
             _window.dispatch_action(crate::keybinds::action_for(action), cx);
         }
-        let sidebar_visible = self.state.read(cx).ui.sidebar_visible;
-        let settings_visible = self.state.read(cx).ui.settings_visible;
-        let pending_close = self.state.read(cx).ui.pending_close;
-        let font_import_modal_open = self.state.read(cx).ui.font_import_modal_open;
+        let sidebar_visible = self.state.read(cx).ui().sidebar_visible;
+        let settings_visible = self.state.read(cx).ui().settings_visible;
+        let pending_close = self.state.read(cx).ui().pending_close;
+        let font_import_modal_open = self.state.read(cx).ui().font_import_modal_open;
         let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
-        let word_count_visible = self.state.read(cx).ui.word_count_visible;
-        let timer_visible = self.state.read(cx).ui.timer.visible;
-        let split_view = self.state.read(cx).workspace.split_view;
-        let split_ratio = self.state.read(cx).workspace.split_ratio;
+        let word_count_visible = self.state.read(cx).ui().word_count_visible;
+        let timer_visible = self.state.read(cx).ui().timer.visible;
+        let split_view = self.state.read(cx).workspace().split_view;
+        let split_ratio = self.state.read(cx).workspace().split_ratio;
         let sidebar_width = self.state.read(cx).sidebar_width;
-        let find_bar_visible = self.state.read(cx).ui.find_bar.is_some();
-        let command_palette_visible = self.state.read(cx).ui.command_palette.is_some();
-        let notification = self.state.read(cx).ui.notifications.last().cloned();
+        let find_bar_visible = self.state.read(cx).ui().find_bar.is_some();
+        let command_palette_visible = self.state.read(cx).ui().command_palette.is_some();
+        let notification = self.state.read(cx).ui().notifications.last().cloned();
         let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();
@@ -1113,9 +1092,9 @@ impl Render for MainWindow {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.blur();
                 ctx_menu_state.update(cx, |s, cx| {
-                    if s.ui.file_context_menu.is_some()
-                        || s.ui.nav_context_menu.is_some()
-                        || s.ui.editor_context_menu.is_some()
+                    if s.ui().file_context_menu.is_some()
+                        || s.ui().nav_context_menu.is_some()
+                        || s.ui().editor_context_menu.is_some()
                     {
                         s.close_file_context_menu();
                         s.close_nav_context_menu();
@@ -1139,7 +1118,7 @@ impl Render for MainWindow {
                 split_state.update(cx, |s, cx| {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
-                    let left = if s.ui.sidebar_visible {
+                    let left = if s.ui().sidebar_visible {
                         s.sidebar_width
                     } else {
                         0.0

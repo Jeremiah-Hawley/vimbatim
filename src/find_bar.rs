@@ -55,7 +55,7 @@ impl FindBarView {
         if self
             .state
             .read(cx)
-            .ui
+            .ui()
             .find_bar
             .as_ref()
             .is_some_and(|b| b.list_mode)
@@ -97,7 +97,7 @@ impl FindBarView {
             }
             "tab" => {
                 self.state.update(cx, |s, cx| {
-                    if let Some(bar) = s.ui.find_bar.as_mut() {
+                    if let Some(bar) = s.find_bar_mut() {
                         bar.focus = match bar.focus {
                             FindField::Query => FindField::Replace,
                             FindField::Replace => FindField::Query,
@@ -108,7 +108,7 @@ impl FindBarView {
             }
             "backspace" => {
                 self.state.update(cx, |s, cx| {
-                    if let Some(bar) = s.ui.find_bar.as_mut() {
+                    if let Some(bar) = s.find_bar_mut() {
                         match bar.focus {
                             FindField::Query => {
                                 bar.query.pop();
@@ -134,7 +134,7 @@ impl FindBarView {
                     return;
                 };
                 self.state.update(cx, |s, cx| {
-                    if let Some(bar) = s.ui.find_bar.as_mut() {
+                    if let Some(bar) = s.find_bar_mut() {
                         match bar.focus {
                             FindField::Query => bar.query.push(ch),
                             FindField::Replace => bar.replacement.push(ch),
@@ -197,7 +197,7 @@ impl FindBarView {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, window, cx| {
                             this.state.update(cx, |s, cx| {
-                                if let Some(bar) = s.ui.find_bar.as_mut() {
+                                if let Some(bar) = s.find_bar_mut() {
                                     bar.focus = field;
                                 }
                                 cx.notify();
@@ -244,7 +244,7 @@ impl FindBarView {
 
 impl Render for FindBarView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(bar) = self.state.read(cx).ui.find_bar.clone() else {
+        let Some(bar) = self.state.read(cx).ui().find_bar.clone() else {
             return div().into_any_element();
         };
         let p = self.state.read(cx).current_palette();

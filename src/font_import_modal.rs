@@ -109,9 +109,9 @@ impl Render for FontImportModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let theme_mode = state.preferences.theme_mode;
+        let theme_mode = state.preferences().theme_mode;
 
-        if !state.ui.font_import_modal_open {
+        if !state.ui().font_import_modal_open {
             return div();
         }
 

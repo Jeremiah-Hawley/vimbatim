@@ -1366,22 +1366,8 @@ fn test_darken_for_light_text_result_is_no_longer_light() {
 #[test]
 fn bench_diagnostic_large_document_per_keystroke_costs() {
     let big_text: String = "the quick brown fox jumps over the lazy dog ".repeat(340); // ~15,300 chars, one giant paragraph
-    let paragraphs = vec![Paragraph {
-        list: None,
-        runs: vec![Run {
-            text: big_text.clone(),
-            ..Run::default()
-        }],
-        heading: 0,
-        alignment: Alignment::default(),
-        unsupported_xml: None,
-    }];
-
     let mut state = AppState::new();
-    state.workspace.tabs[0]
-        .document
-        .replace_paragraphs(paragraphs);
-    state.workspace.tabs[0].cursor = big_text.len();
+    state.insert_str(&big_text);
 
     // (1) 100x insert_char: covers push_undo_snapshot + sync_insert_char
     //     (which calls resolve_position) — the whole mutation path.
@@ -1395,14 +1381,14 @@ fn bench_diagnostic_large_document_per_keystroke_costs() {
     //     TextEditor::render() both pay on every non-coalesced keystroke
     //     and every frame respectively.
     let t1 = Instant::now();
-    let _cloned = state.workspace.tabs[0].document.paragraphs().to_vec();
+    let _cloned = state.workspace().tabs[0].document.paragraphs().to_vec();
     let clone_elapsed = t1.elapsed();
 
     // (3) build_visual_rows over the full document with a synthetic,
     //     branch-free width closure — isolates the wrap algorithm's own
     //     cost from real font-shaping cost (which this headless sandbox
     //     cannot measure without a live GPUI App).
-    let lines = document_lines(&state.workspace.tabs[0].document.content());
+    let lines = document_lines(&state.workspace().tabs[0].document.content());
     let mut synthetic_width_of = |_: usize, _: usize, c: char| if c == ' ' { 4.0 } else { 8.4 };
     let t2 = Instant::now();
     let _rows = build_visual_rows(&lines, usable_wrap_width(800.0), &mut synthetic_width_of);

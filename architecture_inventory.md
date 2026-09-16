@@ -1,24 +1,24 @@
 # Architecture Inventory
 
-53 Rust files; 60,283 lines.
+53 Rust files; 60,319 lines.
 
 | Lines | File |
 |---:|---|
 | 12,330 | `src/state/editing_tests.rs` |
-| 4,978 | `src/state/vim.rs` |
-| 3,686 | `src/editor/view.rs` |
-| 3,017 | `src/editor/view_tests.rs` |
-| 2,956 | `src/settings_modal.rs` |
+| 5,016 | `src/state/vim.rs` |
+| 3,674 | `src/editor/view.rs` |
+| 3,003 | `src/editor/view_tests.rs` |
+| 2,955 | `src/settings_modal.rs` |
 | 2,910 | `src/docx_parser_tests.rs` |
 | 2,596 | `src/formatting_ribbon.rs` |
 | 2,514 | `src/state/editing.rs` |
 | 2,170 | `src/docx_parser.rs` |
-| 2,011 | `src/file_explorer.rs` |
+| 1,938 | `src/file_explorer.rs` |
 | 1,907 | `src/document_ops.rs` |
-| 1,813 | `src/state.rs` |
-| 1,480 | `src/state/workspace.rs` |
+| 1,828 | `src/state.rs` |
+| 1,556 | `src/state/workspace.rs` |
 | 1,409 | `src/keybinds.rs` |
-| 1,355 | `src/main_window.rs` |
+| 1,334 | `src/main_window.rs` |
 | 1,132 | `src/theme.rs` |
 | 970 | `src/recovery.rs` |
 | 934 | `src/tab_bar.rs` |
@@ -26,7 +26,7 @@
 | 751 | `src/command_palette.rs` |
 | 737 | `src/timer.rs` |
 | 649 | `src/document.rs` |
-| 639 | `src/editor/input_adapter.rs` |
+| 634 | `src/editor/input_adapter.rs` |
 | 553 | `src/vim_keybinds.rs` |
 | 444 | `src/color_picker.rs` |
 | 440 | `src/find_bar.rs` |
@@ -34,8 +34,8 @@
 | 405 | `src/font_import.rs` |
 | 390 | `src/editor/style.rs` |
 | 382 | `src/lib.rs` |
+| 379 | `src/state/ui.rs` |
 | 348 | `src/app_toolbar.rs` |
-| 347 | `src/state/ui.rs` |
 | 270 | `src/rich_clipboard.rs` |
 | 263 | `src/spellcheck.rs` |
 | 244 | `src/auto_scroll.rs` |
@@ -44,7 +44,7 @@
 | 226 | `src/font_import_modal.rs` |
 | 210 | `src/app/repository.rs` |
 | 207 | `src/app/store.rs` |
-| 189 | `src/close_confirm.rs` |
+| 190 | `src/close_confirm.rs` |
 | 173 | `src/word_count.rs` |
 | 113 | `src/case_converter.rs` |
 | 88 | `src/editor/input.rs` |

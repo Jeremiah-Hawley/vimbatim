@@ -4,9 +4,6 @@ use gpui::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::app::repository::WorkspaceRepository;
-use crate::app::store::WorkspaceFs;
-
 use crate::state::{
     AppState, FileContextMenu, FileContextMenuTarget, FileNode, NavContextMenuTarget, SidebarMode,
 };
@@ -104,7 +101,7 @@ impl FileExplorer {
     ) {
         let ks = &event.keystroke;
         self.state.update(cx, |s, cx| {
-            let Some(menu) = s.ui.file_context_menu.as_mut() else {
+            let Some(menu) = s.file_context_menu_mut() else {
                 return;
             };
             let Some(buffer) = menu.rename_buffer.as_mut() else {
@@ -190,7 +187,7 @@ impl FileExplorer {
          * In a future iteration this should open a modal asking for a custom name
          * rather than auto-generating one.
          */
-        let dir = self.state.read(cx).workspace.working_directory.clone();
+        let dir = self.state.read(cx).workspace().working_directory.clone();
         self.state.update(cx, |s, cx| {
             if let Err(e) = s.create_new_docx_in(&dir) {
                 let message = format!("Failed to create a file in {}: {e}", dir.display());
@@ -265,12 +262,7 @@ impl FileExplorer {
                             .on_click(move |_ev, _window, cx| {
                                 let p = path_clone.clone();
                                 state_clone.update(cx, |s, cx| {
-                                    toggle_dir_expanded(&mut s.workspace.file_tree, &p);
-                                    let expanded = collect_expanded_dirs(&s.workspace.file_tree);
-                                    let _ = crate::state::save_expanded_dirs(
-                                        &crate::state::settings_conf_path(),
-                                        &expanded,
-                                    );
+                                    s.toggle_directory_expanded(&p);
                                     cx.notify();
                                 });
                             })
@@ -753,7 +745,7 @@ impl FileExplorer {
                         p,
                         move |_, window, cx| {
                             rename.update(cx, |s, cx| {
-                                if let Some(menu) = s.ui.file_context_menu.as_mut() {
+                                if let Some(menu) = s.file_context_menu_mut() {
                                     menu.rename_buffer = Some(dir_name.clone());
                                 }
                                 cx.notify();
@@ -833,7 +825,7 @@ impl FileExplorer {
                         p,
                         move |_, window, cx| {
                             rename.update(cx, |s, cx| {
-                                if let Some(menu) = s.ui.file_context_menu.as_mut() {
+                                if let Some(menu) = s.file_context_menu_mut() {
                                     menu.rename_buffer = Some(stem.clone());
                                 }
                                 cx.notify();
@@ -902,13 +894,13 @@ impl FileExplorer {
                     let new_folder_state = state_handle.clone();
                     Self::menu_item("ctx-new-folder", "New Folder", false, p, move |_, _, cx| {
                         new_folder_state.update(cx, |s, cx| {
-                            let dir = match s.ui.file_context_menu.take().map(|m| m.target) {
+                            let dir = match s.take_file_context_menu().map(|m| m.target) {
                                 Some(FileContextMenuTarget::File(path)) => path
                                     .parent()
                                     .map(|p| p.to_path_buf())
-                                    .unwrap_or_else(|| s.workspace.working_directory.clone()),
+                                    .unwrap_or_else(|| s.workspace().working_directory.clone()),
                                 Some(FileContextMenuTarget::Dir(path)) => path,
-                                _ => s.workspace.working_directory.clone(),
+                                _ => s.workspace().working_directory.clone(),
                             };
                             if let Err(e) = s.create_new_folder_in(&dir) {
                                 let message = format!("Failed to create folder: {e}");
@@ -952,7 +944,7 @@ impl FileExplorer {
                         .id("file-context-menu-dismiss")
                         .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                             dismiss_state.update(cx, |s, cx| {
-                                if s.ui.file_context_menu.is_some() {
+                                if s.ui().file_context_menu.is_some() {
                                     s.close_file_context_menu();
                                     cx.notify();
                                 }
@@ -1103,7 +1095,7 @@ impl FileExplorer {
                         .id("nav-context-menu-dismiss")
                         .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                             dismiss_state.update(cx, |s, cx| {
-                                if s.ui.nav_context_menu.is_some() {
+                                if s.ui().nav_context_menu.is_some() {
                                     s.close_nav_context_menu();
                                     cx.notify();
                                 }
@@ -1193,7 +1185,7 @@ impl FileExplorer {
         cx: &mut Context<FileExplorer>,
     ) -> AnyElement {
         let state = state_handle.read(cx);
-        let Some(tab) = state.workspace.tabs.get(state.workspace.active_tab) else {
+        let Some(tab) = state.workspace().tabs.get(state.workspace().active_tab) else {
             return div().into_any_element();
         };
 
@@ -1464,27 +1456,27 @@ impl Render for FileExplorer {
         let p = state.current_palette();
         let sidebar_mode = state.sidebar_mode;
         let dir_name = state
-            .workspace
+            .workspace()
             .working_directory
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(".")
             .to_string();
         let active_tab_title = state
-            .workspace
+            .workspace()
             .tabs
-            .get(state.workspace.active_tab)
+            .get(state.workspace().active_tab)
             .map(|t| t.title.clone());
-        let file_tree = state.workspace.file_tree.clone();
+        let file_tree = state.workspace().file_tree.clone();
         let active_path = state
-            .workspace
+            .workspace()
             .tabs
-            .get(state.workspace.active_tab)
+            .get(state.workspace().active_tab)
             .and_then(|tab| tab.file_path.clone());
         let sidebar_width = state.sidebar_width;
         let has_copied_file = state.copied_file.is_some();
         let pending_cut = state.copied_file.as_ref().is_some_and(|(_, cut)| *cut);
-        let nav_fold_buttons = state.preferences.nav_fold_buttons;
+        let nav_fold_buttons = state.preferences().nav_fold_buttons;
         let _ = state;
 
         let state_handle = self.state.clone();
@@ -1729,7 +1721,7 @@ impl Render for FileExplorer {
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
             })
             .when_some(
-                self.state.read(cx).ui.file_context_menu.clone(),
+                self.state.read(cx).ui().file_context_menu.clone(),
                 |el, menu| {
                     el.child(Self::render_context_menu(
                         menu,
@@ -1743,7 +1735,7 @@ impl Render for FileExplorer {
                 },
             )
             .when_some(
-                self.state.read(cx).ui.nav_context_menu.clone(),
+                self.state.read(cx).ui().nav_context_menu.clone(),
                 |el, menu| el.child(Self::render_nav_context_menu(menu, p, &state_handle, cx)),
             )
             // ── Resize handle ────────────────────────────────────────────────
@@ -1769,72 +1761,6 @@ impl Render for FileExplorer {
                         },
                     ),
             )
-    }
-}
-
-/// Recursively searches the mutable tree for a `FileNode::Dir` whose path matches
-/// `target` and flips its `expanded` flag.
-fn toggle_dir_expanded(tree: &mut [FileNode], target: &PathBuf) {
-    /*
-     * Walks `tree` in-place. On finding a matching directory, it flips `expanded`
-     * and returns early. Children are searched recursively before returning.
-     */
-    for node in tree.iter_mut() {
-        if let FileNode::Dir {
-            path,
-            expanded,
-            children,
-            ..
-        } = node
-        {
-            if path == target {
-                *expanded = !*expanded;
-                if *expanded && children.is_empty() {
-                    *children = WorkspaceFs.scan_directory(path).unwrap_or_default();
-                }
-                return;
-            }
-            toggle_dir_expanded(children, target);
-        }
-    }
-}
-
-/// Walks `tree` collecting the path of every currently-expanded directory
-/// (recursing into their children too), so the caller can persist the full
-/// expansion state to settings.conf (`state::save_expanded_dirs`).
-pub(crate) fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for node in tree {
-        if let FileNode::Dir {
-            path,
-            expanded,
-            children,
-            ..
-        } = node
-        {
-            if *expanded {
-                out.push(path.clone());
-                out.extend(collect_expanded_dirs(children));
-            }
-        }
-    }
-    out
-}
-
-/// Re-applies persisted expansion (`state::load_expanded_dirs`) onto a
-/// freshly scanned tree at startup. `scan_directory` always returns
-/// directories collapsed with empty `children`, so replaying
-/// `toggle_dir_expanded` for each persisted path both flips `expanded` to
-/// `true` and lazily populates `children` — the same on-demand scan a
-/// user's click would trigger. Paths are processed shallowest-first so a
-/// persisted child path can only be found once its parent has been expanded
-/// and its children populated (`toggle_dir_expanded` only recurses into
-/// children that already exist).
-pub(crate) fn restore_expanded_dirs(tree: &mut [FileNode], dirs: &[PathBuf]) {
-    let mut sorted = dirs.to_vec();
-    sorted.sort_by_key(|p| p.components().count());
-    for dir in &sorted {
-        toggle_dir_expanded(tree, dir);
     }
 }
 

@@ -349,7 +349,7 @@ pub struct FormattingRibbon {
     tab_search_focus: FocusHandle,
     /// `pub(crate)` so `color_picker::render_picker`'s listeners can reach it.
     pub(crate) picker: crate::color_picker::CustomColorPicker,
-    /// `AppState.ui.read_mode` as of the last render, so the transition into it
+    /// `AppState.ui().read_mode` as of the last render, so the transition into it
     /// can be acted on once. Same check-and-update-per-frame idiom as
     /// `TextEditor.last_seen_active_tab`.
     last_seen_read_mode: bool,
@@ -836,7 +836,7 @@ impl FormattingRibbon {
                         }
                         FormatAction::Timer => {
                             st.update(cx, |state, _cx| {
-                                state.ui.timer.visible = !state.ui.timer.visible;
+                                state.toggle_timer();
                             });
                             cx.notify();
                         }
@@ -870,7 +870,7 @@ impl FormattingRibbon {
                         }
                         FormatAction::WindowSplit => {
                             st.update(cx, |state, _cx| {
-                                if state.workspace.split_view {
+                                if state.workspace().split_view {
                                     state.close_split();
                                 } else {
                                     state.open_split();
@@ -970,7 +970,7 @@ impl FormattingRibbon {
                                     let op = match (act, op) {
                                         (FormatAction::Highlight, FormatOp::Highlight(_)) => {
                                             FormatOp::Highlight(Some(
-                                                state.preferences.highlight_color.clone(),
+                                                state.preferences().highlight_color.clone(),
                                             ))
                                         }
                                         (_, op) => op,
@@ -1086,7 +1086,7 @@ impl FormattingRibbon {
         // it displays as the configured body size, which is what it paints at.
         let current_points = {
             let state = self.state.read(cx);
-            let default_points = state.preferences.normal_text_size_half_points as f32 / 2.0;
+            let default_points = state.preferences().normal_text_size_half_points as f32 / 2.0;
             state.selection_font_size_half_points().map(|half| {
                 if half == 0 {
                     default_points
@@ -1192,7 +1192,7 @@ impl FormattingRibbon {
     /// Clamped to 1..=409pt, Word's own range.
     fn step_font_size(&mut self, delta: i32, cx: &mut Context<Self>) {
         self.state.update(cx, |state, _cx| {
-            let default_half = state.preferences.normal_text_size_half_points;
+            let default_half = state.preferences().normal_text_size_half_points;
             let current_half = match state.selection_font_size_half_points() {
                 Some(0) | None => default_half,
                 Some(half) => half,
@@ -1250,7 +1250,7 @@ impl FormattingRibbon {
         p: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme_mode = self.state.read(cx).preferences.theme_mode;
+        let theme_mode = self.state.read(cx).preferences().theme_mode;
         let rows: Vec<AnyElement> = match action {
             FormatAction::DocMenu => Self::text_menu_rows(
                 "Doc Menu",
@@ -1587,14 +1587,14 @@ impl FormattingRibbon {
         let (tabs, active_tab) = {
             let state = self.state.read(cx);
             let tabs: Vec<(usize, TabId, String)> = state
-                .workspace
+                .workspace()
                 .tabs
                 .iter()
                 .enumerate()
                 .map(|(idx, t)| (idx, t.id, t.title.clone()))
                 .filter(|(_, _, title)| query.is_empty() || title.to_lowercase().contains(&query))
                 .collect();
-            (tabs, state.workspace.active_tab)
+            (tabs, state.workspace().active_tab)
         };
 
         let typed = self.tab_search_buffer.clone();
@@ -1719,7 +1719,7 @@ impl FormattingRibbon {
                 let hit = {
                     let state = self.state.read(cx);
                     state
-                        .workspace
+                        .workspace()
                         .tabs
                         .iter()
                         .find(|t| query.is_empty() || t.title.to_lowercase().contains(&query))
@@ -2343,7 +2343,7 @@ impl Render for FormattingRibbon {
         // window; leaving puts the previous layout back. Acted on once per
         // transition rather than held as an override, so a group can still be
         // expanded by hand while reading.
-        let read_mode = self.state.read(cx).ui.read_mode;
+        let read_mode = self.state.read(cx).ui().read_mode;
         if read_mode != self.last_seen_read_mode {
             self.last_seen_read_mode = read_mode;
             if read_mode {
@@ -2370,21 +2370,21 @@ impl Render for FormattingRibbon {
             let state_read = state.read(cx);
             (
                 state_read.current_palette(),
-                state_read.preferences.theme_color_mode,
+                state_read.preferences().theme_color_mode,
             )
         };
-        let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
-        // let print_layout = self.state.read(cx).ui.print_layout; // see the
+        let invisibility_mode = self.state.read(cx).ui().invisibility_mode;
+        // let print_layout = self.state.read(cx).ui().print_layout; // see the
         // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
-        let timer_visible = self.state.read(cx).ui.timer.visible;
+        let timer_visible = self.state.read(cx).ui().timer.visible;
         // The button wears the current highlight color, nudged toward
         // visibility against this theme's chrome — see `visible_on_chrome`.
         let highlight_tint = crate::theme::visible_on_chrome(
             crate::editor::color::highlight_color_hex(
-                &self.state.read(cx).preferences.highlight_color,
+                &self.state.read(cx).preferences().highlight_color,
             ),
-            self.state.read(cx).preferences.theme_mode,
+            self.state.read(cx).preferences().theme_mode,
         );
         let ribbon_groups = ["cards", "text", "document", "view", "caselist"];
         let all_collapsed = ribbon_groups
@@ -2563,7 +2563,7 @@ impl Render for FormattingRibbon {
                             RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold)
                                 .engaged(any_folded),
                             // Print Layout: deferred (checklist) — the toggle/state
-                            // (AppState.ui.print_layout, toggle_print_layout) and this
+                            // (AppState.ui().print_layout, toggle_print_layout) and this
                             // action's click-handler arm are left in place, inert,
                             // for whenever the real wrap-width/hit-testing rework
                             // lands. No button until then — one that visibly does

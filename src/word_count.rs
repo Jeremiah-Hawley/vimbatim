@@ -59,7 +59,7 @@ impl Render for WordCount {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let wpm = state.preferences.spreading_wpm;
+        let wpm = state.preferences().spreading_wpm;
         let stats = state.document_stats();
         let (minutes, seconds) = stats.estimated_time(wpm);
 

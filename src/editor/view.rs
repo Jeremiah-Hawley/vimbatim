@@ -454,7 +454,7 @@ pub struct TextEditor {
     spell_cache: Rc<RefCell<SpellCache>>,
     /// Which pane this editor paints. Two `TextEditor` entities exist while
     /// the split is open (`notes/split_view_plan.md`); every tab read below
-    /// goes through `tab_index` rather than `AppState.workspace.active_tab`, so each one
+    /// goes through `tab_index` rather than `AppState.workspace().active_tab`, so each one
     /// shows its own document.
     pane: Pane,
 }
@@ -662,7 +662,7 @@ impl TextEditor {
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let line_spacing = state.preferences.line_spacing;
+        let line_spacing = state.preferences().line_spacing;
         let _ = state;
 
         // `scroll_to_cursor` calls this on essentially every key event, so
@@ -727,27 +727,27 @@ impl TextEditor {
     ) {
         let idx = self.tab_index(cx);
         let state = self.state.read(cx);
-        let dragging = state.workspace.split_dragging;
-        let invisibility = state.ui.invisibility_mode;
-        let cite_size = state.preferences.cite_size_half_points;
+        let dragging = state.workspace().split_dragging;
+        let invisibility = state.ui().invisibility_mode;
+        let cite_size = state.preferences().cite_size_half_points;
         let fold_version = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.fold_version)
             .unwrap_or(0);
         let folds = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.folded_headings.clone())
             .unwrap_or_default();
         let tab_id = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.id.0)
             .unwrap_or(usize::MAX);
         let content_version = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.content_version)
             .unwrap_or(0);
         let zoom = state.zoom;
-        let line_spacing = state.preferences.line_spacing;
+        let line_spacing = state.preferences().line_spacing;
         if let Some(cache) = self.row_cache.as_ref() {
             if row_cache_is_valid_for(
                 cache,
@@ -769,7 +769,7 @@ impl TextEditor {
         }
         let content = state.pane_content(self.pane).to_string();
         let paragraphs = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
@@ -822,7 +822,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let row_height = row_slot_px(normal_size_px, state.preferences.line_spacing, zoom);
+        let row_height = row_slot_px(normal_size_px, state.preferences().line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
         }
@@ -902,7 +902,7 @@ impl TextEditor {
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let _ = state;
@@ -961,7 +961,7 @@ impl TextEditor {
         let zoom = state.zoom;
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.paragraphs().to_vec())
             .unwrap_or_default();
         let _ = state;
@@ -1023,7 +1023,7 @@ impl TextEditor {
         // Here rather than in `process_key`: that one is also the macro-replay
         // path (`@<register>`), which has no live menu to dismiss and
         // shouldn't pay for the check per replayed keystroke.
-        if self.state.read(cx).ui.editor_context_menu.is_some() {
+        if self.state.read(cx).ui().editor_context_menu.is_some() {
             self.state.update(cx, |s, cx| {
                 s.close_editor_context_menu();
                 cx.notify();
@@ -1039,7 +1039,7 @@ impl TextEditor {
         if self
             .state
             .read(cx)
-            .workspace
+            .workspace()
             .tabs
             .get(self.tab_index(cx).unwrap_or(usize::MAX))
             .is_some_and(|t| !t.similar_ranges.is_empty())
@@ -1058,7 +1058,7 @@ impl TextEditor {
         // scroll actually moved, so at the end of the document the key still
         // falls through to ordinary cursor movement.
         let plain_arrow = !ks.modifiers.shift && !ks.modifiers.control && !ks.modifiers.platform;
-        if self.state.read(cx).ui.read_mode && plain_arrow {
+        if self.state.read(cx).ui().read_mode && plain_arrow {
             let forward = match ks.key.as_str() {
                 "right" => Some(true),
                 "left" => Some(false),
@@ -1148,7 +1148,7 @@ impl Render for TextEditor {
         // first time that tab has ever been active.
         let active_tab_id = self
             .tab_index(cx)
-            .and_then(|i| self.state.read(cx).workspace.tabs.get(i))
+            .and_then(|i| self.state.read(cx).workspace().tabs.get(i))
             .map(|t| t.id.0);
         if self.last_seen_active_tab != active_tab_id {
             if let Some(prev_id) = self.last_seen_active_tab {
@@ -1170,8 +1170,8 @@ impl Render for TextEditor {
         // below comes from the palette so light mode reaches the document
         // surface too, not just the frame around it.
         let p = state.current_palette();
-        let theme_mode = state.preferences.theme_mode;
-        let cursor_style = if state.global_vim.vim_enabled {
+        let theme_mode = state.preferences().theme_mode;
+        let cursor_style = if state.global_vim().vim_enabled {
             CursorStyle::Block
         } else {
             CursorStyle::Line
@@ -1188,9 +1188,9 @@ impl Render for TextEditor {
             .filter(|name| is_curated_font(name))
             .map(|name| SharedString::from(name.to_string()))
             .unwrap_or_else(|| SharedString::from(FONT_FAMILY));
-        let line_spacing = state.preferences.line_spacing;
+        let line_spacing = state.preferences().line_spacing;
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-        let dragging = state.workspace.split_dragging;
+        let dragging = state.workspace().split_dragging;
         // Scroll movement re-arms the scrollbar's fade. Compared with a small
         // tolerance so sub-pixel jitter in the offset can't hold the bar
         // permanently visible by restarting the animation every frame.
@@ -1203,22 +1203,22 @@ impl Render for TextEditor {
             self.scrollbar_activity = self.scrollbar_activity.wrapping_add(1);
         }
         let scrollbar_activity = self.scrollbar_activity;
-        let invisibility = state.ui.invisibility_mode;
-        let cite_size = state.preferences.cite_size_half_points;
+        let invisibility = state.ui().invisibility_mode;
+        let cite_size = state.preferences().cite_size_half_points;
         let fold_version = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.fold_version)
             .unwrap_or(0);
         let folds = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.folded_headings.clone())
             .unwrap_or_default();
         let tab_id = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.id.0)
             .unwrap_or(usize::MAX);
         let content_version = idx
-            .and_then(|i| state.workspace.tabs.get(i))
+            .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.content_version)
             .unwrap_or(0);
         let cache_valid = self.row_cache.as_ref().is_some_and(|c| {
@@ -1242,7 +1242,7 @@ impl Render for TextEditor {
             (
                 state.pane_content(self.pane).to_string(),
                 state
-                    .workspace
+                    .workspace()
                     .tabs
                     .get(idx.unwrap_or(usize::MAX))
                     .map(|t| t.document.paragraphs().to_vec())
@@ -1250,13 +1250,13 @@ impl Render for TextEditor {
             )
         });
         let is_new_tab = state
-            .workspace
+            .workspace()
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .map(|t| t.is_blank_new_tab())
             .unwrap_or(true);
         let banner_message = state
-            .workspace
+            .workspace()
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .and_then(|t| t.banner_message());
@@ -1270,7 +1270,7 @@ impl Render for TextEditor {
         // the caret selection, and the next keystroke or click clears the
         // similar ranges.
         let selections: Vec<(usize, usize)> = state
-            .workspace
+            .workspace()
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .into_iter()
@@ -1286,8 +1286,8 @@ impl Render for TextEditor {
         // between "vim is on and in Normal mode" and "vim mode is off
         // entirely", both of which otherwise render an identical blank
         // indicator strip.
-        let mode_indicator_text: Option<&'static str> = if state.global_vim.vim_enabled {
-            idx.and_then(|i| state.workspace.tabs.get(i))
+        let mode_indicator_text: Option<&'static str> = if state.global_vim().vim_enabled {
+            idx.and_then(|i| state.workspace().tabs.get(i))
                 .map(|t| match t.vim_mode {
                     VimMode::Normal => "-- NORMAL --",
                     VimMode::Insert => "-- INSERT --",
@@ -1327,7 +1327,7 @@ impl Render for TextEditor {
         // until the next `:` is opened, matching real vim's persistent
         // error line.
         let pending_command_text: Option<String> = state
-            .workspace
+            .workspace()
             .tabs
             .get(idx.unwrap_or(usize::MAX))
             .map(|t| {
@@ -1535,11 +1535,11 @@ impl Render for TextEditor {
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
-                            let line_spacing = this.state.read(cx).preferences.line_spacing;
+                            let line_spacing = this.state.read(cx).preferences().line_spacing;
                             let paragraphs = {
                                 let st = this.state.read(cx);
                                 pane_idx
-                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .and_then(|i| st.workspace().tabs.get(i))
                                     .map(|t| t.document.paragraphs().to_vec())
                                     .unwrap_or_default()
                             };
@@ -1585,7 +1585,7 @@ impl Render for TextEditor {
                                     // position themselves.
                                     state.set_cursor_from_line_col(line, col);
                                     let byte_pos = pane_idx
-                                        .and_then(|i| state.workspace.tabs.get(i))
+                                        .and_then(|i| state.workspace().tabs.get(i))
                                         .map(|t| t.cursor)
                                         .unwrap_or(0);
                                     match click_count {
@@ -1622,7 +1622,7 @@ impl Render for TextEditor {
                             let has_selection = {
                                 let st = this.state.read(cx);
                                 pane_idx
-                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .and_then(|i| st.workspace().tabs.get(i))
                                     .is_some_and(|t| t.selection.is_some())
                             };
                             // Resolve the click to a (line, col) whether or not there's a
@@ -1634,11 +1634,11 @@ impl Render for TextEditor {
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
-                            let line_spacing = this.state.read(cx).preferences.line_spacing;
+                            let line_spacing = this.state.read(cx).preferences().line_spacing;
                             let paragraphs = {
                                 let st = this.state.read(cx);
                                 pane_idx
-                                    .and_then(|i| st.workspace.tabs.get(i))
+                                    .and_then(|i| st.workspace().tabs.get(i))
                                     .map(|t| t.document.paragraphs().to_vec())
                                     .unwrap_or_default()
                             };
@@ -1673,11 +1673,11 @@ impl Render for TextEditor {
                             // slower than the per-word `check` the squiggles use.
                             let spell_target = {
                                 let st = this.state.read(cx);
-                                if !st.preferences.spellcheck_enabled {
+                                if !st.preferences().spellcheck_enabled {
                                     None
                                 } else {
                                     let content = pane_idx
-                                        .and_then(|i| st.workspace.tabs.get(i))
+                                        .and_then(|i| st.workspace().tabs.get(i))
                                         .map(|t| t.document.content())
                                         .unwrap_or_default();
                                     let lines = document_lines(&content);
@@ -1755,11 +1755,11 @@ impl Render for TextEditor {
                         let zoom = this.state.read(cx).zoom;
                         let font_size_px =
                             this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                        let line_spacing = this.state.read(cx).preferences.line_spacing;
+                        let line_spacing = this.state.read(cx).preferences().line_spacing;
                         let paragraphs = {
                             let st = this.state.read(cx);
                             pane_idx
-                                .and_then(|i| st.workspace.tabs.get(i))
+                                .and_then(|i| st.workspace().tabs.get(i))
                                 .map(|t| t.document.paragraphs().to_vec())
                                 .unwrap_or_default()
                         };
@@ -1863,20 +1863,20 @@ impl Render for TextEditor {
                             // row. `user_dictionary` is `Rc` in `AppState` precisely
                             // so this is a refcount bump, not a deep clone.
                             let spellcheck_enabled =
-                                self.state.read(cx).preferences.spellcheck_enabled;
+                                self.state.read(cx).preferences().spellcheck_enabled;
                             let user_dictionary = self.state.read(cx).user_dictionary.clone();
                             let spell_cache = self.spell_cache.clone();
                             let spellcheck_color = crate::editor::color::highlight_color_hex(
-                                &self.state.read(cx).preferences.spellcheck_underline_color,
+                                &self.state.read(cx).preferences().spellcheck_underline_color,
                             );
-                            let invisibility_mode = self.state.read(cx).ui.invisibility_mode;
+                            let invisibility_mode = self.state.read(cx).ui().invisibility_mode;
                             let cite_size_half_points =
-                                self.state.read(cx).preferences.cite_size_half_points;
+                                self.state.read(cx).preferences().cite_size_half_points;
                             let folded_headings = {
                                 let st = self.state.read(cx);
-                                st.workspace
+                                st.workspace()
                                     .tabs
-                                    .get(st.workspace.active_tab)
+                                    .get(st.workspace().active_tab)
                                     .map(|t| t.folded_headings.clone())
                                     .unwrap_or_default()
                             };
@@ -2329,12 +2329,12 @@ impl Render for TextEditor {
                     .child(line)
             })
             .when_some(
-                self.state.read(cx).ui.editor_context_menu.clone(),
+                self.state.read(cx).ui().editor_context_menu.clone(),
                 |el, menu| {
                     let has_selection = self
                         .state
                         .read(cx)
-                        .workspace
+                        .workspace()
                         .tabs
                         .get(self.tab_index(cx).unwrap_or(usize::MAX))
                         .is_some_and(|t| t.selection.is_some());
@@ -2514,7 +2514,7 @@ fn render_context_menu(
                     .id("editor-context-menu-dismiss")
                     .on_mouse_down_out(move |_ev: &MouseDownEvent, _window, cx| {
                         dismiss_state.update(cx, |s, cx| {
-                            if s.ui.editor_context_menu.is_some() {
+                            if s.ui().editor_context_menu.is_some() {
                                 s.close_editor_context_menu();
                                 cx.notify();
                             }
@@ -3457,21 +3457,21 @@ fn extend_auto_scroll_selection(
     // edge-dragging; thread RowCache through only if this measures as a cost.
     let st = state.read(cx);
     let zoom = st.zoom;
-    let font_size_px = st.preferences.normal_text_size_half_points as f32 / 2.0;
-    let line_spacing = st.preferences.line_spacing;
+    let font_size_px = st.preferences().normal_text_size_half_points as f32 / 2.0;
+    let line_spacing = st.preferences().line_spacing;
     let content = st.active_content().to_string();
     let paragraphs = st
-        .workspace
+        .workspace()
         .tabs
-        .get(st.workspace.active_tab)
+        .get(st.workspace().active_tab)
         .map(|tab| tab.document.paragraphs().to_vec())
         .unwrap_or_default();
-    let invisibility = st.ui.invisibility_mode;
-    let cite_size = st.preferences.cite_size_half_points;
+    let invisibility = st.ui().invisibility_mode;
+    let cite_size = st.preferences().cite_size_half_points;
     let folds = st
-        .workspace
+        .workspace()
         .tabs
-        .get(st.workspace.active_tab)
+        .get(st.workspace().active_tab)
         .map(|tab| tab.folded_headings.clone())
         .unwrap_or_default();
 

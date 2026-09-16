@@ -36,11 +36,11 @@ impl Render for AppToolbar {
          */
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let sidebar_visible = state.ui.sidebar_visible;
+        let sidebar_visible = state.ui().sidebar_visible;
         // Read Mode's button is disabled below pending a real rework — see
         // that `.child` block's comment.
         // let read_mode = state.read_mode;
-        let search_from_list_enabled = state.preferences.search_from_list_enabled;
+        let search_from_list_enabled = state.preferences().search_from_list_enabled;
         let _ = state;
 
         let sidebar_label = if sidebar_visible {

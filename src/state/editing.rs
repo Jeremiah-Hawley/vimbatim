@@ -20,7 +20,7 @@ impl AppState {
          * directory) when there's no persisted prior working directory. The
          * file tree is populated by scanning that directory for .docx files,
          * then persisted nav-pane expansion (`expanded_dirs`) is re-applied
-         * via `file_explorer::restore_expanded_dirs`. Keybindings and vim mode
+         * via `workspace::restore_expanded_dirs`. Keybindings and vim mode
          * are loaded from settings.conf, resolved via `settings_conf_path()`
          * (next to the running executable, not the process's CWD — see that
          * function's own doc comment).
@@ -38,7 +38,7 @@ impl AppState {
         let mut file_tree = crate::app::store::WorkspaceFs
             .scan_directory(&working_directory)
             .unwrap_or_default();
-        crate::file_explorer::restore_expanded_dirs(&mut file_tree, &preferences.expanded_dirs);
+        super::workspace::restore_expanded_dirs(&mut file_tree, &preferences.expanded_dirs);
         let keybinds = crate::keybinds::Keybinds::load(settings_path);
         let vim_keybinds = crate::vim_keybinds::VimKeybinds::load(settings_path);
         let vim_enabled = crate::keybinds::load_vim_enabled(settings_path);

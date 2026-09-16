@@ -186,7 +186,7 @@ impl TabBar {
                             let state = this.state.clone();
                             let prepared = state.update(cx, |s, cx| {
                                 let prepared = s
-                                    .workspace
+                                    .workspace()
                                     .tabs
                                     .iter()
                                     .position(|t| t.id == tab_id)
@@ -237,11 +237,11 @@ impl TabBar {
                             // from the active one.
                             let (dir, suggested) = {
                                 let st = s.read(cx);
-                                let tab = st.workspace.tabs.iter().find(|t| t.id == tab_id);
+                                let tab = st.workspace().tabs.iter().find(|t| t.id == tab_id);
                                 let dir = tab
                                     .and_then(|t| t.file_path.as_ref())
                                     .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                                    .unwrap_or_else(|| st.workspace.working_directory.clone());
+                                    .unwrap_or_else(|| st.workspace().working_directory.clone());
                                 let suggested = tab
                                     .map(|t| t.title.clone())
                                     .filter(|t| t.ends_with(".docx"))
@@ -257,7 +257,7 @@ impl TabBar {
                                 let prepared = s.update(cx, |st, cx| {
                                     // Resolved after the await: tabs can be reordered or closed.
                                     let prepared = st
-                                        .workspace
+                                        .workspace()
                                         .tabs
                                         .iter()
                                         .position(|t| t.id == tab_id)
@@ -309,7 +309,7 @@ impl TabBar {
                                 // Through `request_close_tab`, so a dirty tab gets
                                 // the same Save/Discard/Cancel dialog the × does.
                                 if let Some(idx) =
-                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                    s.workspace().tabs.iter().position(|t| t.id == tab_id)
                                 {
                                     s.request_close_tab(idx);
                                 }
@@ -326,7 +326,7 @@ impl TabBar {
                             this.context_menu = None;
                             this.state.update(cx, |s, cx| {
                                 if let Some(idx) =
-                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                    s.workspace().tabs.iter().position(|t| t.id == tab_id)
                                 {
                                     s.close_tabs_to_left(idx);
                                 }
@@ -343,7 +343,7 @@ impl TabBar {
                             this.context_menu = None;
                             this.state.update(cx, |s, cx| {
                                 if let Some(idx) =
-                                    s.workspace.tabs.iter().position(|t| t.id == tab_id)
+                                    s.workspace().tabs.iter().position(|t| t.id == tab_id)
                                 {
                                     s.close_tabs_to_right(idx);
                                 }
@@ -467,8 +467,8 @@ impl Render for TabBar {
         let state = self.state.read(cx);
         let p = state.current_palette();
         let accent_alt = p.accent_alt;
-        let tabs = state.workspace.tabs.clone();
-        let active_idx = state.workspace.active_tab;
+        let tabs = state.workspace().tabs.clone();
+        let active_idx = state.workspace().active_tab;
         // The secondary pane's tab is marked so it's clear which half of a
         // split a document lives in — it is not `active_tab` unless that pane
         // also has focus.
@@ -910,7 +910,7 @@ impl Render for TabBar {
                 let should_quit = this.state.update(cx, |s, cx| {
                     s.request_close_app();
                     cx.notify();
-                    s.ui.pending_close.is_none()
+                    s.ui().pending_close.is_none()
                 });
                 cx.notify();
                 if should_quit {

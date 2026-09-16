@@ -104,10 +104,10 @@ impl TextEditor {
                     let state = self.state.read(cx);
                     let mode = self
                         .tab_index(cx)
-                        .and_then(|i| state.workspace.tabs.get(i))
+                        .and_then(|i| state.workspace().tabs.get(i))
                         .map(|t| t.vim_mode)
                         .unwrap_or(VimMode::Insert);
-                    (state.global_vim.vim_enabled, mode)
+                    (state.global_vim().vim_enabled, mode)
                 };
                 if vim_enabled && vim_mode == VimMode::Normal {
                     self.state.update(cx, |state, _cx| {
@@ -224,10 +224,10 @@ impl TextEditor {
             let idx = self.tab_index(cx);
             let state = self.state.read(cx);
             let mode = idx
-                .and_then(|i| state.workspace.tabs.get(i))
+                .and_then(|i| state.workspace().tabs.get(i))
                 .map(|t| t.vim_mode)
                 .unwrap_or_default();
-            (state.global_vim.vim_enabled, mode)
+            (state.global_vim().vim_enabled, mode)
         };
         let translated = if vim_enabled {
             VimInputStrategy.command(key, shift, key_char)
@@ -315,7 +315,7 @@ impl TextEditor {
                     let zoom = self.state.read(cx).zoom;
                     let normal_size_px =
                         self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
-                    let line_spacing = self.state.read(cx).preferences.line_spacing;
+                    let line_spacing = self.state.read(cx).preferences().line_spacing;
                     let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
                     let (rows, display_to_wrap, _) =
                         self.cached_or_fresh_row_tables(cx, viewport_width);
@@ -381,7 +381,7 @@ impl TextEditor {
                         .and_then(|i| {
                             self.state
                                 .read(cx)
-                                .workspace
+                                .workspace()
                                 .tabs
                                 .get(i)
                                 .map(|t| t.vim_keybind_seq == "z")
@@ -447,7 +447,7 @@ impl TextEditor {
                         .and_then(|i| {
                             self.state
                                 .read(cx)
-                                .workspace
+                                .workspace()
                                 .tabs
                                 .get(i)
                                 .map(|t| t.vim_command_buf.is_empty())
@@ -484,7 +484,7 @@ impl TextEditor {
                         self.macro_at_pending = false;
                         if let Some(register) = vim_find_target_char(key, shift, key_char) {
                             let register = if register == '@' {
-                                self.state.read(cx).global_vim.vim_last_macro_register
+                                self.state.read(cx).global_vim().vim_last_macro_register
                             } else {
                                 Some(register)
                             };
@@ -614,7 +614,7 @@ impl TextEditor {
          * a `self.state.update(...)` closure instead.
          */
         self.state.update(cx, |state, _cx| {
-            state.global_vim.vim_last_macro_register = Some(register);
+            state.set_vim_last_macro_register(register);
         });
         let Some(keys) = self.state.read(cx).macro_keys(register) else {
             return;

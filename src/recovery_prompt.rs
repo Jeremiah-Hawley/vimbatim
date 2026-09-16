@@ -127,7 +127,7 @@ impl Render for RecoveryPrompt {
                                     // reuse the app's own working directory
                                     // rather than inventing a new default.
                                     let directory =
-                                        this.state.read(cx).workspace.working_directory.clone();
+                                        this.state.read(cx).workspace().working_directory.clone();
                                     // Suggest the name *with* .docx so the
                                     // dialog shows it up front — a never-saved
                                     // tab's title is bare ("New Tab"). The

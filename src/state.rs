@@ -946,14 +946,11 @@ pub struct WorkspaceState {
 
 /// The shared application state, owned as a GPUI Model and read/written by all views.
 pub struct AppState {
-    /// Temporary compatibility forwarding keeps existing callers mechanical
-    /// while workspace commands and selectors are extracted.
-    pub(crate) workspace: WorkspaceState,
-    pub(crate) ui: UiState,
-    pub(crate) global_vim: GlobalVimState,
-    /// Typed persisted settings. Legacy mirrors remain until their setters
-    /// are migrated, avoiding a behavior-changing bulk rewrite.
-    pub(crate) preferences: crate::preferences::Preferences,
+    workspace: WorkspaceState,
+    ui: UiState,
+    global_vim: GlobalVimState,
+    /// Typed persisted settings.
+    preferences: crate::preferences::Preferences,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
     /// settings.conf — resets to `DEFAULT_SIDEBAR_WIDTH` every launch.
@@ -1212,6 +1209,24 @@ pub struct AppState {
     pub user_dictionary: Rc<HashSet<String>>,
 }
 
+impl AppState {
+    pub(crate) fn workspace(&self) -> &WorkspaceState {
+        &self.workspace
+    }
+
+    pub(crate) fn ui(&self) -> &UiState {
+        &self.ui
+    }
+
+    pub(crate) fn preferences(&self) -> &crate::preferences::Preferences {
+        &self.preferences
+    }
+
+    pub(crate) fn global_vim(&self) -> &GlobalVimState {
+        &self.global_vim
+    }
+}
+
 /// The last repeatable change (spec 5.5's `.`) — see `AppState.last_change`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VimChange {
@@ -1425,7 +1440,7 @@ fn save_working_directory(path: &std::path::Path, dir: &std::path::Path) -> std:
 /// Persists every currently expanded nav-pane directory to settings.conf as
 /// a single `|`-joined `expanded_dirs` line, so `AppState::new()` can
 /// restore the same folders expanded on the next launch
-/// (`file_explorer::restore_expanded_dirs`).
+/// (`state::workspace::restore_expanded_dirs`).
 pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> std::io::Result<()> {
     let joined = dirs
         .iter()

@@ -3,6 +3,54 @@ use crate::app::error::AppError;
 use crate::app::repository::{DocumentRepository, WorkspaceRepository};
 use crate::app::store::{DocumentStore, WorkspaceFs};
 
+pub(super) fn toggle_dir_expanded(tree: &mut [FileNode], target: &Path) {
+    for node in tree {
+        if let FileNode::Dir {
+            path,
+            expanded,
+            children,
+            ..
+        } = node
+        {
+            if path == target {
+                *expanded = !*expanded;
+                if *expanded && children.is_empty() {
+                    *children = WorkspaceFs.scan_directory(path).unwrap_or_default();
+                }
+                return;
+            }
+            toggle_dir_expanded(children, target);
+        }
+    }
+}
+
+pub(super) fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
+    let mut expanded_dirs = Vec::new();
+    for node in tree {
+        if let FileNode::Dir {
+            path,
+            expanded,
+            children,
+            ..
+        } = node
+        {
+            if *expanded {
+                expanded_dirs.push(path.clone());
+                expanded_dirs.extend(collect_expanded_dirs(children));
+            }
+        }
+    }
+    expanded_dirs
+}
+
+pub(super) fn restore_expanded_dirs(tree: &mut [FileNode], dirs: &[PathBuf]) {
+    let mut sorted = dirs.to_vec();
+    sorted.sort_by_key(|path| path.components().count());
+    for dir in &sorted {
+        toggle_dir_expanded(tree, dir);
+    }
+}
+
 impl AppState {
     pub fn new_tab(&mut self) {
         /*
@@ -926,12 +974,28 @@ impl AppState {
         }
     }
 
+    pub fn toggle_directory_expanded(&mut self, path: &Path) {
+        toggle_dir_expanded(&mut self.workspace.file_tree, path);
+        let expanded = collect_expanded_dirs(&self.workspace.file_tree);
+        let _ = save_expanded_dirs(&self.settings_path, &expanded);
+    }
+
+    pub fn complete_recovery_snapshot(&mut self, tab_id: TabId, version: u64, cost: Duration) {
+        match self.workspace.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            Some(tab) if tab.document.is_modified => {
+                tab.last_snapshot_version = version;
+                tab.last_snapshot_cost = Some(cost);
+            }
+            _ => crate::recovery::delete_snapshot(tab_id),
+        }
+    }
+
     pub fn complete_file_tree_scan(&mut self, directory: &PathBuf, mut file_tree: Vec<FileNode>) {
         if &self.workspace.working_directory != directory {
             return;
         }
-        let expanded = crate::file_explorer::collect_expanded_dirs(&self.workspace.file_tree);
-        crate::file_explorer::restore_expanded_dirs(&mut file_tree, &expanded);
+        let expanded = collect_expanded_dirs(&self.workspace.file_tree);
+        restore_expanded_dirs(&mut file_tree, &expanded);
         self.workspace.file_tree = file_tree;
     }
 
@@ -947,11 +1011,11 @@ impl AppState {
          * same collect/restore pair startup already uses to replay persisted
          * expansion onto a fresh scan.
          */
-        let expanded = crate::file_explorer::collect_expanded_dirs(&self.workspace.file_tree);
+        let expanded = collect_expanded_dirs(&self.workspace.file_tree);
         self.workspace.file_tree = WorkspaceFs
             .scan_directory(&self.workspace.working_directory)
             .unwrap_or_default();
-        crate::file_explorer::restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
+        restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
     }
 
     pub fn set_working_directory(&mut self, dir: PathBuf) {
@@ -1361,15 +1425,14 @@ impl AppState {
             // matching absolute paths against the *old* tree — without this
             // prefix swap, the renamed folder (and any expanded descendant)
             // would silently collapse since its old path no longer exists.
-            let expanded: Vec<PathBuf> =
-                crate::file_explorer::collect_expanded_dirs(&self.workspace.file_tree)
-                    .into_iter()
-                    .map(|p| p.strip_prefix(old).map(|rest| new.join(rest)).unwrap_or(p))
-                    .collect();
+            let expanded: Vec<PathBuf> = collect_expanded_dirs(&self.workspace.file_tree)
+                .into_iter()
+                .map(|p| p.strip_prefix(old).map(|rest| new.join(rest)).unwrap_or(p))
+                .collect();
             self.workspace.file_tree = WorkspaceFs
                 .scan_directory(&self.workspace.working_directory)
                 .unwrap_or_default();
-            crate::file_explorer::restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
+            restore_expanded_dirs(&mut self.workspace.file_tree, &expanded);
         } else {
             let title = new
                 .file_name()

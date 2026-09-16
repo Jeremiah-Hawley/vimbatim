@@ -5,6 +5,38 @@ impl AppState {
         &self.ui.notifications
     }
 
+    pub fn find_bar_mut(&mut self) -> Option<&mut FindBar> {
+        self.ui.find_bar.as_mut()
+    }
+
+    pub fn command_palette_mut(&mut self) -> Option<&mut CommandPaletteState> {
+        self.ui.command_palette.as_mut()
+    }
+
+    pub fn file_context_menu_mut(&mut self) -> Option<&mut FileContextMenu> {
+        self.ui.file_context_menu.as_mut()
+    }
+
+    pub fn take_file_context_menu(&mut self) -> Option<FileContextMenu> {
+        self.ui.file_context_menu.take()
+    }
+
+    pub fn timer_mut(&mut self) -> &mut crate::timer::TimerState {
+        &mut self.ui.timer
+    }
+
+    pub fn toggle_timer(&mut self) {
+        self.ui.timer.visible = !self.ui.timer.visible;
+    }
+
+    pub fn push_pending_keybind(&mut self, action: crate::keybinds::KeybindAction) {
+        self.ui.pending_keybinds.push(action);
+    }
+
+    pub fn take_pending_keybinds(&mut self) -> Vec<crate::keybinds::KeybindAction> {
+        std::mem::take(&mut self.ui.pending_keybinds)
+    }
+
     pub fn close_settings(&mut self) {
         self.ui.settings_visible = false;
     }

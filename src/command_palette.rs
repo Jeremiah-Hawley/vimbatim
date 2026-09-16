@@ -206,7 +206,7 @@ pub fn registry() -> Vec<PaletteCommand> {
             s.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
         }),
         ("Toggle Split View", |s| {
-            if s.workspace.split_view {
+            if s.workspace().split_view {
                 s.close_split();
             } else {
                 s.open_split();
@@ -448,7 +448,7 @@ impl CommandPaletteView {
             }
             "backspace" => {
                 self.state.update(cx, |s, cx| {
-                    if let Some(p) = s.ui.command_palette.as_mut() {
+                    if let Some(p) = s.command_palette_mut() {
                         p.query.pop();
                     }
                     cx.notify();
@@ -463,7 +463,7 @@ impl CommandPaletteView {
                     return;
                 };
                 self.state.update(cx, |s, cx| {
-                    if let Some(p) = s.ui.command_palette.as_mut() {
+                    if let Some(p) = s.command_palette_mut() {
                         p.query.push(ch);
                     }
                     cx.notify();
@@ -477,7 +477,7 @@ impl CommandPaletteView {
     fn query(&self, cx: &App) -> String {
         self.state
             .read(cx)
-            .ui
+            .ui()
             .command_palette
             .as_ref()
             .map(|p| p.query.clone())
@@ -487,7 +487,7 @@ impl CommandPaletteView {
 
 impl Render for CommandPaletteView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(palette) = self.state.read(cx).ui.command_palette.clone() else {
+        let Some(palette) = self.state.read(cx).ui().command_palette.clone() else {
             return div().into_any_element();
         };
         let p = self.state.read(cx).current_palette();
