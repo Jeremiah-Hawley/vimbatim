@@ -1,6 +1,10 @@
 use super::*;
 
 impl AppState {
+    pub fn notifications(&self) -> &[Notification] {
+        &self.ui.notifications
+    }
+
     pub fn open_find_bar(&mut self) {
         // Mutually exclusive with the command palette — see
         // `open_command_palette` for why this lives here and not at the call

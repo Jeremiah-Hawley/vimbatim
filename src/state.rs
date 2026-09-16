@@ -947,12 +947,12 @@ pub struct WorkspaceState {
 pub struct AppState {
     /// Temporary compatibility forwarding keeps existing callers mechanical
     /// while workspace commands and selectors are extracted.
-    pub workspace: WorkspaceState,
-    pub ui: UiState,
-    pub global_vim: GlobalVimState,
+    pub(crate) workspace: WorkspaceState,
+    pub(crate) ui: UiState,
+    pub(crate) global_vim: GlobalVimState,
     /// Typed persisted settings. Legacy mirrors remain until their setters
     /// are migrated, avoiding a behavior-changing bulk rewrite.
-    pub preferences: crate::preferences::Preferences,
+    pub(crate) preferences: crate::preferences::Preferences,
     /// File explorer sidebar width in pixels, changed by dragging its
     /// resize handle (`main_window.rs`). Deliberately not persisted to
     /// settings.conf — resets to `DEFAULT_SIDEBAR_WIDTH` every launch.
