@@ -1,5 +1,6 @@
 [advisories]
 # The application parser uses quick-xml 0.41. Older copies are locked inside
-# GPUI's xcb/Wayland stack and do not parse user documents; remove these when
-# the pinned Zed revision upgrades those platform crates.
+# GPUI's platform stack and do not parse user documents. Zed v1.9.0 still
+# resolves quick-xml 0.30/0.39; remove these exceptions when upstream reaches
+# quick-xml 0.41 or later.
 ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
