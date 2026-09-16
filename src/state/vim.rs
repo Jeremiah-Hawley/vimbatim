@@ -3458,18 +3458,19 @@ impl AppState {
 
         match line {
             "w" => {
-                self.global_vim
-                    .pending_effects
-                    .push(crate::app::command::AppEffect::PerformSave(
-                        self.workspace.active_tab,
-                    ));
-            }
-            "wa" => {
-                for idx in 0..self.workspace.tabs.len() {
+                if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
                     self.global_vim
                         .pending_effects
-                        .push(crate::app::command::AppEffect::PerformSave(idx));
+                        .push(crate::app::command::AppEffect::PerformSave(tab.id));
                 }
+            }
+            "wa" => {
+                self.global_vim.pending_effects.extend(
+                    self.workspace
+                        .tabs
+                        .iter()
+                        .map(|tab| crate::app::command::AppEffect::PerformSave(tab.id)),
+                );
             }
             "q" => {
                 let modified = self
@@ -3486,11 +3487,11 @@ impl AppState {
             }
             "q!" => self.close_tab(self.workspace.active_tab),
             "wq" | "x" => {
-                self.global_vim
-                    .pending_effects
-                    .push(crate::app::command::AppEffect::PerformSave(
-                        self.workspace.active_tab,
-                    ));
+                if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
+                    self.global_vim
+                        .pending_effects
+                        .push(crate::app::command::AppEffect::PerformSave(tab.id));
+                }
                 self.close_tab(self.workspace.active_tab);
             }
             "set vim" => self.global_vim.vim_enabled = true,

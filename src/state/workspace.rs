@@ -65,6 +65,10 @@ impl AppState {
     /// The single place the secondary pane's stored `Tab.id` is turned into an
     /// index. `None` for `Secondary` when the split is closed, or when its tab
     /// has since been closed.
+    pub fn tab_index(&self, id: TabId) -> Option<usize> {
+        self.workspace.tabs.iter().position(|tab| tab.id == id)
+    }
+
     pub fn pane_tab_index(&self, pane: Pane) -> Option<usize> {
         match pane {
             // While the secondary pane holds focus, `active_tab` names *its*

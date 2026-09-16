@@ -627,7 +627,9 @@ impl Render for TabBar {
                                 this.renaming_tab_id = None;
                                 this.rename_buffer.clear();
                                 this.state.update(cx, |s, cx| {
-                                    s.dispatch(crate::app::command::AppCommand::SwitchTab(idx));
+                                    s.dispatch(crate::app::command::AppCommand::SwitchTab(
+                                        tab_id_for_rename,
+                                    ));
                                     cx.notify();
                                 });
                             }

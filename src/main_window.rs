@@ -434,10 +434,10 @@ impl MainWindow {
                     })
                     .detach();
                 }
-                crate::app::command::AppEffect::PromptSaveAs(idx) => {
+                crate::app::command::AppEffect::PromptSaveAs(id) => {
                     let (dir, suggested) = {
                         let st = state.read(cx);
-                        let tab = st.workspace.tabs.get(idx);
+                        let tab = st.tab_index(id).and_then(|idx| st.workspace.tabs.get(idx));
                         let dir = tab
                             .and_then(|t| t.file_path.as_ref())
                             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -454,7 +454,11 @@ impl MainWindow {
                     cx.spawn(async move |cx| {
                         if let Ok(Ok(Some(path))) = rx.await {
                             let prepared = s.update(cx, |st, cx| {
-                                let p = st.prepare_save_as(idx, path);
+                                let p = st
+                                    .tab_index(id)
+                                    .map(|idx| st.prepare_save_as(idx, path))
+                                    .transpose()
+                                    .map(Option::flatten);
                                 cx.notify();
                                 p
                             });
@@ -489,9 +493,13 @@ impl MainWindow {
                     })
                     .detach();
                 }
-                crate::app::command::AppEffect::PerformSave(idx) => {
+                crate::app::command::AppEffect::PerformSave(id) => {
                     let prepared = state.update(cx, |st, cx| {
-                        let p = st.prepare_save(idx);
+                        let p = st
+                            .tab_index(id)
+                            .map(|idx| st.prepare_save(idx))
+                            .transpose()
+                            .map(Option::flatten);
                         cx.notify();
                         p
                     });

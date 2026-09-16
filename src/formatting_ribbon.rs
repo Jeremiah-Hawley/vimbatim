@@ -1661,20 +1661,13 @@ impl FormattingRibbon {
                         cx.listener(move |this, _ev, _window, cx| {
                             cx.stop_propagation();
                             this.state.update(cx, |state, cx| {
-                                // Re-resolve by id: the list was built on a
-                                // previous frame and a tab could have closed
-                                // since, which would shift every later index.
-                                if let Some(pos) =
-                                    state.workspace.tabs.iter().position(|t| t.id == id)
-                                {
-                                    let effects = state
-                                        .execute(crate::app::command::AppCommand::SwitchTab(pos));
-                                    crate::main_window::MainWindow::handle_app_effects(
-                                        this.state.clone(),
-                                        effects,
-                                        cx,
-                                    );
-                                }
+                                let effects =
+                                    state.execute(crate::app::command::AppCommand::SwitchTab(id));
+                                crate::main_window::MainWindow::handle_app_effects(
+                                    this.state.clone(),
+                                    effects,
+                                    cx,
+                                );
                                 cx.notify();
                             });
                             this.open_menu = None;
@@ -1713,16 +1706,18 @@ impl FormattingRibbon {
             }
             "enter" => {
                 let query = self.tab_search_buffer.to_lowercase();
-                let hit =
-                    {
-                        let state = self.state.read(cx);
-                        state.workspace.tabs.iter().position(|t| {
-                            query.is_empty() || t.title.to_lowercase().contains(&query)
-                        })
-                    };
-                if let Some(pos) = hit {
+                let hit = {
+                    let state = self.state.read(cx);
+                    state
+                        .workspace
+                        .tabs
+                        .iter()
+                        .find(|t| query.is_empty() || t.title.to_lowercase().contains(&query))
+                        .map(|t| t.id)
+                };
+                if let Some(id) = hit {
                     self.state.update(cx, |state, cx| {
-                        state.dispatch(crate::app::command::AppCommand::SwitchTab(pos));
+                        state.dispatch(crate::app::command::AppCommand::SwitchTab(id));
                         cx.notify();
                     });
                 }

@@ -12298,3 +12298,20 @@ fn dirty_tab_snapshots_is_empty_when_nothing_is_modified() {
     let state = make_state("hello", 0, None);
     assert!(state.dirty_tab_snapshots().is_empty());
 }
+
+#[test]
+fn commands_keep_stable_tab_identity_after_reordering() {
+    let mut state = make_state("one", 0, None);
+    let original_id = state.workspace.tabs[0].id;
+    state.workspace.tabs.insert(0, Tab::new_empty(TabId(42)));
+
+    state.execute(crate::app::command::AppCommand::SwitchTab(original_id));
+    assert_eq!(
+        state.workspace.tabs[state.workspace.active_tab].id,
+        original_id
+    );
+    assert_eq!(
+        state.execute(crate::app::command::AppCommand::Save),
+        vec![crate::app::command::AppEffect::PerformSave(original_id)]
+    );
+}

@@ -2343,8 +2343,10 @@ impl AppState {
                 self.ui.sidebar_visible = !self.ui.sidebar_visible;
                 vec![]
             }
-            AppCommand::SwitchTab(idx) => {
-                self.set_active_tab(idx);
+            AppCommand::SwitchTab(id) => {
+                if let Some(idx) = self.tab_index(id) {
+                    self.set_active_tab(idx);
+                }
                 vec![]
             }
             AppCommand::Undo => {
@@ -2413,14 +2415,20 @@ impl AppState {
                 self.extend_right();
                 vec![]
             }
-            AppCommand::Save => vec![crate::app::command::AppEffect::PerformSave(
-                self.workspace.active_tab,
-            )],
-            AppCommand::SaveAs => vec![crate::app::command::AppEffect::PromptSaveAs(
-                self.workspace.active_tab,
-            )],
-            AppCommand::SaveTab(idx) => vec![crate::app::command::AppEffect::PerformSave(idx)],
-            AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
+            AppCommand::Save => self
+                .workspace
+                .tabs
+                .get(self.workspace.active_tab)
+                .map(|tab| vec![crate::app::command::AppEffect::PerformSave(tab.id)])
+                .unwrap_or_default(),
+            AppCommand::SaveAs => self
+                .workspace
+                .tabs
+                .get(self.workspace.active_tab)
+                .map(|tab| vec![crate::app::command::AppEffect::PromptSaveAs(tab.id)])
+                .unwrap_or_default(),
+            AppCommand::SaveTab(id) => vec![crate::app::command::AppEffect::PerformSave(id)],
+            AppCommand::SaveTabAs(id) => vec![crate::app::command::AppEffect::PromptSaveAs(id)],
             AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
             AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
             AppCommand::OpenFileAt(path) => {

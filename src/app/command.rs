@@ -1,3 +1,4 @@
+use crate::document::TabId;
 use crate::document_ops::FormatOp;
 use crate::state::CardStyleKind;
 
@@ -16,7 +17,7 @@ pub enum AppCommand {
     ToggleInvisibilityMode,
     ToggleSidebarMode,
     ToggleSidebar,
-    SwitchTab(usize),
+    SwitchTab(TabId),
     Undo,
     Redo,
     ClearToast,
@@ -31,8 +32,8 @@ pub enum AppCommand {
     ExtendRight,
     Save,
     SaveAs,
-    SaveTab(usize),
-    SaveTabAs(usize),
+    SaveTab(TabId),
+    SaveTabAs(TabId),
     OpenFile,
     OpenFileAt(std::path::PathBuf),
     OpenFileInCurrentTab(std::path::PathBuf),
@@ -57,6 +58,6 @@ pub enum AppEffect {
     LoadDocument(std::path::PathBuf),
     LoadDocumentInCurrentTab(std::path::PathBuf),
     ScanWorkspace(std::path::PathBuf),
-    PromptSaveAs(usize),
-    PerformSave(usize),
+    PromptSaveAs(TabId),
+    PerformSave(TabId),
 }
