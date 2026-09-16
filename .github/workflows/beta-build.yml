@@ -23,7 +23,8 @@ jobs:
       - run: cargo fmt --check
       - run: bash tools/check_packaging.sh
       - run: cargo test --all-targets
-      - run: cargo clippy --all-targets --all-features
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - uses: rustsec/audit-check@v2.0.0
 
   build:
     needs: quality

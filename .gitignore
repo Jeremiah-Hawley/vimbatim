@@ -1,11 +1,15 @@
 .claude/
 .superpowers/
 docs/
+!docs/
+!docs/adr/
 notes/
 .worktrees/
 graphify-out/
 *.md
 !/README.md
+!/architecture_inventory.md
+!docs/adr/*.md
 
 *.xml
 *.hpp

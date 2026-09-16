@@ -9,10 +9,10 @@ name = "vimbatim"
 path = "src/main.rs"
 
 [dependencies]
-gpui          = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", features = ["font-kit","x11", "wayland"] }
+gpui          = { git = "https://github.com/zed-industries/zed", rev = "2c346f60a76fe3f0367ef924927f50a6efdf5718", package = "gpui" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "2c346f60a76fe3f0367ef924927f50a6efdf5718", package = "gpui_platform", features = ["font-kit","x11", "wayland"] }
 regex         = "1"
-quick-xml     = "0.30"
+quick-xml     = "0.41"
 zip           = "2"
 spellbook = "0.4.2"
 # Reads a font file's own name table to get the exact family name Word

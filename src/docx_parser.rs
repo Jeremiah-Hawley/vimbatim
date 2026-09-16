@@ -110,6 +110,7 @@ impl DocxOrigin {
 
 /// Returns all paragraph text joined by newlines. This is the plain-text
 /// content loaded into `tab.document.content()` so the text editor can display it.
+#[cfg(test)]
 pub fn paragraphs_to_plain_text(paragraphs: &[Paragraph]) -> String {
     /*
      * Each paragraph becomes one line.  Runs within a paragraph are
@@ -202,6 +203,7 @@ pub fn parse_docx(path: &Path) -> Result<(Vec<Paragraph>, DocxOrigin), Box<dyn s
 ///  - `document_compression` applies only to word/document.xml. Real saves
 ///    pass Deflated; recovery snapshots may pass Stored to skip the deflate
 ///    cost on a transient file (see the recovery spec's Performance section).
+///
 /// Temp path for the atomic write that ends in a rename onto `path`.
 ///
 /// Unique per call, because two writers really can target one destination at
@@ -371,7 +373,7 @@ struct StyleDefaults {
 /// question asked once per file.
 pub fn parse_doc_defaults(xml: &str) -> DocDefaults {
     let mut reader = Reader::from_str(xml);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut out = DocDefaults::default();
     let mut in_defaults = false;
@@ -409,7 +411,7 @@ pub fn parse_doc_defaults(xml: &str) -> DocDefaults {
 fn parse_styles_xml(xml: &str) -> HashMap<String, StyleDefaults> {
     let mut styles = HashMap::new();
     let mut reader = Reader::from_str(xml);
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
 
     let mut current_id: Option<String> = None;
     let mut current: StyleDefaults = StyleDefaults::default();
@@ -496,7 +498,7 @@ fn parse_numbering_xml(xml: &str) -> HashMap<u32, (String, String, Option<String
     let mut num_to_abstract: HashMap<u32, u32> = HashMap::new();
 
     let mut reader = Reader::from_str(xml);
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
 
     let mut current_abstract_id: Option<u32> = None;
     let mut current_num_id: Option<u32> = None;
@@ -636,7 +638,7 @@ fn parse_document_xml(
      */
     let mut reader = Reader::from_str(xml);
     // Do not trim whitespace — leading/trailing spaces in <w:t> are significant.
-    reader.trim_text(false);
+    reader.config_mut().trim_text(false);
 
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     let mut current_para: Option<Paragraph> = None;
@@ -695,7 +697,7 @@ fn parse_document_xml(
                         para_has_unsupported_content = false;
                         current_para_num_id = None;
                         current_para_ilvl = 0;
-                        para_start_pos = reader.buffer_position();
+                        para_start_pos = reader.buffer_position() as usize;
                     }
                     b"w:pPr" => {
                         in_ppr = true;
@@ -863,7 +865,8 @@ fn parse_document_xml(
                 if in_text {
                     if let Some(run) = current_run.as_mut() {
                         // unescape() handles XML entities like &amp; → &.
-                        run.text.push_str(&e.unescape()?);
+                        run.text
+                            .push_str(&quick_xml::escape::unescape(&e.decode()?)?);
                     }
                 }
             }
@@ -877,7 +880,7 @@ fn parse_document_xml(
                                 // literal tag's own byte length (6) to get
                                 // just the inner content, excluding the
                                 // closing tag itself.
-                                let para_end_pos = reader.buffer_position() - 6;
+                                let para_end_pos = reader.buffer_position() as usize - 6;
                                 para.unsupported_xml =
                                     Some(xml[para_start_pos..para_end_pos].to_string());
                             }
@@ -1272,7 +1275,7 @@ fn run_props_xml(run: &Run) -> String {
 /// Falls back to the raw bytes when the value isn't decodable (a malformed
 /// entity), which is what the parser did for every value before this.
 fn attr_value(attr: &quick_xml::events::attributes::Attribute) -> String {
-    attr.unescape_value()
+    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map(|v| v.into_owned())
         .unwrap_or_else(|_| String::from_utf8_lossy(&attr.value).into_owned())
 }
@@ -4003,7 +4006,7 @@ mod tests {
         // rebuild_document_xml wraps in <w:body>...</w:body></w:document>,
         // matching what parse_document_xml expects to find.
         let reparsed = parse_document_xml(&xml, &no_styles(), &no_numbering()).unwrap();
-        assert_eq!(reparsed[0].runs[0].italic, true);
+        assert!(reparsed[0].runs[0].italic);
         assert_eq!(reparsed[0].runs[0].font, Some("Georgia".to_string()));
         assert_eq!(reparsed[0].runs[0].color, Some("00FF00".to_string()));
     }
@@ -4776,9 +4779,9 @@ mod tests {
         };
 
         // Plain bulleted list (example 1): three items, indices 1-3.
-        for i in 1..=3 {
+        for (i, paragraph) in paragraphs.iter().enumerate().take(4).skip(1) {
             assert_eq!(
-                paragraphs[i].list.map(|l| l.kind),
+                paragraph.list.map(|l| l.kind),
                 Some(ListKind::BulletSolid),
                 "index {i}"
             );
@@ -4799,9 +4802,9 @@ mod tests {
         );
 
         // Plain numbered list (example 2): three items, indices 6-8.
-        for i in 6..=8 {
+        for (i, paragraph) in paragraphs.iter().enumerate().take(9).skip(6) {
             assert_eq!(
-                paragraphs[i].list.map(|l| l.kind),
+                paragraph.list.map(|l| l.kind),
                 Some(ListKind::NumberDecimalDot),
                 "index {i}"
             );

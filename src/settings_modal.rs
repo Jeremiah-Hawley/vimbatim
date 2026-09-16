@@ -434,13 +434,11 @@ impl SettingsModal {
             "escape" => {
                 self.cancel_vim_capture();
                 cx.notify();
-                return;
             }
             "backspace" => {
                 self.vim_capture_buffer.pop();
                 self.vim_conflict_message = None;
                 cx.notify();
-                return;
             }
             "enter" => {
                 if self.vim_capture_buffer.is_empty() {
@@ -746,7 +744,7 @@ impl SettingsModal {
                 .spawn(async move { std::fs::write(path, crate::theme::custom_theme_template()) })
                 .await;
             if let Err(error) = result {
-                let _ = state.update(cx, |state, cx| {
+                state.update(cx, |state, cx| {
                     state.apply_effect(crate::app::command::AppEffect::ShowError(format!(
                         "Could not save theme template: {error}"
                     )));
@@ -778,7 +776,7 @@ impl SettingsModal {
                 .spawn(async move { std::fs::read_to_string(path) })
                 .await;
             let Ok(content) = content else {
-                let _ = state.update(cx, |state, cx| {
+                state.update(cx, |state, cx| {
                     state.apply_effect(crate::app::command::AppEffect::ShowError(
                         "Could not read theme file.".to_string(),
                     ));

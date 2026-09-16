@@ -1,0 +1,5 @@
+[advisories]
+# The application parser uses quick-xml 0.41. Older copies are locked inside
+# GPUI's xcb/Wayland stack and do not parse user documents; remove these when
+# the pinned Zed revision upgrades those platform crates.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

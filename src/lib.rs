@@ -1,3 +1,7 @@
+// GPUI render functions naturally carry view state as explicit parameters; grouping
+// them into single-use structs would add indirection without reducing complexity.
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 pub mod app;
 
 #[doc(hidden)]
@@ -216,7 +220,7 @@ pub(crate) fn run_app() {
                     }),
                     ..Default::default()
                 },
-                |_window, cx| cx.new(|cx| MainWindow::new(cx)),
+                |_window, cx| cx.new(MainWindow::new),
             )
             .expect("Failed to open main window");
 
@@ -234,7 +238,7 @@ pub(crate) fn run_app() {
                 .background_executor()
                 .spawn(async { font_import::prepare_persisted() })
                 .await;
-            let _ = state_for_fonts.update(cx, |_state, cx| {
+            state_for_fonts.update(cx, |_state, cx| {
                 font_import::activate_persisted(cx, fonts);
                 cx.notify();
             });
@@ -248,7 +252,7 @@ pub(crate) fn run_app() {
                 .background_executor()
                 .spawn(async move { crate::app::store::RecoveryStore.list_entries() })
                 .await;
-            let _ = state_for_scan.update(cx, |state, cx| {
+            state_for_scan.update(cx, |state, cx| {
                 match result {
                     Ok(entries) => state.recovery.pending_entries = entries,
                     Err(error) => state.apply_effect(app::command::AppEffect::ShowError(format!(

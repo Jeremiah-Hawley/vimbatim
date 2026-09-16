@@ -66,7 +66,7 @@ pub enum FormatAction {
 }
 
 impl FormatAction {
-    pub fn to_format_op(&self) -> Option<FormatOp> {
+    pub fn to_format_op(self) -> Option<FormatOp> {
         match self {
             FormatAction::Underline => Some(FormatOp::Underline(true)),
             FormatAction::Italics => Some(FormatOp::Italic(true)),
@@ -1856,13 +1856,11 @@ impl FormattingRibbon {
                         gpui::MouseButton::Left,
                         cx.listener(move |this, _ev, _window, cx| {
                             cx.stop_propagation();
-                            match action {
-                                Some(run) => this.state.update(cx, |state, cx| {
+                            if let Some(run) = action {
+                                this.state.update(cx, |state, cx| {
                                     run(state);
                                     cx.notify();
-                                }),
-                                // None => println!("{menu_label}: {item}"),
-                                None => {}
+                                });
                             }
                             this.open_menu = None;
                             cx.notify();

@@ -210,7 +210,7 @@ impl TabBar {
                                             )
                                         })
                                         .await;
-                                    let _ = state.update(cx, |s, cx| {
+                                    state.update(cx, |s, cx| {
                                         s.complete_save(id, result, started.elapsed());
                                         cx.notify();
                                     });
@@ -282,13 +282,13 @@ impl TabBar {
                                             )
                                         })
                                         .await;
-                                    let _ = s.update(cx, |st, cx| {
+                                    s.update(cx, |st, cx| {
                                         st.complete_save(id, result, started.elapsed());
                                         cx.notify();
                                     });
                                 } else if let Err(e) = prepared {
                                     crate::state::log_line(&format!("[save as] {e}"));
-                                    let _ = s.update(cx, |st, _| {
+                                    s.update(cx, |st, _| {
                                         st.apply_effect(crate::app::command::AppEffect::ShowError(
                                             format!("Save As failed: {e}"),
                                         ));

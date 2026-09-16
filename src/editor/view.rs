@@ -95,46 +95,7 @@ const LINE_HEIGHT_PX: f32 = 20.0;
 #[cfg(test)]
 const LINE_HEIGHT_RATIO: f32 = LINE_HEIGHT_PX / FONT_SIZE_PX;
 
-/// The real row height for one line of body text at `normal_size_px` — the
-/// zoom-scalable replacement for using `LINE_HEIGHT_PX` directly. See
-/// `LINE_HEIGHT_RATIO`.
-///
-/// `spacing` is `AppState::line_spacing`, Word's own multiplier unit (1.0
-/// single, 1.5, 2.0 double) — the single point every row-height calculation
-/// in this file routes through, so the future line-spacing button changes
-/// row height, cursor pixel math, scroll paging and click hit-testing
-/// together rather than letting them drift apart. Multiplied on top of
-/// `LINE_HEIGHT_RATIO` rather than replacing it, so 1.0 reproduces the
-/// spacing that shipped before the setting existed.
-
-/// The pixel height GPUI must lay a line of `font_px` text out at, so that
-/// what it paints matches what `slot_count_for_paragraph` reserved.
-///
-/// GPUI's default text `line_height` is `phi()` — `relative(1.618034)`, the
-/// golden ratio (`gpui`'s `TextStyle::default`) — resolved as
-/// `(1.618034 * font_size).round()`. This file reserves row space at
-/// `LINE_HEIGHT_RATIO` (20/14 = 1.428571) instead, and nothing ever told GPUI
-/// about that, so every line was *painted* into a box ~13% taller than the
-/// row reserved for it. Glyphs alone did not make that obvious, but anything
-/// that fills the line box does: a highlight is a background on the run's
-/// span, so each highlighted line's colored rectangle reached ~2.3px (at the
-/// 11px default) into the line above and covered the bottom of the highlight
-/// there (bug report + `Highlight_Cover.docx`: teal TEAL covering yellow
-/// YELLOW).
-///
-/// Floored, not rounded: GPUI rounds the resolved line height to whole
-/// pixels, so asking for 15.71px would paint 16px and overflow the 15.71px
-/// row again by a fraction. Flooring guarantees the painted box is never
-/// taller than the space reserved for it. The lost sub-pixel is slack in the
-/// line box, not in the glyphs — it does not clip text.
-
-/// The height of one `uniform_list` row — a `ROW_SUBDIVISIONS` fraction of a
-/// real line of body text. This is the pitch of the *display* grid, so it is
-/// what every display-row-indexed pixel calculation (cursor position, page
-/// scrolling, click hit-testing) must multiply by; `line_height_px` remains
-/// the height of an actual line of text and is what "one line" means to
-/// things like `SCROLL_MARGIN_LINES`.
-/// Matches the `.p(px(16.0))` set on the outer editor div in render().
+/// Matches the outer editor div's padding.
 const CONTENT_PADDING_PX: f32 = 16.0;
 /// Number of lines of buffer to keep visible above/below the cursor —
 /// mirrors Vim's `scrolloff`. `scroll_to_cursor` starts scrolling once the
@@ -238,8 +199,6 @@ struct ScrollbarDecoration {
     thumb: u32,
     thumb_hover: u32,
 }
-
-/// Thumb size and position for one frame of the scrollbar.
 
 impl UniformListDecoration for ScrollbarDecoration {
     fn compute(
@@ -1993,7 +1952,7 @@ impl Render for TextEditor {
                                         // only needs to know about the runs it actually spans.
                                         let row_run_spans: Vec<(usize, usize, usize)> = paragraphs
                                             .get(li)
-                                            .map(|p| paragraph_run_char_spans(p))
+                                            .map(paragraph_run_char_spans)
                                             .unwrap_or_default()
                                             .into_iter()
                                             .filter_map(|(rs, re, run_idx)| {
@@ -3151,16 +3110,6 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
     el
 }
 
-/// Vertical padding (`py(8.0)`, top+bottom) plus border (`border_2()`,
-/// top+bottom) that `render_line`'s box wrapper (`FormatOp::Box`, used by
-/// the Pocket card style) adds around the text itself, on top of the font's
-/// own height — not scaled by `zoom` (matches the fixed `px(8.0)`/
-/// `border_2()` calls in `render_line`). Used by `slot_count_for_paragraph`
-/// to reserve enough uniform_list slots for a boxed line's real height.
-/// Must move in lockstep with `render_line`'s border width (16px padding +
-/// 2px*2 border sides = 20) — under-reserving here reproduces the box
-/// clipping/overlap bug already fixed once (see this const's own history).
-
 /// Fixed pixel width reserved for a list paragraph's marker gutter — wide
 /// enough for the longest ordinal this app's practical list lengths need
 /// ("99." or "iii.") at the default zoom, scaled by `zoom` like every other
@@ -3218,18 +3167,6 @@ pub(crate) const LIST_GUTTER_PX: f32 = 28.0;
 /// ~1.45-2.36x normal size (vs. Tag/Cite's ~1.18x) and Word's own reference
 /// styles give them real `w:spacing w:before` (12pt/2pt/2pt) on top of that,
 /// so their existing multi-slot reservation stays as-is.
-/// The font size a paragraph's row is sized against — the single answer both
-/// the space reserved for the row (`slot_count_for_paragraph`) and the box
-/// GPUI paints its text into (`text_line_box_px`, applied in `render`) are
-/// derived from.
-///
-/// They must agree: reserving against one size and painting against another
-/// is precisely how a highlight's background rectangle ended up taller than
-/// its own row and covered the line above it.
-///
-/// Returns the plain body size for the cases the reservation treats as one
-/// ordinary line — no paragraph data, and Tag (`heading == 4`).
-
 fn usable_wrap_width(viewport_width_px: f32) -> f32 {
     /*
      * Computes how many pixels of width are available for wrapping text,
@@ -5907,9 +5844,9 @@ mod tests {
         // box's real overflow direction (upward, out of a bottom-aligned
         // row) has somewhere empty to land, then the content itself. Row 1
         // (plain) follows with its own `plain` slots.
-        let mut expected = std::iter::repeat(None).take(slots - 1).collect::<Vec<_>>();
+        let mut expected = std::iter::repeat_n(None, slots - 1).collect::<Vec<_>>();
         expected.push(Some(0));
-        expected.extend(std::iter::repeat(None).take(plain - 1));
+        expected.extend(std::iter::repeat_n(None, plain - 1));
         expected.push(Some(1));
         assert_eq!(display_to_wrap, expected);
         assert!(

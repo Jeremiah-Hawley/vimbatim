@@ -475,7 +475,6 @@ pub(crate) fn line_for_y(y: f32, line_height: f32, num_rows: usize) -> usize {
 /// and multiplies the display-row table (and the number of small empty divs
 /// `uniform_list` builds for the visible range) by the same factor; lowering
 /// it is cheaper and chunkier. It must stay >= 1.
-
 pub(crate) const CARD_BOX_EXTRA_PX: f32 = 20.0;
 
 /// Vertical clearance reserved for an `emphasis_boxed` run, on top of the
@@ -561,8 +560,8 @@ pub(crate) fn slot_count_for_paragraph(
 ///   row starts at — needed anywhere pixel math is keyed off a wrap-row
 ///   index (cursor position, scroll-to-cursor) so it accounts for spacer
 ///   rows inserted earlier in the document.
-/// Which wrap rows paint nothing, so they can be dropped from the display list
-/// entirely rather than left as blank lines.
+///
+/// Rows that paint nothing are dropped rather than retained as blank lines.
 ///
 /// Two independent reasons a row disappears:
 ///

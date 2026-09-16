@@ -154,7 +154,7 @@ impl Render for RecoveryPrompt {
                                                     .map_err(|e| format!("Save failed: {e}"))
                                             })
                                             .await;
-                                        let _ = state.update(cx, |s, cx| {
+                                        state.update(cx, |s, cx| {
                                             match result {
                                                 Ok(()) => {
                                                     let _ = s.finish_recovery_save_as(&entry);
@@ -191,7 +191,7 @@ impl Render for RecoveryPrompt {
                                                     .map_err(|e| e.to_string())
                                             })
                                             .await;
-                                        let _ = state.update(cx, |s, cx| {
+                                        state.update(cx, |s, cx| {
                                             s.complete_recovery_resume(entry, result);
                                             cx.notify();
                                         });

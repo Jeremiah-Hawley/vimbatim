@@ -296,7 +296,7 @@ pub fn scan_recovery_dir(dir: &Path) -> Vec<RecoveryEntry> {
         }
     }
 
-    entries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.saved_at));
     entries
 }
 
@@ -347,10 +347,7 @@ pub fn write_snapshot(
         None => crate::docx_parser::create_new_docx(paragraphs, &docx, doc_style),
     };
     if let Err(e) = written {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ));
+        return Err(std::io::Error::other(e.to_string()));
     }
 
     let saved_at = std::time::SystemTime::now()

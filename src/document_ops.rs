@@ -155,7 +155,7 @@ fn sync_insert_str_impl(
 /// (not the run it lands inside's) at `byte_offset`, splitting the
 /// surrounding run first via `split_run_at_position` when the insertion
 /// point falls in the middle of one.
-fn insert_styled_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char, style: &Run) {
+fn insert_styled_char(paragraphs: &mut [Paragraph], byte_offset: usize, ch: char, style: &Run) {
     let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, byte_offset);
     let mut new_run = style.clone();
     new_run.text = ch.to_string();
@@ -441,7 +441,7 @@ pub enum FormatOp {
 /// splitting runs at the boundaries first so a run that only partially
 /// overlaps the range doesn't get formatted in its entirety. A no-op when
 /// `start >= end`.
-pub fn apply_formatting(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize, op: FormatOp) {
+pub fn apply_formatting(paragraphs: &mut [Paragraph], start: usize, end: usize, op: FormatOp) {
     if start >= end {
         return;
     }
@@ -685,7 +685,7 @@ pub(crate) fn split_run_at_position(
 /// Applies paragraph-level alignment to all paragraphs that overlap `[start, end)`,
 /// or to the single paragraph containing the cursor when start == end.
 pub fn apply_paragraph_alignment(
-    paragraphs: &mut Vec<Paragraph>,
+    paragraphs: &mut [Paragraph],
     start: usize,
     end: usize,
     alignment: Alignment,
@@ -716,7 +716,7 @@ pub fn apply_paragraph_alignment(
 /// shape as `apply_paragraph_alignment` above) so `apply_formatting_to_line`
 /// and `apply_formatting_to_selection` both call one choke point instead of
 /// each re-deriving it.
-pub fn reset_card_style_in_range(paragraphs: &mut Vec<Paragraph>, start: usize, end: usize) {
+pub fn reset_card_style_in_range(paragraphs: &mut [Paragraph], start: usize, end: usize) {
     if start > end {
         return;
     }

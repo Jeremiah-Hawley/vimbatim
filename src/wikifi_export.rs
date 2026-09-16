@@ -25,7 +25,7 @@ pub fn export_to_markdown(paragraphs: &[Paragraph], content: &str) -> String {
     markdown
 }
 
-pub fn save_markdown_file(path: &std::path::PathBuf, markdown: &str) -> std::io::Result<()> {
+pub fn save_markdown_file(path: &std::path::Path, markdown: &str) -> std::io::Result<()> {
     /*
      * Saves markdown string to file with .md extension.
      */

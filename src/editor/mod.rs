@@ -4,4 +4,3 @@ pub mod input;
 pub mod layout;
 pub mod style;
 pub mod view;
-pub use view::*;

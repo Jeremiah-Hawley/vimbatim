@@ -33,7 +33,6 @@ fn parse_face(bytes: Vec<u8>) -> Option<Face> {
         .and_then(|n| n.to_string())?;
     let bold = face.is_bold();
     let italic = face.is_italic();
-    drop(face);
     Some(Face {
         family,
         bold,

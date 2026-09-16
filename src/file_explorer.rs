@@ -213,7 +213,7 @@ impl FileExplorer {
         active_path: &Option<PathBuf>,
         p: Palette,
         state_handle: &Entity<AppState>,
-        cx: &mut Context<FileExplorer>,
+        _cx: &mut Context<FileExplorer>,
     ) -> AnyElement {
         /*
          * Renders one row in the tree:
@@ -293,7 +293,7 @@ impl FileExplorer {
                     // Recursively render children when the directory is expanded
                     .when(is_expanded, |d| {
                         d.children(children_snap.iter().map(|child| {
-                            Self::render_node(child, depth + 1, active_path, p, state_handle, cx)
+                            Self::render_node(child, depth + 1, active_path, p, state_handle, _cx)
                         }))
                     })
                     .into_any_element()
@@ -351,7 +351,7 @@ impl FileExplorer {
                                         crate::app::store::DocumentStore.load_document(&load_path)
                                     })
                                     .await;
-                                let _ = state.update(cx, |s, cx| {
+                                state.update(cx, |s, cx| {
                                     s.complete_open_file(path, result);
                                     cx.notify();
                                 });
@@ -661,7 +661,7 @@ impl FileExplorer {
                                         crate::app::store::DocumentStore.load_document(&load_path)
                                     })
                                     .await;
-                                let _ = state.update(cx, |s, cx| {
+                                state.update(cx, |s, cx| {
                                     s.complete_open_file(path, result);
                                     cx.notify();
                                 });
@@ -723,7 +723,7 @@ impl FileExplorer {
                                             .collect::<Vec<_>>()
                                     })
                                     .await;
-                                let _ = state.update(cx, |s, cx| {
+                                state.update(cx, |s, cx| {
                                     for (path, result) in loaded {
                                         s.complete_open_file(path, result);
                                     }
@@ -1767,7 +1767,7 @@ impl Render for FileExplorer {
 
 /// Recursively searches the mutable tree for a `FileNode::Dir` whose path matches
 /// `target` and flips its `expanded` flag.
-fn toggle_dir_expanded(tree: &mut Vec<FileNode>, target: &PathBuf) {
+fn toggle_dir_expanded(tree: &mut [FileNode], target: &PathBuf) {
     /*
      * Walks `tree` in-place. On finding a matching directory, it flips `expanded`
      * and returns early. Children are searched recursively before returning.
@@ -1823,7 +1823,7 @@ pub(crate) fn collect_expanded_dirs(tree: &[FileNode]) -> Vec<PathBuf> {
 /// persisted child path can only be found once its parent has been expanded
 /// and its children populated (`toggle_dir_expanded` only recurses into
 /// children that already exist).
-pub(crate) fn restore_expanded_dirs(tree: &mut Vec<FileNode>, dirs: &[PathBuf]) {
+pub(crate) fn restore_expanded_dirs(tree: &mut [FileNode], dirs: &[PathBuf]) {
     let mut sorted = dirs.to_vec();
     sorted.sort_by_key(|p| p.components().count());
     for dir in &sorted {

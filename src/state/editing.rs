@@ -4,6 +4,12 @@ use crate::app::error::AppError;
 use crate::app::repository::{DocumentRepository, SettingsRepository, WorkspaceRepository};
 use crate::app::store::{DocumentStore, SettingsStore, WorkspaceFs};
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         /*
@@ -626,10 +632,7 @@ impl AppState {
 
         let mut replaced = 0;
         let mut at = 0;
-        loop {
-            let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
-                break;
-            };
+        while let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let Some(pos) = find_from(&tab.document.content(), &query, at) else {
                 break;
             };
@@ -2691,27 +2694,24 @@ impl AppState {
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.selection);
-        match selection {
-            Some((a, f)) => {
-                let (start, end) = (a.min(f), a.max(f));
-                self.push_undo_snapshot();
-                if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    let mut cumulative = 0usize;
-                    for para in tab.document.paragraphs_mut() {
-                        for run in &mut para.runs {
-                            let run_start = cumulative;
-                            let run_end = cumulative + run.text.len();
-                            if run_start >= start && run_end <= end && !run.underline {
-                                run.size = small_size;
-                            }
-                            cumulative = run_end;
+        if let Some((a, f)) = selection {
+            let (start, end) = (a.min(f), a.max(f));
+            self.push_undo_snapshot();
+            if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                let mut cumulative = 0usize;
+                for para in tab.document.paragraphs_mut() {
+                    for run in &mut para.runs {
+                        let run_start = cumulative;
+                        let run_end = cumulative + run.text.len();
+                        if run_start >= start && run_end <= end && !run.underline {
+                            run.size = small_size;
                         }
-                        cumulative += 1;
+                        cumulative = run_end;
                     }
-                    tab.document.is_modified = true;
+                    cumulative += 1;
                 }
+                tab.document.is_modified = true;
             }
-            None => {} // No-op when no selection
         }
     }
 
@@ -2724,52 +2724,49 @@ impl AppState {
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.selection);
-        match selection {
-            Some((a, f)) => {
-                let (start, end) = (a.min(f), a.max(f));
-                if start >= end {
-                    return;
-                }
-                self.push_undo_snapshot();
-                if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-                    let (start_para, start_run, start_char) = tab.document.resolve_position(start);
-                    let (end_para, end_run, end_char) = tab.document.resolve_position(end);
-                    // Split at the boundaries first — same pattern as
-                    // `apply_formatting` — so a run that only partially
-                    // overlaps the selection doesn't get skipped entirely.
-                    // End before start so start's already-resolved indices
-                    // aren't shifted by a run being inserted ahead of it.
-                    crate::document_ops::split_run_at_position(
-                        tab.document.paragraphs_mut(),
-                        end_para,
-                        end_run,
-                        end_char,
-                    );
-                    crate::document_ops::split_run_at_position(
-                        tab.document.paragraphs_mut(),
-                        start_para,
-                        start_run,
-                        start_char,
-                    );
-
-                    let mut cumulative = 0usize;
-                    for para in tab.document.paragraphs_mut() {
-                        for run in &mut para.runs {
-                            let run_start = cumulative;
-                            let run_end = cumulative + run.text.len();
-                            if run_start >= start && run_end <= end {
-                                run.text = case_converter::apply_case(&run.text, case_type);
-                            }
-                            cumulative = run_end;
-                        }
-                        cumulative += 1;
-                        crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
-                    }
-                    tab.document.is_modified = true;
-                    // Update content to match
-                }
+        if let Some((a, f)) = selection {
+            let (start, end) = (a.min(f), a.max(f));
+            if start >= end {
+                return;
             }
-            None => {}
+            self.push_undo_snapshot();
+            if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                let (start_para, start_run, start_char) = tab.document.resolve_position(start);
+                let (end_para, end_run, end_char) = tab.document.resolve_position(end);
+                // Split at the boundaries first — same pattern as
+                // `apply_formatting` — so a run that only partially
+                // overlaps the selection doesn't get skipped entirely.
+                // End before start so start's already-resolved indices
+                // aren't shifted by a run being inserted ahead of it.
+                crate::document_ops::split_run_at_position(
+                    tab.document.paragraphs_mut(),
+                    end_para,
+                    end_run,
+                    end_char,
+                );
+                crate::document_ops::split_run_at_position(
+                    tab.document.paragraphs_mut(),
+                    start_para,
+                    start_run,
+                    start_char,
+                );
+
+                let mut cumulative = 0usize;
+                for para in tab.document.paragraphs_mut() {
+                    for run in &mut para.runs {
+                        let run_start = cumulative;
+                        let run_end = cumulative + run.text.len();
+                        if run_start >= start && run_end <= end {
+                            run.text = case_converter::apply_case(&run.text, case_type);
+                        }
+                        cumulative = run_end;
+                    }
+                    cumulative += 1;
+                    crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
+                }
+                tab.document.is_modified = true;
+                // Update content to match
+            }
         }
     }
 
@@ -3177,10 +3174,7 @@ impl AppState {
         if let Some(path) = &tab.file_path {
             wikifi_export::save_markdown_file(path, &markdown)?;
         } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Tab must be saved first",
-            ));
+            return Err(std::io::Error::other("Tab must be saved first"));
         }
         Ok(())
     }
@@ -5288,7 +5282,7 @@ impl AppState {
     /// hundreds of tabs from one click.
     pub fn open_all_files_in_dir(&mut self, dir: &std::path::Path) {
         for path in WorkspaceFs
-            .scan_directory(&dir.to_path_buf())
+            .scan_directory(dir)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|n| match n {
@@ -5726,9 +5720,7 @@ impl AppState {
          * `handle_vim_normal_key` itself. Returns `None` when no count was
          * typed, distinct from an explicit `1`.
          */
-        let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) else {
-            return None;
-        };
+        let tab = self.workspace.tabs.get_mut(self.workspace.active_tab)?;
         let (count, _trigger) = split_vim_command_buf(&tab.vim_command_buf);
         let digit_len = tab
             .vim_command_buf
@@ -7605,10 +7597,8 @@ impl AppState {
             }
         }
 
-        match self.handle_vim_motion_key(key, shift, key_char, true) {
-            Some(result) => result,
-            None => true,
-        }
+        self.handle_vim_motion_key(key, shift, key_char, true)
+            .unwrap_or(true)
     }
 
     fn vim_visual_operator_range(&self, operator: char) -> Option<(usize, usize, MotionKind)> {
@@ -7870,7 +7860,7 @@ impl AppState {
                     self.global_vim
                         .pending_effects
                         .push(crate::app::command::AppEffect::LoadDocument(path));
-                } else if let Some(count) = line.parse::<usize>().ok() {
+                } else if let Ok(count) = line.parse::<usize>() {
                     if count >= 1 {
                         self.vim_move_to_line_first_nonblank(count - 1, false);
                     }
@@ -9409,6 +9399,239 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
     })
 }
 
+impl AppState {
+    pub fn execute(
+        &mut self,
+        command: crate::app::command::AppCommand,
+    ) -> Vec<crate::app::command::AppEffect> {
+        use crate::app::command::AppCommand;
+
+        match command {
+            AppCommand::ApplyFormatting(op) => {
+                self.apply_formatting_to_selection(op);
+                vec![]
+            }
+            AppCommand::ApplyCardStyle(kind) => {
+                self.apply_card_style(kind);
+                vec![]
+            }
+            AppCommand::ApplyCiteStyle => {
+                self.apply_cite_style();
+                vec![]
+            }
+            AppCommand::ApplyAnalyticStyle => {
+                self.apply_analytic_style();
+                vec![]
+            }
+            AppCommand::ApplyEmphasisStyle => {
+                self.apply_emphasis_style();
+                vec![]
+            }
+            AppCommand::ClearFormatting => {
+                self.clear_formatting();
+                vec![]
+            }
+            AppCommand::ToggleStrikethrough => {
+                self.toggle_strikethrough();
+                vec![]
+            }
+            AppCommand::ApplyCaseToSelection(case_type) => {
+                self.apply_case_to_selection(case_type);
+                vec![]
+            }
+            AppCommand::ApplyLineAlignment(alignment) => {
+                self.apply_line_alignment(alignment);
+                vec![]
+            }
+            AppCommand::ToggleFold => {
+                self.toggle_fold();
+                vec![]
+            }
+            AppCommand::ToggleInvisibilityMode => {
+                self.toggle_invisibility_mode();
+                vec![]
+            }
+            AppCommand::ToggleSidebarMode => {
+                self.toggle_sidebar_mode();
+                vec![]
+            }
+            AppCommand::ToggleSidebar => {
+                self.ui.sidebar_visible = !self.ui.sidebar_visible;
+                vec![]
+            }
+            AppCommand::SwitchTab(idx) => {
+                self.set_active_tab(idx);
+                vec![]
+            }
+            AppCommand::Undo => {
+                self.undo();
+                vec![]
+            }
+            AppCommand::Redo => {
+                self.redo();
+                vec![]
+            }
+            AppCommand::ClearToast => {
+                self.ui.notifications.clear();
+                vec![]
+            }
+            AppCommand::Backspace => {
+                self.backspace();
+                vec![]
+            }
+            AppCommand::DeleteForward => {
+                self.delete_forward();
+                vec![]
+            }
+            AppCommand::InsertChar(ch) => {
+                self.insert_char(ch);
+                vec![]
+            }
+            AppCommand::IndentListItem => {
+                let in_list = self
+                    .workspace
+                    .tabs
+                    .get(self.workspace.active_tab)
+                    .is_some_and(|t| {
+                        let (para_idx, ..) = crate::document_ops::resolve_position(
+                            t.document.paragraphs(),
+                            t.cursor,
+                        );
+                        t.document
+                            .paragraphs()
+                            .get(para_idx)
+                            .is_some_and(|p| p.list.is_some())
+                    });
+                if in_list {
+                    self.indent_list_item();
+                } else {
+                    self.insert_char('\t');
+                }
+                vec![]
+            }
+            AppCommand::OutdentListItem => {
+                self.outdent_list_item();
+                vec![]
+            }
+            AppCommand::MoveLeft => {
+                self.move_left();
+                vec![]
+            }
+            AppCommand::MoveRight => {
+                self.move_right();
+                vec![]
+            }
+            AppCommand::ExtendLeft => {
+                self.extend_left();
+                vec![]
+            }
+            AppCommand::ExtendRight => {
+                self.extend_right();
+                vec![]
+            }
+            AppCommand::Save => vec![crate::app::command::AppEffect::PerformSave(
+                self.workspace.active_tab,
+            )],
+            AppCommand::SaveAs => vec![crate::app::command::AppEffect::PromptSaveAs(
+                self.workspace.active_tab,
+            )],
+            AppCommand::SaveTab(idx) => vec![crate::app::command::AppEffect::PerformSave(idx)],
+            AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
+            AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
+            AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
+            AppCommand::OpenFileAt(path) => {
+                vec![crate::app::command::AppEffect::LoadDocument(path)]
+            }
+            AppCommand::OpenFileInCurrentTab(path) => {
+                vec![crate::app::command::AppEffect::LoadDocumentInCurrentTab(
+                    path,
+                )]
+            }
+            AppCommand::OpenFileInSidePane(path) => {
+                if !self.workspace.split_view {
+                    self.workspace.split_view = true;
+                    self.workspace
+                        .tabs
+                        .push(crate::state::Tab::new_empty(crate::document::TabId(
+                            self.workspace.next_tab_id,
+                        )));
+                    self.workspace.secondary_tab_id =
+                        Some(crate::document::TabId(self.workspace.next_tab_id));
+                    self.workspace.next_tab_id += 1;
+                }
+                self.focus_pane(crate::state::Pane::Secondary);
+                vec![crate::app::command::AppEffect::LoadDocument(path)]
+            }
+            AppCommand::RefreshFileTree => {
+                vec![crate::app::command::AppEffect::ScanWorkspace(
+                    self.workspace.working_directory.clone(),
+                )]
+            }
+            AppCommand::ReopenClosedTab => self
+                .workspace
+                .closed_tabs
+                .pop()
+                .map(crate::app::command::AppEffect::LoadDocument)
+                .into_iter()
+                .collect(),
+            command @ AppCommand::VimKey { .. } => self.execute_vim_command(command).1,
+        }
+    }
+
+    /// Runs a translated Vim command through the application boundary. The
+    /// boolean retains the editor-view fallthrough contract for visual-row
+    /// navigation; all platform work is returned as effects.
+    pub fn execute_vim_command(
+        &mut self,
+        command: AppCommand,
+    ) -> (bool, Vec<crate::app::command::AppEffect>) {
+        let AppCommand::VimKey {
+            key,
+            shift,
+            key_char,
+        } = command
+        else {
+            return (false, Vec::new());
+        };
+        let handled = self.handle_vim_key(&key, shift, key_char.as_deref());
+        let mut effects = Vec::new();
+        if let Some((text, metadata)) = self.take_pending_clipboard_sync() {
+            effects.push(crate::app::command::AppEffect::WriteClipboard { text, metadata });
+        }
+        if let Some(action) = self.take_pending_vim_action() {
+            effects.push(crate::app::command::AppEffect::DispatchKeybind(action));
+        }
+        effects.append(&mut self.global_vim.pending_effects);
+        (handled, effects)
+    }
+
+    pub fn dispatch(&mut self, command: crate::app::command::AppCommand) {
+        for effect in self.execute(command) {
+            self.apply_effect(effect);
+        }
+    }
+
+    pub fn apply_effect(&mut self, effect: crate::app::command::AppEffect) {
+        match effect {
+            crate::app::command::AppEffect::ShowError(message) => {
+                self.ui.notifications.push(crate::state::Notification {
+                    severity: crate::state::NotificationSeverity::Error,
+                    message,
+                });
+            }
+            crate::app::command::AppEffect::WriteClipboard { .. }
+            | crate::app::command::AppEffect::DispatchKeybind(_)
+            | crate::app::command::AppEffect::PromptOpenFolder
+            | crate::app::command::AppEffect::PromptOpenFile
+            | crate::app::command::AppEffect::LoadDocument(_)
+            | crate::app::command::AppEffect::LoadDocumentInCurrentTab(_)
+            | crate::app::command::AppEffect::ScanWorkspace(_)
+            | crate::app::command::AppEffect::PromptSaveAs(_)
+            | crate::app::command::AppEffect::PerformSave(_) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9572,7 +9795,7 @@ mod tests {
     /// selection are set to the given values. Avoids touching the filesystem
     /// or GPUI context.
     fn make_state(content: &str, cursor: usize, selection: Option<(usize, usize)>) -> AppState {
-        let state = AppState {
+        AppState {
             workspace: WorkspaceState {
                 tabs: vec![Tab {
                     id: TabId(0),
@@ -9678,8 +9901,7 @@ mod tests {
             spellcheck_enabled: false,
             spellcheck_underline_color: "red".to_string(),
             user_dictionary: Rc::new(HashSet::new()),
-        };
-        state
+        }
     }
 
     #[test]
@@ -14226,7 +14448,7 @@ mod tests {
             .document
             .undo_stack
             .iter()
-            .map(|p| crate::docx_parser::paragraphs_to_plain_text(&p))
+            .map(|p| crate::docx_parser::paragraphs_to_plain_text(p))
             .collect()
     }
 
@@ -14235,7 +14457,7 @@ mod tests {
             .document
             .redo_stack
             .iter()
-            .map(|p| crate::docx_parser::paragraphs_to_plain_text(&p))
+            .map(|p| crate::docx_parser::paragraphs_to_plain_text(p))
             .collect()
     }
 
@@ -16996,8 +17218,8 @@ mod tests {
     fn test_handle_vim_key_visual_line_h_extends_within_visual_line() {
         let mut state = make_state("one\ntwo\nthree", 4, None); // on "two"
         state.vim_enter_visual_line(); // selects "two\n" as (4, 8)
-        assert!(state.handle_vim_key("j", false, None) == false); // falls through, unaffected here
-                                                                  // Directly verify a pure motion extends VisualLine's selection too.
+        assert!(!state.handle_vim_key("j", false, None)); // falls through, unaffected here
+                                                          // Directly verify a pure motion extends VisualLine's selection too.
         assert!(state.handle_vim_key("l", false, None));
         assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::VisualLine);
     }
@@ -21726,238 +21948,5 @@ mod tests {
     fn dirty_tab_snapshots_is_empty_when_nothing_is_modified() {
         let state = make_state("hello", 0, None);
         assert!(state.dirty_tab_snapshots().is_empty());
-    }
-}
-
-impl AppState {
-    pub fn execute(
-        &mut self,
-        command: crate::app::command::AppCommand,
-    ) -> Vec<crate::app::command::AppEffect> {
-        use crate::app::command::AppCommand;
-
-        match command {
-            AppCommand::ApplyFormatting(op) => {
-                self.apply_formatting_to_selection(op);
-                vec![]
-            }
-            AppCommand::ApplyCardStyle(kind) => {
-                self.apply_card_style(kind);
-                vec![]
-            }
-            AppCommand::ApplyCiteStyle => {
-                self.apply_cite_style();
-                vec![]
-            }
-            AppCommand::ApplyAnalyticStyle => {
-                self.apply_analytic_style();
-                vec![]
-            }
-            AppCommand::ApplyEmphasisStyle => {
-                self.apply_emphasis_style();
-                vec![]
-            }
-            AppCommand::ClearFormatting => {
-                self.clear_formatting();
-                vec![]
-            }
-            AppCommand::ToggleStrikethrough => {
-                self.toggle_strikethrough();
-                vec![]
-            }
-            AppCommand::ApplyCaseToSelection(case_type) => {
-                self.apply_case_to_selection(case_type);
-                vec![]
-            }
-            AppCommand::ApplyLineAlignment(alignment) => {
-                self.apply_line_alignment(alignment);
-                vec![]
-            }
-            AppCommand::ToggleFold => {
-                self.toggle_fold();
-                vec![]
-            }
-            AppCommand::ToggleInvisibilityMode => {
-                self.toggle_invisibility_mode();
-                vec![]
-            }
-            AppCommand::ToggleSidebarMode => {
-                self.toggle_sidebar_mode();
-                vec![]
-            }
-            AppCommand::ToggleSidebar => {
-                self.ui.sidebar_visible = !self.ui.sidebar_visible;
-                vec![]
-            }
-            AppCommand::SwitchTab(idx) => {
-                self.set_active_tab(idx);
-                vec![]
-            }
-            AppCommand::Undo => {
-                self.undo();
-                vec![]
-            }
-            AppCommand::Redo => {
-                self.redo();
-                vec![]
-            }
-            AppCommand::ClearToast => {
-                self.ui.notifications.clear();
-                vec![]
-            }
-            AppCommand::Backspace => {
-                self.backspace();
-                vec![]
-            }
-            AppCommand::DeleteForward => {
-                self.delete_forward();
-                vec![]
-            }
-            AppCommand::InsertChar(ch) => {
-                self.insert_char(ch);
-                vec![]
-            }
-            AppCommand::IndentListItem => {
-                let in_list = self
-                    .workspace
-                    .tabs
-                    .get(self.workspace.active_tab)
-                    .is_some_and(|t| {
-                        let (para_idx, ..) = crate::document_ops::resolve_position(
-                            t.document.paragraphs(),
-                            t.cursor,
-                        );
-                        t.document
-                            .paragraphs()
-                            .get(para_idx)
-                            .is_some_and(|p| p.list.is_some())
-                    });
-                if in_list {
-                    self.indent_list_item();
-                } else {
-                    self.insert_char('\t');
-                }
-                vec![]
-            }
-            AppCommand::OutdentListItem => {
-                self.outdent_list_item();
-                vec![]
-            }
-            AppCommand::MoveLeft => {
-                self.move_left();
-                vec![]
-            }
-            AppCommand::MoveRight => {
-                self.move_right();
-                vec![]
-            }
-            AppCommand::ExtendLeft => {
-                self.extend_left();
-                vec![]
-            }
-            AppCommand::ExtendRight => {
-                self.extend_right();
-                vec![]
-            }
-            AppCommand::Save => vec![crate::app::command::AppEffect::PerformSave(
-                self.workspace.active_tab,
-            )],
-            AppCommand::SaveAs => vec![crate::app::command::AppEffect::PromptSaveAs(
-                self.workspace.active_tab,
-            )],
-            AppCommand::SaveTab(idx) => vec![crate::app::command::AppEffect::PerformSave(idx)],
-            AppCommand::SaveTabAs(idx) => vec![crate::app::command::AppEffect::PromptSaveAs(idx)],
-            AppCommand::OpenFile => vec![crate::app::command::AppEffect::PromptOpenFile],
-            AppCommand::OpenFolder => vec![crate::app::command::AppEffect::PromptOpenFolder],
-            AppCommand::OpenFileAt(path) => {
-                vec![crate::app::command::AppEffect::LoadDocument(path)]
-            }
-            AppCommand::OpenFileInCurrentTab(path) => {
-                vec![crate::app::command::AppEffect::LoadDocumentInCurrentTab(
-                    path,
-                )]
-            }
-            AppCommand::OpenFileInSidePane(path) => {
-                if !self.workspace.split_view {
-                    self.workspace.split_view = true;
-                    self.workspace
-                        .tabs
-                        .push(crate::state::Tab::new_empty(crate::document::TabId(
-                            self.workspace.next_tab_id,
-                        )));
-                    self.workspace.secondary_tab_id =
-                        Some(crate::document::TabId(self.workspace.next_tab_id));
-                    self.workspace.next_tab_id += 1;
-                }
-                self.focus_pane(crate::state::Pane::Secondary);
-                vec![crate::app::command::AppEffect::LoadDocument(path)]
-            }
-            AppCommand::RefreshFileTree => {
-                vec![crate::app::command::AppEffect::ScanWorkspace(
-                    self.workspace.working_directory.clone(),
-                )]
-            }
-            AppCommand::ReopenClosedTab => self
-                .workspace
-                .closed_tabs
-                .pop()
-                .map(|p| crate::app::command::AppEffect::LoadDocument(p))
-                .into_iter()
-                .collect(),
-            command @ AppCommand::VimKey { .. } => self.execute_vim_command(command).1,
-        }
-    }
-
-    /// Runs a translated Vim command through the application boundary. The
-    /// boolean retains the editor-view fallthrough contract for visual-row
-    /// navigation; all platform work is returned as effects.
-    pub fn execute_vim_command(
-        &mut self,
-        command: AppCommand,
-    ) -> (bool, Vec<crate::app::command::AppEffect>) {
-        let AppCommand::VimKey {
-            key,
-            shift,
-            key_char,
-        } = command
-        else {
-            return (false, Vec::new());
-        };
-        let handled = self.handle_vim_key(&key, shift, key_char.as_deref());
-        let mut effects = Vec::new();
-        if let Some((text, metadata)) = self.take_pending_clipboard_sync() {
-            effects.push(crate::app::command::AppEffect::WriteClipboard { text, metadata });
-        }
-        if let Some(action) = self.take_pending_vim_action() {
-            effects.push(crate::app::command::AppEffect::DispatchKeybind(action));
-        }
-        effects.append(&mut self.global_vim.pending_effects);
-        (handled, effects)
-    }
-
-    pub fn dispatch(&mut self, command: crate::app::command::AppCommand) {
-        for effect in self.execute(command) {
-            self.apply_effect(effect);
-        }
-    }
-
-    pub fn apply_effect(&mut self, effect: crate::app::command::AppEffect) {
-        match effect {
-            crate::app::command::AppEffect::ShowError(message) => {
-                self.ui.notifications.push(crate::state::Notification {
-                    severity: crate::state::NotificationSeverity::Error,
-                    message,
-                });
-            }
-            crate::app::command::AppEffect::WriteClipboard { .. }
-            | crate::app::command::AppEffect::DispatchKeybind(_)
-            | crate::app::command::AppEffect::PromptOpenFolder
-            | crate::app::command::AppEffect::PromptOpenFile
-            | crate::app::command::AppEffect::LoadDocument(_)
-            | crate::app::command::AppEffect::LoadDocumentInCurrentTab(_)
-            | crate::app::command::AppEffect::ScanWorkspace(_)
-            | crate::app::command::AppEffect::PromptSaveAs(_)
-            | crate::app::command::AppEffect::PerformSave(_) => {}
-        }
     }
 }

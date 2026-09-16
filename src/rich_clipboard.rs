@@ -163,7 +163,7 @@ mod tests {
             size: 24,
             ..Run::default()
         };
-        let encoded = encode_with_lengths(&[run.clone()], &[(0, Alignment::Left)]);
+        let encoded = encode_with_lengths(std::slice::from_ref(&run), &[(0, Alignment::Left)]);
         let (decoded, paras) = decode(&encoded, "hello").unwrap();
         assert_eq!(decoded, vec![run]);
         assert_eq!(paras, vec![(0, Alignment::Left)]);
@@ -202,7 +202,7 @@ mod tests {
             emphasis_boxed: true,
             ..Run::default()
         };
-        let encoded = encode_with_lengths(&[run.clone()], &[]);
+        let encoded = encode_with_lengths(std::slice::from_ref(&run), &[]);
         let (decoded, _) = decode(&encoded, "hi").unwrap();
         assert_eq!(decoded, vec![run]);
     }

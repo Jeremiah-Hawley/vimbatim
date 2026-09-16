@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> None:
     rows = []
-    for path in sorted((ROOT / "src").glob("*.rs")):
+    for path in sorted((ROOT / "src").rglob("*.rs")):
         lines = sum(1 for _ in path.open(encoding="utf-8"))
         rows.append((lines, path.relative_to(ROOT)))
 

@@ -164,7 +164,7 @@ impl Preferences {
         p.working_directory = values
             .get("working_directory")
             .filter(|v| !v.is_empty())
-            .map(|v| std::path::PathBuf::from(v));
+            .map(std::path::PathBuf::from);
         p.expanded_dirs = values
             .get("expanded_dirs")
             .map(|v| {

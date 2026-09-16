@@ -92,7 +92,7 @@ fn uncondense_markers(text: &str) -> String {
 fn snapshot_byte_estimate(content: &str, paragraphs: &[Paragraph]) -> usize {
     let runs: usize = paragraphs.iter().map(|p| p.runs.len()).sum();
     content.len()
-        + paragraphs.len() * std::mem::size_of::<Paragraph>()
+        + std::mem::size_of_val(paragraphs)
         + runs * (std::mem::size_of::<Run>() + PER_RUN_ALLOCATION_OVERHEAD)
         + paragraphs
             .iter()
@@ -771,8 +771,9 @@ pub struct CommandPaletteState {
 }
 
 /// Which of the find bar's two text fields keystrokes go to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FindField {
+    #[default]
     Query,
     Replace,
 }
@@ -805,12 +806,6 @@ pub struct FindBar {
     /// set this explicitly — see `open_find_bar` (clears) and
     /// `open_search_from_list` (sets).
     pub list_mode: bool,
-}
-
-impl Default for FindField {
-    fn default() -> Self {
-        FindField::Query
-    }
 }
 
 /// A close action (tab-close `×` or the app-close `×`) awaiting the user's
@@ -1490,6 +1485,7 @@ pub(crate) fn save_expanded_dirs(path: &std::path::Path, dirs: &[PathBuf]) -> st
 /// Reading rate used when settings.conf has no `spreading_wpm`. Conversational
 /// speech is ~150 wpm and prose reading ~250; competitive debate "spreading"
 /// sits far above both, and 300 is a common mid-range figure to start from.
+#[cfg(test)]
 pub const DEFAULT_SPREADING_WPM: u32 = 300;
 
 /// Clamps the shrink size (points) to something a document can actually use.

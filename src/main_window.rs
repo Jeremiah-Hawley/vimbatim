@@ -323,7 +323,7 @@ impl MainWindow {
                                 crate::app::store::DocumentStore.load_document(&load_path)
                             })
                             .await;
-                        let _ = s.update(cx, |st, cx| {
+                        s.update(cx, |st, cx| {
                             st.complete_open_file(file, result);
                             cx.notify();
                         });
@@ -341,7 +341,7 @@ impl MainWindow {
                                 crate::app::store::DocumentStore.load_document(&load_path)
                             })
                             .await;
-                        let _ = s.update(cx, |st, cx| {
+                        s.update(cx, |st, cx| {
                             st.complete_open_file_in_current_tab(file, result);
                             cx.notify();
                         });
@@ -363,7 +363,7 @@ impl MainWindow {
                                 .unwrap_or_default()
                             })
                             .await;
-                        let _ = s.update(cx, |st, cx| {
+                        s.update(cx, |st, cx| {
                             st.complete_file_tree_scan(&scan_dir, file_tree);
                             cx.notify();
                         });
@@ -389,7 +389,7 @@ impl MainWindow {
                                         crate::app::store::DocumentStore.load_document(&load_path)
                                     })
                                     .await;
-                                let _ = s.update(cx, |st, cx| {
+                                s.update(cx, |st, cx| {
                                     st.complete_open_file(file, result);
                                     cx.notify();
                                 });
@@ -410,7 +410,7 @@ impl MainWindow {
                         if let Ok(Ok(Some(mut paths))) = rx.await {
                             if let Some(dir) = paths.pop() {
                                 let scan_dir = dir.clone();
-                                let _ = s.update(cx, |st, cx| {
+                                s.update(cx, |st, cx| {
                                     st.begin_working_directory(dir);
                                     cx.notify();
                                 });
@@ -425,7 +425,7 @@ impl MainWindow {
                                         .unwrap_or_default()
                                     })
                                     .await;
-                                let _ = s.update(cx, |st, cx| {
+                                s.update(cx, |st, cx| {
                                     st.complete_file_tree_scan(&scan_dir, file_tree);
                                     cx.notify();
                                 });
@@ -473,13 +473,13 @@ impl MainWindow {
                                         )
                                     })
                                     .await;
-                                let _ = s.update(cx, |st, cx| {
+                                s.update(cx, |st, cx| {
                                     st.complete_save(tab_id, result, start.elapsed());
                                     cx.notify();
                                 });
                             } else if let Err(e) = prepared {
                                 crate::state::log_line(&format!("[save as] {e}"));
-                                let _ = s.update(cx, |st, _| {
+                                s.update(cx, |st, _| {
                                     st.apply_effect(crate::app::command::AppEffect::ShowError(
                                         format!("Save As failed: {e}"),
                                     ));
@@ -510,7 +510,7 @@ impl MainWindow {
                                     )
                                 })
                                 .await;
-                            let _ = s.update(cx, |st, cx| {
+                            s.update(cx, |st, cx| {
                                 st.complete_save(tab_id, result, start.elapsed());
                                 cx.notify();
                             });
@@ -673,7 +673,7 @@ impl MainWindow {
                             .unwrap_or_default()
                     })
                     .await;
-                let _ = state.update(cx, |st, cx| {
+                state.update(cx, |st, cx| {
                     st.complete_file_tree_scan(&directory, file_tree);
                     cx.notify();
                 });
@@ -1017,11 +1017,7 @@ impl MainWindow {
         let s = state.clone();
         cx.on_action(move |_: &WikifiAction, cx| {
             s.update(cx, |st, _cx| {
-                match st.wikify_current_tab() {
-                    // Ok(_) => println!("Document exported to markdown"),
-                    // Err(e) => println!("Export failed: {}", e),
-                    _ => {}
-                }
+                let _ = st.wikify_current_tab();
             });
         });
     }

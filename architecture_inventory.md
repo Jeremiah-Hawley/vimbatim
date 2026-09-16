@@ -1,0 +1,52 @@
+# Architecture Inventory
+
+46 Rust files; 60,142 lines.
+
+| Lines | File |
+|---:|---|
+| 21,952 | `src/state/editing.rs` |
+| 6,627 | `src/editor/view.rs` |
+| 5,089 | `src/docx_parser.rs` |
+| 2,984 | `src/settings_modal.rs` |
+| 2,586 | `src/formatting_ribbon.rs` |
+| 2,004 | `src/file_explorer.rs` |
+| 1,884 | `src/document_ops.rs` |
+| 1,854 | `src/state.rs` |
+| 1,409 | `src/keybinds.rs` |
+| 1,340 | `src/main_window.rs` |
+| 1,132 | `src/theme.rs` |
+| 970 | `src/recovery.rs` |
+| 932 | `src/tab_bar.rs` |
+| 866 | `src/editor/layout.rs` |
+| 736 | `src/timer.rs` |
+| 729 | `src/command_palette.rs` |
+| 639 | `src/editor/input_adapter.rs` |
+| 610 | `src/document.rs` |
+| 553 | `src/vim_keybinds.rs` |
+| 444 | `src/color_picker.rs` |
+| 440 | `src/find_bar.rs` |
+| 405 | `src/font_import.rs` |
+| 390 | `src/editor/style.rs` |
+| 382 | `src/lib.rs` |
+| 348 | `src/app_toolbar.rs` |
+| 338 | `src/auto_scroll.rs` |
+| 270 | `src/rich_clipboard.rs` |
+| 263 | `src/spellcheck.rs` |
+| 229 | `src/recovery_prompt.rs` |
+| 228 | `src/preferences.rs` |
+| 226 | `src/font_import_modal.rs` |
+| 210 | `src/app/repository.rs` |
+| 207 | `src/app/store.rs` |
+| 189 | `src/close_confirm.rs` |
+| 173 | `src/word_count.rs` |
+| 113 | `src/case_converter.rs` |
+| 88 | `src/editor/input.rs` |
+| 78 | `src/wikifi_export.rs` |
+| 62 | `src/app/command.rs` |
+| 57 | `src/editor/color.rs` |
+| 56 | `src/editor/geometry.rs` |
+| 26 | `src/app/error.rs` |
+| 9 | `src/app/mod.rs` |
+| 6 | `src/editor/mod.rs` |
+| 5 | `src/main.rs` |
+| 4 | `src/text_editor.rs` |
