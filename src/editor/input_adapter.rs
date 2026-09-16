@@ -388,13 +388,8 @@ impl TextEditor {
                         })
                         .unwrap_or(false);
                     if pending_z {
-                        self.state.update(cx, |state, _cx| {
-                            if let Some(tab) =
-                                state.workspace.tabs.get_mut(state.workspace.active_tab)
-                            {
-                                tab.vim_keybind_seq.clear();
-                            }
-                        });
+                        self.state
+                            .update(cx, |state, _cx| state.clear_vim_keybind_sequence());
                         match key {
                             "z" => self.scroll_to_cursor_centered(cx),
                             "t" => self.scroll_to_cursor_top(cx),

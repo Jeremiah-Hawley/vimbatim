@@ -1130,14 +1130,7 @@ impl Render for TextEditor {
         // heading still visibly does something.
         let pane_idx = self.tab_index(cx);
         let should_scroll = self.state.update(cx, |state, _cx| {
-            let active = pane_idx.unwrap_or(usize::MAX);
-            if let Some(tab) = state.workspace.tabs.get_mut(active) {
-                if tab.pending_scroll_to_cursor {
-                    tab.pending_scroll_to_cursor = false;
-                    return true;
-                }
-            }
-            false
+            state.take_pending_scroll_to_cursor(self.pane)
         });
         if should_scroll {
             self.scroll_to_cursor_centered(cx);
@@ -1506,12 +1499,7 @@ impl Render for TextEditor {
                                     // and the pane's tab can change meanwhile.
                                     let pane = this.pane;
                                     this.state.update(cx, |s, cx| {
-                                        let i = s.pane_tab_index(pane);
-                                        if let Some(tab) =
-                                            i.and_then(|i| s.workspace.tabs.get_mut(i))
-                                        {
-                                            tab.banner_dismissed = true;
-                                        }
+                                        s.dismiss_unsupported_banner(pane);
                                         cx.notify();
                                     });
                                 })),

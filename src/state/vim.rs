@@ -1,6 +1,12 @@
 use super::*;
 
 impl AppState {
+    pub fn clear_vim_keybind_sequence(&mut self) {
+        if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+            tab.vim_keybind_seq.clear();
+        }
+    }
+
     pub fn move_left(&mut self) {
         /*
          * Moves the cursor back one character boundary. Clamps at the start

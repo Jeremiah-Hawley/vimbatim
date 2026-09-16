@@ -78,6 +78,19 @@ impl AppState {
         }
     }
 
+    pub fn take_pending_scroll_to_cursor(&mut self, pane: Pane) -> bool {
+        let Some(idx) = self.pane_tab_index(pane) else {
+            return false;
+        };
+        std::mem::take(&mut self.workspace.tabs[idx].pending_scroll_to_cursor)
+    }
+
+    pub fn dismiss_unsupported_banner(&mut self, pane: Pane) {
+        if let Some(idx) = self.pane_tab_index(pane) {
+            self.workspace.tabs[idx].banner_dismissed = true;
+        }
+    }
+
     pub fn end_split_drag(&mut self) -> bool {
         std::mem::take(&mut self.workspace.split_dragging)
     }
