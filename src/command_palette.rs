@@ -491,7 +491,7 @@ impl Render for CommandPaletteView {
             return div().into_any_element();
         };
         let p = self.state.read(cx).current_palette();
-        let keybinds = self.state.read(cx).keybinds.clone();
+        let keybinds = self.state.read(cx).keybinds().clone();
 
         // Opened by a keybind and usable only from the keyboard, so it takes
         // focus on the frame it appears — same as the find bar.

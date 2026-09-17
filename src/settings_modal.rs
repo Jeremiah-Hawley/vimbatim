@@ -299,7 +299,7 @@ impl SettingsModal {
     fn cancel_capture(&mut self, cx: &mut Context<Self>) {
         self.capturing = None;
         self.conflict_message = None;
-        let keybinds = self.state.read(cx).keybinds.clone();
+        let keybinds = self.state.read(cx).keybinds().clone();
         rebuild_keymap(cx, &keybinds);
     }
 
@@ -356,7 +356,7 @@ impl SettingsModal {
         let conflict = self
             .state
             .read(cx)
-            .keybinds
+            .keybinds()
             .find_conflict(&combo, (action, slot));
         if let Some(other) = conflict {
             self.conflict_message = Some(format!(
@@ -369,12 +369,9 @@ impl SettingsModal {
         }
 
         self.state.update(cx, |s, _cx| {
-            match slot {
-                Some(index) => s.keybinds.set_at(action, index, combo.clone()),
-                None => s.keybinds.add(action, combo.clone()),
-            }
+            s.set_keybind(action, slot, combo.clone());
             let _ = s
-                .keybinds
+                .keybinds()
                 .save_to(&settings_path(), s.global_vim().vim_enabled, &[]);
         });
         self.cancel_capture(cx); // restores the keymap, now including the new binding
@@ -554,7 +551,7 @@ impl SettingsModal {
         p: crate::theme::Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let words = self.state.read(cx).search_word_list.clone();
+        let words = self.state.read(cx).search_word_list().to_vec();
         let editing = self.editing_word_list;
         // While editing, paint the live buffer (which can hold a trailing
         // blank line the saved list deliberately drops); otherwise the saved
@@ -879,7 +876,7 @@ impl SettingsModal {
         let theme_color_mode = crate::theme::load_theme_color_mode(path);
 
         self.state.update(cx, |s, _cx| {
-            s.keybinds = keybinds;
+            s.replace_keybinds(keybinds);
             s.replace_vim_settings(vim_keybinds, vim_enabled);
             s.apply_theme_preferences(theme, theme_mode, theme_color_mode);
         });
@@ -949,8 +946,8 @@ impl SettingsModal {
                         MouseButton::Left,
                         cx.listener(move |this, _ev, _window, cx| {
                             this.state.update(cx, |s, _cx| {
-                                s.keybinds.remove_at(action, index);
-                                let _ = s.keybinds.save_to(
+                                s.remove_keybind(action, index);
+                                let _ = s.keybinds().save_to(
                                     &settings_path(),
                                     s.global_vim().vim_enabled,
                                     &[],

@@ -81,7 +81,7 @@ impl Render for TextEditor {
 
         let idx = pane_idx;
         let state = self.state.read(cx);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         // The editor pane is themed like the rest of the chrome — every color
         // below comes from the palette so light mode reaches the document
         // surface too, not just the frame around it.
@@ -447,7 +447,7 @@ impl Render for TextEditor {
                             this.focus_handle.clone().focus(window, cx);
                             let bounds = this.scroll_handle.bounds();
                             let scroll_y = this.scroll_handle.offset().y.as_f32();
-                            let zoom = this.state.read(cx).zoom;
+                            let zoom = this.state.read(cx).zoom();
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
@@ -546,7 +546,7 @@ impl Render for TextEditor {
                             // but either way it's what locates a misspelled word below.
                             let bounds = this.scroll_handle.bounds();
                             let scroll_y = this.scroll_handle.offset().y.as_f32();
-                            let zoom = this.state.read(cx).zoom;
+                            let zoom = this.state.read(cx).zoom();
                             let font_size_px =
                                 this.state.read(cx).effective_normal_size_half_points() as f32
                                     / 2.0;
@@ -600,7 +600,7 @@ impl Render for TextEditor {
                                     lines.get(line).and_then(|text| {
                                         crate::spellcheck::misspelled_ranges(
                                             text,
-                                            &st.user_dictionary,
+                                            st.user_dictionary(),
                                         )
                                         .into_iter()
                                         .find(|&(s, e)| col >= s && col < e)
@@ -668,7 +668,7 @@ impl Render for TextEditor {
                         }
                         let bounds = this.scroll_handle.bounds();
                         let scroll_y = this.scroll_handle.offset().y.as_f32();
-                        let zoom = this.state.read(cx).zoom;
+                        let zoom = this.state.read(cx).zoom();
                         let font_size_px =
                             this.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                         let line_spacing = this.state.read(cx).preferences().line_spacing;
@@ -780,7 +780,7 @@ impl Render for TextEditor {
                             // so this is a refcount bump, not a deep clone.
                             let spellcheck_enabled =
                                 self.state.read(cx).preferences().spellcheck_enabled;
-                            let user_dictionary = self.state.read(cx).user_dictionary.clone();
+                            let user_dictionary = self.state.read(cx).user_dictionary().clone();
                             let spell_cache = self.spell_cache.clone();
                             let spellcheck_color = crate::editor::color::highlight_color_hex(
                                 &self.state.read(cx).preferences().spellcheck_underline_color,

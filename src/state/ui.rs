@@ -1,6 +1,14 @@
 use super::*;
 
 impl AppState {
+    pub(crate) fn set_sidebar_width(&mut self, width: f32) {
+        self.sidebar_width = clamp_sidebar_width(width);
+    }
+
+    pub(crate) fn set_sidebar_mode(&mut self, mode: SidebarMode) {
+        self.sidebar_mode = mode;
+    }
+
     pub fn notifications(&self) -> &[Notification] {
         &self.ui.notifications
     }

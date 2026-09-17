@@ -13,6 +13,11 @@ Rich `DocumentBuffer` paragraphs are the only writable document text. `PlainText
 is derived, cached, and invalidated by `DocumentBuffer` mutation. Undo and recovery
 persist paragraph snapshots rather than a second flat-text representation.
 
+All `AppState` fields are private to the state module. Views use read-only selectors
+and focused mutation methods; private session scalars need not become new aggregates.
+Existing UI-substate mutable accessors remain scoped exceptions, not mutable access
+to the entire application model.
+
 The public crate surface remains `app::run` plus the hidden integration-test boundary.
 
 ## Consequences

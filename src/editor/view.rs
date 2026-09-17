@@ -661,7 +661,7 @@ impl TextEditor {
     ) -> Option<(f32, f32, f32, Pixels, f32, f32, f32)> {
         let state = self.state.read(cx);
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let line_spacing = state.preferences().line_spacing;
         let _ = state;
@@ -747,7 +747,7 @@ impl TextEditor {
             .and_then(|i| state.workspace().tabs.get(i))
             .map(|t| t.document.content_version)
             .unwrap_or(0);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         let line_spacing = state.preferences().line_spacing;
         if let Some(cache) = self.row_cache.as_ref() {
             if row_cache_is_valid_for(
@@ -821,7 +821,7 @@ impl TextEditor {
     /// fall through to its normal meaning.
     fn page_scroll(&self, forward: bool, cx: &Context<Self>) -> bool {
         let state = self.state.read(cx);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let row_height = row_slot_px(normal_size_px, state.preferences().line_spacing, zoom);
         if row_height <= 0.0 {
@@ -900,7 +900,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
             .and_then(|i| state.workspace().tabs.get(i))
@@ -959,7 +959,7 @@ impl TextEditor {
         let state = self.state.read(cx);
         let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
-        let zoom = state.zoom;
+        let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
             .and_then(|i| state.workspace().tabs.get(i))
@@ -2197,7 +2197,7 @@ fn extend_auto_scroll_selection(
     // ponytail: uncached full-document rewrap once per animation frame while
     // edge-dragging; thread RowCache through only if this measures as a cost.
     let st = state.read(cx);
-    let zoom = st.zoom;
+    let zoom = st.zoom();
     let font_size_px = st.preferences().normal_text_size_half_points as f32 / 2.0;
     let line_spacing = st.preferences().line_spacing;
     let content = st.active_content().to_string();

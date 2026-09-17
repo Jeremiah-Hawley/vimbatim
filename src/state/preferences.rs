@@ -1,6 +1,26 @@
 use super::*;
 
 impl AppState {
+    pub(crate) fn set_keybind(
+        &mut self,
+        action: crate::keybinds::KeybindAction,
+        slot: Option<usize>,
+        combo: crate::keybinds::KeyCombo,
+    ) {
+        match slot {
+            Some(index) => self.keybinds.set_at(action, index, combo),
+            None => self.keybinds.add(action, combo),
+        }
+    }
+
+    pub(crate) fn remove_keybind(&mut self, action: crate::keybinds::KeybindAction, index: usize) {
+        self.keybinds.remove_at(action, index);
+    }
+
+    pub(crate) fn replace_keybinds(&mut self, keybinds: crate::keybinds::Keybinds) {
+        self.keybinds = keybinds;
+    }
+
     pub fn toggle_vim(&mut self) {
         self.global_vim.vim_enabled = !self.global_vim.vim_enabled;
         // Vim's flag rides in the keybinds file, not as a standalone setting.

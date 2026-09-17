@@ -52,6 +52,10 @@ pub(super) fn restore_expanded_dirs(tree: &mut [FileNode], dirs: &[PathBuf]) {
 }
 
 impl AppState {
+    pub(crate) fn set_recovery_entries(&mut self, entries: Vec<RecoveryEntry>) {
+        self.recovery.pending_entries = entries;
+    }
+
     pub fn new_tab(&mut self) {
         /*
          * Appends a blank tab and makes it the active tab. Used when the user

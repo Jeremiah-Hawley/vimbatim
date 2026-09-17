@@ -1177,7 +1177,7 @@ impl Render for SettingsModal {
         let current_theme = self.state.read(cx).preferences().theme;
         let current_theme_mode = self.state.read(cx).preferences().theme_mode;
         let current_theme_color_mode = self.state.read(cx).preferences().theme_color_mode;
-        let keybinds = self.state.read(cx).keybinds.clone();
+        let keybinds = self.state.read(cx).keybinds().clone();
         let vim_keybinds = self.state.read(cx).global_vim().vim_keybinds.clone();
         let p = self.state.read(cx).current_palette();
         let theme_preview = self.theme_preview;

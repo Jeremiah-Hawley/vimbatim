@@ -1,10 +1,10 @@
 # Architecture Inventory
 
-57 Rust files; 60,334 lines.
+57 Rust files; 60,171 lines.
 
 | Lines | File |
 |---:|---|
-| 12,330 | `src/state/editing_tests.rs` |
+| 12,352 | `src/state/editing_tests.rs` |
 | 3,003 | `src/editor/view_tests.rs` |
 | 2,910 | `src/docx_parser_tests.rs` |
 | 2,596 | `src/formatting_ribbon.rs` |
@@ -14,10 +14,10 @@
 | 2,170 | `src/docx_parser.rs` |
 | 1,937 | `src/file_explorer.rs` |
 | 1,907 | `src/document_ops.rs` |
-| 1,832 | `src/state.rs` |
-| 1,556 | `src/state/workspace.rs` |
+| 1,618 | `src/state.rs` |
+| 1,560 | `src/state/workspace.rs` |
 | 1,493 | `src/settings_modal/view.rs` |
-| 1,465 | `src/settings_modal.rs` |
+| 1,462 | `src/settings_modal.rs` |
 | 1,434 | `src/state/vim.rs` |
 | 1,409 | `src/keybinds.rs` |
 | 1,334 | `src/main_window.rs` |
@@ -32,13 +32,13 @@
 | 649 | `src/document.rs` |
 | 634 | `src/editor/input_adapter.rs` |
 | 553 | `src/vim_keybinds.rs` |
+| 444 | `src/state/preferences.rs` |
 | 444 | `src/color_picker.rs` |
 | 440 | `src/find_bar.rs` |
-| 424 | `src/state/preferences.rs` |
 | 405 | `src/font_import.rs` |
 | 390 | `src/editor/style.rs` |
+| 387 | `src/state/ui.rs` |
 | 382 | `src/lib.rs` |
-| 379 | `src/state/ui.rs` |
 | 348 | `src/app_toolbar.rs` |
 | 270 | `src/rich_clipboard.rs` |
 | 263 | `src/spellcheck.rs` |

@@ -35,11 +35,11 @@ impl Render for RecoveryPrompt {
         let state = self.state.read(cx);
         let p = state.current_palette();
 
-        let Some(entry) = state.recovery.pending_entries.first() else {
+        let Some(entry) = state.recovery().pending_entries.first() else {
             return div();
         };
         let title = entry.title.clone();
-        let remaining = state.recovery.pending_entries.len();
+        let remaining = state.recovery().pending_entries.len();
         let origin_line = match &entry.original_path {
             Some(path) => format!("Was editing: {}", path.display()),
             None => "This document had never been saved.".to_string(),

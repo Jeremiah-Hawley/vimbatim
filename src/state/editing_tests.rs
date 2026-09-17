@@ -14,6 +14,28 @@ fn custom_color_temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn state_accessors_preserve_sidebar_and_keybind_updates() {
+    use crate::keybinds::{KeyCombo, KeybindAction};
+    let mut state = make_state("", 0, None);
+    state.set_sidebar_width(50.0);
+    assert_eq!(state.sidebar_width(), clamp_sidebar_width(50.0));
+    state.set_sidebar_mode(SidebarMode::Files);
+    assert_eq!(state.sidebar_mode(), SidebarMode::Files);
+
+    let action = KeybindAction::Save;
+    let original = state.keybinds().get_all(action);
+    let slot = original.len();
+    let combo = KeyCombo::new(true, false, false, "s");
+    state.set_keybind(action, None, combo.clone());
+    assert_eq!(state.keybinds().get_all(action)[slot], combo);
+    let replacement = KeyCombo::new(true, true, false, "s");
+    state.set_keybind(action, Some(slot), replacement.clone());
+    assert_eq!(state.keybinds().get_all(action)[slot], replacement);
+    state.remove_keybind(action, slot);
+    assert_eq!(state.keybinds().get_all(action), original);
+}
+
+#[test]
 fn test_load_custom_colors_parses_pipe_separated_hex() {
     let dir = custom_color_temp_dir("load");
     let path = dir.join("settings.conf");

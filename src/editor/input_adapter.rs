@@ -312,7 +312,7 @@ impl TextEditor {
                     && shift
                     && matches!(key, "h" | "m" | "l")
                 {
-                    let zoom = self.state.read(cx).zoom;
+                    let zoom = self.state.read(cx).zoom();
                     let normal_size_px =
                         self.state.read(cx).effective_normal_size_half_points() as f32 / 2.0;
                     let line_spacing = self.state.read(cx).preferences().line_spacing;

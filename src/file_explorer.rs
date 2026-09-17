@@ -1160,7 +1160,7 @@ impl FileExplorer {
             })
             .on_click(move |_ev, _window, cx| {
                 state_clone.update(cx, |s, cx| {
-                    s.sidebar_mode = mode;
+                    s.set_sidebar_mode(mode);
                     cx.notify();
                 });
             })
@@ -1454,7 +1454,7 @@ impl Render for FileExplorer {
          */
         let state = self.state.read(cx);
         let p = state.current_palette();
-        let sidebar_mode = state.sidebar_mode;
+        let sidebar_mode = state.sidebar_mode();
         let dir_name = state
             .workspace()
             .working_directory
@@ -1473,9 +1473,9 @@ impl Render for FileExplorer {
             .tabs
             .get(state.workspace().active_tab)
             .and_then(|tab| tab.file_path.clone());
-        let sidebar_width = state.sidebar_width;
-        let has_copied_file = state.copied_file.is_some();
-        let pending_cut = state.copied_file.as_ref().is_some_and(|(_, cut)| *cut);
+        let sidebar_width = state.sidebar_width();
+        let has_copied_file = state.copied_file().is_some();
+        let pending_cut = state.copied_file().is_some_and(|(_, cut)| *cut);
         let nav_fold_buttons = state.preferences().nav_fold_buttons;
         let _ = state;
 

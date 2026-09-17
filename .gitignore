@@ -9,6 +9,7 @@ graphify-out/
 *.md
 !/README.md
 !/architecture_inventory.md
+!/ARCHITECTURE_REVIEW.md
 !docs/adr/*.md
 
 *.xml

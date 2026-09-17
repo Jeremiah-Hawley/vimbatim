@@ -1050,12 +1050,12 @@ impl Render for MainWindow {
         let settings_visible = self.state.read(cx).ui().settings_visible;
         let pending_close = self.state.read(cx).ui().pending_close;
         let font_import_modal_open = self.state.read(cx).ui().font_import_modal_open;
-        let has_recovery = !self.state.read(cx).recovery.pending_entries.is_empty();
+        let has_recovery = !self.state.read(cx).recovery().pending_entries.is_empty();
         let word_count_visible = self.state.read(cx).ui().word_count_visible;
         let timer_visible = self.state.read(cx).ui().timer.visible;
         let split_view = self.state.read(cx).workspace().split_view;
         let split_ratio = self.state.read(cx).workspace().split_ratio;
-        let sidebar_width = self.state.read(cx).sidebar_width;
+        let sidebar_width = self.state.read(cx).sidebar_width();
         let find_bar_visible = self.state.read(cx).ui().find_bar.is_some();
         let command_palette_visible = self.state.read(cx).ui().command_palette.is_some();
         let notification = self.state.read(cx).ui().notifications.last().cloned();
@@ -1119,7 +1119,7 @@ impl Render for MainWindow {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
                     let left = if s.ui().sidebar_visible {
-                        s.sidebar_width
+                        s.sidebar_width()
                     } else {
                         0.0
                     };
@@ -1136,7 +1136,7 @@ impl Render for MainWindow {
                 move |e: &DragMoveEvent<SidebarResizePayload>, _window, cx| {
                     let new_width = clamp_sidebar_width(e.event.position.x.as_f32());
                     resize_state.update(cx, |s, cx| {
-                        s.sidebar_width = new_width;
+                        s.set_sidebar_width(new_width);
                         cx.notify();
                     });
                 },

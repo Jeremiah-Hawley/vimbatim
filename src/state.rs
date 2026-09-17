@@ -949,267 +949,53 @@ pub struct AppState {
     workspace: WorkspaceState,
     ui: UiState,
     global_vim: GlobalVimState,
-    /// Typed persisted settings.
+    /// Canonical persisted preferences; no writable scalar mirrors.
     preferences: crate::preferences::Preferences,
-    /// File explorer sidebar width in pixels, changed by dragging its
-    /// resize handle (`main_window.rs`). Deliberately not persisted to
-    /// settings.conf — resets to `DEFAULT_SIDEBAR_WIDTH` every launch.
-    pub sidebar_width: f32,
-    /// Open state of the file explorer's right-click menu, `None` when
-    /// closed. See `FileContextMenu`.
-
-    /// Open state of the Nav outline's right-click menu, `None` when closed.
-    /// See `NavContextMenu`.
-
-    /// The file most recently picked by the explorer's "Copy File", ready
-    /// for "Paste File" to drop into a folder. Deliberately not persisted —
-    /// a copy is a within-session gesture, and a stale path would only make
-    /// `fs::copy` fail. Only one file at a time, matching the single-select
-    /// tree.
-    /// The pending file-tree paste: what was picked, and whether it was
-    /// *cut* rather than copied. One field rather than a path plus a
-    /// separate flag, so the two can't drift out of sync.
-    pub copied_file: Option<(PathBuf, bool)>,
-    /// Settings → Toggle Features "Navigation Menu Heading Fold Buttons":
-    /// shows a 1/2/3/4 row under the sidebar's folder name that applies the
-    /// same "Show Heading Level N" filter the Nav right-click menu offers.
-    /// Off by default — the right-click menu is always available, this is
-    /// just a shortcut for people who use it constantly.
-    /// Open state of the text editor's right-click menu, `None` when closed.
-    /// See `EditorContextMenu`.
-
-    /// Open state of the find/replace bar, `None` when closed. See `FindBar`.
-
-    /// Settings → Toggle Features "Search From List": gates the toolbar button
-    /// and the word-list editor. Off by default.
-    /// The words Search From List looks for, one per line as the user typed
-    /// them, already trimmed of blanks (`parse_word_list`).
-    ///
-    /// Persisted to its own `search_word_list.txt` rather than into
-    /// settings.conf: `save_setting_line` is strictly one line per key, and a
-    /// newline-separated file needs no joiner, no escaping question, and can be
-    /// edited in any text editor. Same reasoning `custom_theme_path()` already
-    /// follows for the custom theme's TOML.
-    pub search_word_list: Vec<String>,
-    /// Whether list search requires whole-word matches ("war" not matching
-    /// "warming"). On by default — a curated word list almost always means
-    /// whole words, unlike the substring semantics Find uses.
-    /// Settings → Toggle Features "Command Palette": gates the Ctrl+P handler
-    /// and the palette's own row in Settings → Keybinds. Off by default.
-    /// Open state of the command palette, `None` when closed. Shares its slot
-    /// under the ribbon with `find_bar` — see `open_command_palette`.
-
-    /// settings.conf `[FORMATTING] spreading_wpm` — the reading rate the word
-    /// count panel divides by for its time estimate. "Spreading" is debate's
-    /// term for reading at speed, so this is deliberately not a prose-reading
-    /// default.
-    /// Colors the user added from the Font Color and HL Color dropdowns'
-    /// picker, oldest first, as `0xRRGGBB`. Persisted to settings.conf's
-    /// `[FORMATTING]` section so they survive a restart, capped at
-    /// `MAX_CUSTOM_COLORS`. Kept as two lists on purpose — see
-    /// `CustomColorTarget`.
-    /// Which view the left sidebar shows — the file tree, or (Nav) a
-    /// heading outline of the active tab's Pocket/Hat/Block/Tag lines.
-    /// Toggled from two places that both flip the same field: the ribbon's
-    /// Nav button, and a Files/Nav button pair in the sidebar's own header.
-    pub sidebar_mode: SidebarMode,
-
-    /// Mounts `font_import_modal.rs`'s "Add Font" popup — opened from the
-    /// Font Family dropdown's "+ Add Font" row (`formatting_ribbon.rs`) or
-    /// the Fonts settings section, closed by Cancel or a successful import.
-
-    /// Set while a tab-close or app-close is waiting on the user's
-    /// save/discard/cancel answer (`close_confirm.rs`). See `PendingClose`.
-
-    /// Crash-recovery queue; `RecoveryPrompt` consumes one entry at a time.
-    pub recovery: RecoveryState,
-    /// Whether vim keybindings are active, loaded from settings.conf's
-    /// `[KEYBINDS] vim` flag (see `keybinds::load_vim_enabled`) and toggled
-    /// live from the settings modal's Vim Mode switch.
-
-    /// Every configurable, non-vim keybinding (see `src/keybinds.rs`),
-    /// loaded from settings.conf at startup. Owned here (rather than a
-    /// standalone global) so the settings modal can mutate it through the
-    /// same `Entity<AppState>` every other view already shares, then call
-    /// `keybinds::rebuild_keymap` and `Keybinds::save_to` to make an edit
-    /// take effect immediately and persist.
-    pub keybinds: crate::keybinds::Keybinds,
-    /// Checklist: Settings -> Vim Mode. Only consulted while `vim_enabled`
-    /// and the active tab's `vim_mode == VimMode::Normal` — see
-    /// `handle_vim_normal_key`'s sequence-continuation check and its
-    /// modified final catch-all.
-
-    /// A vim-keybind's resolved action, staged here because `state.rs` has
-    /// no `cx`/`window` to actually dispatch it — same mailbox pattern as
-    /// `pending_clipboard_sync` below. Drained by `text_editor.rs`'s
-    /// `process_key_plain`, immediately after a vim keystroke is handled,
-    /// via `take_pending_vim_action` + `window.dispatch_action`.
-    /// Light or dark variant of `theme`. Orthogonal to the theme itself —
-    /// every `ThemeKind` ships both, so this only swaps the palette's
-    /// lightness, keeping the user's chosen color family.
-    /// The user's imported theme (Settings -> Themes -> Import Theme),
-    /// `(dark, light)`, loaded from `custom_theme_path()` at startup if that
-    /// file exists. `None` until an import happens; only one at a time —
-    /// importing again replaces it wholesale. Selected via
-    /// `theme == ThemeKind::Custom`; resolve colors through
-    /// `current_palette()`, never the bare `theme::palette()` free function,
-    /// which has no access to this runtime state.
-    pub custom_theme: Option<(crate::theme::Palette, crate::theme::Palette)>,
-    /// `normal_text_size` from settings.conf, in half-points (`Run.size`'s
-    /// unit) — the default body text size: what any run with no explicit
-    /// `FontSize` override renders at (`text_editor.rs`'s `normal_size_px`,
-    /// which covers a brand-new document's single default run same as any
-    /// other plain-typed text), and the size "Clear Formatting" resets a
-    /// line back to. See `load_normal_text_size_half_points`.
-    /// `line_spacing` from settings.conf — the multiplier applied to every
-    /// row's height, in Word's own unit (1.0 = single, 1.5, 2.0 = double).
-    /// Multiplies `text_editor::LINE_HEIGHT_RATIO` rather than replacing it,
-    /// so 1.0 keeps exactly the spacing this app already shipped and the
-    /// setting scales relative to whatever `normal_text_size` is set to.
-    /// See `load_line_spacing` and `set_line_spacing`.
-    /// `pocket_size`/`hat_size`/`block_size`/`tag_size`/`cite_size` from
-    /// settings.conf, in half-points (`Run.size`'s unit) — the font sizes
-    /// `apply_card_style` applies for those styles. See
-    /// `load_font_size_half_points`, and `set_card_size_points` for the
-    /// Text Settings steppers that write them back.
-    ///
-    /// These also drive the `Heading1`-`Heading4` definitions a new document's
-    /// `word/styles.xml` carries (`build_new_doc_styles_xml`), which used to
-    /// hardcode `CardStyleKind::font_size`'s constants — invisible while direct
-    /// run formatting wins in Word, but two sources of truth for the same
-    /// number.
-    /// The size Cite applies alongside bold (`main_window.rs`'s `CiteAction`
-    /// handler and the ribbon's Cite button, `formatting_ribbon.rs`) — Cite
-    /// isn't a `CardStyleKind` (it targets the selection, not the whole
-    /// line), so it keeps its own field rather than sharing the enum.
-    /// `small_size` from settings.conf, in half-points (`Run.size`'s unit) —
-    /// the size Shrink (`shrink_text`) sets non-underlined selected text to.
-    /// Editor text zoom multiplier (`found_bugs.md`'s Ctrl+=/Ctrl+-/Ctrl+0
-    /// zoom, rebuilt from scratch — no trace of a prior implementation
-    /// survived in git history). Applied only to the document text
-    /// (`text_editor.rs`'s font size/line height/wrap and hit-testing
-    /// math), not the surrounding app chrome — a deliberate scope
-    /// narrowing the user confirmed. `1.0` is 100% (no zoom). Not
-    /// persisted to settings.conf — resets to 100% each launch, matching
-    /// how a fresh Word session doesn't remember its last zoom level either.
-    pub zoom: f32,
-    /// Saved macro recordings, keyed by register (user-requested, not in editor_instructions.md).
-
-    /// The register currently being recorded into and its keystrokes so
-    /// far; `None` when not recording.
-
-    /// True right after a bare `q` (with nothing already recording), while
-    /// waiting for the register character that completes `q<register>`.
-
-    /// The register most recently replayed via `@<register>`, so a
-    /// following `@@` can repeat it without re-specifying.
-
-    /// Vim registers (spec 5.8), keyed by name. `d`/`c` write the deleted
-    /// text to `'"'` (plus the selected named register, if any); `y` also
-    /// writes to `'0'` (the yank register). `'+'` is stored here like any
-    /// other named register — `text_editor.rs` mirrors it to/from the OS
-    /// clipboard around dispatch, since that needs a GPUI `cx` this file
-    /// doesn't have.
-
-    /// The formatting for each entry in `registers`, in exactly the encoding
-    /// `rich_clipboard` writes for Ctrl+C — so a yanked card puts its
-    /// fonts, sizes, underlines, boxes *and* its paragraph headings and
-    /// alignment back on `p`, instead of inheriting whatever run the cursor
-    /// happened to be sitting in.
-    ///
-    /// Kept beside `registers` rather than folded into it: every register is
-    /// still fundamentally text (a macro replay, a `+` register filled by
-    /// another app, and every existing caller read it as such), and a
-    /// register with no entry here simply pastes plain — which is exactly
-    /// what an external clipboard's contents should do.
-
-    /// Mailbox for the `'+'` register: set to the `(text, formatting)` just
-    /// written to it (by a `"+y`/`"+d`/`"+c`), drained by `text_editor.rs`
-    /// right after dispatch to push it onto the real OS clipboard. `None`
-    /// means no pending clipboard write. The formatting rides along as
-    /// clipboard *metadata*, the same way `CopyAction` sends it, so `"+y`
-    /// then Ctrl+V keeps its formatting.
-
-    /// The last `/`/`?` search dispatched, or the last `*`/`#` word-search
-    /// (spec 5.5) — (pattern, is_forward). Not per-tab: real vim shares
-    /// the search register across buffers, same reasoning `registers`/
-    /// `vim_macros` use. `n`/`N` repeat it (`N` reverses the direction).
-
-    /// The last repeatable change (spec 5.5's `.`), scoped to operator +
-    /// motion/text-object changes and `i`/`a`/`c`-style insertions per
-    /// `vim_todo.md`'s explicit guidance — not arbitrary multi-command
-    /// sequences. `None` until the first repeatable change happens.
-
-    /// While a change-recordable operator (`d`/`c`/`>`/`<`/`gU`/`gu` — not
-    /// `y`, which isn't a "change") is pending: the completion keystrokes
-    /// fed to it so far, mirroring `RecordedVimKey` so `.` can replay them
-    /// through `complete_vim_operator` again at the new cursor position.
-    /// `text_editor.rs` appends to this (mirroring macro recording's own
-    /// capture site) *before* dispatching each keystroke while it's
-    /// `Some`, so the completing keystroke itself is captured too.
-
-    /// While in an Insert-mode session that should be captured for `.`:
-    /// the text typed so far. Started unconditionally by
-    /// `vim_enter_insert_before_cursor` (so `i`/`a`/`I`/`A`/`c` all cover
-    /// it — `o`/`O` also start one, but since they aren't in `.`'s
-    /// documented scope, replaying it back will insert the text inline
-    /// rather than reopening a new line, a known simplification).
-    /// Committed to `last_change` when Insert mode exits.
-
-    /// Set by `execute_vim_operator_range`'s `'c'` case: the operator +
-    /// completion keystrokes that ran just before entering Insert, held
-    /// until that Insert session ends so the two can be combined into one
-    /// `VimChange::OperatorInsert` — real vim's `.` after `cw<text><Esc>`
-    /// repeats both the deletion and the retyped text.
-    /// settings.conf `highlight_color` — the color the Highlight button and
-    /// keybind apply. A Word highlight-color name (any of the six the ribbon's
-    /// HL Color dropdown offers), or a bare 6-digit hex; resolved by
-    /// `text_editor::highlight_color_hex`, same as everywhere else.
-    ///
-    /// Edited by hand in settings.conf, not in the settings modal — the
-    /// dropdown is where colors get picked.
-    /// settings.conf `analytic_color` — the text color the Analytic style
-    /// applies, as a 6-digit hex (`Run.color`'s own form, no leading `#`).
-    /// settings.conf `standardize_highlight_exception` — a highlight color
-    /// that "Standardize highlighting with exception" leaves alone. Empty
-    /// means no exception, and that command behaves like the plain one.
-    /// Which run formatting the Emphasis command applies. Independent, not
-    /// mutually exclusive — Word's own "emphasis" is whatever combination a
-    /// squad has standardised on. Read by `AppState::apply_emphasis_style`.
-    /// Whether Emphasis also resizes text to `emphasis_size_half_points` —
-    /// its own toggle rather than always-on, so emphasizing doesn't force a
-    /// size change on documents that don't want one.
-    /// The point size (half-points, `Run.size`'s unit) Emphasis resizes text
-    /// to when `emphasis_change_size` is on. Same stepper-clamped shape as
-    /// `small_size_half_points`.
-    /// Whether the paste command (f2 / the ribbon's Paste button) condenses
-    /// the pasted text, collapsing its newlines instead of keeping them.
-    /// When condensing, mark each collapsed newline with a pilcrow instead of
-    /// a plain space. Only meaningful while `paste_condense` is on.
-    /// The settings.conf this state reads from and writes back to.
-    ///
-    /// Held as a field rather than calling `settings_conf_path()` at each
-    /// write site so the test constructor can point at a temp file. Without
-    /// it, running `cargo test` writes through the real
-    /// `~/.vimbatim/settings.conf` — `persist_custom_colors` alone would
-    /// overwrite a developer's actual saved swatches with a test fixture's.
-    pub settings_path: PathBuf,
-    /// settings.conf `[SPELLCHECK]`. When false the editor skips the whole
-    /// spellcheck path for the cost of one bool check per row.
-    /// The squiggle color, kept as the raw settings.conf string (a Word
-    /// color name like `red`, or a bare 6-digit hex) and resolved through
-    /// `text_editor::highlight_color_hex` at paint time — that function
-    /// already handles both forms, so there's nothing to parse here.
-    /// Words the user added via the right-click menu's "Add to Dictionary",
-    /// lowercased. Backed by `user_dictionary.txt` next to settings.conf.
-    ///
-    /// `Rc`-wrapped so `TextEditor::render` can hand it to the `uniform_list`
-    /// closure (which must be `'static`, so it can't borrow) for the price of
-    /// a refcount bump instead of deep-cloning every word on every frame.
-    pub user_dictionary: Rc<HashSet<String>>,
+    /// Session-only sidebar width, clamped by its setter.
+    sidebar_width: f32,
+    /// Pending file-tree paste: source path and whether to cut rather than copy.
+    copied_file: Option<(PathBuf, bool)>,
+    /// Trimmed words persisted separately in search_word_list.txt.
+    search_word_list: Vec<String>,
+    sidebar_mode: SidebarMode,
+    recovery: RecoveryState,
+    keybinds: crate::keybinds::Keybinds,
+    /// Imported (dark, light) palettes; resolve through current_palette().
+    custom_theme: Option<(crate::theme::Palette, crate::theme::Palette)>,
+    /// Session-only document zoom, not application chrome zoom.
+    zoom: f32,
+    /// Instance-specific path so tests never write the user's settings.
+    settings_path: PathBuf,
+    /// Lowercase words; Rc avoids cloning the dictionary on every render.
+    user_dictionary: Rc<HashSet<String>>,
 }
 
 impl AppState {
+    pub(crate) fn sidebar_width(&self) -> f32 {
+        self.sidebar_width
+    }
+    pub(crate) fn sidebar_mode(&self) -> SidebarMode {
+        self.sidebar_mode
+    }
+    pub(crate) fn copied_file(&self) -> Option<&(PathBuf, bool)> {
+        self.copied_file.as_ref()
+    }
+    pub(crate) fn search_word_list(&self) -> &[String] {
+        &self.search_word_list
+    }
+    pub(crate) fn recovery(&self) -> &RecoveryState {
+        &self.recovery
+    }
+    pub(crate) fn keybinds(&self) -> &crate::keybinds::Keybinds {
+        &self.keybinds
+    }
+    pub(crate) fn zoom(&self) -> f32 {
+        self.zoom
+    }
+    pub(crate) fn user_dictionary(&self) -> &Rc<HashSet<String>> {
+        &self.user_dictionary
+    }
+
     pub(crate) fn workspace(&self) -> &WorkspaceState {
         &self.workspace
     }

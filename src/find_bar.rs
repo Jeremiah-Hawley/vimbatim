@@ -263,7 +263,7 @@ impl Render for FindBarView {
             current_match,
             list_mode,
         } = bar;
-        let word_count = self.state.read(cx).search_word_list.len();
+        let word_count = self.state.read(cx).search_word_list().len();
         // What "there is something to search for" means differs by mode — and
         // four separate things below key off it (both fields' visibility, the
         // buttons' enabled styling, the readout, and the Replace pair). One

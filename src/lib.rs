@@ -254,7 +254,7 @@ pub(crate) fn run_app() {
                 .await;
             state_for_scan.update(cx, |state, cx| {
                 match result {
-                    Ok(entries) => state.recovery.pending_entries = entries,
+                    Ok(entries) => state.set_recovery_entries(entries),
                     Err(error) => state.apply_effect(app::command::AppEffect::ShowError(format!(
                         "Could not check crash recovery: {error}"
                     ))),
