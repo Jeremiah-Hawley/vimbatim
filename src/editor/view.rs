@@ -1292,7 +1292,7 @@ fn render_line(
     // happens to also be boxed (not a realistic combination in practice,
     // but composed correctly regardless rather than assumed away).
     list_marker: Option<AnyElement>,
-) -> AnyElement {
+) -> Div {
     /*
      * Renders one (visual-row-clipped) line of text. Splits into
      * `(run_start, run_end, run_idx)` chunks per the paragraph's formatting
@@ -1371,18 +1371,17 @@ fn render_line(
         let needs_alignment = para.is_some_and(|p| !matches!(p.alignment, Alignment::Left));
         if run_spans.is_empty() {
             if !needs_alignment {
-                return line.to_string().into_any_element();
+                return div().flex_shrink_0().child(line.to_string());
             }
         } else if let [(start, end, run_idx)] = run_spans {
             if *start == 0 && *end == chars.len() {
                 let run = para.and_then(|p| p.runs.get(*run_idx));
                 if run.is_none() && !needs_alignment {
-                    return line.to_string().into_any_element();
+                    return div().flex_shrink_0().child(line.to_string());
                 }
                 if !needs_alignment && !paints_run_box(run) {
-                    return apply_run_style(div(), run, zoom, pal)
-                        .child(line.to_string())
-                        .into_any_element();
+                    return apply_run_style(div().flex_shrink_0(), run, zoom, pal)
+                        .child(line.to_string());
                 }
             }
         }
@@ -1506,7 +1505,16 @@ fn render_line(
     // Row_div's own cross-axis stretch (see its comment) is meant to already
     // provide that, but real hardware testing found alignment silently
     // failing in every scenario, so this stops depending on that chain.
-    let mut line_div = div().flex().flex_row().w_full().items_end().children(spans);
+    // A display slot is only 1/ROW_SUBDIVISIONS of a text line. The
+    // content must overflow upward, never shrink to the slot's height.
+    // Keep this invariant on the fast paths and boxed/list wrappers too.
+    let mut line_div = div()
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .w_full()
+        .items_end()
+        .children(spans);
     // Apply paragraph-level alignment if available (Phase 4.3)
     if let Some(p) = para {
         use crate::docx_parser::Alignment;
@@ -1555,19 +1563,19 @@ fn render_line(
                 box_div = box_div.border_2();
             }
 
-            return box_div.into_any_element();
+            return box_div.flex_shrink_0();
         }
     }
     let leading: Vec<AnyElement> = fold_toggle.into_iter().chain(list_marker).collect();
     match leading.is_empty() {
         false => div()
+            .flex_shrink_0()
             .flex()
             .flex_row()
             .items_center()
             .children(leading)
-            .child(div().flex_1().min_w_0().child(line_div))
-            .into_any_element(),
-        true => line_div.into_any_element(),
+            .child(div().flex_1().min_w_0().child(line_div)),
+        true => line_div,
     }
 }
 

@@ -26,6 +26,53 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
+#[test]
+fn rendered_lines_keep_their_height_without_a_cursor() {
+    use gpui::{IntoElement, ParentElement, Styled};
+
+    let palette = crate::theme::palette(
+        crate::theme::ThemeKind::all()[0],
+        crate::theme::ThemeMode::all()[0],
+    );
+    let plain = plain_paragraph();
+    let pocket = pocket_paragraph();
+    let mut highlighted = plain_paragraph();
+    highlighted.runs[0].highlight = true;
+    for para in [None, Some(&plain), Some(&pocket), Some(&highlighted)] {
+        for cursor in [None, Some(1)] {
+            for marker in [false, true] {
+                let spans = if para.is_some() {
+                    vec![(0, 3, 0)]
+                } else {
+                    vec![]
+                };
+                let mut line = super::render_line(
+                    "a\rb",
+                    cursor,
+                    &[],
+                    &spans,
+                    para,
+                    false,
+                    1.0,
+                    palette,
+                    super::CursorStyle::Block,
+                    &[],
+                    0xff0000,
+                    false,
+                    16,
+                    None,
+                    marker.then(|| gpui::div().child("•").into_any_element()),
+                );
+                assert_eq!(
+                    line.style().flex_shrink,
+                    Some(0.0),
+                    "line content must not collapse into a fractional display slot"
+                );
+            }
+        }
+    }
+}
+
 /// The three run properties that paint a box-shaped visual (background
 /// fill or border) — and nothing else — need `render_line`'s fast path
 /// excluded, or the paint stretches to the full row width instead of
