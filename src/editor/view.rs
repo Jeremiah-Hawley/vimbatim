@@ -696,11 +696,12 @@ impl TextEditor {
             return None;
         }
 
-        let max_y = self.scroll_handle.max_offset().y.as_f32();
+        let content_h = wrap_to_display.len() as f32 * slot_px;
+        let max_scroll = (content_h - viewport_h).max(0.0);
         Some((
             cursor_top,
             viewport_h,
-            max_y,
+            max_scroll,
             self.scroll_handle.offset().x,
             zoom,
             normal_size_px,
@@ -833,7 +834,10 @@ impl TextEditor {
             return false;
         }
         let offset = self.scroll_handle.offset();
-        let max_y = self.scroll_handle.max_offset().y.as_f32();
+        let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+        let (_, _, wrap_to_display) = self.cached_or_fresh_row_tables(cx, viewport_width);
+        let content_h = wrap_to_display.len() as f32 * row_height;
+        let max_y = (content_h - viewport_h).max(0.0);
         let current = offset.y.as_f32();
         let Some(next) = page_scroll_offset(current, viewport_h, row_height, max_y, forward) else {
             return false; // already at that end

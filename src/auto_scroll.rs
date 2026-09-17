@@ -40,15 +40,14 @@ fn auto_scroll_delta(
     }
 }
 
-fn clamp_scroll_offset(offset_y: f32, max_offset_y: f32) -> f32 {
+fn clamp_scroll_offset(offset_y: f32) -> f32 {
     /*
      * Clamps a proposed scroll offset to GPUI's valid range for
      * `ScrollHandle::set_offset`: never positive (that would scroll past
-     * the top of the document), never more negative than `max_offset_y`
-     * (that would scroll past the bottom). `max_offset_y.max(0.0)` guards
-     * against a not-yet-laid-out handle reporting a negative max.
+     * the top of the document). GPUI's UniformList does not reliably populate
+     * `max_offset` on its scroll handle, so we only clamp the top edge.
      */
-    offset_y.clamp(-max_offset_y.max(0.0), 0.0)
+    offset_y.min(0.0)
 }
 
 /// Drives auto-scroll for a click-drag selection that sits near the top or
@@ -162,8 +161,7 @@ impl AutoScroller {
         }
 
         let current = self.scroll_handle.offset();
-        let max_y = self.scroll_handle.max_offset().y.as_f32();
-        let new_y = clamp_scroll_offset(current.y.as_f32() + delta, max_y);
+        let new_y = clamp_scroll_offset(current.y.as_f32() + delta);
         self.scroll_handle.set_offset(point(current.x, px(new_y)));
 
         (self.on_tick)(position, bounds, self.scroll_handle.offset().y.as_f32(), cx);
@@ -223,22 +221,12 @@ mod tests {
 
     #[test]
     fn test_clamp_scroll_offset_within_range_unchanged() {
-        assert_eq!(clamp_scroll_offset(-50.0, 100.0), -50.0);
+        assert_eq!(clamp_scroll_offset(-50.0), -50.0);
     }
 
     #[test]
     fn test_clamp_scroll_offset_positive_clamps_to_zero() {
         // Offset can never be positive — that would scroll past the top.
-        assert_eq!(clamp_scroll_offset(10.0, 100.0), 0.0);
-    }
-
-    #[test]
-    fn test_clamp_scroll_offset_past_max_clamps_to_max() {
-        assert_eq!(clamp_scroll_offset(-150.0, 100.0), -100.0);
-    }
-
-    #[test]
-    fn test_clamp_scroll_offset_no_scrollable_content_forces_zero() {
-        assert_eq!(clamp_scroll_offset(-10.0, 0.0), 0.0);
+        assert_eq!(clamp_scroll_offset(10.0), 0.0);
     }
 }
