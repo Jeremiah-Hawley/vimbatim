@@ -277,6 +277,7 @@ impl TextEditor {
                     for _ in 0..count {
                         self.move_cursor_visual_row(cx, delta, is_visual);
                     }
+                    cx.notify();
                     self.scroll_to_cursor(cx);
                     return;
                 }
@@ -573,6 +574,7 @@ impl TextEditor {
                 vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
             let delta = if key == "up" { -1 } else { 1 };
             self.move_cursor_visual_row(cx, delta, shift || vim_visual);
+            cx.notify();
             self.scroll_to_cursor(cx);
             return;
         }

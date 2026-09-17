@@ -900,27 +900,14 @@ impl TextEditor {
     /// hatch back to the true logical-line target when it's actually
     /// wanted.
     fn move_cursor_to_row_edge(&self, cx: &mut Context<Self>, edge: RowEdge, extend: bool) {
-        let idx = self.tab_index(cx);
         let state = self.state.read(cx);
         let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
-        let zoom = state.zoom();
-        let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let paragraphs = idx
-            .and_then(|i| state.workspace().tabs.get(i))
-            .map(|t| t.document.paragraphs().to_vec())
-            .unwrap_or_default();
         let _ = state;
 
         let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(
-            cx,
-            &lines,
-            self.scroll_handle.bounds().size.width.as_f32(),
-            zoom,
-            &paragraphs,
-            normal_size_px,
-        );
+        let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+        let (rows, _, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
         let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         let (line, row_start, row_end) = rows[current_row];
         let line_chars: Vec<char> = lines
@@ -961,7 +948,6 @@ impl TextEditor {
          */
         let idx = self.tab_index(cx);
         let state = self.state.read(cx);
-        let content = state.pane_content(self.pane).to_string();
         let (cursor_line, cursor_col) = state.pane_cursor_line_col(self.pane);
         let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
@@ -971,15 +957,8 @@ impl TextEditor {
             .unwrap_or_default();
         let _ = state;
 
-        let lines = document_lines(&content);
-        let rows = visual_rows_for_viewport(
-            cx,
-            &lines,
-            self.scroll_handle.bounds().size.width.as_f32(),
-            zoom,
-            &paragraphs,
-            normal_size_px,
-        );
+        let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
+        let (rows, _, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
 
         let current_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         let (_, row_start, _) = rows[current_row];
