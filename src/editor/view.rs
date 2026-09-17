@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::auto_scroll::AutoScroller;
 use crate::document_ops::paragraph_run_char_spans;
 use crate::docx_parser::{Paragraph, Run};
-use crate::editor::geometry::page_scroll_offset;
+use crate::editor::geometry::{max_scroll_for_display_rows, page_scroll_offset};
 use crate::editor::layout::{
     build_visual_rows, column_for_x_in_row, display_line, document_lines, expand_rows_for_display,
     hidden_wrap_rows, line_for_y, line_height_px, list_item_ordinal, list_marker_text_for_level,
@@ -673,7 +673,8 @@ impl TextEditor {
         // document rewrap on every single keystroke, on top of render()'s
         // own now-cached cost.
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-        let (rows, _, wrap_to_display) = self.cached_or_fresh_row_tables(cx, viewport_width);
+        let (rows, display_to_wrap, wrap_to_display) =
+            self.cached_or_fresh_row_tables(cx, viewport_width);
         let visual_row = visual_row_for_line_col(&rows, cursor_line, cursor_col);
         // Translate into display-row space (see `expand_rows_for_display`)
         // so an oversized card-style/heading row earlier in the document
@@ -696,8 +697,7 @@ impl TextEditor {
             return None;
         }
 
-        let content_h = wrap_to_display.len() as f32 * slot_px;
-        let max_scroll = (content_h - viewport_h).max(0.0);
+        let max_scroll = max_scroll_for_display_rows(&display_to_wrap, slot_px, viewport_h);
         Some((
             cursor_top,
             viewport_h,
@@ -824,7 +824,8 @@ impl TextEditor {
         let state = self.state.read(cx);
         let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
-        let row_height = row_slot_px(normal_size_px, state.preferences().line_spacing, zoom);
+        let row_height = line_height_px(normal_size_px, state.preferences().line_spacing) * zoom;
+        let slot_px = row_slot_px(normal_size_px, state.preferences().line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
         }
@@ -835,9 +836,8 @@ impl TextEditor {
         }
         let offset = self.scroll_handle.offset();
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
-        let (_, _, wrap_to_display) = self.cached_or_fresh_row_tables(cx, viewport_width);
-        let content_h = wrap_to_display.len() as f32 * row_height;
-        let max_y = (content_h - viewport_h).max(0.0);
+        let (_, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
+        let max_y = max_scroll_for_display_rows(&display_to_wrap, slot_px, viewport_h);
         let current = offset.y.as_f32();
         let Some(next) = page_scroll_offset(current, viewport_h, row_height, max_y, forward) else {
             return false; // already at that end
@@ -937,7 +937,7 @@ impl TextEditor {
          * line would jump to the very first character of the line above
          * (using that *logical* line's column), skipping right past its
          * wrapped continuation rows entirely — landing on the wrong visual
-         * spot on screen. This rebuilds the same row table `render()`
+         * spot on screen. This reuses the same row table `render()`
          * paints from, so "the row above" here always matches what's
          * actually drawn one row up on screen.
          *
@@ -953,9 +953,8 @@ impl TextEditor {
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let paragraphs = idx
             .and_then(|i| state.workspace().tabs.get(i))
-            .map(|t| t.document.paragraphs().to_vec())
+            .map(|t| t.document.paragraphs())
             .unwrap_or_default();
-        let _ = state;
 
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let (rows, _, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
@@ -969,7 +968,7 @@ impl TextEditor {
             current_row,
             col_in_row,
             delta,
-            &paragraphs,
+            paragraphs,
             normal_size_px,
             zoom,
         ) else {

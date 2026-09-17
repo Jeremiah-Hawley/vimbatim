@@ -2213,6 +2213,47 @@ fn test_expand_rows_for_display_plain_rows_are_untouched() {
 }
 
 #[test]
+fn scroll_extent_reaches_last_display_slot() {
+    use crate::editor::geometry::max_scroll_for_display_rows;
+
+    // Wrapped content, a large-font line, and a hidden row must all use
+    // the rendered slot count, not the number of wrapped rows.
+    let rows = vec![(0, 0, 2), (0, 2, 5), (1, 0, 5), (2, 0, 5)];
+    let paragraphs = vec![pocket_paragraph(), plain_paragraph(), plain_paragraph()];
+    for zoom in [0.5, 1.0, 2.0] {
+        for spacing in [0.8, 1.0, 2.0] {
+            let (display, wrap) = expand_rows_for_display(
+                &rows,
+                &paragraphs,
+                zoom,
+                &[false, false, true, false],
+                14.0,
+                spacing,
+            );
+            let slot = row_slot_px(14.0, spacing, zoom);
+            let line = line_height_px(14.0, spacing) * zoom;
+            let viewport = line * 2.5;
+            let max_y = max_scroll_for_display_rows(&display, slot, viewport);
+            let last_bottom = (wrap[3] + 1) as f32 * slot;
+            assert!((max_y + viewport - last_bottom).abs() < 0.001);
+            assert_eq!(
+                max_scroll_for_display_rows(&display, slot, last_bottom * 2.0),
+                0.0
+            );
+            assert_eq!(max_scroll_for_display_rows(&[], slot, viewport), 0.0);
+
+            // Page by complete text lines, not their six layout slots.
+            let next = page_scroll_offset(0.0, viewport, line, max_y, true).unwrap();
+            assert!((next + (2.0 * line).min(max_y)).abs() < 0.001);
+            assert_eq!(
+                page_scroll_offset(-max_y, viewport, line, max_y, true),
+                None
+            );
+        }
+    }
+}
+
+#[test]
 fn test_expand_rows_for_display_inserts_spacers_before_oversized_row() {
     let rows = vec![(0, 0, 5), (1, 0, 5)];
     let paragraphs = vec![pocket_paragraph(), plain_paragraph()];

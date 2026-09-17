@@ -27,6 +27,15 @@ pub(crate) fn scrollbar_geometry(
     }
 }
 
+/// Display slots include the spacers reserved for each rendered line.
+pub(crate) fn max_scroll_for_display_rows(
+    display_rows: &[Option<usize>],
+    slot_px: f32,
+    viewport_h: f32,
+) -> f32 {
+    (display_rows.len() as f32 * slot_px - viewport_h).max(0.0)
+}
+
 // Pixel-only reading-mode page movement.
 /// The scroll arithmetic behind reading mode's Left/Right paging, split out
 /// from `TextEditor::page_scroll` so it is testable without a laid-out view.
