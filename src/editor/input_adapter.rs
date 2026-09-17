@@ -1,7 +1,7 @@
 //! Keyboard input dispatch for the editor.
 
 use super::*;
-use crate::editor::input::{InputStrategy, VimInputStrategy};
+use crate::editor::input::{InputStrategy, PlainInputStrategy, VimInputStrategy};
 use crate::editor::layout::row_slot_px;
 use crate::state::{matches_shifted_symbol, vim_find_target_char, VimMode};
 
@@ -228,11 +228,6 @@ impl TextEditor {
                 .map(|t| t.vim_mode)
                 .unwrap_or_default();
             (state.global_vim().vim_enabled, mode)
-        };
-        let translated = if vim_enabled {
-            VimInputStrategy.command(key, shift, key_char)
-        } else {
-            crate::editor::input::PlainInputStrategy.command(key, shift, key_char)
         };
         if vim_enabled {
             if vim_mode == VimMode::Insert {
@@ -522,9 +517,11 @@ impl TextEditor {
                     }
                 }
 
-                let (consumed, effects) = self.state.update(cx, |state, _| {
-                    let command = translated.expect("non-empty GPUI key");
-                    state.execute_vim_command(command)
+                let (consumed, effects) = self.state.update(cx, |state, _| match VimInputStrategy
+                    .command(key, shift, key_char)
+                {
+                    Some(command) => state.execute_vim_command(command),
+                    None => (false, Vec::new()),
                 });
                 for effect in effects {
                     match effect {
@@ -595,6 +592,13 @@ impl TextEditor {
             return;
         }
 
+        // Insert mode and Vim-disabled editing share this fallback. Translate
+        // here, after Vim routing, so insert keys cannot become VimKey no-ops.
+        self.state.update(cx, |state, cx| {
+            if PlainInputStrategy.apply(state, key, shift, key_char) {
+                cx.notify();
+            }
+        });
         self.scroll_to_cursor(cx);
     }
 

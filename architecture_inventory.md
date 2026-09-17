@@ -1,6 +1,6 @@
 # Architecture Inventory
 
-57 Rust files; 60,171 lines.
+57 Rust files; 60,246 lines.
 
 | Lines | File |
 |---:|---|
@@ -30,7 +30,7 @@
 | 751 | `src/command_palette.rs` |
 | 737 | `src/timer.rs` |
 | 649 | `src/document.rs` |
-| 634 | `src/editor/input_adapter.rs` |
+| 638 | `src/editor/input_adapter.rs` |
 | 553 | `src/vim_keybinds.rs` |
 | 444 | `src/state/preferences.rs` |
 | 444 | `src/color_picker.rs` |
@@ -50,8 +50,8 @@
 | 207 | `src/app/store.rs` |
 | 190 | `src/close_confirm.rs` |
 | 173 | `src/word_count.rs` |
+| 159 | `src/editor/input.rs` |
 | 113 | `src/case_converter.rs` |
-| 88 | `src/editor/input.rs` |
 | 78 | `src/wikifi_export.rs` |
 | 61 | `src/app/command.rs` |
 | 57 | `src/editor/color.rs` |
