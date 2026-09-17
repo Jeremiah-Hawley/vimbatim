@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "main_window_tests.rs"]
+mod tests;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -268,6 +272,16 @@ impl MainWindow {
     /// (shelling out, dialogs, clipboard, keybinds), resolving them asynchronously
     /// or mutating `state` when done.
     pub fn handle_app_effects(
+        state: Entity<AppState>,
+        effects: Vec<crate::app::command::AppEffect>,
+        cx: &mut App,
+    ) {
+        // Callers may still hold AppState's update lease. Effects can read
+        // or update that same entity, so run them only after it is released.
+        cx.defer(move |cx| Self::run_app_effects(state, effects, cx));
+    }
+
+    fn run_app_effects(
         state: Entity<AppState>,
         effects: Vec<crate::app::command::AppEffect>,
         cx: &mut App,
