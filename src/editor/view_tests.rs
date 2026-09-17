@@ -1177,6 +1177,44 @@ fn test_visual_row_step_down_past_last_row_is_none() {
 // ── highlight_color_hex / heading_font_size_px ──────────────────────────
 
 #[test]
+fn block_cursor_uses_highlight_colors_instead_of_page_colors() {
+    use crate::editor::color::{darken_for_light_text, run_colors};
+
+    let mut run = Run {
+        highlight: true,
+        highlight_color: "yellow".into(),
+        ..Run::default()
+    };
+    // The block swaps this pair: its glyph must use the highlight, not
+    // the page background. Match the normal highlight's dark-mode tint.
+    assert_eq!(
+        run_colors(Some(&run), 0xffffff, 0x202020),
+        (0xffffff, darken_for_light_text(0xffd700))
+    );
+    assert_eq!(
+        run_colors(Some(&run), 0x000000, 0xffffff),
+        (0x000000, 0xffd700)
+    );
+    run.color = Some("123456".into());
+    run.highlight_color = "00ff88".into();
+    assert_eq!(
+        run_colors(Some(&run), 0xffffff, 0x202020),
+        (0x123456, 0x00ff88)
+    );
+    run.highlight = false;
+    assert_eq!(
+        run_colors(Some(&run), 0xffffff, 0x202020),
+        (0x123456, 0x202020)
+    );
+    run.color = Some("invalid".into());
+    assert_eq!(
+        run_colors(Some(&run), 0xffffff, 0x202020),
+        (0xffffff, 0x202020)
+    );
+    assert_eq!(run_colors(None, 0xffffff, 0x202020), (0xffffff, 0x202020));
+}
+
+#[test]
 fn test_highlight_color_hex_known_names() {
     assert_eq!(
         crate::editor::color::highlight_color_hex("yellow"),

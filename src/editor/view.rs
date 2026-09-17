@@ -1596,9 +1596,13 @@ fn render_segment(
     let el = apply_run_style(div().flex_shrink(0.0), run, zoom, pal);
     let el = match style {
         SegmentStyle::Cursor => match cursor_style {
-            // Inverted block cursor: the page's text color as the block, the
-            // page's background as the glyph on top of it.
-            CursorStyle::Block => el.bg(rgb(pal.text)).text_color(rgb(pal.editor_bg)),
+            // Invert the run's actual colors, not the unhighlighted page:
+            // using editor_bg here punches a page-colored glyph into highlights.
+            CursorStyle::Block => {
+                let (foreground, background) =
+                    crate::editor::color::run_colors(run, pal.text, pal.editor_bg);
+                el.bg(rgb(foreground)).text_color(rgb(background))
+            }
             // A caret belongs *between* two characters, so it's an overlay on
             // the left edge of the character the cursor is on, not a background
             // on the character itself. Absolutely positioned so the character
@@ -1779,25 +1783,8 @@ fn apply_run_style(el: Div, run: Option<&Run>, zoom: f32, pal: Palette) -> Div {
         }]);
     }
     if run.highlight {
-        let base_hex = crate::editor::color::highlight_color_hex(&run.highlight_color);
-        let text_hex = run
-            .color
-            .as_deref()
-            .and_then(|c| u32::from_str_radix(c, 16).ok())
-            .unwrap_or(pal.text);
-        // Word darkens a light highlight sitting under light text so the text
-        // stays legible (white on yellow is otherwise unreadable). This used
-        // to be unconditional because the app was dark-only; now that the
-        // default text color follows the theme, the condition does the gating
-        // by itself — in light mode `p.text` is dark, so a yellow highlight
-        // is left alone, which is what Word does there too.
-        let highlight_hex = if crate::editor::color::is_light_color(base_hex)
-            && crate::editor::color::is_light_color(text_hex)
-        {
-            crate::editor::color::darken_for_light_text(base_hex)
-        } else {
-            base_hex
-        };
+        let (_, highlight_hex) =
+            crate::editor::color::run_colors(Some(run), pal.text, pal.editor_bg);
         el = el.bg(rgb(highlight_hex));
     }
     if run.size > 0 {

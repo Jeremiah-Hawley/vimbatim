@@ -1,3 +1,27 @@
+/// Effective text/background colors, also inverted by the Vim block cursor.
+pub(crate) fn run_colors(
+    run: Option<&crate::docx_parser::Run>,
+    text: u32,
+    background: u32,
+) -> (u32, u32) {
+    let foreground = run
+        .and_then(|r| r.color.as_deref())
+        .and_then(|c| u32::from_str_radix(c, 16).ok())
+        .unwrap_or(text);
+    let background = match run.filter(|r| r.highlight) {
+        Some(run) => {
+            let base = highlight_color_hex(&run.highlight_color);
+            if is_light_color(base) && is_light_color(foreground) {
+                darken_for_light_text(base)
+            } else {
+                base
+            }
+        }
+        None => background,
+    };
+    (foreground, background)
+}
+
 pub(crate) fn highlight_color_hex(name: &str) -> u32 {
     /*
      * Maps Word's highlight color names to their GPUI hex value (spec
