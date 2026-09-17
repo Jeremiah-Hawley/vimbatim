@@ -396,19 +396,26 @@ impl AppState {
         String,
     > {
         let path = with_docx_extension(&path);
-
-        let tab = self.workspace.tabs.get_mut(idx).ok_or("No active tab")?;
-        if tab.is_saving {
-            return Ok(None);
-        }
-        tab.file_path = Some(path.clone());
-        tab.title = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Untitled")
-            .to_string();
-        tab.document.is_modified = true;
-        self.prepare_save(idx)
+        let (tab_id, paragraphs, origin) = {
+            let tab = self.workspace.tabs.get_mut(idx).ok_or("No active tab")?;
+            if tab.is_saving {
+                return Ok(None);
+            }
+            tab.is_saving = true;
+            tab.saving_version = Some(tab.document.content_version);
+            (
+                tab.id,
+                tab.document.paragraphs().to_vec(),
+                tab.docx_origin.clone(),
+            )
+        };
+        Ok(Some((
+            tab_id,
+            paragraphs,
+            origin,
+            path,
+            self.new_doc_style(),
+        )))
     }
 
     pub fn save_tab_as(&mut self, idx: usize, path: PathBuf) -> Result<(), String> {
@@ -422,7 +429,7 @@ impl AppState {
         let result = DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style);
 
         let elapsed = save_started.elapsed();
-        self.complete_save(tab_id, result.clone(), elapsed);
+        self.complete_save(tab_id, Some(path), result.clone(), elapsed);
 
         result.map_err(|e| format!("Save failed: {e}"))
     }
@@ -472,12 +479,21 @@ impl AppState {
     pub fn complete_save(
         &mut self,
         tab_id: TabId,
+        save_as_path: Option<PathBuf>,
         result: Result<(), crate::app::error::AppError>,
         elapsed: Duration,
     ) {
         match result {
             Ok(()) => {
                 if let Some(tab) = self.workspace.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    if let Some(path) = save_as_path {
+                        tab.file_path = Some(path.clone());
+                        tab.title = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string();
+                    }
                     let saved_version = tab.saving_version.take();
                     tab.is_saving = false;
                     if saved_version == Some(tab.document.content_version) {
@@ -506,7 +522,7 @@ impl AppState {
         let result = DocumentStore::save_document(&paragraphs, origin.as_deref(), &path, doc_style);
 
         let elapsed = save_started.elapsed();
-        self.complete_save(tab_id, result.clone(), elapsed);
+        self.complete_save(tab_id, None, result.clone(), elapsed);
 
         result.map_err(|e| format!("Save failed: {e}"))
     }
@@ -1163,16 +1179,6 @@ impl AppState {
     /// to lose, which is the case this is actually for.
     /// Synchronous compatibility path for tests and non-GPUI callers.
     pub fn open_file_in_current_tab(&mut self, path: PathBuf) {
-        let result = DocumentStore.load_document(&path);
-        self.complete_open_file_in_current_tab(path, result);
-    }
-
-    /// Applies an asynchronously loaded document to the focused clean tab.
-    pub fn complete_open_file_in_current_tab(
-        &mut self,
-        path: PathBuf,
-        result: Result<(Vec<Paragraph>, DocxOrigin), crate::app::error::AppError>,
-    ) {
         let replaceable = self
             .pane_tab_index(self.workspace.focused_pane)
             .filter(|&i| {
@@ -1180,11 +1186,33 @@ impl AppState {
                     .tabs
                     .get(i)
                     .is_some_and(|t| !t.document.is_modified)
-            });
-        let Some(idx) = replaceable else {
+            })
+            .and_then(|i| self.workspace.tabs.get(i).map(|t| t.id));
+        let result = DocumentStore.load_document(&path);
+        self.complete_open_file_in_current_tab(path, replaceable, result);
+    }
+
+    /// Applies an asynchronously loaded document to the focused clean tab.
+    pub fn complete_open_file_in_current_tab(
+        &mut self,
+        path: PathBuf,
+        target_tab_id: Option<TabId>,
+        result: Result<(Vec<Paragraph>, DocxOrigin), crate::app::error::AppError>,
+    ) {
+        let Some(tab_id) = target_tab_id else {
             self.complete_open_file(path, result);
             return;
         };
+        let replaceable_idx = self.workspace.tabs.iter().position(|t| t.id == tab_id);
+        let Some(idx) = replaceable_idx else {
+            self.complete_open_file(path, result);
+            return;
+        };
+        // Ensure the tab still isn't modified
+        if self.workspace.tabs[idx].document.is_modified {
+            self.complete_open_file(path, result);
+            return;
+        }
         if self
             .workspace
             .tabs

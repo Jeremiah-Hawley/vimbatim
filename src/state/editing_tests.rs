@@ -12312,7 +12312,7 @@ fn save_preparation_rejects_duplicates_and_keeps_newer_edits_dirty() {
     assert!(state.prepare_save(0).unwrap().is_none());
 
     state.insert_char('!');
-    state.complete_save(TabId(0), Ok(()), std::time::Duration::ZERO);
+    state.complete_save(TabId(0), None, Ok(()), std::time::Duration::ZERO);
     assert!(!state.workspace.tabs[0].is_saving);
     assert!(state.workspace.tabs[0].document.is_modified);
 }

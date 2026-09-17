@@ -54,7 +54,7 @@ pub enum AppEffect {
     PromptOpenFolder,
     PromptOpenFile,
     LoadDocument(std::path::PathBuf),
-    LoadDocumentInCurrentTab(std::path::PathBuf),
+    LoadDocumentInCurrentTab(std::path::PathBuf, Option<TabId>),
     ScanWorkspace(std::path::PathBuf),
     PromptSaveAs(TabId),
     PerformSave(TabId),

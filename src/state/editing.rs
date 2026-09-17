@@ -2429,8 +2429,18 @@ impl AppState {
                 vec![crate::app::command::AppEffect::LoadDocument(path)]
             }
             AppCommand::OpenFileInCurrentTab(path) => {
+                let replaceable = self
+                    .pane_tab_index(self.workspace().focused_pane)
+                    .filter(|&i| {
+                        self.workspace()
+                            .tabs
+                            .get(i)
+                            .is_some_and(|t| !t.document.is_modified)
+                    })
+                    .and_then(|i| self.workspace().tabs.get(i).map(|t| t.id));
                 vec![crate::app::command::AppEffect::LoadDocumentInCurrentTab(
                     path,
+                    replaceable,
                 )]
             }
             AppCommand::RefreshFileTree => {
@@ -2501,7 +2511,7 @@ impl AppState {
             | crate::app::command::AppEffect::PromptOpenFolder
             | crate::app::command::AppEffect::PromptOpenFile
             | crate::app::command::AppEffect::LoadDocument(_)
-            | crate::app::command::AppEffect::LoadDocumentInCurrentTab(_)
+            | crate::app::command::AppEffect::LoadDocumentInCurrentTab(_, _)
             | crate::app::command::AppEffect::ScanWorkspace(_)
             | crate::app::command::AppEffect::PromptSaveAs(_)
             | crate::app::command::AppEffect::PerformSave(_) => {}

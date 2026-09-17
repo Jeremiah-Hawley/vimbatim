@@ -308,7 +308,7 @@ impl MainWindow {
                     })
                     .detach();
                 }
-                crate::app::command::AppEffect::LoadDocumentInCurrentTab(file) => {
+                crate::app::command::AppEffect::LoadDocumentInCurrentTab(file, target_tab_id) => {
                     let load_path = file.clone();
                     let s = state.clone();
                     cx.spawn(async move |cx| {
@@ -320,7 +320,7 @@ impl MainWindow {
                             })
                             .await;
                         s.update(cx, |st, cx| {
-                            st.complete_open_file_in_current_tab(file, result);
+                            st.complete_open_file_in_current_tab(file, target_tab_id, result);
                             cx.notify();
                         });
                     })
@@ -453,22 +453,22 @@ impl MainWindow {
                                 p
                             });
 
-                            if let Ok(Some((tab_id, paragraphs, _origin, p, doc_style))) = prepared
-                            {
+                            if let Ok(Some((tab_id, paragraphs, origin, p, doc_style))) = prepared {
                                 let start = std::time::Instant::now();
+                                let save_path = p.clone();
                                 let result = cx
                                     .background_executor()
                                     .spawn(async move {
-                                        use crate::app::repository::DocumentRepository;
-                                        crate::app::store::DocumentStore.save_new_docx(
+                                        crate::app::store::DocumentStore::save_document(
                                             &paragraphs,
-                                            &p,
-                                            &doc_style,
+                                            origin.as_deref(),
+                                            &save_path,
+                                            doc_style,
                                         )
                                     })
                                     .await;
                                 s.update(cx, |st, cx| {
-                                    st.complete_save(tab_id, result, start.elapsed());
+                                    st.complete_save(tab_id, Some(p), result, start.elapsed());
                                     cx.notify();
                                 });
                             } else if let Err(e) = prepared {
@@ -509,7 +509,7 @@ impl MainWindow {
                                 })
                                 .await;
                             s.update(cx, |st, cx| {
-                                st.complete_save(tab_id, result, start.elapsed());
+                                st.complete_save(tab_id, None, result, start.elapsed());
                                 cx.notify();
                             });
                         })

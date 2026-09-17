@@ -211,7 +211,7 @@ impl TabBar {
                                         })
                                         .await;
                                     state.update(cx, |s, cx| {
-                                        s.complete_save(id, result, started.elapsed());
+                                        s.complete_save(id, None, result, started.elapsed());
                                         cx.notify();
                                     });
                                 })
@@ -271,19 +271,20 @@ impl TabBar {
                                     prepared
                                 {
                                     let started = std::time::Instant::now();
+                                    let save_path = path.clone();
                                     let result = cx
                                         .background_executor()
                                         .spawn(async move {
                                             crate::app::store::DocumentStore::save_document(
                                                 &paragraphs,
                                                 origin.as_deref(),
-                                                &path,
+                                                &save_path,
                                                 doc_style,
                                             )
                                         })
                                         .await;
                                     s.update(cx, |st, cx| {
-                                        st.complete_save(id, result, started.elapsed());
+                                        st.complete_save(id, Some(path), result, started.elapsed());
                                         cx.notify();
                                     });
                                 } else if let Err(e) = prepared {
