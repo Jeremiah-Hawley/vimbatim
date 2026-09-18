@@ -171,6 +171,24 @@ fn no_numbering() -> HashMap<u32, (String, String, Option<String>)> {
     HashMap::new()
 }
 
+#[test]
+fn text_entities_survive_parse_and_repeated_save() {
+    // A string containing all raw text XML entities, pre-escaped.
+    // `<w:t>` only wraps the run text, so this avoids `wrap_run_xml` attaching `hi` behind it.
+    let xml = "<w:document><w:body><w:p><w:r><w:t>&lt;&lt;tag&gt;&gt; &amp; &quot;quoted&quot; &apos;x&apos; &#60;&#x3E; &#x1F600; &amp;lt;</w:t></w:r></w:p></w:body></w:document>";
+    let expected = "<<tag>> & \"quoted\" 'x' <> 😀 &lt;";
+    let mut paragraphs = parse_document_xml(xml, &no_styles(), &no_numbering()).unwrap();
+    // Prove it parses correctly first.
+    assert_eq!(paragraphs_to_plain_text(&paragraphs), expected);
+
+    // Prove it survives round-trips.
+    for _ in 0..3 {
+        let saved = rebuild_document_xml(&fallback_preamble(), "", &paragraphs);
+        paragraphs = parse_document_xml(&saved, &no_styles(), &no_numbering()).unwrap();
+        assert_eq!(paragraphs_to_plain_text(&paragraphs), expected);
+    }
+}
+
 // ── italic/font/color parsing (rich-text formatting plan, Phase 1) ──────
 
 #[test]

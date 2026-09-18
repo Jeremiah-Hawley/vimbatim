@@ -864,9 +864,24 @@ fn parse_document_xml(
             Event::Text(ref e) => {
                 if in_text {
                     if let Some(run) = current_run.as_mut() {
-                        // unescape() handles XML entities like &amp; → &.
-                        run.text
-                            .push_str(&quick_xml::escape::unescape(&e.decode()?)?);
+                        run.text.push_str(&e.decode()?);
+                    }
+                }
+            }
+            Event::GeneralRef(ref e) if in_text => {
+                if let Some(run) = current_run.as_mut() {
+                    if let Some(ch) = e.resolve_char_ref()? {
+                        run.text.push(ch);
+                    } else {
+                        let name = e.decode()?;
+                        let value =
+                            quick_xml::escape::resolve_xml_entity(&name).ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("unknown XML entity: &{name};"),
+                                )
+                            })?;
+                        run.text.push_str(value);
                     }
                 }
             }
