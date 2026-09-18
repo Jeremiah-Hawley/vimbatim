@@ -10,6 +10,7 @@ graphify-out/
 !/README.md
 !/architecture_inventory.md
 !/ARCHITECTURE_REVIEW.md
+!/Icon_Plan.md
 !docs/adr/*.md
 
 *.xml
