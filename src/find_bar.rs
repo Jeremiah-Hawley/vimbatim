@@ -370,7 +370,11 @@ impl Render for FindBarView {
                                     cx.notify();
                                 });
                             }))
-                            .child("×"),
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::TabClose,
+                                p.text_muted,
+                                12.0,
+                            )),
                     ),
             )
             // Replace has no meaning against a word list — replacing every hit

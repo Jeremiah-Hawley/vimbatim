@@ -242,6 +242,12 @@ impl RibbonBtn {
         self
     }
 
+    /// Replaces a text button's label with an SVG icon, keeping text-button sizing.
+    fn with_icon(mut self, svg_icon: crate::icons::Icon) -> Self {
+        self.icon = Some(RibbonIcon::Svg(svg_icon));
+        self
+    }
+
     /// A compact icon button.
     fn icon(label: &'static str, action: FormatAction, icon: RibbonIcon) -> Self {
         Self {
@@ -297,6 +303,8 @@ enum RibbonIcon {
     /// feature (no font picker/upload exists yet); this shows the one font
     /// the app actually renders in today.
     FontFamily,
+    /// An embedded SVG icon asset replacing a generated mark.
+    Svg(crate::icons::Icon),
     /// A bucket with a handle, filled by the button's own `.tint()`
     /// (already the current highlight color) — the icon just needs to read
     /// as a container, not paint the color itself.
@@ -409,29 +417,12 @@ impl FormattingRibbon {
     fn render_icon(icon: RibbonIcon, color: u32) -> AnyElement {
         match icon {
             RibbonIcon::Align(alignment) => {
-                let justify = |d: Div| match alignment {
-                    Alignment::Center => d.items_center(),
-                    Alignment::Right => d.items_end(),
-                    // Justify has no button of its own; it falls in with Left
-                    // rather than silently painting as something else.
-                    _ => d.items_start(),
+                let svg_icon = match alignment {
+                    Alignment::Center => crate::icons::Icon::AlignCenter,
+                    Alignment::Right => crate::icons::Icon::AlignRight,
+                    _ => crate::icons::Icon::AlignLeft,
                 };
-                justify(div().flex().flex_col())
-                    .w(px(14.0))
-                    .gap(px(2.0))
-                    .children(
-                        [14.0_f32, 9.0, 14.0, 9.0]
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, w)| {
-                                div()
-                                    .id(ElementId::named_usize("align-icon-bar", i))
-                                    .h(px(2.0))
-                                    .w(px(w))
-                                    .bg(rgb(color))
-                            }),
-                    )
-                    .into_any_element()
+                crate::icons::icon(svg_icon, color, 14.0).into_any_element()
             }
             RibbonIcon::Bold
             | RibbonIcon::Italic
@@ -501,110 +492,34 @@ impl FormattingRibbon {
                         .unwrap_or(crate::text_editor::FONT_FAMILY),
                 )
                 .into_any_element(),
-            RibbonIcon::HighlightBucket => div()
-                .flex()
-                .flex_col()
-                .items_center()
-                // Handle: an open-bottom arc (rounded top corners only, no
-                // bottom border) sitting right above the pail, reading as
-                // the bail/handle loop on a real bucket.
-                .child(
-                    div()
-                        .w(px(9.0))
-                        .h(px(4.0))
-                        .rounded_t(px(4.0))
-                        .border_2()
-                        .border_b_0()
-                        .border_color(rgb(color)),
-                )
-                // Pail: flat top (sits flush under the handle), rounded
-                // bottom corners so the silhouette reads as a bucket rather
-                // than a plain box.
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(9.0))
-                        .rounded_b(px(3.0))
-                        .border_2()
-                        .border_color(rgb(color)),
-                )
-                .into_any_element(),
-            RibbonIcon::Eye(open) => {
-                if open {
-                    div()
-                        .w(px(16.0))
-                        .h(px(9.0))
-                        .rounded(px(5.0))
-                        .border_2()
-                        .border_color(rgb(color))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(div().w(px(4.0)).h(px(4.0)).rounded(px(2.0)).bg(rgb(color)))
-                        .into_any_element()
-                } else {
-                    div()
-                        .w(px(16.0))
-                        .h(px(2.0))
-                        .rounded(px(1.0))
-                        .bg(rgb(color))
-                        .into_any_element()
-                }
-            }
-            RibbonIcon::Fold => div()
-                .text_size(px(10.0))
-                .text_color(rgb(color))
-                .child("▼")
-                .into_any_element(),
-            RibbonIcon::Split => div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .child(div().w(px(6.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(color)))
-                .child(div().w(px(1.0)).h(px(12.0)).bg(rgb(color)))
-                .child(div().w(px(6.0)).h(px(12.0)).rounded(px(1.0)).bg(rgb(color)))
-                .into_any_element(),
-            RibbonIcon::BulletList | RibbonIcon::NumberedList => {
-                let numbered = matches!(icon, RibbonIcon::NumberedList);
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .children((0..3).map(|row| {
-                        let marker = if numbered {
-                            // `line_height` pins the numeral to the row height
-                            // so three of them still fit inside the button —
-                            // without it each row grows to the font's natural
-                            // line box and the icon overflows.
-                            div()
-                                .w(px(4.0))
-                                .flex()
-                                .justify_center()
-                                .text_size(px(6.0))
-                                .line_height(px(4.0))
-                                .text_color(rgb(color))
-                                .child(format!("{}", row + 1))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .w(px(4.0))
-                                .flex()
-                                .justify_center()
-                                .child(div().w(px(3.0)).h(px(3.0)).rounded_full().bg(rgb(color)))
-                                .into_any_element()
-                        };
-                        div()
-                            .id(ElementId::named_usize("list-icon-row", row))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(2.0))
-                            .h(px(4.0))
-                            .child(marker)
-                            .child(div().w(px(9.0)).h(px(2.0)).bg(rgb(color)))
-                    }))
+            RibbonIcon::HighlightBucket => {
+                crate::icons::icon(crate::icons::Icon::HighlightBucket, color, 14.0)
                     .into_any_element()
+            }
+            RibbonIcon::Eye(open) => {
+                let svg_icon = if open {
+                    crate::icons::Icon::EyeOpen
+                } else {
+                    crate::icons::Icon::EyeClosed
+                };
+                crate::icons::icon(svg_icon, color, 16.0).into_any_element()
+            }
+            RibbonIcon::Fold => {
+                crate::icons::icon(crate::icons::Icon::Fold, color, 14.0).into_any_element()
+            }
+            RibbonIcon::Split => {
+                crate::icons::icon(crate::icons::Icon::Split, color, 14.0).into_any_element()
+            }
+            RibbonIcon::BulletList | RibbonIcon::NumberedList => {
+                let svg_icon = if matches!(icon, RibbonIcon::NumberedList) {
+                    crate::icons::Icon::ListNumbered
+                } else {
+                    crate::icons::Icon::ListBullet
+                };
+                crate::icons::icon(svg_icon, color, 14.0).into_any_element()
+            }
+            RibbonIcon::Svg(svg_icon) => {
+                crate::icons::icon(svg_icon, color, 16.0).into_any_element()
             }
         }
     }
@@ -2400,40 +2315,48 @@ impl Render for FormattingRibbon {
             .p(px(0.0))
             .bg(rgb(p.chrome))
             .child(Self::render_global_controls(all_collapsed, p, cx))
-            .child(self.render_group(
-                "cards",
-                "CARDS",
-                &[
-                    vec![
-                        RibbonBtn::primary("Paste", FormatAction::Paste),
-                        RibbonBtn::primary("Condense", FormatAction::Condense),
-                        RibbonBtn::primary("Pocket", FormatAction::Pocket),
-                        RibbonBtn::primary("Hat", FormatAction::Hat),
+            .child(
+                self.render_group(
+                    "cards",
+                    "CARDS",
+                    &[
+                        vec![
+                            RibbonBtn::primary("Paste", FormatAction::Paste)
+                                .with_icon(crate::icons::Icon::Paste),
+                            RibbonBtn::primary("Condense", FormatAction::Condense)
+                                .with_icon(crate::icons::Icon::Condense),
+                            RibbonBtn::primary("Pocket", FormatAction::Pocket),
+                            RibbonBtn::primary("Hat", FormatAction::Hat),
+                        ],
+                        vec![
+                            RibbonBtn::primary("Block", FormatAction::Block),
+                            RibbonBtn::primary("Tag", FormatAction::Tag),
+                            RibbonBtn::primary("Cite", FormatAction::Cite),
+                            RibbonBtn::primary("Analytic", FormatAction::Analytic),
+                        ],
+                        vec![
+                            RibbonBtn::secondary("Emphasis", FormatAction::Emphasis)
+                                .with_icon(crate::icons::Icon::Emphasis),
+                            // Put back per Bug fixes pre test 2.md — the Text
+                            // ribbon's HL Color button keeps its own separate
+                            // behavior (opens the color menu); this one just
+                            // applies settings.conf's configured highlight_color
+                            // directly, same as `KeybindAction::Highlight`.
+                            RibbonBtn::secondary("Highlight", FormatAction::Highlight)
+                                .with_icon(crate::icons::Icon::Highlight),
+                            RibbonBtn::secondary("Shrink", FormatAction::Shrink)
+                                .with_icon(crate::icons::Icon::Shrink),
+                            RibbonBtn::secondary("Clear", FormatAction::Clear)
+                                .with_icon(crate::icons::Icon::ClearFormatting),
+                        ],
                     ],
-                    vec![
-                        RibbonBtn::primary("Block", FormatAction::Block),
-                        RibbonBtn::primary("Tag", FormatAction::Tag),
-                        RibbonBtn::primary("Cite", FormatAction::Cite),
-                        RibbonBtn::primary("Analytic", FormatAction::Analytic),
-                    ],
-                    vec![
-                        RibbonBtn::secondary("Emphasis", FormatAction::Emphasis),
-                        // Put back per Bug fixes pre test 2.md — the Text
-                        // ribbon's HL Color button keeps its own separate
-                        // behavior (opens the color menu); this one just
-                        // applies settings.conf's configured highlight_color
-                        // directly, same as `KeybindAction::Highlight`.
-                        RibbonBtn::secondary("Highlight", FormatAction::Highlight),
-                        RibbonBtn::secondary("Shrink", FormatAction::Shrink),
-                        RibbonBtn::secondary("Clear", FormatAction::Clear),
-                    ],
-                ],
-                *self.collapsed.get("cards").unwrap_or(&false),
-                p,
-                color_mode,
-                state.clone(),
-                cx,
-            ))
+                    *self.collapsed.get("cards").unwrap_or(&false),
+                    p,
+                    color_mode,
+                    state.clone(),
+                    cx,
+                ),
+            )
             .child(self.render_group(
                 "text",
                 "TEXT",
@@ -2485,16 +2408,17 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(self.render_group(
-                "document",
-                "DOCUMENT",
-                &[
-                    // All five icon buttons share one row: at 38px each they
-                    // fit in the width the Doc Menu / Card Menu row already
-                    // needs, and folding the old fourth row in here drops
-                    // DOCUMENT — the only four-row group — to three, which is
-                    // what sets the ribbon's height.
-                    vec![
+            .child(
+                self.render_group(
+                    "document",
+                    "DOCUMENT",
+                    &[
+                        // All five icon buttons share one row: at 38px each they
+                        // fit in the width the Doc Menu / Card Menu row already
+                        // needs, and folding the old fourth row in here drops
+                        // DOCUMENT — the only four-row group — to three, which is
+                        // what sets the ribbon's height.
+                        vec![
                             RibbonBtn::icon(
                                 "Bullets",
                                 FormatAction::BulletList,
@@ -2523,31 +2447,36 @@ impl Render for FormattingRibbon {
                                 RibbonIcon::Align(Alignment::Right),
                             ),
                         ],
-                    // Para Integrity / Pilcrows buttons removed per checklist
-                    // — Settings -> Text Settings already has the equivalent
-                    // controls ("Condense by default" / "Mark collapsed
-                    // newlines with ¶", `settings_modal.rs:1145-1167`), which
-                    // are the same two settings these ribbon buttons drove
-                    // (`AppState::toggle_paragraph_integrity`/`toggle_pilcrows`
-                    // just call `set_paste_condense`/`set_paste_condense_pilcrow`
-                    // — one switch, not two that could disagree).
-                    vec![
-                        RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu),
-                        RibbonBtn::secondary("Card Menu", FormatAction::CardMenu),
+                        // Para Integrity / Pilcrows buttons removed per checklist
+                        // — Settings -> Text Settings already has the equivalent
+                        // controls ("Condense by default" / "Mark collapsed
+                        // newlines with ¶", `settings_modal.rs:1145-1167`), which
+                        // are the same two settings these ribbon buttons drove
+                        // (`AppState::toggle_paragraph_integrity`/`toggle_pilcrows`
+                        // just call `set_paste_condense`/`set_paste_condense_pilcrow`
+                        // — one switch, not two that could disagree).
+                        vec![
+                            RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu)
+                                .with_icon(crate::icons::Icon::DocMenu),
+                            RibbonBtn::secondary("Card Menu", FormatAction::CardMenu)
+                                .with_icon(crate::icons::Icon::CardMenu),
+                        ],
                     ],
-                ],
-                *self.collapsed.get("document").unwrap_or(&false),
-                p,
-                color_mode,
-                state.clone(),
-                cx,
-            ))
-            .child(self.render_group(
-                "view",
-                "VIEW",
-                &[
-                    vec![
-                            RibbonBtn::secondary("Nav", FormatAction::Nav),
+                    *self.collapsed.get("document").unwrap_or(&false),
+                    p,
+                    color_mode,
+                    state.clone(),
+                    cx,
+                ),
+            )
+            .child(
+                self.render_group(
+                    "view",
+                    "VIEW",
+                    &[
+                        vec![
+                            RibbonBtn::secondary("Nav", FormatAction::Nav)
+                                .with_icon(crate::icons::Icon::Nav),
                             RibbonBtn::icon(
                                 "Invisibility",
                                 FormatAction::InvisibilityMode,
@@ -2555,10 +2484,12 @@ impl Render for FormattingRibbon {
                             )
                             .engaged(invisibility_mode),
                             RibbonBtn::secondary("Timer", FormatAction::Timer)
+                                .with_icon(crate::icons::Icon::Timer)
                                 .engaged(timer_visible),
                         ],
-                    vec![
-                            RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu),
+                        vec![
+                            RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu)
+                                .with_icon(crate::icons::Icon::SwitchTab),
                             RibbonBtn::icon("Split", FormatAction::WindowSplit, RibbonIcon::Split),
                             RibbonBtn::icon("Fold", FormatAction::FoldToggle, RibbonIcon::Fold)
                                 .engaged(any_folded),
@@ -2571,26 +2502,32 @@ impl Render for FormattingRibbon {
                             // RibbonBtn::secondary("Print Layout", FormatAction::PrintLayout)
                             //     .engaged(print_layout),
                         ],
-                ],
-                *self.collapsed.get("view").unwrap_or(&false),
-                p,
-                color_mode,
-                state.clone(),
-                cx,
-            ))
-            .child(self.render_group(
-                "caselist",
-                "CASELIST",
-                &[
-                    vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)],
-                    vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)],
-                    vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)],
-                ],
-                *self.collapsed.get("caselist").unwrap_or(&false),
-                p,
-                color_mode,
-                state.clone(),
-                cx,
-            ))
+                    ],
+                    *self.collapsed.get("view").unwrap_or(&false),
+                    p,
+                    color_mode,
+                    state.clone(),
+                    cx,
+                ),
+            )
+            .child(
+                self.render_group(
+                    "caselist",
+                    "CASELIST",
+                    &[
+                        vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)
+                            .with_icon(crate::icons::Icon::Wikifi)],
+                        vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)
+                            .with_icon(crate::icons::Icon::OpenWiki)],
+                        vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)
+                            .with_icon(crate::icons::Icon::Tabroom)],
+                    ],
+                    *self.collapsed.get("caselist").unwrap_or(&false),
+                    p,
+                    color_mode,
+                    state.clone(),
+                    cx,
+                ),
+            )
     }
 }

@@ -229,7 +229,6 @@ impl FileExplorer {
                 children,
                 expanded,
             } => {
-                let chevron = if *expanded { "▾ " } else { "▸ " };
                 let path_clone = path.clone();
                 let state_clone = state_handle.clone();
                 let path_for_ctx = path.clone();
@@ -249,6 +248,7 @@ impl FileExplorer {
                             .flex()
                             .flex_row()
                             .items_center()
+                            .gap(px(6.0))
                             .min_h(px(24.0))
                             .pl(indent)
                             .pr(px(space::SM))
@@ -279,7 +279,30 @@ impl FileExplorer {
                                     cx.notify();
                                 });
                             })
-                            .child(div().text_color(rgb(p.text_muted)).child(chevron))
+                            .child(
+                                crate::icons::icon(
+                                    if is_expanded {
+                                        crate::icons::Icon::DisclosureExpanded
+                                    } else {
+                                        crate::icons::Icon::DisclosureCollapsed
+                                    },
+                                    p.text_muted,
+                                    14.0,
+                                )
+                                .flex_none(),
+                            )
+                            .child(
+                                crate::icons::icon(
+                                    if is_expanded {
+                                        crate::icons::Icon::FolderOpen
+                                    } else {
+                                        crate::icons::Icon::Folder
+                                    },
+                                    p.text_muted,
+                                    14.0,
+                                )
+                                .flex_none(),
+                            )
                             .child(div().flex_1().min_w_0().line_clamp(2).child(dir_name)),
                     )
                     // Recursively render children when the directory is expanded
@@ -365,17 +388,11 @@ impl FileExplorer {
                             cx.notify();
                         });
                     })
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .text_xs()
-                            .text_color(if is_active {
-                                rgb(p.text)
-                            } else {
-                                rgb(p.text_faint)
-                            })
-                            .child("DOC"),
-                    )
+                    .child(div().w(px(28.0)).child(crate::icons::icon(
+                        crate::icons::Icon::FileDocx,
+                        if is_active { p.text } else { p.text_muted },
+                        14.0,
+                    )))
                     .child(div().flex_1().min_w_0().line_clamp(2).child(file_name))
                     .into_any_element()
             }
@@ -1129,6 +1146,7 @@ impl FileExplorer {
     /// same pattern `render_node`'s click handlers already use.
     fn render_mode_toggle_btn(
         id: &'static str,
+        icon: gpui::Svg,
         label: &'static str,
         mode: SidebarMode,
         current: SidebarMode,
@@ -1140,6 +1158,8 @@ impl FileExplorer {
         div()
             .id(id)
             .flex()
+            .flex_row()
+            .gap(px(4.0))
             .items_center()
             .justify_center()
             .h(px(24.0))
@@ -1164,6 +1184,7 @@ impl FileExplorer {
                     cx.notify();
                 });
             })
+            .child(icon.flex_none())
             .child(label)
     }
 
@@ -1328,7 +1349,15 @@ impl FileExplorer {
                                 }
                                 cx.notify();
                             }))
-                            .child(if is_collapsed { "▸" } else { "▾" })
+                            .child(crate::icons::icon(
+                                if is_collapsed {
+                                    crate::icons::Icon::DisclosureCollapsed
+                                } else {
+                                    crate::icons::Icon::DisclosureExpanded
+                                },
+                                p.text_muted,
+                                14.0,
+                            ))
                             .into_any_element()
                     } else {
                         div().w(px(16.0)).flex_shrink_0().into_any_element()
@@ -1549,6 +1578,7 @@ impl Render for FileExplorer {
                             // AppState.sidebar_mode field.
                             .child(Self::render_mode_toggle_btn(
                                 "files-mode-btn",
+                                crate::icons::icon(crate::icons::Icon::Sidebar, p.text, 14.0),
                                 "Files",
                                 SidebarMode::Files,
                                 sidebar_mode,
@@ -1557,6 +1587,7 @@ impl Render for FileExplorer {
                             ))
                             .child(Self::render_mode_toggle_btn(
                                 "nav-mode-btn",
+                                crate::icons::icon(crate::icons::Icon::Nav, p.text, 14.0),
                                 "Nav",
                                 SidebarMode::Nav,
                                 sidebar_mode,
@@ -1578,13 +1609,10 @@ impl Render for FileExplorer {
                                             .h(px(24.0))
                                             .rounded(px(radius::MD))
                                             .cursor_pointer()
-                                            .text_color(rgb(p.text_muted))
-                                            .text_sm()
                                             .border_1()
                                             .border_color(rgb(p.border_subtle))
                                             .hover(move |s| {
                                                 s.bg(rgb(p.chrome_hover))
-                                                    .text_color(rgb(p.text))
                                                     .border_color(rgb(p.border))
                                             })
                                             .active(move |s| s.bg(rgb(p.chrome_active)))
@@ -1602,7 +1630,7 @@ impl Render for FileExplorer {
                                                 });
                                                 cx.notify();
                                             }))
-                                            .child("↻"),
+                                            .child(crate::icons::icon(crate::icons::Icon::Refresh, p.text_muted, 14.0)),
                                     )
                                     .child(
                                         div()
@@ -1614,20 +1642,17 @@ impl Render for FileExplorer {
                                             .h(px(24.0))
                                             .rounded(px(radius::MD))
                                             .cursor_pointer()
-                                            .text_color(rgb(p.text_muted))
-                                            .text_sm()
                                             .border_1()
                                             .border_color(rgb(p.border_subtle))
                                             .hover(move |s| {
                                                 s.bg(rgb(p.chrome_hover))
-                                                    .text_color(rgb(p.text))
                                                     .border_color(rgb(p.border))
                                             })
                                             .active(move |s| s.bg(rgb(p.chrome_active)))
                                             .on_click(cx.listener(|this, _ev, window, cx| {
                                                 this.create_new_file(window, cx);
                                             }))
-                                            .child("+"),
+                                            .child(crate::icons::icon(crate::icons::Icon::TabNew, p.text_muted, 14.0)),
                                     )
                             }),
                     ),

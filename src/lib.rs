@@ -29,6 +29,7 @@ mod find_bar;
 mod font_import;
 mod font_import_modal;
 mod formatting_ribbon;
+mod icons;
 mod keybinds;
 mod main_window;
 mod preferences;
@@ -186,114 +187,116 @@ pub(crate) fn run_app() {
     // bundled defaults.
     state::ensure_settings_file();
 
-    application().run(|cx: &mut App| {
-        load_bundled_fonts(cx);
-        // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
-        // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
-        // loaded from settings.conf and registered here. The settings modal
-        // calls `rebuild_keymap` again at runtime whenever the user remaps
-        // one, so this isn't the only place this ever runs.
-        let keybinds = Keybinds::load(&state::settings_conf_path());
-        rebuild_keymap(cx, &keybinds);
+    application()
+        .with_assets(crate::icons::VimbatimAssets)
+        .run(|cx: &mut App| {
+            load_bundled_fonts(cx);
+            // All non-vim keybindings (toggle-settings, toggle-sidebar, new-tab,
+            // close-tab, save, copy/cut/paste, undo/redo, card styles, etc.) are
+            // loaded from settings.conf and registered here. The settings modal
+            // calls `rebuild_keymap` again at runtime whenever the user remaps
+            // one, so this isn't the only place this ever runs.
+            let keybinds = Keybinds::load(&state::settings_conf_path());
+            rebuild_keymap(cx, &keybinds);
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(768.0)), cx);
+            let bounds = Bounds::centered(None, size(px(1280.0), px(768.0)), cx);
 
-        let _ =
-            recovery::PANIC_SNAPSHOT.set(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+            let _ = recovery::PANIC_SNAPSHOT
+                .set(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
 
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Vimbatim".into()),
-                        // tab_bar.rs draws its own drag region + minimize/maximize/close
-                        // buttons. `false` here leaves GPUI's Windows backend showing the
-                        // native OS caption too (gpui_windows/window.rs maps this straight
-                        // to `hide_title_bar`), stacking a second, native set of window
-                        // chrome above the app's own — the "two menus" bug. macOS shows its
-                        // native traffic lights regardless of this flag (different style
-                        // mask), so scoping to Windows avoids trading a stacked duplicate
-                        // there for an overlapping one.
-                        appears_transparent: cfg!(target_os = "windows"),
-                        traffic_light_position: None,
-                    }),
-                    ..Default::default()
-                },
-                |_window, cx| cx.new(MainWindow::new),
-            )
-            .expect("Failed to open main window");
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("Vimbatim".into()),
+                            // tab_bar.rs draws its own drag region + minimize/maximize/close
+                            // buttons. `false` here leaves GPUI's Windows backend showing the
+                            // native OS caption too (gpui_windows/window.rs maps this straight
+                            // to `hide_title_bar`), stacking a second, native set of window
+                            // chrome above the app's own — the "two menus" bug. macOS shows its
+                            // native traffic lights regardless of this flag (different style
+                            // mask), so scoping to Windows avoids trading a stacked duplicate
+                            // there for an overlapping one.
+                            appears_transparent: cfg!(target_os = "windows"),
+                            traffic_light_position: None,
+                        }),
+                        ..Default::default()
+                    },
+                    |_window, cx| cx.new(MainWindow::new),
+                )
+                .expect("Failed to open main window");
 
-        // Recovery scanning can recursively read a directory, so defer it
-        // until the window exists and keep it off the UI thread.
-        let recovery_state = window
-            .update(cx, |view, _, _| view.state.clone())
-            .expect("Failed to access application state");
+            // Recovery scanning can recursively read a directory, so defer it
+            // until the window exists and keep it off the UI thread.
+            let recovery_state = window
+                .update(cx, |view, _, _| view.state.clone())
+                .expect("Failed to access application state");
 
-        // Read persisted font files in the background; registration still
-        // happens on the UI thread because it uses GPUI's text system.
-        let state_for_fonts = recovery_state.clone();
-        cx.spawn(async move |cx| {
-            let fonts = cx
-                .background_executor()
-                .spawn(async { font_import::prepare_persisted() })
-                .await;
-            state_for_fonts.update(cx, |_state, cx| {
-                font_import::activate_persisted(cx, fonts);
-                cx.notify();
-            });
-        })
-        .detach();
-
-        let state_for_scan = recovery_state.clone();
-        cx.spawn(async move |cx| {
-            use crate::app::repository::RecoveryRepository;
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::app::store::RecoveryStore.list_entries() })
-                .await;
-            state_for_scan.update(cx, |state, cx| {
-                match result {
-                    Ok(entries) => state.set_recovery_entries(entries),
-                    Err(error) => state.apply_effect(app::command::AppEffect::ShowError(format!(
-                        "Could not check crash recovery: {error}"
-                    ))),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-
-        // The native titlebar close button previously bypassed the
-        // Save/Discard/Cancel prompt entirely: every other quit path routes
-        // through AppState::request_close_app (see tab_bar.rs), but the OS
-        // button routed nowhere. Returning `false` here keeps the window
-        // open and lets close_confirm.rs drive the decision, exactly as the
-        // in-app × already does.
-        window
-            .update(cx, |view, window, cx| {
-                let state = view.state.clone();
-                window.on_window_should_close(cx, move |_window, cx| {
-                    let quit_now = state.update(cx, |s, cx| {
-                        s.request_close_app();
-                        cx.notify();
-                        s.ui().pending_close.is_none()
-                    });
-                    // Returning true only tells the platform not to veto the
-                    // close — it does not terminate the app. GPUI's default
-                    // QuitMode auto-quits when the last window closes on
-                    // Linux/Windows but NOT on macOS, so quit explicitly here,
-                    // exactly as tab_bar.rs and close_confirm.rs already do.
-                    if quit_now {
-                        cx.quit();
-                    }
-                    quit_now
+            // Read persisted font files in the background; registration still
+            // happens on the UI thread because it uses GPUI's text system.
+            let state_for_fonts = recovery_state.clone();
+            cx.spawn(async move |cx| {
+                let fonts = cx
+                    .background_executor()
+                    .spawn(async { font_import::prepare_persisted() })
+                    .await;
+                state_for_fonts.update(cx, |_state, cx| {
+                    font_import::activate_persisted(cx, fonts);
+                    cx.notify();
                 });
             })
-            .expect("Failed to install window close handler");
+            .detach();
 
-        cx.activate(true);
-    });
+            let state_for_scan = recovery_state.clone();
+            cx.spawn(async move |cx| {
+                use crate::app::repository::RecoveryRepository;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { crate::app::store::RecoveryStore.list_entries() })
+                    .await;
+                state_for_scan.update(cx, |state, cx| {
+                    match result {
+                        Ok(entries) => state.set_recovery_entries(entries),
+                        Err(error) => state.apply_effect(app::command::AppEffect::ShowError(
+                            format!("Could not check crash recovery: {error}"),
+                        )),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+
+            // The native titlebar close button previously bypassed the
+            // Save/Discard/Cancel prompt entirely: every other quit path routes
+            // through AppState::request_close_app (see tab_bar.rs), but the OS
+            // button routed nowhere. Returning `false` here keeps the window
+            // open and lets close_confirm.rs drive the decision, exactly as the
+            // in-app × already does.
+            window
+                .update(cx, |view, window, cx| {
+                    let state = view.state.clone();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        let quit_now = state.update(cx, |s, cx| {
+                            s.request_close_app();
+                            cx.notify();
+                            s.ui().pending_close.is_none()
+                        });
+                        // Returning true only tells the platform not to veto the
+                        // close — it does not terminate the app. GPUI's default
+                        // QuitMode auto-quits when the last window closes on
+                        // Linux/Windows but NOT on macOS, so quit explicitly here,
+                        // exactly as tab_bar.rs and close_confirm.rs already do.
+                        if quit_now {
+                            cx.quit();
+                        }
+                        quit_now
+                    });
+                })
+                .expect("Failed to install window close handler");
+
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]

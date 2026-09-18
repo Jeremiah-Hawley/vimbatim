@@ -44,9 +44,9 @@ impl Render for AppToolbar {
         let _ = state;
 
         let sidebar_label = if sidebar_visible {
-            "≡  Hide Files"
+            "Hide Files"
         } else {
-            "≡  Show Files"
+            "Show Files"
         };
 
         div()
@@ -93,7 +93,19 @@ impl Render for AppToolbar {
                     .on_click(cx.listener(|_this, _ev, window, cx| {
                         window.dispatch_action(Box::new(crate::keybinds::ToggleSidebarAction), cx);
                     }))
-                    .child(sidebar_label),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::Sidebar,
+                                p.text,
+                                14.0,
+                            ))
+                            .child(sidebar_label),
+                    ),
             )
             // ── Open folder ───────────────────────────────────────────────────
             .child(
@@ -117,7 +129,19 @@ impl Render for AppToolbar {
                     .on_click(cx.listener(|_this, _ev, window, cx| {
                         window.dispatch_action(Box::new(crate::keybinds::OpenFolderAction), cx);
                     }))
-                    .child("Open Folder"),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::FolderOpen,
+                                p.text,
+                                14.0,
+                            ))
+                            .child("Open Folder"),
+                    ),
             )
             // ── Open file ─────────────────────────────────────────────────────
             // Same native picker as Open Folder, flipped to files, feeding
@@ -143,7 +167,19 @@ impl Render for AppToolbar {
                     .on_click(cx.listener(|_this, _ev, window, cx| {
                         window.dispatch_action(Box::new(crate::keybinds::OpenFileAction), cx);
                     }))
-                    .child("Open File"),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::FileOpen,
+                                p.text,
+                                14.0,
+                            ))
+                            .child("Open File"),
+                    ),
             )
             .child(div().flex_1())
             // ── Future command hooks ─────────────────────────────────────────
@@ -224,7 +260,19 @@ impl Render for AppToolbar {
                             });
                             cx.notify();
                         }))
-                        .child("Search From List"),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(crate::icons::icon(
+                                    crate::icons::Icon::SearchList,
+                                    p.text_muted,
+                                    16.0,
+                                ))
+                                .child("Search From List"),
+                        ),
                 )
             })
             // Find opens the same panel Ctrl+F does, via the shared action.
@@ -235,19 +283,19 @@ impl Render for AppToolbar {
                     .items_center()
                     .justify_center()
                     .h(px(24.0))
-                    .px(px(10.0))
+                    .px(px(6.0))
                     .rounded(px(radius::MD))
-                    .text_xs()
-                    .text_color(rgb(p.text_muted))
                     .cursor_pointer()
-                    .border_1()
-                    .border_color(rgb(p.border_subtle))
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(|_ev, window, cx| {
                         window.dispatch_action(Box::new(FindAction), cx);
                     })
-                    .child("Find"),
+                    .child(crate::icons::icon(
+                        crate::icons::Icon::Find,
+                        p.text_muted,
+                        16.0,
+                    )),
             )
             // Word Count opens the stats panel, via the same action the
             // `open_stats` keybind already dispatches.
@@ -258,19 +306,19 @@ impl Render for AppToolbar {
                     .items_center()
                     .justify_center()
                     .h(px(24.0))
-                    .px(px(10.0))
+                    .px(px(6.0))
                     .rounded(px(radius::MD))
-                    .text_xs()
-                    .text_color(rgb(p.text_muted))
                     .cursor_pointer()
-                    .border_1()
-                    .border_color(rgb(p.border_subtle))
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(|_ev, window, cx| {
                         window.dispatch_action(Box::new(OpenStatsAction), cx);
                     })
-                    .child("Word Count"),
+                    .child(crate::icons::icon(
+                        crate::icons::Icon::WordCount,
+                        p.text_muted,
+                        16.0,
+                    )),
             )
             // ── Save As ───────────────────────────────────────────────────────
             // Dispatches the existing `SaveAsAction` rather than opening the
@@ -283,19 +331,19 @@ impl Render for AppToolbar {
                     .items_center()
                     .justify_center()
                     .h(px(24.0))
-                    .px(px(10.0))
+                    .px(px(6.0))
                     .rounded(px(radius::MD))
-                    .text_xs()
-                    .text_color(rgb(p.text_muted))
                     .cursor_pointer()
-                    .border_1()
-                    .border_color(rgb(p.border_subtle))
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(|_ev, window, cx| {
                         window.dispatch_action(Box::new(SaveAsAction), cx);
                     })
-                    .child("Save As"),
+                    .child(crate::icons::icon(
+                        crate::icons::Icon::SaveAs,
+                        p.text_muted,
+                        16.0,
+                    )),
             )
             // ── Save ──────────────────────────────────────────────────────────
             // Dispatches the existing `SaveAction` (already live behind
@@ -308,19 +356,19 @@ impl Render for AppToolbar {
                     .items_center()
                     .justify_center()
                     .h(px(24.0))
-                    .px(px(10.0))
+                    .px(px(6.0))
                     .rounded(px(radius::MD))
-                    .text_xs()
-                    .text_color(rgb(p.text_muted))
                     .cursor_pointer()
-                    .border_1()
-                    .border_color(rgb(p.border_subtle))
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(|_ev, window, cx| {
                         window.dispatch_action(Box::new(SaveAction), cx);
                     })
-                    .child("Save"),
+                    .child(crate::icons::icon(
+                        crate::icons::Icon::Save,
+                        p.text_muted,
+                        16.0,
+                    )),
             )
             // ── Secondary app controls ───────────────────────────────────────
             .child(
@@ -332,17 +380,19 @@ impl Render for AppToolbar {
                     .h(px(28.0))
                     .w(px(32.0))
                     .rounded(px(radius::MD))
-                    .text_lg()
-                    .text_color(rgb(p.text_muted))
                     .cursor_pointer()
                     .border_1()
                     .border_color(rgb(p.border))
-                    .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                    .hover(move |s| s.bg(rgb(p.chrome_hover)))
                     .active(move |s| s.bg(rgb(p.chrome_active)))
                     .on_click(cx.listener(|_this, _ev, window, cx| {
                         window.dispatch_action(Box::new(crate::keybinds::ToggleSettingsAction), cx);
                     }))
-                    .child("⚙"),
+                    .child(crate::icons::icon(
+                        crate::icons::Icon::Settings,
+                        p.text_muted,
+                        18.0,
+                    )),
             )
     }
 }

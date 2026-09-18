@@ -44,7 +44,19 @@ impl SettingsModal {
                             cx.notify();
                         }),
                     )
-                    .child(section.label())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(crate::icons::icon(
+                                section.icon(),
+                                if is_current { p.text } else { p.text_muted },
+                                14.0,
+                            ))
+                            .child(section.label()),
+                    )
             }))
     }
 
@@ -1082,7 +1094,11 @@ impl SettingsModal {
                                     cx.notify();
                                 }),
                             )
-                            .child("×"),
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::TabClose,
+                                p.text_faint,
+                                12.0,
+                            )),
                     )
                     .into_any_element()
             }))
@@ -1305,7 +1321,11 @@ impl Render for SettingsModal {
                                         .on_click(cx.listener(|this, _ev, window, cx| {
                                             this.close(window, cx);
                                         }))
-                                        .child("×"),
+                                        .child(crate::icons::icon(
+                                            crate::icons::Icon::TabClose,
+                                            p.text_muted,
+                                            16.0,
+                                        )),
                                 )
                             }),
                     )

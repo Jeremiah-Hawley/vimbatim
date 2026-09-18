@@ -708,7 +708,11 @@ impl Render for TabBar {
                                 });
                                 cx.notify();
                             }))
-                            .child("×"),
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::TabClose,
+                                p.text_muted,
+                                12.0,
+                            )),
                     )
             })
             .collect();
@@ -762,7 +766,11 @@ impl Render for TabBar {
                     this.open_context_menu(TabContextTarget::NewTabButton, ev, cx);
                 }),
             )
-            .child("+");
+            .child(crate::icons::icon(
+                crate::icons::Icon::TabNew,
+                p.text_muted,
+                16.0,
+            ));
 
         // Invisible spacer that fills remaining width. macOS/Linux drag the window via
         // start_window_move() on mouse-down. On Windows that call is a no-op — dragging
@@ -843,7 +851,11 @@ impl Render for TabBar {
             .on_click(|_ev, window, _cx| {
                 window.minimize_window();
             })
-            .child("−");
+            .child(crate::icons::icon(
+                crate::icons::Icon::WindowMinimise,
+                p.text_muted,
+                16.0,
+            ));
 
         // Icon reflects current state: "□" to maximize, "❐" (restore) once
         // already maximized — same convention Windows/most Linux DEs use.
@@ -918,7 +930,11 @@ impl Render for TabBar {
                     cx.quit();
                 }
             }))
-            .child("×");
+            .child(crate::icons::icon(
+                crate::icons::Icon::WindowClose,
+                p.text_muted,
+                16.0,
+            ));
 
         // The context menu is a child of `bar`, not of `tab_scroll_area` —
         // that container is `overflow_x_scroll` and would clip the panel.

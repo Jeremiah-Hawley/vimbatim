@@ -82,6 +82,16 @@ impl SettingsSection {
             SettingsSection::ToggleFeatures => "Toggle Features",
         }
     }
+
+    pub fn icon(&self) -> crate::icons::Icon {
+        match self {
+            SettingsSection::Appearance => crate::icons::Icon::SettingsAppearance,
+            SettingsSection::TextSettings => crate::icons::Icon::SettingsText,
+            SettingsSection::Fonts => crate::icons::Icon::SettingsFonts,
+            SettingsSection::Keybindings => crate::icons::Icon::SettingsKeybindings,
+            SettingsSection::ToggleFeatures => crate::icons::Icon::SettingsToggles,
+        }
+    }
 }
 
 /// `{version} ({git_sha})`, e.g. `0.1.0-beta.1 (a1b2c3d)` — both baked in at

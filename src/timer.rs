@@ -481,7 +481,11 @@ impl Render for Timer {
                                     cx.notify();
                                 });
                             }))
-                            .child("×"),
+                            .child(crate::icons::icon(
+                                crate::icons::Icon::TabClose,
+                                p.text_muted,
+                                12.0,
+                            )),
                     ),
             )
             // ── The clock ────────────────────────────────────────────────
