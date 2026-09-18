@@ -493,8 +493,7 @@ impl FormattingRibbon {
                 )
                 .into_any_element(),
             RibbonIcon::HighlightBucket => {
-                crate::icons::icon(crate::icons::Icon::HighlightBucket, color, 14.0)
-                    .into_any_element()
+                crate::icons::icon(crate::icons::Icon::Highlight, color, 14.0).into_any_element()
             }
             RibbonIcon::Eye(open) => {
                 let svg_icon = if open {
