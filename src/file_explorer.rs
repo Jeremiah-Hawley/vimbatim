@@ -1652,7 +1652,7 @@ impl Render for FileExplorer {
                                             .on_click(cx.listener(|this, _ev, window, cx| {
                                                 this.create_new_file(window, cx);
                                             }))
-                                            .child(crate::icons::icon(crate::icons::Icon::TabNew, p.text_muted, 14.0)),
+                                            .child(crate::icons::icon(crate::icons::Icon::NewFile, p.text_muted, 14.0)),
                                     )
                             }),
                     ),
