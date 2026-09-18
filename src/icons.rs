@@ -81,7 +81,7 @@ impl Icon {
             Icon::Highlight => "icons/Highlight.svg",
             Icon::ListBullet => "icons/Bullet_List.svg",
             Icon::ListNumbered => "icons/Numbered_List.svg",
-            Icon::Nav => "icons/file_tree_menu.svg",
+            Icon::Nav => "icons/nav_menu.svg",
             Icon::OpenWiki => "icons/open_wiki.svg",
             Icon::Paste => "icons/paste.svg",
             Icon::Refresh => "icons/Refresh.svg",
@@ -95,8 +95,8 @@ impl Icon {
             Icon::SettingsToggles => "icons/settings-toggles.svg",
             Icon::Settings => "icons/settings.svg",
             Icon::Shrink => "icons/shrink.svg",
-            Icon::Sidebar => "icons/split screen.svg",
-            Icon::Split => "icons/Split_Icon.svg",
+            Icon::Sidebar => "icons/file_tree_menu.svg",
+            Icon::Split => "icons/split screen.svg",
             Icon::SwitchTab => "icons/tab_menu.svg",
             Icon::TabClose => "icons/Close_Tab.svg",
             Icon::TabNew => "icons/New_Tab.svg",
@@ -237,8 +237,8 @@ impl AssetSource for VimbatimAssets {
             "icons/Numbered_List.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/Numbered_List.svg"
             )))),
-            "icons/file_tree_menu.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/file_tree_menu.svg"
+            "icons/nav_menu.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../icons/nav_menu.svg"
             )))),
             "icons/open_wiki.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/open_wiki.svg"
@@ -269,11 +269,11 @@ impl AssetSource for VimbatimAssets {
                 Ok(Some(Cow::Borrowed(include_bytes!("../icons/settings.svg"))))
             }
             "icons/shrink.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../icons/shrink.svg")))),
+            "icons/file_tree_menu.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../icons/file_tree_menu.svg"
+            )))),
             "icons/split screen.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/split screen.svg"
-            )))),
-            "icons/Split_Icon.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/Split_Icon.svg"
             )))),
             "icons/tab_menu.svg" => {
                 Ok(Some(Cow::Borrowed(include_bytes!("../icons/tab_menu.svg"))))
