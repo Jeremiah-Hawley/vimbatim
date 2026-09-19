@@ -1502,7 +1502,11 @@ impl Render for FileExplorer {
             .tabs
             .get(state.workspace().active_tab)
             .and_then(|tab| tab.file_path.clone());
-        let sidebar_width = state.sidebar_width();
+        let sidebar_width = if state.ui().timer.visible {
+            state.sidebar_width().max(280.0)
+        } else {
+            state.sidebar_width()
+        };
         let has_copied_file = state.copied_file().is_some();
         let pending_cut = state.copied_file().is_some_and(|(_, cut)| *cut);
         let nav_fold_buttons = state.preferences().nav_fold_buttons;

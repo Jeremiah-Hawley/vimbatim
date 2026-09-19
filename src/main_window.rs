@@ -1083,7 +1083,6 @@ impl Render for MainWindow {
         // ratio needs the window's own width, sampled here rather than inside
         // the handler (which has no view to measure from).
         let window_width = _window.viewport_size().width.as_f32();
-        let _ = sidebar_width;
         div()
             // Closes the file explorer's right-click menu (found_bugs.md)
             // on any left-click elsewhere in the app — its own rows call
@@ -1132,7 +1131,9 @@ impl Render for MainWindow {
                 split_state.update(cx, |s, cx| {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
-                    let left = if s.ui().sidebar_visible {
+                    let left = if s.ui().timer.visible {
+                        s.sidebar_width().max(280.0)
+                    } else if s.ui().sidebar_visible {
                         s.sidebar_width()
                     } else {
                         0.0
@@ -1166,34 +1167,13 @@ impl Render for MainWindow {
             // ── App toolbar (Vimbatim label, sidebar toggle, placeholders) ──
             .child(self.app_toolbar.clone())
             // ── Formatting ribbon ──────────────────────────────────────────
-            // Wrapped in its own stacking context so the timer popup can be
-            // positioned against the *ribbon* ("in the middle of the ribbon")
-            // rather than against the window, with no height constants to keep
-            // in sync. `deferred` so it paints over the editor below it — the
-            // same trick the ribbon's own dropdown menus use, and the reason it
-            // can't simply be a later sibling like the modals are.
+            // Keep the command palette centred against the full window width.
             .child(
                 div()
                     .relative()
                     .child(self.formatting_ribbon.clone())
-                    .when(timer_visible, |d| {
-                        d.child(
-                            deferred(
-                                div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .right_0()
-                                    .flex()
-                                    .justify_center()
-                                    .child(self.timer.clone()),
-                            )
-                            .with_priority(150),
-                        )
-                    })
                     // ── Command palette ────────────────────────────────────
-                    // Hosted by this same ribbon-relative wrapper, and for the
-                    // same reason the timer popup is: centring against the
+                    // Hosted by this ribbon-relative wrapper: centring against the
                     // *window* is what "centred" actually means to the eye,
                     // and the editor area below is offset by the sidebar, so a
                     // palette centred there sits visibly off-centre whenever
@@ -1202,7 +1182,7 @@ impl Render for MainWindow {
                     // ribbon regardless of sidebar state or window size.
                     //
                     // `deferred` with a priority above the ribbon's own
-                    // dropdowns (100) and the timer (150): the palette is
+                    // dropdowns (100): the palette is
                     // taller than the ribbon and deliberately overlays it,
                     // spilling down over the editor.
                     .when(command_palette_visible, |d| {
@@ -1232,7 +1212,36 @@ impl Render for MainWindow {
                     // min_h_0 is critical: without it a flex child won't respect
                     // the parent's height and will overflow.
                     .min_h_0()
-                    .when(sidebar_visible, |d| d.child(self.file_explorer.clone()))
+                    .when(sidebar_visible || timer_visible, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .w(px(if timer_visible {
+                                    sidebar_width.max(280.0)
+                                } else {
+                                    sidebar_width
+                                }))
+                                .min_h_0()
+                                .overflow_hidden()
+                                .when(timer_visible, |d| {
+                                    d.child(
+                                        div()
+                                            .id("timer-dock")
+                                            .flex_shrink_0()
+                                            .max_h_full()
+                                            .overflow_y_scroll()
+                                            .child(self.timer.clone()),
+                                    )
+                                })
+                                .when(sidebar_visible, |d| {
+                                    d.child(
+                                        div().flex_1().min_h_0().child(self.file_explorer.clone()),
+                                    )
+                                }),
+                        )
+                    })
                     // The editor and the find bar share a stacking context so
                     // the bar can float over the top-left of the editor area
                     // (spec 4.6) without taking layout space from it — an
