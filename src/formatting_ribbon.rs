@@ -137,8 +137,8 @@ pub(crate) const HIGHLIGHT_COLORS: [(&str, &str, u32); 6] = [
 /// described as the accessible name), so the text here is the name the button
 /// already had rather than a second one to keep in sync.
 pub struct RibbonTooltip {
-    label: SharedString,
-    palette: Palette,
+    pub(crate) label: SharedString,
+    pub(crate) palette: Palette,
 }
 
 impl Render for RibbonTooltip {
@@ -2514,12 +2514,14 @@ impl Render for FormattingRibbon {
                     "caselist",
                     "CASELIST",
                     &[
-                        vec![RibbonBtn::primary("Wikifi", FormatAction::Wikifi)
-                            .with_icon(crate::icons::Icon::Wikifi)],
+                        vec![
+                            RibbonBtn::primary("Wikifi", FormatAction::Wikifi)
+                                .with_icon(crate::icons::Icon::Wikifi),
+                            RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)
+                                .with_icon(crate::icons::Icon::Tabroom),
+                        ],
                         vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)
                             .with_icon(crate::icons::Icon::OpenWiki)],
-                        vec![RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)
-                            .with_icon(crate::icons::Icon::Tabroom)],
                     ],
                     *self.collapsed.get("caselist").unwrap_or(&false),
                     p,

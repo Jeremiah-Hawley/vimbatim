@@ -279,6 +279,13 @@ impl Render for AppToolbar {
             .child(
                 div()
                     .id("toolbar-find")
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                            label: "Search".into(),
+                            palette: p,
+                        })
+                        .into()
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -302,6 +309,13 @@ impl Render for AppToolbar {
             .child(
                 div()
                     .id("toolbar-word-count")
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                            label: "Word Count".into(),
+                            palette: p,
+                        })
+                        .into()
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -327,6 +341,13 @@ impl Render for AppToolbar {
             .child(
                 div()
                     .id("toolbar-save-as")
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                            label: "Save As".into(),
+                            palette: p,
+                        })
+                        .into()
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -352,6 +373,13 @@ impl Render for AppToolbar {
             .child(
                 div()
                     .id("toolbar-save")
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                            label: "Save".into(),
+                            palette: p,
+                        })
+                        .into()
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
@@ -374,6 +402,13 @@ impl Render for AppToolbar {
             .child(
                 div()
                     .id("toolbar-settings")
+                    .tooltip(move |_window, cx| {
+                        cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                            label: "Settings".into(),
+                            palette: p,
+                        })
+                        .into()
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
