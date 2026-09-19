@@ -769,7 +769,7 @@ impl Render for TabBar {
             .child(crate::icons::icon(
                 crate::icons::Icon::TabNew,
                 p.text_muted,
-                16.0,
+                12.0,
             ));
 
         // Invisible spacer that fills remaining width. macOS/Linux drag the window via
