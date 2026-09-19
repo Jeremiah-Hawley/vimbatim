@@ -22,8 +22,6 @@ pub enum Icon {
     Fold,
     FolderOpen,
     Folder,
-    FontSize,
-    HighlightBucket,
     Highlight,
     ListBullet,
     ListNumbered,
@@ -76,8 +74,6 @@ impl Icon {
             Icon::Fold => "icons/Fold_Icon.svg",
             Icon::FolderOpen => "icons/Open_Folder.svg",
             Icon::Folder => "icons/folder.svg",
-            Icon::FontSize => "icons/font-size.svg",
-            Icon::HighlightBucket => "icons/highlight-bucket.svg",
             Icon::Highlight => "icons/Highlight.svg",
             Icon::ListBullet => "icons/Bullet_List.svg",
             Icon::ListNumbered => "icons/Numbered_List.svg",
@@ -130,8 +126,6 @@ impl Icon {
             Icon::Fold,
             Icon::FolderOpen,
             Icon::Folder,
-            Icon::FontSize,
-            Icon::HighlightBucket,
             Icon::Highlight,
             Icon::ListBullet,
             Icon::ListNumbered,
@@ -222,12 +216,6 @@ impl AssetSource for VimbatimAssets {
                 "../icons/Open_Folder.svg"
             )))),
             "icons/folder.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../icons/folder.svg")))),
-            "icons/font-size.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/font-size.svg"
-            )))),
-            "icons/highlight-bucket.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/highlight-bucket.svg"
-            )))),
             "icons/Highlight.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/Highlight.svg"
             )))),
