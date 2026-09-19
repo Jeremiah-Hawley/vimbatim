@@ -1,17 +1,11 @@
 .claude/
 .superpowers/
 docs/
-!docs/
-!docs/adr/
 notes/
 .worktrees/
 graphify-out/
 *.md
 !/README.md
-!/architecture_inventory.md
-!/ARCHITECTURE_REVIEW.md
-!/Icon_Plan.md
-!docs/adr/*.md
 
 *.xml
 *.hpp
