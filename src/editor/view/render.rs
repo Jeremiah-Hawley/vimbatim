@@ -936,6 +936,7 @@ impl Render for TextEditor {
                                                 div()
                                                     .id(ElementId::named_usize("fold-toggle", li))
                                                     .w(px(12.0 * zoom))
+                                                    .ml(px(-12.0 * zoom))
                                                     .flex_none()
                                                     .flex()
                                                     .items_center()
@@ -945,9 +946,9 @@ impl Render for TextEditor {
                                                     // consistent size down the outline.
                                                     .text_size(px(9.0 * zoom))
                                                     .font_weight(FontWeight::NORMAL)
-                                                    // Transparent rather than absent: the marker
-                                                    // keeps its width at all times, so hovering a
-                                                    // heading doesn't shift its text sideways.
+                                                    // The negative margin puts the marker in the
+                                                    // gutter without indenting heading text.
+                                                    // Hover changes only its visibility.
                                                     .text_color(transparent_black())
                                                     .group_hover(FOLD_ROW_GROUP, move |s| {
                                                         s.text_color(rgb(p.text_muted))
