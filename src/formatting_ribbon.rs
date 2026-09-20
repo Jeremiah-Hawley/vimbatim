@@ -2314,12 +2314,11 @@ impl Render for FormattingRibbon {
             .p(px(0.0))
             .bg(rgb(p.chrome))
             .child(Self::render_global_controls(all_collapsed, p, cx))
-            .child(
-                self.render_group(
-                    "cards",
-                    "CARDS",
-                    &[
-                        vec![
+            .child(self.render_group(
+                "cards",
+                "CARDS",
+                &[
+                    vec![
                             RibbonBtn::primary("Paste", FormatAction::Paste)
                                 .with_icon(crate::icons::Icon::Paste),
                             RibbonBtn::primary("Condense", FormatAction::Condense)
@@ -2327,13 +2326,13 @@ impl Render for FormattingRibbon {
                             RibbonBtn::primary("Pocket", FormatAction::Pocket),
                             RibbonBtn::primary("Hat", FormatAction::Hat),
                         ],
-                        vec![
-                            RibbonBtn::primary("Block", FormatAction::Block),
-                            RibbonBtn::primary("Tag", FormatAction::Tag),
-                            RibbonBtn::primary("Cite", FormatAction::Cite),
-                            RibbonBtn::primary("Analytic", FormatAction::Analytic),
-                        ],
-                        vec![
+                    vec![
+                        RibbonBtn::primary("Block", FormatAction::Block),
+                        RibbonBtn::primary("Tag", FormatAction::Tag),
+                        RibbonBtn::primary("Cite", FormatAction::Cite),
+                        RibbonBtn::primary("Analytic", FormatAction::Analytic),
+                    ],
+                    vec![
                             RibbonBtn::secondary("Emphasis", FormatAction::Emphasis)
                                 .with_icon(crate::icons::Icon::Emphasis),
                             // Put back per Bug fixes pre test 2.md — the Text
@@ -2348,14 +2347,13 @@ impl Render for FormattingRibbon {
                             RibbonBtn::secondary("Clear", FormatAction::Clear)
                                 .with_icon(crate::icons::Icon::ClearFormatting),
                         ],
-                    ],
-                    *self.collapsed.get("cards").unwrap_or(&false),
-                    p,
-                    color_mode,
-                    state.clone(),
-                    cx,
-                ),
-            )
+                ],
+                *self.collapsed.get("cards").unwrap_or(&false),
+                p,
+                color_mode,
+                state.clone(),
+                cx,
+            ))
             .child(self.render_group(
                 "text",
                 "TEXT",
@@ -2407,17 +2405,16 @@ impl Render for FormattingRibbon {
                 state.clone(),
                 cx,
             ))
-            .child(
-                self.render_group(
-                    "document",
-                    "DOCUMENT",
-                    &[
-                        // All five icon buttons share one row: at 38px each they
-                        // fit in the width the Doc Menu / Card Menu row already
-                        // needs, and folding the old fourth row in here drops
-                        // DOCUMENT — the only four-row group — to three, which is
-                        // what sets the ribbon's height.
-                        vec![
+            .child(self.render_group(
+                "document",
+                "DOCUMENT",
+                &[
+                    // All five icon buttons share one row: at 38px each they
+                    // fit in the width the Doc Menu / Card Menu row already
+                    // needs, and folding the old fourth row in here drops
+                    // DOCUMENT — the only four-row group — to three, which is
+                    // what sets the ribbon's height.
+                    vec![
                             RibbonBtn::icon(
                                 "Bullets",
                                 FormatAction::BulletList,
@@ -2446,34 +2443,32 @@ impl Render for FormattingRibbon {
                                 RibbonIcon::Align(Alignment::Right),
                             ),
                         ],
-                        // Para Integrity / Pilcrows buttons removed per checklist
-                        // — Settings -> Text Settings already has the equivalent
-                        // controls ("Condense by default" / "Mark collapsed
-                        // newlines with ¶", `settings_modal.rs:1145-1167`), which
-                        // are the same two settings these ribbon buttons drove
-                        // (`AppState::toggle_paragraph_integrity`/`toggle_pilcrows`
-                        // just call `set_paste_condense`/`set_paste_condense_pilcrow`
-                        // — one switch, not two that could disagree).
-                        vec![
+                    // Para Integrity / Pilcrows buttons removed per checklist
+                    // — Settings -> Text Settings already has the equivalent
+                    // controls ("Condense by default" / "Mark collapsed
+                    // newlines with ¶", `settings_modal.rs:1145-1167`), which
+                    // are the same two settings these ribbon buttons drove
+                    // (`AppState::toggle_paragraph_integrity`/`toggle_pilcrows`
+                    // just call `set_paste_condense`/`set_paste_condense_pilcrow`
+                    // — one switch, not two that could disagree).
+                    vec![
                             RibbonBtn::secondary("Doc Menu", FormatAction::DocMenu)
                                 .with_icon(crate::icons::Icon::DocMenu),
                             RibbonBtn::secondary("Card Menu", FormatAction::CardMenu)
                                 .with_icon(crate::icons::Icon::CardMenu),
                         ],
-                    ],
-                    *self.collapsed.get("document").unwrap_or(&false),
-                    p,
-                    color_mode,
-                    state.clone(),
-                    cx,
-                ),
-            )
-            .child(
-                self.render_group(
-                    "view",
-                    "VIEW",
-                    &[
-                        vec![
+                ],
+                *self.collapsed.get("document").unwrap_or(&false),
+                p,
+                color_mode,
+                state.clone(),
+                cx,
+            ))
+            .child(self.render_group(
+                "view",
+                "VIEW",
+                &[
+                    vec![
                             RibbonBtn::secondary("Nav", FormatAction::Nav)
                                 .with_icon(crate::icons::Icon::Nav),
                             RibbonBtn::icon(
@@ -2486,7 +2481,7 @@ impl Render for FormattingRibbon {
                                 .with_icon(crate::icons::Icon::Timer)
                                 .engaged(timer_visible),
                         ],
-                        vec![
+                    vec![
                             RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu)
                                 .with_icon(crate::icons::Icon::SwitchTab),
                             RibbonBtn::icon("Split", FormatAction::WindowSplit, RibbonIcon::Split),
@@ -2501,34 +2496,31 @@ impl Render for FormattingRibbon {
                             // RibbonBtn::secondary("Print Layout", FormatAction::PrintLayout)
                             //     .engaged(print_layout),
                         ],
-                    ],
-                    *self.collapsed.get("view").unwrap_or(&false),
-                    p,
-                    color_mode,
-                    state.clone(),
-                    cx,
-                ),
-            )
-            .child(
-                self.render_group(
-                    "caselist",
-                    "CASELIST",
-                    &[
-                        vec![
+                ],
+                *self.collapsed.get("view").unwrap_or(&false),
+                p,
+                color_mode,
+                state.clone(),
+                cx,
+            ))
+            .child(self.render_group(
+                "caselist",
+                "CASELIST",
+                &[
+                    vec![
                             RibbonBtn::primary("Wikifi", FormatAction::Wikifi)
                                 .with_icon(crate::icons::Icon::Wikifi),
                             RibbonBtn::secondary("Tabroom", FormatAction::OpenTabroom)
                                 .with_icon(crate::icons::Icon::Tabroom),
                         ],
-                        vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)
+                    vec![RibbonBtn::secondary("Open Wiki", FormatAction::OpenWiki)
                             .with_icon(crate::icons::Icon::OpenWiki)],
-                    ],
-                    *self.collapsed.get("caselist").unwrap_or(&false),
-                    p,
-                    color_mode,
-                    state.clone(),
-                    cx,
-                ),
-            )
+                ],
+                *self.collapsed.get("caselist").unwrap_or(&false),
+                p,
+                color_mode,
+                state.clone(),
+                cx,
+            ))
     }
 }

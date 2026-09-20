@@ -51,6 +51,9 @@ resources = ["default_settings.conf"]
 # changes — see the plan doc for why that's an acceptable non-FHS tradeoff
 # for a closed beta.
 [package.metadata.generate-rpm]
+# Packaging metadata only: no project license has been declared yet.
+license = "Unspecified"
+summary = ".docx editor for collegiate policy debate"
 assets = [
     { source = "target/release/vimbatim", dest = "/usr/bin/vimbatim", mode = "755" },
     { source = "default_settings.conf", dest = "/usr/bin/default_settings.conf", mode = "644" },

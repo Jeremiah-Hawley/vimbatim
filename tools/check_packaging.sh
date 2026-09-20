@@ -5,6 +5,16 @@ workflow=.github/workflows/beta-build.yml
 grep -Fq 'cp default_settings.conf dist/Vimbatim-Windows/' "$workflow"
 ! grep -Fq 'cp settings.conf dist/Vimbatim-Windows/' "$workflow"
 
+# cargo-generate-rpm requires both fields, even when Cargo itself does not.
+python3 - <<'PY'
+import tomllib
+from pathlib import Path
+package = tomllib.loads(Path("Cargo.toml").read_text())["package"]
+rpm = package["metadata"]["generate-rpm"]
+assert rpm.get("license") or package.get("license"), "RPM license metadata missing"
+assert rpm.get("summary") or package.get("description"), "RPM summary missing"
+PY
+
 # Icon Packaging Checks
 # Ensure all icons are tracked
 for svg in icons/*.svg; do

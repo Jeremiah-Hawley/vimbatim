@@ -225,9 +225,9 @@ impl AssetSource for VimbatimAssets {
             "icons/Numbered_List.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/Numbered_List.svg"
             )))),
-            "icons/nav_menu.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/nav_menu.svg"
-            )))),
+            "icons/nav_menu.svg" => {
+                Ok(Some(Cow::Borrowed(include_bytes!("../icons/nav_menu.svg"))))
+            }
             "icons/open_wiki.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/open_wiki.svg"
             )))),

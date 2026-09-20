@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config \
+            libssl-dev libwayland-dev libxkbcommon-x11-dev libxcb1-dev \
+            libx11-dev libvulkan-dev libfontconfig1-dev libfreetype6-dev \
+            libasound2-dev libzstd-dev
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
       - run: bash tools/check_packaging.sh
@@ -29,6 +36,7 @@ jobs:
   build:
     needs: quality
     strategy:
+      fail-fast: false
       matrix:
         include:
           - label: windows-x86_64
@@ -36,7 +44,7 @@ jobs:
           - label: windows-arm64
             runner: windows-11-arm
           - label: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
           - label: macos-arm64
             runner: macos-latest
           - label: fedora-x86_64
@@ -55,7 +63,7 @@ jobs:
             curl openssl-devel wayland-devel libxkbcommon-x11-devel \
             libxcb-devel libX11-devel mesa-vulkan-drivers \
             vulkan-loader-devel fontconfig-devel freetype-devel \
-            alsa-lib-devel zlib-devel rpm-build
+            alsa-lib-devel zlib-devel libzstd-devel rpm-build
 
       - uses: actions/checkout@v4
 
@@ -67,7 +75,7 @@ jobs:
       # ── macOS (x86_64 + arm64): cargo-bundle .app, wrapped in a .dmg ────
       - name: Install cargo-bundle
         if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
-        run: cargo install cargo-bundle
+        run: cargo install cargo-bundle --locked
 
       - name: Bundle .app
         if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
@@ -122,7 +130,7 @@ jobs:
       # ── Fedora (x86_64): .rpm via cargo-generate-rpm ─────────────────────
       - name: Install cargo-generate-rpm
         if: matrix.label == 'fedora-x86_64'
-        run: cargo install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
 
       - name: Build .rpm
         if: matrix.label == 'fedora-x86_64'
