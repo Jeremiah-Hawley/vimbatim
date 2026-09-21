@@ -191,7 +191,7 @@ pub const fn palette(kind: ThemeKind, mode: ThemeMode) -> Palette {
     }
 }
 
-const fn dark_palette(kind: ThemeKind) -> Palette {
+pub(crate) const fn dark_palette(kind: ThemeKind) -> Palette {
     match kind {
         ThemeKind::WorkbenchDark => Palette {
             app_bg: color::APP_BG,
@@ -386,7 +386,7 @@ const fn dark_palette(kind: ThemeKind) -> Palette {
 /// accents that were tuned against a dark background and wash out on a light
 /// one, so these are authored, not derived. Workbench Light has no upstream and
 /// mirrors Workbench Dark's structure.
-const fn light_palette(kind: ThemeKind) -> Palette {
+pub(crate) const fn light_palette(kind: ThemeKind) -> Palette {
     match kind {
         ThemeKind::WorkbenchDark => Palette {
             app_bg: 0xf3f3f3,
@@ -771,14 +771,14 @@ fn parse_palette_section(lines: &[&str]) -> Option<Palette> {
 /// not placeholder gibberish) with `[dark]` and `[light]` sections the user
 /// edits in place — matching `default_settings.conf`'s own role as a
 /// pristine, complete example rather than an empty shell.
-pub fn custom_theme_template() -> String {
+pub fn custom_theme_template(dark: &Palette, light: &Palette) -> String {
     format!(
         "# Vimbatim custom theme.\n\
          # Edit the hex values below (no leading '#') and re-import this\n\
          # file from Settings -> Themes -> Import Theme.\n\n\
          [dark]\n{}\n\n[light]\n{}\n",
-        palette_to_toml_lines(&dark_palette(ThemeKind::WorkbenchDark)),
-        palette_to_toml_lines(&light_palette(ThemeKind::WorkbenchDark)),
+        palette_to_toml_lines(dark),
+        palette_to_toml_lines(light),
     )
 }
 
@@ -996,7 +996,10 @@ mod tests {
 
     #[test]
     fn custom_theme_template_round_trips_through_parse() {
-        let template = custom_theme_template();
+        let template = custom_theme_template(
+            &dark_palette(ThemeKind::WorkbenchDark),
+            &light_palette(ThemeKind::WorkbenchDark),
+        );
         let (dark, light) = parse_custom_theme_toml(&template).expect("template must parse");
         assert_eq!(dark, dark_palette(ThemeKind::WorkbenchDark));
         assert_eq!(light, light_palette(ThemeKind::WorkbenchDark));
@@ -1013,7 +1016,10 @@ mod tests {
 
     #[test]
     fn parse_custom_theme_toml_rejects_a_missing_field() {
-        let mut broken = custom_theme_template();
+        let mut broken = custom_theme_template(
+            &dark_palette(ThemeKind::WorkbenchDark),
+            &light_palette(ThemeKind::WorkbenchDark),
+        );
         // Drop the `app_bg` line from the [dark] section entirely.
         broken = broken
             .lines()
@@ -1027,7 +1033,11 @@ mod tests {
     fn parse_custom_theme_toml_accepts_unquoted_hex_too() {
         // The template quotes values, but a hand-edited file without quotes
         // (still valid per `color_picker::parse_hex`) should work too.
-        let unquoted = custom_theme_template().replace('"', "");
+        let unquoted = custom_theme_template(
+            &dark_palette(ThemeKind::WorkbenchDark),
+            &light_palette(ThemeKind::WorkbenchDark),
+        )
+        .replace('"', "");
         let (dark, light) =
             parse_custom_theme_toml(&unquoted).expect("unquoted hex must still parse");
         assert_eq!(dark, dark_palette(ThemeKind::WorkbenchDark));

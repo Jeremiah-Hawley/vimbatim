@@ -94,6 +94,8 @@ pub fn registry() -> Vec<PaletteCommand> {
     // Same labels and same `fn(&mut AppState)` the ribbon's own menus use.
     let menu_rows: &[(&'static str, fn(&mut AppState))] = &[
         ("Delete analytics", AppState::delete_analytics),
+        ("Toggle Dark/Light Mode", AppState::toggle_dark_mode),
+        ("Add Font", AppState::open_font_import_modal),
         (
             "Convert analytics to tags",
             AppState::convert_analytics_to_tags,

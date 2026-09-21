@@ -83,7 +83,7 @@ impl Icon {
             Icon::Refresh => "icons/Refresh.svg",
             Icon::SaveAs => "icons/Save_As.svg",
             Icon::Save => "icons/save.svg",
-            Icon::SearchList => "icons/search-list.svg",
+            Icon::SearchList => "icons/search_from_list.svg",
             Icon::SettingsAppearance => "icons/settings-appearance.svg",
             Icon::SettingsFonts => "icons/settings-fonts.svg",
             Icon::SettingsKeybindings => "icons/settings-keybindings.svg",
@@ -235,8 +235,8 @@ impl AssetSource for VimbatimAssets {
             "icons/Refresh.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../icons/Refresh.svg")))),
             "icons/Save_As.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../icons/Save_As.svg")))),
             "icons/save.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../icons/save.svg")))),
-            "icons/search-list.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-                "../icons/search-list.svg"
+            "icons/search_from_list.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+                "../icons/search_from_list.svg"
             )))),
             "icons/settings-appearance.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
                 "../icons/settings-appearance.svg"

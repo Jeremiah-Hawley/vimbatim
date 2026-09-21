@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::editor::input::{InputStrategy, PlainInputStrategy, VimInputStrategy};
-use crate::editor::layout::row_slot_px;
+use crate::editor::view::real_row_height_px;
 use crate::state::{matches_shifted_symbol, vim_find_target_char, VimMode};
 
 impl TextEditor {
@@ -261,8 +261,13 @@ impl TextEditor {
                 // `!shift` (Task I) — shift+j is `J` (join lines, spec
                 // 5.5), a completely different command that must reach
                 // `handle_vim_key` instead of being swallowed as "move down".
-                let no_pending_trigger = self.state.read(cx).vim_pending_trigger().is_none()
+                let no_pending_motion = self.state.read(cx).vim_pending_trigger().is_none()
                     && self.state.read(cx).vim_pending_operator().is_none();
+                let no_pending_trigger = no_pending_motion
+                    && self
+                        .tab_index(cx)
+                        .and_then(|i| self.state.read(cx).workspace().tabs.get(i))
+                        .is_none_or(|tab| tab.vim_keybind_seq.is_empty());
                 let is_visual = matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
                 if (vim_mode == VimMode::Normal || is_visual)
                     && no_pending_trigger
@@ -318,7 +323,13 @@ impl TextEditor {
                     if !rows.is_empty() && !display_to_wrap.is_empty() {
                         // Display-row indices, so this steps by the display
                         // grid's own pitch, not by a full line of text.
-                        let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
+                        let slot_px = real_row_height_px(
+                            &self.uniform_list_scroll_handle,
+                            display_to_wrap.len(),
+                            normal_size_px,
+                            zoom,
+                            line_spacing,
+                        );
                         let viewport_h = self.scroll_handle.bounds().size.height.as_f32()
                             - 2.0 * CONTENT_PADDING_PX;
                         let offset = self.scroll_handle.offset();
@@ -368,7 +379,7 @@ impl TextEditor {
                 // to `VimLookup::None`, and silently do nothing, which is
                 // exactly the reported bug.
                 if vim_mode == VimMode::Normal
-                    && no_pending_trigger
+                    && no_pending_motion
                     && !shift
                     && matches!(key, "z" | "t" | "b")
                 {
@@ -417,13 +428,8 @@ impl TextEditor {
                     }
                 }
 
-                // Bug report: `$` jumped to the end of the whole wrapped
-                // paragraph instead of the current visual row — same
-                // "logical line vs visual row" inversion `j`/`k` already
-                // make for this heavily-wrapping app (see
-                // `move_cursor_to_row_edge`'s doc comment). `0`/`^`/Home/End
-                // get the identical treatment for consistency; `g$`/`g0`/
-                // `g^` (`state.rs`) reach the original logical-line target.
+                // 0/^/Home/End retain visual-row navigation. Bare $ now
+                // falls through to the shared paragraph-end motion.
                 // Deliberately does NOT cover an operator's pending target
                 // (`d$`/`c$`/`D`/`C`) — confirmed with the reporter that
                 // those should keep deleting to the end of the paragraph,
@@ -449,16 +455,15 @@ impl TextEditor {
                                 .map(|t| t.vim_command_buf.is_empty())
                         })
                         .unwrap_or(true);
-                    let edge =
-                        if matches_shifted_symbol(key, shift, key_char, "4", "$") || key == "end" {
-                            Some(RowEdge::End)
-                        } else if matches_shifted_symbol(key, shift, key_char, "6", "^") {
-                            Some(RowEdge::FirstNonBlank)
-                        } else if key == "home" || (key == "0" && !shift && buf_empty) {
-                            Some(RowEdge::Start)
-                        } else {
-                            None
-                        };
+                    let edge = if matches_shifted_symbol(key, shift, key_char, "6", "^") {
+                        Some(RowEdge::FirstNonBlank)
+                    } else if key == "home" || (key == "0" && !shift && buf_empty) {
+                        Some(RowEdge::Start)
+                    } else if key == "end" {
+                        Some(RowEdge::End)
+                    } else {
+                        None
+                    };
                     if let Some(edge) = edge {
                         self.move_cursor_to_row_edge(cx, edge, is_visual);
                         return;

@@ -453,7 +453,7 @@ impl SettingsModal {
 
                 if crate::vim_keybinds::VimKeybinds::is_reserved_first_key(&candidate) {
                     self.vim_conflict_message = Some(format!(
-                        "{candidate:?} starts with a key vim's own Normal mode already uses. Try a different sequence, or Esc to keep the current binding."
+                        "{candidate:?} is reserved or invalid. Use an unreserved sequence or :name (letters, digits, underscore; letter first). Esc keeps the current binding."
                     ));
                     self.vim_capture_buffer.clear();
                     cx.notify();
@@ -723,13 +723,18 @@ impl SettingsModal {
         let dir = self.state.read(cx).workspace().working_directory.clone();
         let path_rx = cx.prompt_for_new_path(&dir, Some("theme_template.toml"));
         let state = self.state.clone();
+
+        let (dark, light) = state.read(cx).theme_palettes();
+
         cx.spawn_in(window, async move |_this, cx| {
             let Ok(Ok(Some(path))) = path_rx.await else {
                 return;
             };
             let result = cx
                 .background_executor()
-                .spawn(async move { std::fs::write(path, crate::theme::custom_theme_template()) })
+                .spawn(async move {
+                    std::fs::write(path, crate::theme::custom_theme_template(&dark, &light))
+                })
                 .await;
             if let Err(error) = result {
                 state.update(cx, |state, cx| {
@@ -1455,11 +1460,9 @@ impl SettingsModal {
                             .text_color(rgb(p.text_muted))
                             .max_w(px(500.0))
                             .child(
-                                "Bind an app action to a vim-Normal-mode keystroke sequence. \
-                                 Only fires while Vim Mode is on and the active tab is in Normal \
-                                 mode. A sequence can't start with a key vim's own commands \
-                                 already use (h, d, g, f, and so on) — every default here lives \
-                                 under \"z\", which vim leaves free.",
+                                "Bind an action to a Normal/Visual-mode sequence or a command such as :myhighlight. \
+                                 Command names start with an ASCII letter and contain only letters, digits or _. \
+                                 Press Enter to save or execute a command. Native commands are reserved.",
                             ),
                     ),
             )

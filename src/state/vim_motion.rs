@@ -1193,6 +1193,9 @@ pub(crate) fn vim_find_target_char(key: &str, shift: bool, key_char: Option<&str
     if key == "space" {
         return Some(' ');
     }
+    if key == "'" {
+        return Some(if shift { '"' } else { '\'' });
+    }
     let mut chars = key.chars();
     let c = chars.next()?;
     if chars.next().is_some() {

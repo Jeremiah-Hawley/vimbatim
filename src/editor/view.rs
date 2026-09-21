@@ -684,10 +684,15 @@ impl TextEditor {
         // `display_row` is the row's *content* slot, the last of the slots
         // reserved for it — its glyphs are bottom-aligned there and painted
         // upward through the blank slots before it. So the top of the line is
-        // one slot past that index, less a line's height. With a single slot
-        // per line (`ROW_SUBDIVISIONS == 1`) this reduces exactly to the old
-        // `display_row * line_height`.
-        let slot_px = row_slot_px(normal_size_px, line_spacing, zoom);
+        // one slot past that index, less a line's height.
+        let item_count = display_to_wrap.len();
+        let slot_px = real_row_height_px(
+            &self.uniform_list_scroll_handle,
+            item_count,
+            normal_size_px,
+            zoom,
+            line_spacing,
+        );
         let cursor_top = (display_row + 1) as f32 * slot_px
             - line_height_px(normal_size_px, line_spacing) * zoom;
 
@@ -825,19 +830,29 @@ impl TextEditor {
         let zoom = state.zoom();
         let normal_size_px = state.effective_normal_size_half_points() as f32 / 2.0;
         let row_height = line_height_px(normal_size_px, state.preferences().line_spacing) * zoom;
-        let slot_px = row_slot_px(normal_size_px, state.preferences().line_spacing, zoom);
         if row_height <= 0.0 {
             return false;
         }
         let viewport_h =
             self.scroll_handle.bounds().size.height.as_f32() - 2.0 * CONTENT_PADDING_PX;
+
         if viewport_h <= 0.0 {
             return false;
         }
         let offset = self.scroll_handle.offset();
         let viewport_width = self.scroll_handle.bounds().size.width.as_f32();
         let (_, display_to_wrap, _) = self.cached_or_fresh_row_tables(cx, viewport_width);
+
+        let item_count = display_to_wrap.len();
+        let slot_px = real_row_height_px(
+            &self.uniform_list_scroll_handle,
+            item_count,
+            normal_size_px,
+            zoom,
+            state.preferences().line_spacing,
+        );
         let max_y = max_scroll_for_display_rows(&display_to_wrap, slot_px, viewport_h);
+
         let current = offset.y.as_f32();
         let Some(next) = page_scroll_offset(current, viewport_h, row_height, max_y, forward) else {
             return false; // already at that end

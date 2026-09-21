@@ -174,10 +174,43 @@ impl AppState {
             }
         }
 
+        // Tab commands must run before the motion dispatcher consumes pending g.
+        // gt and 1gt through 9gt
+        let pending_trigger = self.vim_pending_trigger();
+        if pending_trigger == Some('g') && key == "t" && !shift {
+            let buffer = self
+                .workspace
+                .tabs
+                .get(self.workspace.active_tab)
+                .map(|t| t.vim_command_buf.clone())
+                .unwrap_or_default();
+            let count = split_vim_command_buf(&buffer).0;
+
+            if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                tab.vim_command_buf.clear();
+            }
+
+            if let Some(c) = count {
+                // 1-based index
+                let target_index = c.saturating_sub(1);
+                // Leave alone if out of bounds, matching native vim
+                if target_index < self.workspace.tabs.len() {
+                    self.set_active_tab(target_index);
+                }
+            } else {
+                // Next tab, wrapping around
+                let len = self.workspace.tabs.len();
+                if len > 0 {
+                    let next_index = (self.workspace.active_tab + 1) % len;
+                    self.set_active_tab(next_index);
+                }
+            }
+            return true;
+        }
+
         if let Some(result) = self.handle_vim_motion_key(key, shift, key_char, false) {
             return result;
         }
-
         if matches_shifted_symbol(key, shift, key_char, ";", ":") {
             self.vim_enter_command();
             return true;
@@ -1790,6 +1823,15 @@ impl AppState {
          * GPUI-context fallthrough) is propagated as-is so `text_editor.rs`
          * can apply visual-row movement with `extend: true`.
          */
+        if self
+            .workspace
+            .tabs
+            .get(self.workspace.active_tab)
+            .is_some_and(|t| !t.vim_keybind_seq.is_empty())
+        {
+            return self.continue_vim_keybind_sequence(key, shift, key_char);
+        }
+
         let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
             return true;
         };
@@ -1799,18 +1841,6 @@ impl AppState {
             return true;
         }
 
-        // A pending `f`/`F`/`t`/`T`/`g` trigger must win over these checks
-        // — e.g. `f` then `d` must complete as "find target 'd'", not
-        // misfire as starting the delete operator (and in Visual mode,
-        // `f` then `v` must complete as "find target 'v'", not misfire as
-        // exiting visual mode) — the same collision class the advisor
-        // flagged for Normal mode's macro/operator checks, caught here by
-        // this test suite's own pre-existing regression test rather than
-        // shipping unverified. `gU`/`gu`'s own check
-        // (`is_pending_g_case_trigger`, shared with Normal mode) is
-        // narrower (only fires when `g` specifically is pending) and must
-        // stay *ahead* of `handle_vim_motion_key`, which would otherwise
-        // silently claim `u` as `gg`'s failed completion first.
         let pending_trigger = self.vim_pending_trigger();
         if pending_trigger.is_none() {
             match (mode, key, shift) {
@@ -1843,8 +1873,14 @@ impl AppState {
             }
         }
 
-        self.handle_vim_motion_key(key, shift, key_char, true)
-            .unwrap_or(true)
+        if let Some(res) = self.handle_vim_motion_key(key, shift, key_char, true) {
+            return res;
+        }
+
+        if let Some(c) = vim_find_target_char(key, shift, key_char) {
+            self.dispatch_fresh_vim_keybind_key(c);
+        }
+        true
     }
 
     pub(super) fn vim_visual_operator_range(
@@ -2024,8 +2060,9 @@ impl AppState {
     ) {
         match self.capture_vim_line_input(key, shift, key_char) {
             VimLineInput::Dispatch(line) => {
-                self.dispatch_vim_command(&line);
+                // Exit the source tab before a command can activate another tab.
                 self.vim_exit_to_normal();
+                self.dispatch_vim_command(&line);
             }
             VimLineInput::Cancelled => self.vim_exit_to_normal(),
             VimLineInput::Consumed => {}
@@ -2068,6 +2105,17 @@ impl AppState {
             }
         };
 
+        // Check for custom bound colon commands
+        let colon_line = format!(":{}", line.trim());
+        if !crate::vim_keybinds::VimKeybinds::is_reserved_first_key(&colon_line) {
+            if let crate::vim_keybinds::VimLookup::Exact(action) =
+                self.global_vim.vim_keybinds.lookup(&colon_line)
+            {
+                self.global_vim.pending_vim_action = Some(action);
+                return;
+            }
+        }
+
         match line {
             "w" => {
                 if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
@@ -2076,6 +2124,7 @@ impl AppState {
                         .push(crate::app::command::AppEffect::PerformSave(tab.id));
                 }
             }
+            "tabnew" => self.new_tab(),
             "wa" => {
                 self.global_vim.pending_effects.extend(
                     self.workspace
@@ -2108,7 +2157,14 @@ impl AppState {
             }
             "set vim" => self.global_vim.vim_enabled = true,
             "set novim" => self.global_vim.vim_enabled = false,
-            "noh" => {} // nothing to clear yet — Task I adds search highlighting
+            "noh" => {
+                self.close_find_bar();
+                self.global_vim.last_search = None;
+                self.clear_similar_selection();
+                if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                    tab.selection = None;
+                }
+            }
             _ => {
                 if let Some(path) = line.strip_prefix("e ") {
                     let path = self.workspace.working_directory.join(path.trim());

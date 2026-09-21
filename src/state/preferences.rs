@@ -339,6 +339,14 @@ impl AppState {
         }
     }
 
+    pub fn toggle_dark_mode(&mut self) {
+        let new_mode = match self.preferences.theme_mode {
+            crate::theme::ThemeMode::Light => crate::theme::ThemeMode::Dark,
+            crate::theme::ThemeMode::Dark => crate::theme::ThemeMode::Light,
+        };
+        self.set_theme_mode(new_mode);
+    }
+
     pub fn set_theme_mode(&mut self, mode: crate::theme::ThemeMode) {
         self.preferences.theme_mode = mode;
         if let Err(error) = crate::theme::save_theme_mode(&self.settings_path, mode) {

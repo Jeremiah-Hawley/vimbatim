@@ -14,6 +14,207 @@ fn custom_color_temp_dir(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn final_fixes_tab_commands_use_real_key_dispatch() {
+    let mut state = make_state("keep", 0, None);
+    state.workspace.tabs[0].document.is_modified = true;
+    state.handle_vim_key(":", false, Some(":"));
+    for c in "tabnew".chars() {
+        state.handle_vim_key(&c.to_string(), false, None);
+    }
+    state.handle_vim_key("enter", false, None);
+    assert_eq!(state.workspace.tabs.len(), 2);
+    assert_eq!(state.workspace.tabs[0].vim_mode, VimMode::Normal);
+    assert_eq!(state.workspace.tabs[0].document.content(), "keep");
+    assert!(state.workspace.tabs[0].document.is_modified);
+    for _ in 2..9 {
+        state.new_tab();
+    }
+    for sequence in ["gt", "9gt", "1gt", "2gt", "99gt"] {
+        for c in sequence.chars() {
+            state.handle_vim_key(&c.to_string(), false, None);
+        }
+        let expected = match sequence {
+            "gt" | "1gt" => 0,
+            "9gt" => 8,
+            _ => 1,
+        };
+        assert_eq!(state.workspace.active_tab, expected, "{sequence}");
+        assert!(state
+            .workspace
+            .tabs
+            .iter()
+            .all(|t| t.vim_command_buf.is_empty()));
+    }
+}
+
+#[test]
+fn final_fixes_noh_clears_both_searches_and_all_selections() {
+    let mut state = make_state("one two one", 0, None);
+    state.dispatch_vim_search("one", true);
+    state.open_find_bar();
+    state.workspace.tabs[0].selection = Some((0, 3));
+    state.workspace.tabs[0].similar_ranges = vec![(0, 3), (8, 11)];
+    let cursor = state.workspace.tabs[0].cursor;
+    state.dispatch_vim_command("noh");
+    assert!(state.ui.find_bar.is_none());
+    assert!(state.global_vim.last_search.is_none());
+    assert!(state.workspace.tabs[0].similar_ranges.is_empty());
+    assert!(state.workspace.tabs[0].selection.is_none());
+    assert!(!state.find_next(true));
+    state.handle_vim_key("n", false, None);
+    assert_eq!(state.workspace.tabs[0].cursor, cursor);
+}
+
+#[test]
+fn final_fixes_visual_bindings_and_quote_targets() {
+    use crate::keybinds::KeybindAction;
+    for mode in [VimMode::Visual, VimMode::VisualLine] {
+        let mut state = make_state("abc", 2, Some((3, 0)));
+        state.workspace.tabs[0].vim_mode = mode;
+        state
+            .global_vim
+            .vim_keybinds
+            .add(KeybindAction::Highlight, "zvh".into());
+        for c in "zvh".chars() {
+            state.handle_vim_key(&c.to_string(), false, None);
+        }
+        assert_eq!(
+            state.global_vim.pending_vim_action,
+            Some(KeybindAction::Highlight)
+        );
+        assert_eq!(state.workspace.tabs[0].selection, Some((3, 0)));
+    }
+    let mut state = make_state("a é\"b\"", 0, None);
+    state.handle_vim_key("f", false, None);
+    state.handle_vim_key("'", true, None);
+    assert_eq!(state.workspace.tabs[0].cursor, 4);
+    state.handle_vim_key(";", false, None);
+    assert_eq!(state.workspace.tabs[0].cursor, 6);
+}
+
+#[test]
+fn final_fixes_delete_mixed_tags_and_undo() {
+    let mut mixed = para_plain("keep");
+    mixed.runs.push(tag_para("delete").runs.remove(0));
+    let mut state = make_state_with_paragraphs(vec![tag_para("whole"), mixed], 0);
+    state.delete_tags();
+    assert_eq!(state.workspace.tabs[0].document.content(), "keep");
+    state.undo();
+    assert_eq!(
+        state.workspace.tabs[0].document.content(),
+        "whole\nkeepdelete"
+    );
+    state.redo();
+    assert_eq!(state.workspace.tabs[0].document.content(), "keep");
+}
+
+#[test]
+fn final_fixes_shrink_stops_at_every_marker_and_is_noop_twice() {
+    for style in [
+        CardStyle::Tag,
+        CardStyle::Cite,
+        CardStyle::Hat,
+        CardStyle::Pocket,
+        CardStyle::Block,
+        CardStyle::Analytic,
+    ] {
+        let mut boundary = para_plain("mixed ");
+        let mut run = tag_para("stop").runs.remove(0);
+        run.style = Some(style);
+        boundary.runs.push(run);
+        let original = boundary.clone();
+        let mut state = make_state_with_paragraphs(vec![para_plain("abcdef"), boundary], 2);
+        state.shrink_text();
+        let p = state.workspace.tabs[0].document.paragraphs();
+        assert_eq!(p[0].runs[0].text, "ab");
+        assert_eq!(p[0].runs[1].text, "cdef");
+        assert_eq!(p[0].runs[1].size, state.preferences.small_size_half_points);
+        assert_eq!(format!("{:?}", p[1]), format!("{:?}", original));
+        let version = state.workspace.tabs[0].document.content_version;
+        state.shrink_text();
+        assert_eq!(state.workspace.tabs[0].document.content_version, version);
+        state.undo();
+        assert_eq!(
+            state.workspace.tabs[0].document.paragraphs()[0].runs.len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn final_fixes_colon_aliases_validate_roundtrip_and_dispatch() {
+    use crate::keybinds::KeybindAction;
+    use crate::vim_keybinds::{VimKeybinds, VimLookup};
+    let mut state = make_state("abc", 0, None);
+    for invalid in [
+        ":",
+        ":w",
+        ":tabnew",
+        ":noh",
+        ":23",
+        ":%s/x/y/",
+        ":bad name",
+        ": x",
+        ":a=b",
+    ] {
+        assert!(VimKeybinds::is_reserved_first_key(invalid), "{invalid}");
+    }
+    let binds = &mut state.global_vim.vim_keybinds;
+    binds.add(KeybindAction::Highlight, ":myhighlight".into());
+    assert!(binds
+        .find_overlap_conflict(":myhighlightMore", None)
+        .is_none());
+    assert!(binds.find_overlap_conflict(":myhighlight", None).is_some());
+    let dir = custom_color_temp_dir("colon-alias-review");
+    let path = dir.join("settings.conf");
+    binds.save_to(&path).unwrap();
+    state.global_vim.vim_keybinds = VimKeybinds::load(&path);
+    assert!(matches!(
+        state.global_vim.vim_keybinds.lookup(":myhighlight"),
+        VimLookup::Exact(KeybindAction::Highlight)
+    ));
+    state.handle_vim_key(";", true, Some(":"));
+    for c in "myhighlight".chars() {
+        state.handle_vim_key(&c.to_string(), false, None);
+    }
+    assert!(state.global_vim.pending_vim_action.is_none());
+    state.handle_vim_key("enter", false, None);
+    assert_eq!(
+        state.take_pending_vim_action(),
+        Some(KeybindAction::Highlight)
+    );
+    // Even malformed/programmatic bindings cannot shadow a built-in command.
+    state
+        .global_vim
+        .vim_keybinds
+        .add(KeybindAction::Highlight, ":noh".into());
+    state.dispatch_vim_command("noh");
+    assert!(state.take_pending_vim_action().is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn final_fixes_export_custom_theme_uses_imported_pair() {
+    use crate::theme::{
+        custom_theme_template, palette, parse_custom_theme_toml, ThemeKind, ThemeMode,
+    };
+    let mut state = make_state("", 0, None);
+    let mut dark = palette(ThemeKind::WorkbenchDark, ThemeMode::Dark);
+    let mut light = palette(ThemeKind::WorkbenchDark, ThemeMode::Light);
+    dark.text = 0x123456;
+    light.text = 0xabcdef;
+    state.preferences.theme = ThemeKind::Custom;
+    state.custom_theme = Some((dark, light));
+    for mode in [ThemeMode::Dark, ThemeMode::Light] {
+        state.preferences.theme_mode = mode;
+        let (d, l) = state.theme_palettes();
+        let (d, l) = parse_custom_theme_toml(&custom_theme_template(&d, &l)).unwrap();
+        assert_eq!(d.text, dark.text);
+        assert_eq!(l.text, light.text);
+    }
+}
+
+#[test]
 fn state_accessors_preserve_sidebar_and_keybind_updates() {
     use crate::keybinds::{KeyCombo, KeybindAction};
     let mut state = make_state("", 0, None);
@@ -2447,14 +2648,12 @@ fn card_markers_survive_a_real_docx_round_trip_without_rstyle_markers() {
 #[test]
 fn doc_menu_delete_tags_works_after_a_round_trip() {
     let mut state = through_a_real_docx(menu_fixture(), "deltags");
+    let before = state.workspace.tabs[0].document.paragraphs().len();
     state.delete_tags();
     let paras = state.workspace.tabs[0].document.paragraphs();
-    assert_eq!(paras[3].heading, 0, "the Tag line lost its heading");
-    assert!(!paras[3].runs[0].bold, "and its formatting");
-    assert_eq!(paras[3].runs[0].style, None);
-    // Nothing else touched.
+    assert_eq!(paras.len(), before - 1, "The tag line was removed");
     assert_eq!(paras[0].heading, 1);
-    assert_eq!(paras[4].runs[0].style, Some(CardStyle::Analytic));
+    assert_eq!(paras[3].runs[0].style, Some(CardStyle::Analytic));
 }
 
 /// Doc Menu -> Delete analytics, on a reloaded document.
@@ -9659,7 +9858,7 @@ fn tag_para(text: &str) -> Paragraph {
 
 /// The words survive; only the formatting goes.
 #[test]
-fn delete_tags_strips_formatting_but_keeps_the_line() {
+fn delete_tags_removes_the_line_and_preserves_body() {
     let mut state = make_state_with_paragraphs(
         vec![
             para_plain("body"),
@@ -9673,16 +9872,7 @@ fn delete_tags_strips_formatting_but_keeps_the_line() {
 
     assert_eq!(
         state.workspace.tabs[0].document.content(),
-        "body\nA tag\nmore body"
-    );
-    let tag = &state.workspace.tabs[0].document.paragraphs()[1];
-    assert_eq!(tag.heading, 0, "the heading marker is what made it a tag");
-    assert_eq!(tag.runs[0].text, "A tag");
-    assert!(!tag.runs[0].bold);
-    assert_eq!(tag.runs[0].style, None);
-    assert_eq!(
-        tag.runs[0].size,
-        state.preferences.normal_text_size_half_points
+        "body\nmore body"
     );
 }
 
@@ -9694,18 +9884,13 @@ fn delete_tags_finds_a_marked_tag_whose_formatting_was_changed() {
     para.runs[0].bold = false;
     para.runs[0].size = 99;
     para.heading = 0;
-    let mut state = make_state_with_paragraphs(vec![para], 0);
+    // Need something else so document is not empty
+    let mut state = make_state_with_paragraphs(vec![para, para_plain("body")], 0);
 
     state.delete_tags();
 
-    assert_eq!(
-        state.workspace.tabs[0].document.paragraphs()[0].runs[0].style,
-        None
-    );
-    assert_eq!(
-        state.workspace.tabs[0].document.paragraphs()[0].runs[0].size,
-        state.preferences.normal_text_size_half_points
-    );
+    // The tag line is deleted entirely, leaving only "body".
+    assert_eq!(state.workspace.tabs[0].document.content(), "body");
 }
 
 /// ...and a marked *cite* that happens to sit at a heading level is not a

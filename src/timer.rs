@@ -420,7 +420,7 @@ impl Render for Timer {
             .collect();
 
         div()
-            .w(px(280.0))
+            .w_full()
             .bg(rgb(p.chrome))
             .border_1()
             .border_color(rgb(p.border))

@@ -335,6 +335,18 @@ impl AppState {
     /// should call this instead of the bare `theme::palette()` free function,
     /// which is a `const fn` with no access to `custom_theme` and would
     /// silently fall back to a placeholder for `ThemeKind::Custom`.
+    pub fn theme_palettes(&self) -> (crate::theme::Palette, crate::theme::Palette) {
+        if self.preferences.theme == crate::theme::ThemeKind::Custom {
+            if let Some(pair) = self.custom_theme {
+                return pair;
+            }
+        }
+        (
+            crate::theme::palette(self.preferences.theme, crate::theme::ThemeMode::Dark),
+            crate::theme::palette(self.preferences.theme, crate::theme::ThemeMode::Light),
+        )
+    }
+
     pub fn current_palette(&self) -> crate::theme::Palette {
         if self.preferences.theme == crate::theme::ThemeKind::Custom {
             if let Some((dark, light)) = self.custom_theme {

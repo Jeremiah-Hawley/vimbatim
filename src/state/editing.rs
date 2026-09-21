@@ -210,21 +210,21 @@ impl AppState {
         )
     }
 
-    /// Caselist Tools → Delete tags (`delete_tags` keybind): strips Tag
-    /// formatting from every tagged paragraph, leaving the words behind as
-    /// ordinary body text.
-    ///
-    /// The *formatting* is deleted, not the line — unlike `delete_analytics`,
-    /// which removes the paragraph outright. Reuses `FormatOp::ClearAll`, the
-    /// same op the Clear button applies, so a de-tagged line is byte-identical
-    /// to one the user cleared by hand.
+    /// Delete whole tag paragraphs and tagged runs within mixed paragraphs.
     pub fn delete_tags(&mut self) {
         let is_tag = Self::tag_paragraph_test();
         let any = self
             .workspace
             .tabs
             .get(self.workspace.active_tab)
-            .map(|t| t.document.paragraphs().iter().any(&is_tag))
+            .map(|t| {
+                t.document.paragraphs().iter().any(|p| {
+                    is_tag(p)
+                        || p.runs
+                            .iter()
+                            .any(|r| r.style == Some(CardStyle::Tag) && !r.text.is_empty())
+                })
+            })
             .unwrap_or(false);
         // No undo entry for a no-op — Ctrl+Z should undo what the user did.
         if !any {
@@ -232,22 +232,30 @@ impl AppState {
         }
 
         self.push_undo_snapshot();
-        let default_size = self.preferences.normal_text_size_half_points;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+            tab.document.retain_paragraphs(|para| !is_tag(para));
             for para in tab.document.paragraphs_mut_slice() {
-                if !is_tag(para) {
-                    continue;
+                if para.runs.iter().any(|r| r.style == Some(CardStyle::Tag)) {
+                    para.runs.retain(|r| r.style != Some(CardStyle::Tag));
+                    if para.runs.is_empty() {
+                        para.runs = default_paragraphs().remove(0).runs;
+                    }
+                    if para.heading == CardStyleKind::Tag.heading_level() {
+                        para.heading = 0;
+                    }
                 }
-                for run in &mut para.runs {
-                    apply_format_op(run, &FormatOp::ClearAll { default_size });
-                }
-                // What made the line a Tag structurally: the heading marker is
-                // what the Nav outline, the fold hierarchy and `document_stats`
-                // all read. Alignment is left alone — `apply_card_style` never
-                // centres a Tag, so any centring here was the user's own.
-                para.heading = 0;
-                crate::document_ops::merge_adjacent_same_format_runs(&mut para.runs);
             }
+            // Every rich-text-aware function assumes at least one paragraph and
+            // one run always exist (`default_paragraphs`).
+            if tab.document.paragraphs().is_empty() {
+                tab.document.replace_paragraphs(default_paragraphs());
+            }
+            // The cursor and any selection pointed into text that is gone.
+            tab.cursor = clamp_to_char_boundary(
+                &tab.document.content(),
+                tab.cursor.min(tab.document.content().len()),
+            );
+            tab.selection = None;
             tab.document.is_modified = true;
         }
     }
@@ -1383,24 +1391,95 @@ impl AppState {
     }
 
     pub fn shrink_text(&mut self) {
-        /*
-         * Sets the font size of every non-underlined run in the selection to
-         * settings.conf's `small_size` (user-requested: underlined text is
-         * left alone — e.g. a debate card's underlined emphasis shouldn't
-         * shrink along with the rest of the tag/cite). Runs are only
-         * touched when they fall fully inside the selection (no splitting
-         * at partial overlaps), matching this method's pre-existing scan.
-         */
         let small_size = self.preferences.small_size_half_points;
-        let selection = self
+        let mut selection = self
             .workspace
             .tabs
             .get(self.workspace.active_tab)
             .and_then(|t| t.selection);
+
+        if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
+            let cursor = tab.cursor;
+            if selection.is_none() || selection.unwrap().0 == selection.unwrap().1 {
+                // Determine target range if there is no explicit nonempty selection
+                let mut end = tab.document.content().len();
+                let mut cumulative = 0usize;
+                for para in tab.document.paragraphs() {
+                    let para_len = para.runs.iter().map(|r| r.text.len()).sum::<usize>() + 1; // +1 for newline
+                    if cumulative > cursor {
+                        let is_tag = Self::tag_paragraph_test();
+                        let is_analytic = self.analytic_paragraph_test();
+                        // Boundary kinds: Tag, Cite, Hat, Pocket, Block, or Analytic
+                        let has_style =
+                            para.runs
+                                .iter()
+                                .filter(|r| !r.text.trim().is_empty())
+                                .any(|r| {
+                                    matches!(
+                                        r.style,
+                                        Some(CardStyle::Cite)
+                                            | Some(CardStyle::Hat)
+                                            | Some(CardStyle::Pocket)
+                                            | Some(CardStyle::Block)
+                                            | Some(CardStyle::Tag)
+                                            | Some(CardStyle::Analytic)
+                                    )
+                                });
+                        let legacy_heading = (1..=4).contains(&para.heading)
+                            && para.runs.iter().all(|r| r.style.is_none());
+                        if is_tag(para) || is_analytic(para) || has_style || legacy_heading {
+                            end = cumulative;
+                            break;
+                        }
+                    }
+                    cumulative += para_len;
+                }
+                selection = Some((cursor, end));
+            }
+        }
+
         if let Some((a, f)) = selection {
             let (start, end) = (a.min(f), a.max(f));
+            if start >= end {
+                return;
+            }
+            let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) else {
+                return;
+            };
+            let mut offset = 0;
+            let needs_change = tab.document.paragraphs().iter().any(|p| {
+                let changed = p.runs.iter().any(|r| {
+                    let run_start = offset;
+                    offset += r.text.len();
+                    run_start < end
+                        && offset > start
+                        && !r.text.is_empty()
+                        && !r.underline
+                        && r.size != small_size
+                });
+                offset += 1;
+                changed
+            });
+            if !needs_change {
+                return;
+            }
             self.push_undo_snapshot();
             if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                let (start_para, start_run, start_char) = tab.document.resolve_position(start);
+                let (end_para, end_run, end_char) = tab.document.resolve_position(end);
+                crate::document_ops::split_run_at_position(
+                    tab.document.paragraphs_mut_slice(),
+                    end_para,
+                    end_run,
+                    end_char,
+                );
+                crate::document_ops::split_run_at_position(
+                    tab.document.paragraphs_mut_slice(),
+                    start_para,
+                    start_run,
+                    start_char,
+                );
+
                 let mut cumulative = 0usize;
                 for para in tab.document.paragraphs_mut_slice() {
                     for run in &mut para.runs {

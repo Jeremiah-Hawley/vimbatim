@@ -244,14 +244,10 @@ impl Render for AppToolbar {
                         .items_center()
                         .justify_center()
                         .h(px(24.0))
-                        .px(px(10.0))
+                        .px(px(6.0))
                         .rounded(px(radius::MD))
-                        .text_xs()
-                        .text_color(rgb(p.text_muted))
                         .cursor_pointer()
-                        .border_1()
-                        .border_color(rgb(p.border_subtle))
-                        .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                        .hover(move |s| s.bg(rgb(p.chrome_hover)))
                         .active(move |s| s.bg(rgb(p.chrome_active)))
                         .on_click(cx.listener(|this, _ev, _window, cx| {
                             this.state.update(cx, |s, cx| {
@@ -260,19 +256,18 @@ impl Render for AppToolbar {
                             });
                             cx.notify();
                         }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .child(crate::icons::icon(
-                                    crate::icons::Icon::SearchList,
-                                    p.text_muted,
-                                    16.0,
-                                ))
-                                .child("Search From List"),
-                        ),
+                        .tooltip(move |_window, cx| {
+                            cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                                label: "Search From List".into(),
+                                palette: p,
+                            })
+                            .into()
+                        })
+                        .child(crate::icons::icon(
+                            crate::icons::Icon::SearchList,
+                            p.text_muted,
+                            16.0,
+                        )),
                 )
             })
             // Find opens the same panel Ctrl+F does, via the shared action.

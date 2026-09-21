@@ -1529,137 +1529,134 @@ impl Render for FileExplorer {
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .h(px(44.0))
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(6.0))
+                    .py(px(space::MD))
                     .px(px(space::MD))
                     .border_b_1()
                     .border_color(rgb(p.border))
-                    // The title column is what gives way when the sidebar is
-                    // narrow: `min_w_0` lets it shrink below its text's natural
-                    // width and `truncate` clips the folder name, so a long
-                    // directory can never push the buttons off the edge.
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap(px(space::XXS))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(p.text))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(match sidebar_mode {
-                                        SidebarMode::Files => "Files",
-                                        SidebarMode::Nav => "Navigation",
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .truncate()
-                                    .text_color(rgb(p.text_faint))
-                                    .child(match sidebar_mode {
-                                        SidebarMode::Files => dir_name,
-                                        SidebarMode::Nav => active_tab_title.unwrap_or_default(),
-                                    }),
-                            ),
-                    )
+                    // Label and controls share a top edge; the folder gets its own row.
                     .child(
                         div()
                             .flex()
                             .flex_row()
-                            // Never shrinks — the controls stay reachable at
-                            // any sidebar width, including the 180px minimum
-                            // `clamp_sidebar_width` allows.
-                            .flex_none()
-                            .gap(px(space::XS))
-                            // Files/Nav toggle — switches this whole panel between the
-                            // file tree and the heading outline. The ribbon's own Nav
-                            // button (formatting_ribbon.rs) flips the exact same
-                            // AppState.sidebar_mode field.
-                            .child(Self::render_mode_toggle_btn(
-                                "files-mode-btn",
-                                crate::icons::icon(crate::icons::Icon::Sidebar, p.text, 14.0),
-                                "Files",
-                                SidebarMode::Files,
-                                sidebar_mode,
-                                p,
-                                &state_handle,
-                            ))
-                            .child(Self::render_mode_toggle_btn(
-                                "nav-mode-btn",
-                                crate::icons::icon(crate::icons::Icon::Nav, p.text, 14.0),
-                                "Nav",
-                                SidebarMode::Nav,
-                                sidebar_mode,
-                                p,
-                                &state_handle,
-                            ))
-                            .when(sidebar_mode == SidebarMode::Files, |d| {
-                                d
-                                    // Refresh button — re-scans the working directory so
-                                    // files created in external applications become
-                                    // visible without restarting vimbatim.
-                                    .child(
-                                        div()
-                                            .id("refresh-file-btn")
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .w(px(26.0))
-                                            .h(px(24.0))
-                                            .rounded(px(radius::MD))
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(rgb(p.border_subtle))
-                                            .hover(move |s| {
-                                                s.bg(rgb(p.chrome_hover))
-                                                    .border_color(rgb(p.border))
-                                            })
-                                            .active(move |s| s.bg(rgb(p.chrome_active)))
-                                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                                this.state.update(cx, |s, cx| {
-                                                    let effects = s.execute(
-                                                        crate::app::command::AppCommand::RefreshFileTree,
-                                                    );
-                                                    crate::main_window::MainWindow::handle_app_effects(
-                                                        this.state.clone(),
-                                                        effects,
-                                                        cx,
-                                                    );
+                            .items_start()
+                            .justify_between()
+                            .w_full()
+                            .child(div().text_sm().font_weight(FontWeight::BOLD)
+                                .text_color(rgb(p.text))
+                                .child(match sidebar_mode {
+                                    SidebarMode::Files => "Files",
+                                    SidebarMode::Nav => "Nav",
+                                }))
+                            // Files/Nav toggle
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_none()
+                                    .gap(px(space::XS))
+                                    .child(Self::render_mode_toggle_btn(
+                                        "files-mode-btn",
+                                        crate::icons::icon(crate::icons::Icon::Sidebar, p.text, 14.0),
+                                        "Files",
+                                        SidebarMode::Files,
+                                        sidebar_mode,
+                                        p,
+                                        &state_handle,
+                                    ))
+                                    .child(Self::render_mode_toggle_btn(
+                                        "nav-mode-btn",
+                                        crate::icons::icon(crate::icons::Icon::Nav, p.text, 14.0),
+                                        "Nav",
+                                        SidebarMode::Nav,
+                                        sidebar_mode,
+                                        p,
+                                        &state_handle,
+                                    ))
+                            )
+                            // RHS Control Buttons (New File, Refresh)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .when(sidebar_mode == SidebarMode::Files, |d| {
+                                        d.child(
+                                            div()
+                                                .id("refresh-file-btn")
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .w(px(26.0))
+                                                .h(px(24.0))
+                                                .rounded(px(radius::MD))
+                                                .cursor_pointer()
+                                                .border_1()
+                                                .border_color(rgb(p.border_subtle))
+                                                .hover(move |s| {
+                                                    s.bg(rgb(p.chrome_hover))
+                                                        .border_color(rgb(p.border))
+                                                })
+                                                .active(move |s| s.bg(rgb(p.chrome_active)))
+                                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                                    this.state.update(cx, |s, cx| {
+                                                        let effects = s.execute(
+                                                            crate::app::command::AppCommand::RefreshFileTree,
+                                                        );
+                                                        crate::main_window::MainWindow::handle_app_effects(
+                                                            this.state.clone(),
+                                                            effects,
+                                                            cx,
+                                                        );
+                                                        cx.notify();
+                                                    });
                                                     cx.notify();
-                                                });
-                                                cx.notify();
-                                            }))
-                                            .child(crate::icons::icon(crate::icons::Icon::Refresh, p.text_muted, 14.0)),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("new-file-btn")
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .w(px(26.0))
-                                            .h(px(24.0))
-                                            .rounded(px(radius::MD))
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(rgb(p.border_subtle))
-                                            .hover(move |s| {
-                                                s.bg(rgb(p.chrome_hover))
-                                                    .border_color(rgb(p.border))
-                                            })
-                                            .active(move |s| s.bg(rgb(p.chrome_active)))
-                                            .on_click(cx.listener(|this, _ev, window, cx| {
-                                                this.create_new_file(window, cx);
-                                            }))
-                                            .child(crate::icons::icon(crate::icons::Icon::NewFile, p.text_muted, 14.0)),
-                                    )
-                            }),
-                    ),
+                                                }))
+                                                .child(crate::icons::icon(crate::icons::Icon::Refresh, p.text_muted, 14.0)),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("new-file-btn")
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .w(px(26.0))
+                                                .h(px(24.0))
+                                                .rounded(px(radius::MD))
+                                                .cursor_pointer()
+                                                .border_1()
+                                                .border_color(rgb(p.border_subtle))
+                                                .hover(move |s| {
+                                                    s.bg(rgb(p.chrome_hover))
+                                                        .border_color(rgb(p.border))
+                                                })
+                                                .active(move |s| s.bg(rgb(p.chrome_active)))
+                                                .on_click(cx.listener(|this, _ev, window, cx| {
+                                                    this.create_new_file(window, cx);
+                                                }))
+                                                .child(crate::icons::icon(crate::icons::Icon::NewFile, p.text_muted, 14.0)),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .child({
+                        let title = match sidebar_mode {
+                            SidebarMode::Files => dir_name,
+                            SidebarMode::Nav => active_tab_title.unwrap_or_default(),
+                        };
+                        let tip = title.clone();
+                        div().id("sidebar-folder-title").w_full().min_w_0()
+                            .text_xs().truncate().text_color(rgb(p.text_faint))
+                            .tooltip(move |_window, cx| {
+                                cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                                    label: tip.clone().into(), palette: p,
+                                }).into()
+                            })
+                            .child(title)
+                    }),
             )
             // ── Nav heading-fold buttons (Settings → Toggle Features) ────────
             // Its own strip below the header rather than inside it: the header

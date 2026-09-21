@@ -168,8 +168,9 @@ impl VimKeybinds {
                 continue;
             }
             if existing == candidate
-                || existing.starts_with(candidate)
-                || candidate.starts_with(existing.as_str())
+                || (!candidate.starts_with(':')
+                    && (existing.starts_with(candidate)
+                        || candidate.starts_with(existing.as_str())))
             {
                 return Some((*action, existing.clone()));
             }
@@ -198,6 +199,20 @@ impl VimKeybinds {
     /// system's own sequence buffer before it could ever reach the native
     /// dispatcher (see the module doc comment).
     pub fn is_reserved_first_key(candidate: &str) -> bool {
+        if candidate.starts_with(':') {
+            let check = &candidate[1..];
+            // Simple Ex aliases: an ASCII letter followed by letters/digits/_ .
+            if !check.starts_with(|c: char| c.is_ascii_alphabetic())
+                || !check.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return true;
+            }
+            return matches!(
+                check,
+                "w" | "wa" | "q" | "q!" | "wq" | "x" | "tabnew" | "set vim" | "set novim" | "noh"
+            ) || check.starts_with("e ")
+                || check.starts_with("%s");
+        }
         let Some(c) = candidate.chars().next() else {
             return true;
         };
@@ -248,7 +263,10 @@ impl VimKeybinds {
                 // "unbound" instead of a binding that silently does
                 // nothing, and lets the action fall back to its own new
                 // default sequence next time this action is (re)bound.
-                if !raw.is_empty() && VimKeybinds::find_native_vim_conflict(raw).is_none() {
+                if !raw.is_empty()
+                    && !VimKeybinds::is_reserved_first_key(raw)
+                    && VimKeybinds::find_native_vim_conflict(raw).is_none()
+                {
                     vim_keybinds.bindings.insert(raw.clone(), *action);
                 }
             }
