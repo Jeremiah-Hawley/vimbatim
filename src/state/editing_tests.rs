@@ -11728,9 +11728,13 @@ fn test_create_new_folder_in_picks_first_free_name() {
 
     state.create_new_folder_in(&dir).unwrap();
     assert!(dir.join("New Folder").is_dir());
+    assert_eq!(state.workspace.file_tree.len(), 1);
+    assert_eq!(state.workspace.file_tree[0].name(), "New Folder");
 
     state.create_new_folder_in(&dir).unwrap();
     assert!(dir.join("New Folder 2").is_dir());
+    assert_eq!(state.workspace.file_tree.len(), 2);
+    assert_eq!(state.workspace.file_tree[1].name(), "New Folder 2");
 }
 
 #[test]

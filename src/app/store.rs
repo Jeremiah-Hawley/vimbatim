@@ -102,14 +102,12 @@ impl WorkspaceRepository for WorkspaceFs {
                 }
                 // Recursively scan the subdirectory
                 if let Ok(children) = self.scan_directory(&path) {
-                    if !children.is_empty() {
-                        dirs.push(FileNode::Dir {
-                            name,
-                            path,
-                            children,
-                            expanded: false, // populated later by `refresh_file_tree`
-                        });
-                    }
+                    dirs.push(FileNode::Dir {
+                        name,
+                        path,
+                        children,
+                        expanded: false, // populated later by `refresh_file_tree`
+                    });
                 }
             } else if path.is_file()
                 && path
