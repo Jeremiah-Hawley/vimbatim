@@ -655,9 +655,8 @@ impl SettingsModal {
                 prefs.speech_time_3_minutes,
             ];
             let prep = prefs.prep_time_minutes;
-            match speech_slot {
-                Some(slot) => speech[slot] = (speech[slot] as i32 + delta).clamp(1, 120) as u16,
-                None => {}
+            if let Some(slot) = speech_slot {
+                speech[slot] = (speech[slot] as i32 + delta).clamp(1, 120) as u16
             }
             let prep = if speech_slot.is_none() {
                 (prep as i32 + delta).clamp(1, 120) as u16

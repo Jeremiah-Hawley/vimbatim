@@ -199,8 +199,7 @@ impl VimKeybinds {
     /// system's own sequence buffer before it could ever reach the native
     /// dispatcher (see the module doc comment).
     pub fn is_reserved_first_key(candidate: &str) -> bool {
-        if candidate.starts_with(':') {
-            let check = &candidate[1..];
+        if let Some(check) = candidate.strip_prefix(':') {
             // Simple Ex aliases: an ASCII letter followed by letters/digits/_ .
             if !check.starts_with(|c: char| c.is_ascii_alphabetic())
                 || !check.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
