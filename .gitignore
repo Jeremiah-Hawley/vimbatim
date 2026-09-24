@@ -27,6 +27,8 @@ graphify-out/
 # deliberate fixture needs `git add -f path/to/it` instead of a `!` exception.
 tests/
 
+*:Zone.Identifier
+
 # Added by cargo
 
 /target
