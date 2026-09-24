@@ -122,20 +122,22 @@ fn final_fixes_shrink_stops_at_every_marker_and_is_noop_twice() {
         let mut run = tag_para("stop").runs.remove(0);
         run.style = Some(style);
         boundary.runs.push(run);
+        let boundary_len = boundary.runs.iter().map(|r| r.text.len()).sum::<usize>();
         let original = boundary.clone();
-        let mut state = make_state_with_paragraphs(vec![para_plain("abcdef"), boundary], 2);
+        let mut state =
+            make_state_with_paragraphs(vec![boundary, para_plain("abcdef")], boundary_len + 3);
         state.shrink_text();
         let p = state.workspace.tabs[0].document.paragraphs();
-        assert_eq!(p[0].runs[0].text, "ab");
-        assert_eq!(p[0].runs[1].text, "cdef");
-        assert_eq!(p[0].runs[1].size, state.preferences.small_size_half_points);
-        assert_eq!(format!("{:?}", p[1]), format!("{:?}", original));
+        assert_eq!(format!("{:?}", p[0]), format!("{:?}", original));
+        assert_eq!(p[1].runs[0].text, "ab");
+        assert_eq!(p[1].runs[0].size, state.preferences.small_size_half_points);
+        assert_eq!(p[1].runs[1].text, "cdef");
         let version = state.workspace.tabs[0].document.content_version;
         state.shrink_text();
         assert_eq!(state.workspace.tabs[0].document.content_version, version);
         state.undo();
         assert_eq!(
-            state.workspace.tabs[0].document.paragraphs()[0].runs.len(),
+            state.workspace.tabs[0].document.paragraphs()[1].runs.len(),
             1
         );
     }

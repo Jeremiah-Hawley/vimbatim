@@ -1401,40 +1401,41 @@ impl AppState {
         if let Some(tab) = self.workspace.tabs.get(self.workspace.active_tab) {
             let cursor = tab.cursor;
             if selection.is_none() || selection.unwrap().0 == selection.unwrap().1 {
-                // Determine target range if there is no explicit nonempty selection
-                let mut end = tab.document.content().len();
+                // With no selection, shrink backwards from the cursor to the
+                // nearest preceding card marker.
+                let mut start = 0;
                 let mut cumulative = 0usize;
                 for para in tab.document.paragraphs() {
+                    if cumulative >= cursor {
+                        break;
+                    }
                     let para_len = para.runs.iter().map(|r| r.text.len()).sum::<usize>() + 1; // +1 for newline
-                    if cumulative > cursor {
-                        let is_tag = Self::tag_paragraph_test();
-                        let is_analytic = self.analytic_paragraph_test();
-                        // Boundary kinds: Tag, Cite, Hat, Pocket, Block, or Analytic
-                        let has_style =
-                            para.runs
-                                .iter()
-                                .filter(|r| !r.text.trim().is_empty())
-                                .any(|r| {
-                                    matches!(
-                                        r.style,
-                                        Some(CardStyle::Cite)
-                                            | Some(CardStyle::Hat)
-                                            | Some(CardStyle::Pocket)
-                                            | Some(CardStyle::Block)
-                                            | Some(CardStyle::Tag)
-                                            | Some(CardStyle::Analytic)
-                                    )
-                                });
-                        let legacy_heading = (1..=4).contains(&para.heading)
-                            && para.runs.iter().all(|r| r.style.is_none());
-                        if is_tag(para) || is_analytic(para) || has_style || legacy_heading {
-                            end = cumulative;
-                            break;
-                        }
+                    let is_tag = Self::tag_paragraph_test();
+                    let is_analytic = self.analytic_paragraph_test();
+                    // Boundary kinds: Tag, Cite, Hat, Pocket, Block, or Analytic
+                    let has_style =
+                        para.runs
+                            .iter()
+                            .filter(|r| !r.text.trim().is_empty())
+                            .any(|r| {
+                                matches!(
+                                    r.style,
+                                    Some(CardStyle::Cite)
+                                        | Some(CardStyle::Hat)
+                                        | Some(CardStyle::Pocket)
+                                        | Some(CardStyle::Block)
+                                        | Some(CardStyle::Tag)
+                                        | Some(CardStyle::Analytic)
+                                )
+                            });
+                    let legacy_heading = (1..=4).contains(&para.heading)
+                        && para.runs.iter().all(|r| r.style.is_none());
+                    if is_tag(para) || is_analytic(para) || has_style || legacy_heading {
+                        start = (cumulative + para_len).min(cursor);
                     }
                     cumulative += para_len;
                 }
-                selection = Some((cursor, end));
+                selection = Some((start, cursor));
             }
         }
 
