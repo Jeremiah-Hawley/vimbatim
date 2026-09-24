@@ -410,13 +410,21 @@ pub(crate) fn list_marker_text_for_level(kind: ListKind, level: u8, ordinal: u32
 /// meaningless — callers only invoke this after checking
 /// `paragraphs[index].list.is_some()`.
 pub(crate) fn list_item_ordinal(paragraphs: &[Paragraph], index: usize) -> u32 {
-    let Some(run_kind) = paragraphs[index].list.map(|item| item.kind) else {
+    let Some(item) = paragraphs[index].list else {
         return 1;
     };
     let mut ordinal = 1u32;
     let mut i = index;
-    while i > 0 && paragraphs[i - 1].list.map(|item| item.kind) == Some(run_kind) {
-        ordinal += 1;
+    while i > 0 {
+        let Some(previous) = paragraphs[i - 1].list else {
+            break;
+        };
+        if previous.kind != item.kind {
+            break;
+        }
+        if previous.level == item.level {
+            ordinal += 1;
+        }
         i -= 1;
     }
     ordinal

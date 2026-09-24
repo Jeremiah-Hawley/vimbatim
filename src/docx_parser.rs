@@ -1578,11 +1578,13 @@ fn assign_list_num_ids(paragraphs: &[Paragraph]) -> HashMap<usize, u32> {
     let mut next_num_id = 1u32;
     let mut i = 0;
     while i < paragraphs.len() {
-        let Some(run_kind) = paragraphs[i].list.map(|item| item.kind) else {
+        let Some(item) = paragraphs[i].list else {
             i += 1;
             continue;
         };
-        while i < paragraphs.len() && paragraphs[i].list.map(|item| item.kind) == Some(run_kind) {
+        while i < paragraphs.len()
+            && paragraphs[i].list.map(|current| current.kind) == Some(item.kind)
+        {
             assignment.insert(i, next_num_id);
             i += 1;
         }

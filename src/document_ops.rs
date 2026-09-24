@@ -53,8 +53,10 @@ pub fn resolve_position(paragraphs: &[Paragraph], byte_offset: usize) -> (usize,
     }
 }
 
-pub fn buffer_insert_char(buffer: &mut DocumentBuffer, byte_offset: usize, ch: char) {
-    buffer.edit_structure(|paragraphs| sync_insert_char(paragraphs, byte_offset, ch));
+pub fn buffer_insert_char(buffer: &mut DocumentBuffer, byte_offset: usize, ch: char) -> bool {
+    let mut inserted = false;
+    buffer.edit_structure(|paragraphs| inserted = sync_insert_char(paragraphs, byte_offset, ch));
+    inserted
 }
 
 pub fn buffer_insert_str(buffer: &mut DocumentBuffer, byte_offset: usize, text: &str) {
@@ -84,19 +86,17 @@ pub fn buffer_delete_range(buffer: &mut DocumentBuffer, start: usize, end: usize
 /// A plain character inherits whatever run it lands inside — typing inside
 /// a bold run produces more bold text, matching real rich-text editors.
 /// `'\n'` is structural: it splits the paragraph at this position into two.
-pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char) {
+pub fn sync_insert_char(paragraphs: &mut Vec<Paragraph>, byte_offset: usize, ch: char) -> bool {
     let (para_idx, run_idx, char_offset) = resolve_position(paragraphs, byte_offset);
     if ch == '\n' {
-        // split_paragraph_at constructs two brand-new Paragraph literals,
-        // which already default unsupported_xml to None - no separate
-        // clear needed for the newline case.
-        split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
+        return split_paragraph_at(paragraphs, para_idx, run_idx, char_offset);
     } else {
         paragraphs[para_idx].runs[run_idx]
             .text
             .insert(char_offset, ch);
         paragraphs[para_idx].unsupported_xml = None;
     }
+    true
 }
 
 /// Keeps `paragraphs` in sync with inserting `text` at `byte_offset`, one
@@ -201,7 +201,7 @@ fn split_paragraph_at(
     para_idx: usize,
     run_idx: usize,
     char_offset: usize,
-) {
+) -> bool {
     /*
      * Splits paragraph `para_idx` into two at (run_idx, char_offset): the
      * run being split becomes a "head" run ending the first paragraph, and
@@ -216,8 +216,18 @@ fn split_paragraph_at(
      * bold/size/box/underline/alignment — otherwise `heading` would reset
      * but the line would still visually look like the card style.
      */
-    let para = &paragraphs[para_idx];
+    let para = &mut paragraphs[para_idx];
     let split_run = &para.runs[run_idx];
+    if para.runs.iter().all(|run| run.text.is_empty()) {
+        if let Some(item) = para.list.as_mut() {
+            if item.level > 0 {
+                item.level -= 1;
+            } else {
+                para.list = None;
+            }
+            return false;
+        }
+    }
     let mut head_run = split_run.clone();
     head_run.text = split_run.text[..char_offset].to_string();
 
@@ -243,13 +253,15 @@ fn split_paragraph_at(
     // a brand-new blank document's first paragraph starts with), so this
     // doesn't need a caller-supplied default size.
     let was_heading = heading != 0;
-    // A heading line resets the new paragraph to fully plain formatting
-    // (see above) — list continuation shouldn't survive that reset either,
-    // even though a paragraph carrying both `heading` and `list` isn't
-    // reachable through this app's own UI today.
-    let new_line_list = if was_heading { None } else { new_line_list };
     let tail_text = split_run.text[char_offset..].to_string();
-    let (tail_run, new_alignment) = if was_heading {
+    let reset_tail = was_heading
+        && tail_text.is_empty()
+        && run_idx + 1 == para.runs.len()
+        && para.runs[run_idx + 1..]
+            .iter()
+            .all(|run| run.text.is_empty());
+    let new_line_list = if reset_tail { None } else { new_line_list };
+    let (tail_run, new_alignment) = if reset_tail {
         (
             Run {
                 text: tail_text,
@@ -282,12 +294,13 @@ fn split_paragraph_at(
             Paragraph {
                 list: new_line_list,
                 runs: para_b_runs,
-                heading: 0,
+                heading: if reset_tail { 0 } else { heading },
                 alignment: new_alignment,
                 unsupported_xml: None,
             },
         ],
     );
+    true
 }
 
 /// Keeps `paragraphs` in sync with deleting `[start, end)` from the

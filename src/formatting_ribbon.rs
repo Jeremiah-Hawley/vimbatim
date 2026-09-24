@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::document_ops::FormatOp;
+use crate::document_ops::{is_uniformly_active, FormatOp};
 use crate::docx_parser::Alignment;
 use crate::theme::{radius, space, Palette, ThemeColorMode, ThemeMode};
 use crate::{document::TabId, state::AppState};
@@ -2292,6 +2292,41 @@ impl Render for FormattingRibbon {
         // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
         let timer_visible = self.state.read(cx).ui().timer.visible;
+        let (bold_active, italic_active, underline_active) = {
+            let format_active = |op: FormatOp| {
+                let state = self.state.read(cx);
+                let Some(tab) = state.workspace().tabs.get(state.workspace().active_tab) else {
+                    return false;
+                };
+                let content = tab.document.content();
+                let (start, end) = tab.selection.filter(|(a, b)| a != b).map_or_else(
+                    || {
+                        let end = tab.cursor.min(content.len());
+                        let start = if end < content.len() {
+                            end
+                        } else {
+                            content[..end]
+                                .char_indices()
+                                .next_back()
+                                .map_or(0, |(i, _)| i)
+                        };
+                        (
+                            start,
+                            end.max(
+                                start + content[start..].chars().next().map_or(0, char::len_utf8),
+                            ),
+                        )
+                    },
+                    |(a, b)| (a.min(b), a.max(b)),
+                );
+                start < end && is_uniformly_active(tab.document.paragraphs(), start, end, &op)
+            };
+            (
+                format_active(FormatOp::Bold(true)),
+                format_active(FormatOp::Italic(true)),
+                format_active(FormatOp::Underline(true)),
+            )
+        };
         // The button wears the current highlight color, nudged toward
         // visibility against this theme's chrome — see `visible_on_chrome`.
         let highlight_tint = crate::theme::visible_on_chrome(
@@ -2364,13 +2399,16 @@ impl Render for FormattingRibbon {
                     // still fit the width the three-label rows below already
                     // need.
                     vec![
-                        RibbonBtn::icon("Bold", FormatAction::Bold, RibbonIcon::Bold),
-                        RibbonBtn::icon("Italics", FormatAction::Italics, RibbonIcon::Italic),
+                        RibbonBtn::icon("Bold", FormatAction::Bold, RibbonIcon::Bold)
+                            .engaged(bold_active),
+                        RibbonBtn::icon("Italics", FormatAction::Italics, RibbonIcon::Italic)
+                            .engaged(italic_active),
                         RibbonBtn::icon(
                             "Underline",
                             FormatAction::Underline,
                             RibbonIcon::Underline,
-                        ),
+                        )
+                        .engaged(underline_active),
                         RibbonBtn::icon(
                             "Strike",
                             FormatAction::Strikethrough,

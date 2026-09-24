@@ -1601,6 +1601,11 @@ impl Render for FileExplorer {
                                                         .border_color(rgb(p.border))
                                                 })
                                                 .active(move |s| s.bg(rgb(p.chrome_active)))
+                                                .tooltip(move |_window, cx| {
+                                                    cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                                                        label: "Refresh".into(), palette: p,
+                                                    }).into()
+                                                })
                                                 .on_click(cx.listener(|this, _ev, _window, cx| {
                                                     this.state.update(cx, |s, cx| {
                                                         let effects = s.execute(
@@ -1634,6 +1639,11 @@ impl Render for FileExplorer {
                                                         .border_color(rgb(p.border))
                                                 })
                                                 .active(move |s| s.bg(rgb(p.chrome_active)))
+                                                .tooltip(move |_window, cx| {
+                                                    cx.new(|_| crate::formatting_ribbon::RibbonTooltip {
+                                                        label: "New File".into(), palette: p,
+                                                    }).into()
+                                                })
                                                 .on_click(cx.listener(|this, _ev, window, cx| {
                                                     this.create_new_file(window, cx);
                                                 }))

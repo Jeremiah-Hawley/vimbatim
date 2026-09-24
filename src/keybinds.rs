@@ -239,6 +239,7 @@ pub enum KeybindAction {
     SelectSimilarFormatting,
     ToggleSidebarMode,
     Bold,
+    Italic,
     Underline,
     Shrink,
     ClearFormatting,
@@ -293,6 +294,7 @@ impl KeybindAction {
             SelectSimilarFormatting,
             ToggleSidebarMode,
             Bold,
+            Italic,
             Underline,
             Shrink,
             ClearFormatting,
@@ -347,6 +349,7 @@ impl KeybindAction {
             SelectSimilarFormatting => "Select Similar Formatting",
             ToggleSidebarMode => "Toggle Files/Nav",
             Bold => "Bold",
+            Italic => "Italic",
             Underline => "Underline",
             Shrink => "Shrink",
             ClearFormatting => "Clear Formatting",
@@ -400,7 +403,7 @@ impl KeybindAction {
             | SelectAll
             | SelectSimilarFormatting => C::Editing,
             ToggleSidebarMode => C::General,
-            Bold | Underline | Shrink | ClearFormatting => C::TextFormatting,
+            Bold | Italic | Underline | Shrink | ClearFormatting => C::TextFormatting,
             PasteSmart | Condense | Pocket | Hat | Block | Tag | Cite | Analytic | Emphasis => {
                 C::CardStyles
             }
@@ -432,6 +435,7 @@ impl KeybindAction {
             SelectSimilarFormatting => "select_similar_formatting",
             ToggleSidebarMode => "toggle_files_nav",
             Bold => "bold",
+            Italic => "italic",
             Underline => "underline",
             Shrink => "shrink",
             ClearFormatting => "clear",
@@ -498,6 +502,7 @@ impl KeybindAction {
             // combos at all.
             ToggleSidebarMode => KeyCombo::new(false, false, false, ""),
             Bold => KeyCombo::new(true, false, false, "b"),
+            Italic => KeyCombo::new(true, false, false, "i"),
             Underline => KeyCombo::new(true, false, false, "u"),
             Shrink => KeyCombo::new(false, false, true, "f3"),
             ClearFormatting => KeyCombo::new(false, false, false, "f12"),
@@ -857,6 +862,7 @@ actions!(
         SelectSimilarFormattingAction,
         ToggleSidebarModeAction,
         BoldAction,
+        ItalicAction,
         UnderlineAction,
         ShrinkAction,
         ClearFormattingAction,
@@ -952,6 +958,7 @@ pub fn rebuild_keymap(cx: &mut App, keybinds: &Keybinds) {
         ToggleSidebarModeAction,
     ));
     bindings.extend(bind_all(keybinds, Bold, BoldAction));
+    bindings.extend(bind_all(keybinds, Italic, ItalicAction));
     bindings.extend(bind_all(keybinds, Underline, UnderlineAction));
     bindings.extend(bind_all(keybinds, Shrink, ShrinkAction));
     bindings.extend(bind_all(keybinds, ClearFormatting, ClearFormattingAction));
@@ -1020,6 +1027,7 @@ pub fn action_for(action: KeybindAction) -> Box<dyn Action> {
         SelectSimilarFormatting => Box::new(SelectSimilarFormattingAction),
         ToggleSidebarMode => Box::new(ToggleSidebarModeAction),
         Bold => Box::new(BoldAction),
+        Italic => Box::new(ItalicAction),
         Underline => Box::new(UnderlineAction),
         Shrink => Box::new(ShrinkAction),
         ClearFormatting => Box::new(ClearFormattingAction),

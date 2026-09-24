@@ -23,13 +23,14 @@ use crate::formatting_ribbon::FormattingRibbon;
 use crate::keybinds::{
     AnalyticAction, BlockAction, BoldAction, CiteAction, CiteFromLinkAction, ClearFormattingAction,
     CloseTabAction, CommandPaletteAction, CondenseAction, CopyAction, CutAction, DeleteTagsAction,
-    EmphasisAction, FindAction, FindReplaceAction, HatAction, HighlightAction, NewFileAction,
-    NewTabAction, NextTabAction, OpenFileAction, OpenFolderAction, OpenStatsAction, PasteAction,
-    PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction, RedoAction,
-    RefreshFileTreeAction, ReopenClosedTabAction, SaveAction, SaveAsAction, SelectAllAction,
-    SelectSimilarFormattingAction, ShrinkAction, StartTimerAction, SwitchActivePaneAction,
-    TagAction, ToggleSettingsAction, ToggleSidebarAction, ToggleSidebarModeAction, UnderlineAction,
-    UndoAction, WikifiAction, ZoomInAction, ZoomOutAction, ZoomResetAction,
+    EmphasisAction, FindAction, FindReplaceAction, HatAction, HighlightAction, ItalicAction,
+    NewFileAction, NewTabAction, NextTabAction, OpenFileAction, OpenFolderAction, OpenStatsAction,
+    PasteAction, PasteSmartAction, PasteWithoutFormattingAction, PocketAction, PrevTabAction,
+    RedoAction, RefreshFileTreeAction, ReopenClosedTabAction, SaveAction, SaveAsAction,
+    SelectAllAction, SelectSimilarFormattingAction, ShrinkAction, StartTimerAction,
+    SwitchActivePaneAction, TagAction, ToggleSettingsAction, ToggleSidebarAction,
+    ToggleSidebarModeAction, UnderlineAction, UndoAction, WikifiAction, ZoomInAction,
+    ZoomOutAction, ZoomResetAction,
 };
 use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
@@ -825,6 +826,18 @@ impl MainWindow {
             s.update(cx, |st, cx| {
                 for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
                     crate::document_ops::FormatOp::Bold(true),
+                )) {
+                    st.apply_effect(effect);
+                }
+                cx.notify();
+            });
+        });
+
+        let s = state.clone();
+        cx.on_action(move |_: &ItalicAction, cx| {
+            s.update(cx, |st, cx| {
+                for effect in st.execute(crate::app::command::AppCommand::ApplyFormatting(
+                    crate::document_ops::FormatOp::Italic(true),
                 )) {
                     st.apply_effect(effect);
                 }

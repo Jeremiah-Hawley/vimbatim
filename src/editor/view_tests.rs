@@ -2945,6 +2945,25 @@ fn test_list_item_ordinal_counts_within_contiguous_run() {
     assert_eq!(list_item_ordinal(&paragraphs, 3), 1);
 }
 
+#[test]
+fn test_list_item_ordinal_ignores_nested_levels() {
+    let item = |level| Paragraph {
+        runs: vec![Run {
+            text: "x".into(),
+            ..Run::default()
+        }],
+        list: Some(ListItem {
+            kind: ListKind::NumberDecimalDot,
+            level,
+        }),
+        ..Paragraph::default()
+    };
+    let paragraphs = vec![item(0), item(1), item(1), item(0)];
+    assert_eq!(list_item_ordinal(&paragraphs, 1), 1);
+    assert_eq!(list_item_ordinal(&paragraphs, 2), 2);
+    assert_eq!(list_item_ordinal(&paragraphs, 3), 2);
+}
+
 /// Confirmed against real Word (`Lists.docx`'s six-different-bullets and
 /// seven-different-numbers examples, each immediately consecutive
 /// paragraphs): changing `ListKind` starts a new run even with no

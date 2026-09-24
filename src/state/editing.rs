@@ -140,9 +140,40 @@ impl AppState {
     /// `content_version`, so a spelling fix is undoable and re-snapshotted for
     /// crash recovery without this method knowing either concept exists.
     pub fn replace_spell_target(&mut self, target: &SpellTarget, replacement: &str) {
+        let runs = self
+            .workspace
+            .tabs
+            .get(self.workspace.active_tab)
+            .map(|tab| {
+                let line_start = tab
+                    .document
+                    .content()
+                    .lines()
+                    .take(target.line)
+                    .map(|line| line.len() + 1)
+                    .sum::<usize>();
+                let line = &tab.document.content()[line_start..];
+                let start = line_start
+                    + line
+                        .char_indices()
+                        .nth(target.start_col)
+                        .map_or(line.len(), |(i, _)| i);
+                let end = line_start
+                    + line
+                        .char_indices()
+                        .nth(target.end_col)
+                        .map_or(line.len(), |(i, _)| i);
+                let mut runs = runs_in_range(tab.document.paragraphs(), start, end);
+                if let Some(mut run) = runs.first().cloned() {
+                    run.text = replacement.to_string();
+                    runs = vec![run];
+                }
+                runs
+            })
+            .unwrap_or_default();
         self.set_cursor_from_line_col(target.line, target.start_col);
         self.extend_selection_to_line_col(target.line, target.end_col);
-        self.insert_str(replacement);
+        self.insert_str_with_runs(replacement, &runs);
     }
 
     /// Word counts for the active tab, for the word-count panel.
@@ -371,11 +402,12 @@ impl AppState {
         }
         let mut inserted_range = None;
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
-            buffer_insert_char(&mut tab.document, tab.cursor, ch);
             let start = tab.cursor;
-            tab.cursor += ch.len_utf8();
-            tab.document.is_modified = true;
-            inserted_range = Some((start, tab.cursor));
+            if buffer_insert_char(&mut tab.document, tab.cursor, ch) {
+                tab.cursor += ch.len_utf8();
+                tab.document.is_modified = true;
+                inserted_range = Some((start, tab.cursor));
+            }
         }
         // A pending format (spec 7: armed with no selection, per
         // `apply_formatting_to_selection`) applies to every character typed
@@ -390,6 +422,34 @@ impl AppState {
                 if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
                     apply_formatting(tab.document.paragraphs_mut_slice(), start, end, op);
                 }
+            }
+        }
+        if ch == ' ' {
+            let bullet = self
+                .workspace
+                .tabs
+                .get(self.workspace.active_tab)
+                .and_then(|tab| {
+                    let line_start = tab.document.content()[..tab.cursor]
+                        .rfind('\n')
+                        .map_or(0, |p| p + 1);
+                    (&tab.document.content()[line_start..tab.cursor] == "- ")
+                        .then_some((line_start, tab.cursor))
+                });
+            if let Some((start, end)) = bullet {
+                buffer_delete_range(
+                    &mut self.workspace.tabs[self.workspace.active_tab].document,
+                    start,
+                    end,
+                );
+                let tab = &mut self.workspace.tabs[self.workspace.active_tab];
+                tab.cursor = start;
+                let line = tab.document.resolve_position(start).0;
+                tab.document.paragraphs_mut_slice()[line].list = Some(ListItem {
+                    kind: ListKind::BulletSolid,
+                    level: 0,
+                });
+                tab.document.is_modified = true;
             }
         }
         if let Some(rec) = self.global_vim.vim_insertion_recording.as_mut() {
@@ -1794,6 +1854,9 @@ impl AppState {
         self.apply_formatting_to_line(FormatOp::Bold(true));
         self.apply_formatting_to_line(FormatOp::FontSize(size));
         self.apply_formatting_to_line(FormatOp::Style(Some(kind.card_style())));
+        self.apply_formatting_to_line(FormatOp::Box(false));
+        self.apply_formatting_to_line(FormatOp::DoubleUnderline(false));
+        self.apply_formatting_to_line(FormatOp::Underline(false));
         match kind {
             CardStyleKind::Pocket => self.apply_formatting_to_line(FormatOp::Box(true)),
             CardStyleKind::Hat => self.apply_formatting_to_line(FormatOp::DoubleUnderline(true)),
