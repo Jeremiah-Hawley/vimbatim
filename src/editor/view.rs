@@ -2086,7 +2086,21 @@ pub(crate) fn visual_rows_for_viewport(
         }
     };
 
-    build_visual_rows(lines, usable_wrap_width(viewport_width_px), &mut width_at)
+    // List markers are painted before the row text, so their gutter must be
+    // part of the wrap budget. The layout API currently uses one width for
+    // every logical line; reserving the largest document gutter is conservative
+    // (plain lines may wrap a little early) but prevents nested list text from
+    // escaping the viewport.
+    let list_gutter = paragraphs
+        .iter()
+        .filter_map(|p| p.list)
+        .map(|item| LIST_GUTTER_PX * (item.level as f32 + 1.0) * zoom)
+        .fold(0.0, f32::max);
+    build_visual_rows(
+        lines,
+        (usable_wrap_width(viewport_width_px) - list_gutter).max(1.0),
+        &mut width_at,
+    )
 }
 
 fn visual_row_step(

@@ -2292,7 +2292,7 @@ impl Render for FormattingRibbon {
         // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
         let timer_visible = self.state.read(cx).ui().timer.visible;
-        let (bold_active, italic_active, underline_active) = {
+        let (bold_active, italic_active, underline_active, strikethrough_active, emphasis_active) = {
             let format_active = |op: FormatOp| {
                 let state = self.state.read(cx);
                 let Some(tab) = state.workspace().tabs.get(state.workspace().active_tab) else {
@@ -2325,6 +2325,8 @@ impl Render for FormattingRibbon {
                 format_active(FormatOp::Bold(true)),
                 format_active(FormatOp::Italic(true)),
                 format_active(FormatOp::Underline(true)),
+                format_active(FormatOp::Strikethrough(true)),
+                format_active(FormatOp::Emphasis(true)),
             )
         };
         // The button wears the current highlight color, nudged toward
@@ -2369,7 +2371,8 @@ impl Render for FormattingRibbon {
                     ],
                     vec![
                             RibbonBtn::secondary("Emphasis", FormatAction::Emphasis)
-                                .with_icon(crate::icons::Icon::Emphasis),
+                                .with_icon(crate::icons::Icon::Emphasis)
+                                .engaged(emphasis_active),
                             // Put back per Bug fixes pre test 2.md — the Text
                             // ribbon's HL Color button keeps its own separate
                             // behavior (opens the color menu); this one just
@@ -2413,7 +2416,8 @@ impl Render for FormattingRibbon {
                             "Strike",
                             FormatAction::Strikethrough,
                             RibbonIcon::Strikethrough,
-                        ),
+                        )
+                        .engaged(strikethrough_active),
                         RibbonBtn::secondary("Font Size", FormatAction::FontSize),
                     ],
                     vec![

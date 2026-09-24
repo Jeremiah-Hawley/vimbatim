@@ -771,6 +771,9 @@ impl AppState {
     /// for cursor moves that happen from *outside* the editor view.
     pub fn jump_to_line(&mut self, line: usize) {
         self.set_cursor_from_line_col(line, 0);
+        // Navigation is an external click: return keyboard focus to the pane
+        // whose tab was moved, not just the cursor/scroll position.
+        self.workspace.pending_focus_editor = Some(self.workspace.focused_pane);
         if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
             tab.pending_scroll_to_cursor = true;
         }

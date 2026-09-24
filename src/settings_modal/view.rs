@@ -405,6 +405,83 @@ impl SettingsModal {
             .child(div().text_sm().text_color(rgb(p.text)).child(label))
     }
 
+    fn render_timer_settings(
+        &self,
+        speech_minutes: [u16; 3],
+        prep_minutes: u16,
+        p: crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let row = |id: &'static str, label: &'static str, value: u16, speech: Option<usize>| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(div().text_sm().text_color(rgb(p.text)).child(label))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(Self::stepper_btn("timer-down", "−", p).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _ev, _window, cx| {
+                                this.adjust_timer_default(speech, -1, cx)
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .w(px(56.0))
+                                .text_center()
+                                .child(format!("{value} min")),
+                        )
+                        .child(Self::stepper_btn(id, "+", p).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _ev, _window, cx| {
+                                this.adjust_timer_default(speech, 1, cx)
+                            }),
+                        )),
+                )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(div().text_lg().font_weight(FontWeight::BOLD).child("Timer"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(p.text_muted))
+                    .child("Defaults used by the speech timer presets and prep timer."),
+            )
+            .child(row(
+                "timer-speech-1",
+                "Speech button 1",
+                speech_minutes[0],
+                Some(0),
+            ))
+            .child(row(
+                "timer-speech-2",
+                "Speech button 2",
+                speech_minutes[1],
+                Some(1),
+            ))
+            .child(row(
+                "timer-speech-3",
+                "Speech button 3",
+                speech_minutes[2],
+                Some(2),
+            ))
+            .child(row(
+                "timer-prep-up",
+                "Prep time per team",
+                prep_minutes,
+                None,
+            ))
+    }
+
     /// The Text Settings pane: default highlight color, what Emphasis applies,
     /// and how the paste command treats newlines.
     fn render_text_settings(
@@ -1140,6 +1217,15 @@ impl Render for SettingsModal {
             .spellcheck_underline_color
             .clone();
         let spreading_wpm = self.state.read(cx).preferences().spreading_wpm;
+        let speech_time_minutes = {
+            let prefs = self.state.read(cx).preferences();
+            [
+                prefs.speech_time_minutes,
+                prefs.speech_time_2_minutes,
+                prefs.speech_time_3_minutes,
+            ]
+        };
+        let prep_time_minutes = self.state.read(cx).preferences().prep_time_minutes;
         let nav_fold_buttons = self.state.read(cx).preferences().nav_fold_buttons;
         let search_from_list_enabled = self.state.read(cx).preferences().search_from_list_enabled;
         let search_list_whole_words = self.state.read(cx).preferences().search_list_whole_words;
@@ -1411,6 +1497,17 @@ impl Render for SettingsModal {
                                                     ))
                                                 },
                                             )
+                                        },
+                                    )
+                                    .when(
+                                        !theme_preview && section == SettingsSection::Timer,
+                                        |d| {
+                                            d.child(self.render_timer_settings(
+                                                speech_time_minutes,
+                                                prep_time_minutes,
+                                                p,
+                                                cx,
+                                            ))
                                         },
                                     )
                                     .when(

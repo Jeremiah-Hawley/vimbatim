@@ -1566,6 +1566,22 @@ fn apply_emphasis_style_applies_exactly_the_configured_combination() {
 }
 
 #[test]
+fn underline_toggle_removes_only_emphasis_underline() {
+    let mut state = make_state("hello", 0, None);
+    state.set_emphasis(true, true, true);
+    state.set_emphasis_change_size(true);
+    state.set_emphasis_size_points(18);
+    state.workspace.tabs[0].selection = Some((0, 5));
+    state.apply_emphasis_style();
+
+    state.apply_formatting_to_selection(crate::document_ops::FormatOp::Underline(true));
+    let run = &state.workspace.tabs[0].document.paragraphs()[0].runs[0];
+    assert!(run.emphasis && run.bold && run.emphasis_boxed);
+    assert_eq!(run.size, 36);
+    assert!(!run.underline);
+}
+
+#[test]
 fn apply_emphasis_style_applies_the_configured_size_only_when_change_size_is_on() {
     let mut state = make_state("hello", 0, None);
     state.set_emphasis(false, false, false);
@@ -3204,6 +3220,37 @@ fn make_state_with_paragraphs(paragraphs: Vec<Paragraph>, cursor: usize) -> AppS
 }
 
 // ── Real Word lists (apply_list_style/remove_list_formatting) ───────────
+
+#[test]
+fn test_typing_dash_space_creates_one_undoable_bullet_item() {
+    let mut state = make_state("", 0, None);
+    state.insert_char('-');
+    state.insert_char(' ');
+
+    let tab = &state.workspace.tabs[0];
+    assert_eq!(tab.document.content(), "");
+    assert_eq!(
+        tab.document.paragraphs()[0].list,
+        Some(ListItem {
+            kind: ListKind::BulletSolid,
+            level: 0,
+        })
+    );
+
+    state.undo();
+    assert_eq!(state.workspace.tabs[0].document.content(), "- ");
+    assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
+}
+
+#[test]
+fn test_typing_dash_inside_word_does_not_create_a_bullet() {
+    let mut state = make_state("", 0, None);
+    for ch in "hello- ".chars() {
+        state.insert_char(ch);
+    }
+    assert_eq!(state.workspace.tabs[0].document.content(), "hello- ");
+    assert_eq!(state.workspace.tabs[0].document.paragraphs()[0].list, None);
+}
 
 #[test]
 fn test_apply_list_style_sets_list_on_every_touched_paragraph() {
@@ -10340,6 +10387,7 @@ fn test_jump_to_line_moves_cursor_and_arms_scroll_flag() {
 
     assert_eq!(state.workspace.tabs[0].cursor, 8); // start of "three"
     assert!(state.workspace.tabs[0].pending_scroll_to_cursor);
+    assert_eq!(state.workspace.pending_focus_editor, Some(Pane::Primary));
     assert_eq!(state.workspace.tabs[0].selection, None);
 }
 
@@ -11091,6 +11139,24 @@ fn test_replace_spell_target_swaps_only_the_flagged_word() {
 
 /// On a later line, so the line→byte-offset conversion is actually
 /// exercised rather than trivially passing at offset 0.
+#[test]
+fn test_replace_spell_target_preserves_paragraph_alignment() {
+    let mut state = make_state("wrold", 0, None);
+    state.workspace.tabs[0].document.paragraphs_mut_slice()[0].alignment = Alignment::Center;
+    let target = SpellTarget {
+        line: 0,
+        start_col: 0,
+        end_col: 5,
+        word: "wrold".to_string(),
+        suggestions: vec![],
+    };
+    state.replace_spell_target(&target, "world");
+    assert_eq!(
+        state.workspace.tabs[0].document.paragraphs()[0].alignment,
+        Alignment::Center
+    );
+}
+
 #[test]
 fn test_replace_spell_target_on_second_line() {
     let mut state = make_state("first line\nsecond teh line", 0, None);

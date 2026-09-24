@@ -58,6 +58,41 @@ impl AppState {
         self.refresh_find_matches();
     }
 
+    pub fn save_prep_timer(&mut self) {
+        let values = self.ui().prep_timer.remaining;
+        self.save_setting(
+            "prep_remaining_team_1_seconds",
+            values[0].as_secs().to_string().as_str(),
+        );
+        self.save_setting(
+            "prep_remaining_team_2_seconds",
+            values[1].as_secs().to_string().as_str(),
+        );
+    }
+
+    pub fn set_timer_defaults(&mut self, speech: [u16; 3], prep: u16) {
+        self.preferences.speech_time_minutes = speech[0].clamp(1, 120);
+        self.preferences.speech_time_2_minutes = speech[1].clamp(1, 120);
+        self.preferences.speech_time_3_minutes = speech[2].clamp(1, 120);
+        self.preferences.prep_time_minutes = prep.clamp(1, 120);
+        self.save_setting(
+            "speech_time_minutes",
+            &self.preferences.speech_time_minutes.to_string(),
+        );
+        self.save_setting(
+            "speech_time_2_minutes",
+            &self.preferences.speech_time_2_minutes.to_string(),
+        );
+        self.save_setting(
+            "speech_time_3_minutes",
+            &self.preferences.speech_time_3_minutes.to_string(),
+        );
+        self.save_setting(
+            "prep_time_minutes",
+            &self.preferences.prep_time_minutes.to_string(),
+        );
+    }
+
     pub fn toggle_command_palette_enabled(&mut self) {
         self.preferences.command_palette_enabled = !self.preferences.command_palette_enabled;
         self.save_flag("command_palette", self.preferences.command_palette_enabled);

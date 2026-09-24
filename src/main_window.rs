@@ -1085,7 +1085,14 @@ impl Render for MainWindow {
         let sidebar_width = self.state.read(cx).sidebar_width();
         let find_bar_visible = self.state.read(cx).ui().find_bar.is_some();
         let command_palette_visible = self.state.read(cx).ui().command_palette.is_some();
-        let notification = self.state.read(cx).ui().notifications.last().cloned();
+        let notification = self
+            .state
+            .read(cx)
+            .ui()
+            .notifications
+            .last()
+            .cloned()
+            .filter(|n| n.created_at.elapsed() < Duration::from_secs(5));
         let p = self.state.read(cx).current_palette();
 
         let ctx_menu_state = self.state.clone();

@@ -195,6 +195,55 @@ pub fn words_per_minute(words: usize, over: Duration) -> Option<u32> {
     Some((words as f64 * 60.0 / secs).round() as u32)
 }
 
+#[derive(Clone, Debug)]
+pub struct PrepTimerState {
+    pub team: usize,
+    pub remaining: [Duration; 2],
+    running_since: Option<Instant>,
+}
+
+impl PrepTimerState {
+    pub fn new(minutes: u16) -> Self {
+        let duration = Duration::from_secs(minutes as u64 * 60);
+        Self {
+            team: 0,
+            remaining: [duration; 2],
+            running_since: None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running_since.is_some()
+    }
+    pub fn set_remaining(&mut self, values: [Duration; 2]) {
+        self.remaining = values;
+    }
+    pub fn displayed(&self) -> Duration {
+        let elapsed = self.running_since.map_or(Duration::ZERO, |s| {
+            Instant::now().saturating_duration_since(s)
+        });
+        self.remaining[self.team].saturating_sub(elapsed)
+    }
+    pub fn start(&mut self) {
+        if self.running_since.is_none() {
+            self.running_since = Some(Instant::now());
+        }
+    }
+    pub fn stop(&mut self) {
+        if let Some(start) = self.running_since.take() {
+            self.remaining[self.team] = self.remaining[self.team].saturating_sub(start.elapsed());
+        }
+    }
+    pub fn reset(&mut self, minutes: u16) {
+        self.stop();
+        self.remaining[self.team] = Duration::from_secs(minutes as u64 * 60);
+    }
+    pub fn select_team(&mut self, team: usize) {
+        self.stop();
+        self.team = team.min(1);
+    }
+}
+
 /// The timer popup. Rendered by `MainWindow` inside the ribbon's own stacking
 /// context (and `deferred`, so it paints over the editor below), which is what
 /// puts it in the middle of the ribbon.
@@ -234,7 +283,10 @@ impl Timer {
                     .timer(Duration::from_millis(200))
                     .await;
                 let keep_going = this.update(cx, |this: &mut Timer, cx| {
-                    let running = this.state.read(cx).ui().timer.is_running();
+                    let running = {
+                        let state = this.state.read(cx);
+                        state.ui().timer.is_running() || state.ui().prep_timer.is_running()
+                    };
                     if !running {
                         this.ticking = false;
                     }
@@ -283,7 +335,7 @@ impl Timer {
     fn button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString> + 'static,
         enabled: bool,
         p: Palette,
         cx: &mut Context<Self>,
@@ -316,6 +368,42 @@ impl Timer {
                         if this.state.read(cx).ui().timer.is_running() {
                             this.start_ticking(cx);
                         }
+                        cx.notify();
+                    }))
+            })
+            .child(label.into())
+            .into_any_element()
+    }
+
+    fn prep_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+        on_click: impl Fn(&mut crate::timer::PrepTimerState) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(26.0))
+            .px(px(10.0))
+            .rounded(px(radius::MD))
+            .text_xs()
+            .border_1()
+            .border_color(rgb(p.border_subtle))
+            .text_color(rgb(if enabled { p.text } else { p.text_faint }))
+            .when(enabled, |d| {
+                d.cursor_pointer()
+                    .on_click(cx.listener(move |this, _ev, _window, cx| {
+                        this.state.update(cx, |state, cx| {
+                            on_click(state.prep_timer_mut());
+                            state.save_prep_timer();
+                            cx.notify();
+                        });
                         cx.notify();
                     }))
             })
@@ -404,6 +492,15 @@ impl Render for Timer {
         let p = state.current_palette();
         let mode = state.ui().timer.mode;
         let running = state.ui().timer.is_running();
+        let prep_running = state.ui().prep_timer.is_running();
+        let prep_display = format_duration(state.ui().prep_timer.displayed());
+        let prep_team = state.ui().prep_timer.team;
+        let prep_default = state.preferences().prep_time_minutes;
+        let speech_defaults = [
+            state.preferences().speech_time_minutes,
+            state.preferences().speech_time_2_minutes,
+            state.preferences().speech_time_3_minutes,
+        ];
         let display = format_duration(state.ui().timer.displayed());
         let input = state.ui().timer.input.clone();
         let unparseable = mode == TimerMode::Countdown && state.ui().timer.target().is_none();
@@ -549,6 +646,49 @@ impl Render for Timer {
                         ),
                 )
             })
+            // ── Speech presets ───────────────────────────────────────────
+            .when(mode == TimerMode::Countdown, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_center()
+                        .gap(px(space::XXS))
+                        .child(self.button(
+                            "timer-preset-1",
+                            format!("{} min", speech_defaults[0]),
+                            true,
+                            p,
+                            cx,
+                            move |t| {
+                                t.input = format!("{}:00", speech_defaults[0]);
+                                t.reset();
+                            },
+                        ))
+                        .child(self.button(
+                            "timer-preset-2",
+                            format!("{} min", speech_defaults[1]),
+                            true,
+                            p,
+                            cx,
+                            move |t| {
+                                t.input = format!("{}:00", speech_defaults[1]);
+                                t.reset();
+                            },
+                        ))
+                        .child(self.button(
+                            "timer-preset-3",
+                            format!("{} min", speech_defaults[2]),
+                            true,
+                            p,
+                            cx,
+                            move |t| {
+                                t.input = format!("{}:00", speech_defaults[2]);
+                                t.reset();
+                            },
+                        )),
+                )
+            })
             // ── Transport ────────────────────────────────────────────────
             .child(
                 div()
@@ -560,6 +700,90 @@ impl Render for Timer {
                     .child(self.button("timer-stop", "Stop", running, p, cx, |t| t.stop()))
                     .child(self.button("timer-lap", "Lap", running, p, cx, |t| t.lap()))
                     .child(self.button("timer-reset", "Reset", true, p, cx, |t| t.reset())),
+            )
+            // ── Per-team prep timer ──────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XXS))
+                    .border_t_1()
+                    .border_color(rgb(p.border_subtle))
+                    .pt(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(p.text_muted))
+                                    .child("Prep time"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(space::XXS))
+                                    .child(self.prep_button(
+                                        "prep-team-a",
+                                        "Team 1",
+                                        true,
+                                        p,
+                                        cx,
+                                        |t| t.select_team(0),
+                                    ))
+                                    .child(self.prep_button(
+                                        "prep-team-b",
+                                        "Team 2",
+                                        true,
+                                        p,
+                                        cx,
+                                        |t| t.select_team(1),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_center()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .child(div().text_lg().child(prep_display))
+                            .child(self.prep_button(
+                                "prep-start",
+                                "Start",
+                                !prep_running,
+                                p,
+                                cx,
+                                |t| t.start(),
+                            ))
+                            .child(self.prep_button(
+                                "prep-stop",
+                                "Stop",
+                                prep_running,
+                                p,
+                                cx,
+                                |t| t.stop(),
+                            ))
+                            .child(self.prep_button(
+                                "prep-reset",
+                                "Reset",
+                                true,
+                                p,
+                                cx,
+                                move |t| t.reset(prep_default),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(p.text_faint))
+                            .child(format!("Team {}", prep_team + 1)),
+                    ),
             )
             // ── Laps ─────────────────────────────────────────────────────
             .when(!laps.is_empty(), |d| {
@@ -593,7 +817,9 @@ mod tests {
     // Named imports, not `use super::*` — that would re-glob `gpui::*`, whose
     // own `test` attribute macro then shadows the standard one and expands
     // into itself ("recursion limit reached while expanding `#[test]`").
-    use super::{format_duration, parse_duration, words_per_minute, TimerMode, TimerState};
+    use super::{
+        format_duration, parse_duration, words_per_minute, PrepTimerState, TimerMode, TimerState,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -708,6 +934,18 @@ mod tests {
         timer.lap();
 
         assert_eq!(timer.laps, vec![Duration::from_secs(48)]);
+    }
+
+    #[test]
+    fn prep_timer_keeps_each_team_on_its_own_clock() {
+        let mut prep = PrepTimerState::new(3);
+        prep.remaining[0] = Duration::from_secs(20);
+        prep.select_team(1);
+        prep.remaining[1] = Duration::from_secs(40);
+        prep.select_team(0);
+        assert_eq!(prep.remaining[0], Duration::from_secs(20));
+        prep.select_team(1);
+        assert_eq!(prep.remaining[1], Duration::from_secs(40));
     }
 
     #[test]

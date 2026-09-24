@@ -52,6 +52,14 @@ impl AppState {
         // `CardStyleKind::font_size` is the one place these defaults live, so
         // an absent settings key and the enum can't disagree.
 
+        let mut ui = UiState::default();
+        ui.timer.input = format!("{}:00", preferences.speech_time_minutes);
+        ui.prep_timer = crate::timer::PrepTimerState::new(preferences.prep_time_minutes);
+        ui.prep_timer.set_remaining([
+            std::time::Duration::from_secs(preferences.prep_remaining_team_1_seconds),
+            std::time::Duration::from_secs(preferences.prep_remaining_team_2_seconds),
+        ]);
+
         AppState {
             workspace: WorkspaceState {
                 tabs: vec![Tab::new_empty(TabId(0))],
@@ -68,7 +76,7 @@ impl AppState {
                 split_ratio: 0.5,
                 split_dragging: false,
             },
-            ui: UiState::default(),
+            ui,
             global_vim: GlobalVimState {
                 vim_enabled,
                 vim_keybinds,
@@ -140,6 +148,12 @@ impl AppState {
     /// `content_version`, so a spelling fix is undoable and re-snapshotted for
     /// crash recovery without this method knowing either concept exists.
     pub fn replace_spell_target(&mut self, target: &SpellTarget, replacement: &str) {
+        let original_alignment = self
+            .workspace
+            .tabs
+            .get(self.workspace.active_tab)
+            .and_then(|tab| tab.document.paragraphs().get(target.line))
+            .map(|para| para.alignment);
         let runs = self
             .workspace
             .tabs
@@ -174,6 +188,16 @@ impl AppState {
         self.set_cursor_from_line_col(target.line, target.start_col);
         self.extend_selection_to_line_col(target.line, target.end_col);
         self.insert_str_with_runs(replacement, &runs);
+        if let Some(alignment) = original_alignment {
+            if let Some(para) = self
+                .workspace
+                .tabs
+                .get_mut(self.workspace.active_tab)
+                .and_then(|tab| tab.document.paragraphs_mut_slice().get_mut(target.line))
+            {
+                para.alignment = alignment;
+            }
+        }
     }
 
     /// Word counts for the active tab, for the word-count panel.
@@ -437,6 +461,12 @@ impl AppState {
                         .then_some((line_start, tab.cursor))
                 });
             if let Some((start, end)) = bullet {
+                // The marker conversion is a second logical edit: undo should
+                // restore the literal "- " rather than erase the keystroke.
+                if let Some(tab) = self.workspace.tabs.get_mut(self.workspace.active_tab) {
+                    tab.document.last_edit_at = None;
+                }
+                self.push_undo_snapshot();
                 buffer_delete_range(
                     &mut self.workspace.tabs[self.workspace.active_tab].document,
                     start,
@@ -2641,12 +2671,14 @@ impl AppState {
                 self.ui.notifications.push(crate::state::Notification {
                     severity: crate::state::NotificationSeverity::Error,
                     message: error.to_string(),
+                    created_at: Instant::now(),
                 });
             }
             crate::app::command::AppEffect::ShowError(message) => {
                 self.ui.notifications.push(crate::state::Notification {
                     severity: crate::state::NotificationSeverity::Error,
                     message,
+                    created_at: Instant::now(),
                 });
             }
             crate::app::command::AppEffect::WriteClipboard { .. }

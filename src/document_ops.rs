@@ -206,15 +206,9 @@ fn split_paragraph_at(
      * Splits paragraph `para_idx` into two at (run_idx, char_offset): the
      * run being split becomes a "head" run ending the first paragraph, and
      * a "tail" run starting the second, followed by whatever runs came
-     * after it. The new second paragraph always gets `heading: 0` — real
-     * Word itself reverts to body style after pressing Enter inside a
-     * heading, so this matches rather than deviates from that convention.
-     *
-     * When splitting a line with card-style formatting (Pocket/Hat/Block/
-     * Tag, i.e. `heading != 0`), the new paragraph's formatting reverts to
-     * plain (see `was_heading` below) instead of inheriting the split run's
-     * bold/size/box/underline/alignment — otherwise `heading` would reset
-     * but the line would still visually look like the card style.
+     * after it. Card styling follows text moved to the new paragraph when
+     * Enter splits the middle of a styled line. Enter at the true end still
+     * starts a plain body paragraph, matching normal editor behavior.
      */
     let para = &mut paragraphs[para_idx];
     let split_run = &para.runs[run_idx];
@@ -243,15 +237,9 @@ fn split_paragraph_at(
     // untouched either way; only the newly-created line's is decided here.
     let line_had_any_text = para.runs.iter().any(|r| !r.text.is_empty());
     let new_line_list = list.filter(|_| line_had_any_text);
-    // A card style (Pocket/Hat/Block/Tag) is entirely run-level formatting
-    // plus this paragraph-level `heading` marker (state.rs's
-    // `apply_card_style`) — so splitting a heading line must revert the
-    // *new* paragraph's formatting the same way real Word reverts to Normal
-    // style after Enter inside a heading, not just clone the split run's
-    // bold/size/box/underline onto it. `size: 0` (via `Run::default()`) is
-    // this codebase's existing "inherit normal size" convention (also what
-    // a brand-new blank document's first paragraph starts with), so this
-    // doesn't need a caller-supplied default size.
+    // At the true end of a card-style line, the new paragraph is plain body
+    // text. A mid-line split retains the paragraph marker and run formatting
+    // on both resulting paragraphs.
     let was_heading = heading != 0;
     let tail_text = split_run.text[char_offset..].to_string();
     let reset_tail = was_heading
@@ -1053,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_newline_on_empty_list_item_does_not_continue_the_list() {
+    fn test_insert_newline_on_empty_level_zero_list_item_exits_in_place() {
         let mut item = para(vec![run("")]);
         item.list = Some(ListItem {
             kind: ListKind::BulletSolid,
@@ -1061,19 +1049,8 @@ mod tests {
         });
         let mut paragraphs = vec![item];
         sync_insert_char(&mut paragraphs, 0, '\n');
-        assert_eq!(paragraphs.len(), 2);
-        // The original (now still-empty) line keeps whatever it had — this
-        // task only specifies the *new* line's behavior.
-        assert_eq!(
-            paragraphs[0].list,
-            Some(ListItem {
-                kind: ListKind::BulletSolid,
-                level: 0
-            })
-        );
-        // The new line does not continue the list: no character followed
-        // the marker on the line that was split.
-        assert_eq!(paragraphs[1].list, None);
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].list, None);
     }
 
     #[test]
@@ -1133,10 +1110,9 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_newline_mid_heading_line_resets_trailing_text_to_plain() {
-        // Splitting in the middle of a Hat-styled line: the trailing half
-        // that moves to the new paragraph loses the Hat formatting too,
-        // matching Word's "Enter inside a heading reverts to body style".
+    fn test_insert_newline_mid_heading_line_keeps_style_with_trailing_text() {
+        // Splitting in the middle of a Hat-styled line keeps the style on both
+        // pieces of the styled text; only an end-of-line Enter starts plain.
         let heading_line = Paragraph {
             list: None,
             runs: vec![Run {
@@ -1159,11 +1135,11 @@ mod tests {
         assert_eq!(paragraphs[0].heading, 2);
 
         assert_eq!(paragraphs[1].runs[0].text, " world");
-        assert_eq!(paragraphs[1].heading, 0);
-        assert_eq!(paragraphs[1].alignment, Alignment::Left);
-        assert!(!paragraphs[1].runs[0].bold);
-        assert!(!paragraphs[1].runs[0].double_underline);
-        assert_eq!(paragraphs[1].runs[0].size, 0);
+        assert_eq!(paragraphs[1].heading, 2);
+        assert_eq!(paragraphs[1].alignment, Alignment::Center);
+        assert!(paragraphs[1].runs[0].bold);
+        assert!(paragraphs[1].runs[0].double_underline);
+        assert_eq!(paragraphs[1].runs[0].size, 44);
     }
 
     #[test]

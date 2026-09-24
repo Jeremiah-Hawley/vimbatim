@@ -829,6 +829,7 @@ pub enum NotificationSeverity {
 pub struct Notification {
     pub severity: NotificationSeverity,
     pub message: String,
+    pub created_at: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -850,6 +851,7 @@ pub struct UiState {
     pub sidebar_visible: bool,
     pub word_count_visible: bool,
     pub timer: crate::timer::TimerState,
+    pub prep_timer: crate::timer::PrepTimerState,
     pub read_mode: bool,
     pub sidebar_before_read_mode: bool,
     pub invisibility_mode: bool,
@@ -873,6 +875,7 @@ impl Default for UiState {
             sidebar_visible: true,
             word_count_visible: false,
             timer: crate::timer::TimerState::default(),
+            prep_timer: crate::timer::PrepTimerState::new(5),
             read_mode: false,
             sidebar_before_read_mode: true,
             invisibility_mode: false,

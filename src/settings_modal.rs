@@ -58,18 +58,20 @@ pub enum SettingsSection {
     Fonts,
     Keybindings,
     ToggleFeatures,
+    Timer,
 }
 
 impl SettingsSection {
     /// Sidebar order, top to bottom. `ToggleFeatures` is deliberately last —
     /// the toggles belong at the bottom of the settings list.
-    fn all() -> [SettingsSection; 5] {
+    fn all() -> [SettingsSection; 6] {
         [
             SettingsSection::Appearance,
             SettingsSection::TextSettings,
             SettingsSection::Fonts,
             SettingsSection::Keybindings,
             SettingsSection::ToggleFeatures,
+            SettingsSection::Timer,
         ]
     }
 
@@ -80,6 +82,7 @@ impl SettingsSection {
             SettingsSection::Fonts => "Fonts",
             SettingsSection::Keybindings => "Keybindings",
             SettingsSection::ToggleFeatures => "Toggle Features",
+            SettingsSection::Timer => "Timer",
         }
     }
 
@@ -90,6 +93,7 @@ impl SettingsSection {
             SettingsSection::Fonts => crate::icons::Icon::SettingsFonts,
             SettingsSection::Keybindings => crate::icons::Icon::SettingsKeybindings,
             SettingsSection::ToggleFeatures => crate::icons::Icon::SettingsToggles,
+            SettingsSection::Timer => crate::icons::Icon::Timer,
         }
     }
 }
@@ -632,6 +636,35 @@ impl SettingsModal {
     fn toggle_nav_fold_buttons(&mut self, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.toggle_nav_fold_buttons();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn adjust_timer_default(
+        &mut self,
+        speech_slot: Option<usize>,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| {
+            let prefs = s.preferences();
+            let mut speech = [
+                prefs.speech_time_minutes,
+                prefs.speech_time_2_minutes,
+                prefs.speech_time_3_minutes,
+            ];
+            let prep = prefs.prep_time_minutes;
+            match speech_slot {
+                Some(slot) => speech[slot] = (speech[slot] as i32 + delta).clamp(1, 120) as u16,
+                None => {}
+            }
+            let prep = if speech_slot.is_none() {
+                (prep as i32 + delta).clamp(1, 120) as u16
+            } else {
+                prep
+            };
+            s.set_timer_defaults(speech, prep);
             cx.notify();
         });
         cx.notify();

@@ -14,6 +14,12 @@ pub struct Preferences {
     pub spellcheck_underline_color: String,
     pub line_spacing: f32,
     pub spreading_wpm: u32,
+    pub speech_time_minutes: u16,
+    pub speech_time_2_minutes: u16,
+    pub speech_time_3_minutes: u16,
+    pub prep_time_minutes: u16,
+    pub prep_remaining_team_1_seconds: u64,
+    pub prep_remaining_team_2_seconds: u64,
     pub normal_text_size_half_points: u16,
     pub small_size_half_points: u16,
     pub pocket_size_half_points: u16,
@@ -53,6 +59,12 @@ impl Default for Preferences {
             spellcheck_underline_color: "red".into(),
             line_spacing: 1.0,
             spreading_wpm: 300,
+            speech_time_minutes: 9,
+            speech_time_2_minutes: 3,
+            speech_time_3_minutes: 6,
+            prep_time_minutes: 5,
+            prep_remaining_team_1_seconds: 300,
+            prep_remaining_team_2_seconds: 300,
             normal_text_size_half_points: 22,
             small_size_half_points: 12,
             pocket_size_half_points: 52,
@@ -122,6 +134,24 @@ impl Preferences {
             .get("spreading_wpm")
             .and_then(|v| v.parse().ok())
             .map_or(300, |v: u32| v.clamp(50, 1000));
+        let minutes = |key: &str, default: u16| {
+            values
+                .get(key)
+                .and_then(|v| v.parse().ok())
+                .map_or(default, |v: u16| v.clamp(1, 120))
+        };
+        p.speech_time_minutes = minutes("speech_time_minutes", p.speech_time_minutes);
+        p.speech_time_2_minutes = minutes("speech_time_2_minutes", p.speech_time_2_minutes);
+        p.speech_time_3_minutes = minutes("speech_time_3_minutes", p.speech_time_3_minutes);
+        p.prep_time_minutes = minutes("prep_time_minutes", p.prep_time_minutes);
+        p.prep_remaining_team_1_seconds = values
+            .get("prep_remaining_team_1_seconds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        p.prep_remaining_team_2_seconds = values
+            .get("prep_remaining_team_2_seconds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
         let size = |key, default| {
             values
                 .get(key)
@@ -200,6 +230,24 @@ impl Preferences {
             ),
             ("line_spacing", self.line_spacing.to_string()),
             ("spreading_wpm", self.spreading_wpm.to_string()),
+            ("speech_time_minutes", self.speech_time_minutes.to_string()),
+            (
+                "speech_time_2_minutes",
+                self.speech_time_2_minutes.to_string(),
+            ),
+            (
+                "speech_time_3_minutes",
+                self.speech_time_3_minutes.to_string(),
+            ),
+            ("prep_time_minutes", self.prep_time_minutes.to_string()),
+            (
+                "prep_remaining_team_1_seconds",
+                self.prep_remaining_team_1_seconds.to_string(),
+            ),
+            (
+                "prep_remaining_team_2_seconds",
+                self.prep_remaining_team_2_seconds.to_string(),
+            ),
         ] {
             Self::update(path, key, &value)?;
         }

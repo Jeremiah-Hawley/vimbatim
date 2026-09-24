@@ -1243,7 +1243,11 @@ impl Render for TextEditor {
                     .font_family(FONT_FAMILY)
                     .text_sm()
                     .text_color(rgb(p.text))
+                    .flex()
+                    .flex_row()
+                    .justify_between()
                     .child(line)
+                    .child(format!("{}%", (zoom * 100.0).round() as u32))
             })
             .when_some(
                 self.state.read(cx).ui().editor_context_menu.clone(),

@@ -33,6 +33,10 @@ impl AppState {
         &mut self.ui.timer
     }
 
+    pub fn prep_timer_mut(&mut self) -> &mut crate::timer::PrepTimerState {
+        &mut self.ui.prep_timer
+    }
+
     pub fn toggle_timer(&mut self) {
         self.ui.timer.visible = !self.ui.timer.visible;
     }
