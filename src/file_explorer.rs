@@ -8,6 +8,7 @@ use crate::state::{
     AppState, FileContextMenu, FileContextMenuTarget, FileNode, NavContextMenuTarget, SidebarMode,
 };
 use crate::theme::{radius, space, Palette};
+use crate::timer::Timer;
 
 /// Drag payload used solely to identify a sidebar-resize drag to
 /// `MainWindow`'s `on_drag_move` handler (`main_window.rs`) — GPUI
@@ -42,6 +43,7 @@ impl Render for SidebarResizePayload {
 /// handle on its right edge (`render`, bottom).
 pub struct FileExplorer {
     state: Entity<AppState>,
+    timer: Entity<Timer>,
     /// Line indices (into the active tab's content) of Nav headings the
     /// user has collapsed, hiding their nested headings. View-only UI
     /// state — unlike the file tree's own expand/collapse (`FileNode::Dir.
@@ -72,7 +74,7 @@ pub struct FileExplorer {
 }
 
 impl FileExplorer {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, timer: Entity<Timer>, cx: &mut Context<Self>) -> Self {
         /*
          * Constructs the FileExplorer. File tree data lives in AppState so that
          * the rest of the app can react to file changes without querying the
@@ -81,6 +83,7 @@ impl FileExplorer {
          */
         FileExplorer {
             state,
+            timer,
             nav_collapsed: HashSet::new(),
             nav_max_level: None,
             rename_focus: cx.focus_handle(),
@@ -1502,7 +1505,9 @@ impl Render for FileExplorer {
             .tabs
             .get(state.workspace().active_tab)
             .and_then(|tab| tab.file_path.clone());
-        let sidebar_width = if state.ui().timer.visible {
+        let sidebar_width = if state.ui().timer.visible
+            || (state.preferences().timer_panel_enabled && sidebar_mode == SidebarMode::Timer)
+        {
             state.sidebar_width().max(280.0)
         } else {
             state.sidebar_width()
@@ -1510,6 +1515,7 @@ impl Render for FileExplorer {
         let has_copied_file = state.copied_file().is_some();
         let pending_cut = state.copied_file().is_some_and(|(_, cut)| *cut);
         let nav_fold_buttons = state.preferences().nav_fold_buttons;
+        let timer_panel_enabled = state.preferences().timer_panel_enabled;
         let _ = state;
 
         let state_handle = self.state.clone();
@@ -1549,6 +1555,7 @@ impl Render for FileExplorer {
                                 .child(match sidebar_mode {
                                     SidebarMode::Files => "Files",
                                     SidebarMode::Nav => "Nav",
+                                    SidebarMode::Timer => "Timer",
                                 }))
                             // Files/Nav toggle
                             .child(
@@ -1575,6 +1582,10 @@ impl Render for FileExplorer {
                                         p,
                                         &state_handle,
                                     ))
+                                    .when(timer_panel_enabled, |d| d.child(Self::render_mode_toggle_btn(
+                                        "timer-mode-btn", crate::icons::icon(crate::icons::Icon::Timer, p.text, 14.0),
+                                        "Timer", SidebarMode::Timer, sidebar_mode, p, &state_handle,
+                                    )))
                             )
                             // RHS Control Buttons (New File, Refresh)
                             .child(
@@ -1656,6 +1667,7 @@ impl Render for FileExplorer {
                         let title = match sidebar_mode {
                             SidebarMode::Files => dir_name,
                             SidebarMode::Nav => active_tab_title.unwrap_or_default(),
+                            SidebarMode::Timer => "Timer".to_string(),
                         };
                         let tip = title.clone();
                         div().id("sidebar-folder-title").w_full().min_w_0()
@@ -1755,6 +1767,7 @@ impl Render for FileExplorer {
                         .into_any_element()
                 }
                 SidebarMode::Nav => self.render_nav_tree(&state_handle, p, cx),
+                SidebarMode::Timer => self.timer.clone().into_any_element(),
             })
             .when_some(
                 self.state.read(cx).ui().file_context_menu.clone(),

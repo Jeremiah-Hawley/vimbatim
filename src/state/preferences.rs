@@ -39,6 +39,14 @@ impl AppState {
         self.save_flag("nav_fold_buttons", self.preferences.nav_fold_buttons);
     }
 
+    pub fn toggle_timer_panel_enabled(&mut self) {
+        self.preferences.timer_panel_enabled = !self.preferences.timer_panel_enabled;
+        if !self.preferences.timer_panel_enabled && self.sidebar_mode == SidebarMode::Timer {
+            self.sidebar_mode = SidebarMode::Files;
+        }
+        self.save_flag("timer_panel_enabled", self.preferences.timer_panel_enabled);
+    }
+
     pub fn toggle_search_from_list(&mut self) {
         self.preferences.search_from_list_enabled = !self.preferences.search_from_list_enabled;
         self.save_flag(

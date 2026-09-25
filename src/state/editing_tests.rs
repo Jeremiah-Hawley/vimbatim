@@ -257,6 +257,24 @@ fn test_load_custom_colors_parses_pipe_separated_hex() {
 }
 
 #[test]
+fn timer_panel_preference_defaults_off_and_loads_from_settings() {
+    let dir = custom_color_temp_dir("timer-panel");
+    let path = dir.join("settings.conf");
+    assert!(
+        !crate::preferences::Preferences::load(&path)
+            .unwrap_or_default()
+            .timer_panel_enabled
+    );
+    std::fs::write(&path, "timer_panel_enabled=true\n").unwrap();
+    assert!(
+        crate::preferences::Preferences::load(&path)
+            .unwrap()
+            .timer_panel_enabled
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn test_load_custom_colors_tolerates_missing_and_garbage() {
     let dir = custom_color_temp_dir("tolerant");
     let path = dir.join("settings.conf");
@@ -10968,6 +10986,25 @@ fn toggle_sidebar_mode_reveals_a_hidden_sidebar() {
     state.ui.sidebar_visible = false;
     state.toggle_sidebar_mode();
     assert!(state.ui.sidebar_visible);
+}
+
+#[test]
+fn timer_sidebar_mode_toggles_and_disabling_does_not_strand_sidebar() {
+    let mut state = make_state("", 0, None);
+    state.toggle_timer();
+    assert!(state.ui.timer.visible);
+    state.toggle_timer();
+    assert!(!state.ui.timer.visible);
+
+    state.toggle_timer_panel_enabled();
+    state.toggle_timer();
+    assert_eq!(state.sidebar_mode, SidebarMode::Timer);
+    assert!(state.ui.sidebar_visible);
+    state.toggle_sidebar_mode();
+    assert_eq!(state.sidebar_mode, SidebarMode::Nav);
+    state.switch_sidebar_mode(SidebarMode::Timer);
+    state.toggle_timer_panel_enabled();
+    assert_eq!(state.sidebar_mode, SidebarMode::Files);
 }
 
 #[test]

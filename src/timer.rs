@@ -1,6 +1,6 @@
 /*
- * Speech timer: a countdown/stopwatch popup that opens over the middle of the
- * formatting ribbon, plus the WPM readout that turns a selection and a
+ * Speech timer: a countdown/stopwatch view shown in the sidebar or its
+ * original dock, plus the WPM readout that turns a selection and a
  * duration into "how fast would I have to read this".
  *
  * `TimerState` (held by `AppState`) is plain data and arithmetic with no GPUI
@@ -244,9 +244,7 @@ impl PrepTimerState {
     }
 }
 
-/// The timer popup. Rendered by `MainWindow` inside the ribbon's own stacking
-/// context (and `deferred`, so it paints over the editor below), which is what
-/// puts it in the middle of the ribbon.
+/// Timer view shared by the sidebar panel and the original dock.
 pub struct Timer {
     state: Entity<AppState>,
     /// Focus for the countdown duration box — same typable-box pattern as the
@@ -490,6 +488,7 @@ impl Render for Timer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let p = state.current_palette();
+        let in_sidebar = state.preferences().timer_panel_enabled;
         let mode = state.ui().timer.mode;
         let running = state.ui().timer.is_running();
         let prep_running = state.ui().prep_timer.is_running();
@@ -518,11 +517,13 @@ impl Render for Timer {
 
         div()
             .w_full()
-            .bg(rgb(p.chrome))
-            .border_1()
-            .border_color(rgb(p.border))
-            .rounded(px(8.0))
-            .shadow_lg()
+            .bg(rgb(if in_sidebar { p.sidebar } else { p.chrome }))
+            .when(!in_sidebar, |d| {
+                d.border_1()
+                    .border_color(rgb(p.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+            })
             .flex()
             .flex_col()
             .gap(px(space::SM))
@@ -560,30 +561,32 @@ impl Render for Timer {
                                 cx,
                             )),
                     )
-                    .child(
-                        div()
-                            .id("timer-close")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(20.0))
-                            .h(px(20.0))
-                            .rounded(px(radius::MD))
-                            .cursor_pointer()
-                            .text_color(rgb(p.text_muted))
-                            .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
-                            .on_click(cx.listener(|this, _ev, _window, cx| {
-                                this.state.update(cx, |s, cx| {
-                                    s.timer_mut().visible = false;
-                                    cx.notify();
-                                });
-                            }))
-                            .child(crate::icons::icon(
-                                crate::icons::Icon::TabClose,
-                                p.text_muted,
-                                12.0,
-                            )),
-                    ),
+                    .when(!in_sidebar, |d| {
+                        d.child(
+                            div()
+                                .id("timer-close")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .rounded(px(radius::MD))
+                                .cursor_pointer()
+                                .text_color(rgb(p.text_muted))
+                                .hover(move |s| s.bg(rgb(p.chrome_hover)).text_color(rgb(p.text)))
+                                .on_click(cx.listener(|this, _ev, _window, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.timer_mut().visible = false;
+                                        cx.notify();
+                                    });
+                                }))
+                                .child(crate::icons::icon(
+                                    crate::icons::Icon::TabClose,
+                                    p.text_muted,
+                                    12.0,
+                                )),
+                        )
+                    }),
             )
             // ── The clock ────────────────────────────────────────────────
             .child(

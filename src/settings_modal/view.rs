@@ -409,6 +409,7 @@ impl SettingsModal {
         &self,
         speech_minutes: [u16; 3],
         prep_minutes: u16,
+        timer_panel_enabled: bool,
         p: crate::theme::Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -479,6 +480,13 @@ impl SettingsModal {
                 "Prep time per team",
                 prep_minutes,
                 None,
+            ))
+            .child(div().h(px(1.0)).bg(rgb(p.border_subtle)))
+            .child(Self::toggle_row(
+                "timer-panel-toggle", "Timer Panel",
+                "Shows the timer as its own sidebar panel, next to Files and Nav, instead of docked above them.",
+                timer_panel_enabled, p,
+                cx.listener(|this, _ev, _window, cx| this.toggle_timer_panel_enabled(cx)),
             ))
     }
 
@@ -1227,6 +1235,7 @@ impl Render for SettingsModal {
         };
         let prep_time_minutes = self.state.read(cx).preferences().prep_time_minutes;
         let nav_fold_buttons = self.state.read(cx).preferences().nav_fold_buttons;
+        let timer_panel_enabled = self.state.read(cx).preferences().timer_panel_enabled;
         let search_from_list_enabled = self.state.read(cx).preferences().search_from_list_enabled;
         let search_list_whole_words = self.state.read(cx).preferences().search_list_whole_words;
         let command_palette_enabled = self.state.read(cx).preferences().command_palette_enabled;
@@ -1505,6 +1514,7 @@ impl Render for SettingsModal {
                                             d.child(self.render_timer_settings(
                                                 speech_time_minutes,
                                                 prep_time_minutes,
+                                                timer_panel_enabled,
                                                 p,
                                                 cx,
                                             ))

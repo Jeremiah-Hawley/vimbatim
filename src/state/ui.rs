@@ -38,7 +38,21 @@ impl AppState {
     }
 
     pub fn toggle_timer(&mut self) {
-        self.ui.timer.visible = !self.ui.timer.visible;
+        if self.preferences.timer_panel_enabled {
+            self.sidebar_mode = if self.sidebar_mode == SidebarMode::Timer {
+                SidebarMode::Files
+            } else {
+                SidebarMode::Timer
+            };
+            self.ui.sidebar_visible = true;
+        } else {
+            self.ui.timer.visible = !self.ui.timer.visible;
+        }
+    }
+
+    pub fn switch_sidebar_mode(&mut self, mode: SidebarMode) {
+        self.sidebar_mode = mode;
+        self.ui.sidebar_visible = true;
     }
 
     pub fn push_pending_keybind(&mut self, action: crate::keybinds::KeybindAction) {
@@ -382,9 +396,10 @@ impl AppState {
     }
 
     pub fn toggle_sidebar_mode(&mut self) {
-        self.sidebar_mode = match self.sidebar_mode {
-            SidebarMode::Files => SidebarMode::Nav,
-            SidebarMode::Nav => SidebarMode::Files,
+        self.sidebar_mode = if self.sidebar_mode == SidebarMode::Nav {
+            SidebarMode::Files
+        } else {
+            SidebarMode::Nav
         };
         self.ui.sidebar_visible = true;
     }

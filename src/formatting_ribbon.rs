@@ -4,7 +4,10 @@ use gpui::*;
 use crate::document_ops::{is_uniformly_active, FormatOp};
 use crate::docx_parser::Alignment;
 use crate::theme::{radius, space, Palette, ThemeColorMode, ThemeMode};
-use crate::{document::TabId, state::AppState};
+use crate::{
+    document::TabId,
+    state::{AppState, SidebarMode},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -2292,6 +2295,12 @@ impl Render for FormattingRibbon {
         // commented-out Print Layout button below — deferred.
         let any_folded = self.state.read(cx).any_folded();
         let timer_visible = self.state.read(cx).ui().timer.visible;
+        let timer_panel_enabled = self.state.read(cx).preferences().timer_panel_enabled;
+        let timer_engaged = if timer_panel_enabled {
+            self.state.read(cx).sidebar_mode() == SidebarMode::Timer
+        } else {
+            timer_visible
+        };
         let (bold_active, italic_active, underline_active, strikethrough_active, emphasis_active) = {
             let format_active = |op: FormatOp| {
                 let state = self.state.read(cx);
@@ -2521,7 +2530,7 @@ impl Render for FormattingRibbon {
                             .engaged(invisibility_mode),
                             RibbonBtn::secondary("Timer", FormatAction::Timer)
                                 .with_icon(crate::icons::Icon::Timer)
-                                .engaged(timer_visible),
+                                .engaged(timer_engaged),
                         ],
                     vec![
                             RibbonBtn::secondary("Switch Tab", FormatAction::SwitchTabMenu)

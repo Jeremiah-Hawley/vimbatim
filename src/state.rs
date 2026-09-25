@@ -674,6 +674,7 @@ pub enum SidebarMode {
     #[default]
     Files,
     Nav,
+    Timer,
 }
 
 /// What a file-explorer right-click landed on (`found_bugs.md`'s Forgotten

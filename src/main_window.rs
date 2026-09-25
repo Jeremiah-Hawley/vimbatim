@@ -34,7 +34,7 @@ use crate::keybinds::{
 };
 use crate::recovery_prompt::RecoveryPrompt;
 use crate::settings_modal::SettingsModal;
-use crate::state::{clamp_sidebar_width, clamp_split_ratio, AppState, CardStyleKind};
+use crate::state::{clamp_sidebar_width, clamp_split_ratio, AppState, CardStyleKind, SidebarMode};
 use crate::tab_bar::TabBar;
 use crate::text_editor::TextEditor;
 use crate::timer::Timer;
@@ -114,7 +114,8 @@ impl MainWindow {
         // — sharing one editor would make the panes fight over all four.
         let text_editor_secondary =
             cx.new(|cx| TextEditor::for_pane(state.clone(), crate::state::Pane::Secondary, cx));
-        let file_explorer = cx.new(|cx| FileExplorer::new(state.clone(), cx));
+        let timer = cx.new(|cx| Timer::new(state.clone(), cx));
+        let file_explorer = cx.new(|cx| FileExplorer::new(state.clone(), timer.clone(), cx));
         let find_bar = cx.new(|cx| FindBarView::new(state.clone(), cx));
         let command_palette = cx.new(|cx| CommandPaletteView::new(state.clone(), cx));
         let settings_modal = cx.new(|cx| SettingsModal::new(state.clone(), cx));
@@ -122,7 +123,6 @@ impl MainWindow {
         let font_import_modal = cx.new(|_cx| FontImportModal::new(state.clone()));
         let recovery_prompt = cx.new(|_cx| RecoveryPrompt::new(state.clone()));
         let word_count = cx.new(|_cx| WordCount::new(state.clone()));
-        let timer = cx.new(|cx| Timer::new(state.clone(), cx));
 
         // ── Crash-recovery snapshots ────────────────────────────────────
         // One task for the whole app, not one per tab: it wakes on a fixed
@@ -1080,6 +1080,9 @@ impl Render for MainWindow {
         let has_recovery = !self.state.read(cx).recovery().pending_entries.is_empty();
         let word_count_visible = self.state.read(cx).ui().word_count_visible;
         let timer_visible = self.state.read(cx).ui().timer.visible;
+        let timer_panel_enabled = self.state.read(cx).preferences().timer_panel_enabled;
+        let timer_panel_showing =
+            timer_panel_enabled && self.state.read(cx).sidebar_mode() == SidebarMode::Timer;
         let split_view = self.state.read(cx).workspace().split_view;
         let split_ratio = self.state.read(cx).workspace().split_ratio;
         let sidebar_width = self.state.read(cx).sidebar_width();
@@ -1151,7 +1154,10 @@ impl Render for MainWindow {
                 split_state.update(cx, |s, cx| {
                     // Measured against the editor area, which starts after the
                     // sidebar when one is showing.
-                    let left = if s.ui().timer.visible {
+                    let left = if s.ui().timer.visible
+                        || (s.preferences().timer_panel_enabled
+                            && s.sidebar_mode() == SidebarMode::Timer)
+                    {
                         s.sidebar_width().max(280.0)
                     } else if s.ui().sidebar_visible {
                         s.sidebar_width()
@@ -1238,14 +1244,14 @@ impl Render for MainWindow {
                                 .flex()
                                 .flex_col()
                                 .flex_none()
-                                .w(px(if timer_visible {
+                                .w(px(if timer_visible || timer_panel_showing {
                                     sidebar_width.max(280.0)
                                 } else {
                                     sidebar_width
                                 }))
                                 .min_h_0()
                                 .overflow_hidden()
-                                .when(timer_visible, |d| {
+                                .when(timer_visible && !timer_panel_enabled, |d| {
                                     d.child(
                                         div()
                                             .id("timer-dock")

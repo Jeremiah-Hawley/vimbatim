@@ -641,6 +641,14 @@ impl SettingsModal {
         cx.notify();
     }
 
+    fn toggle_timer_panel_enabled(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.toggle_timer_panel_enabled();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn adjust_timer_default(
         &mut self,
         speech_slot: Option<usize>,

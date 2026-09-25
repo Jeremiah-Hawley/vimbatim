@@ -15,7 +15,7 @@ use gpui::*;
 use crate::document_ops::FormatOp;
 use crate::docx_parser::Alignment;
 use crate::keybinds::{action_for, KeybindAction};
-use crate::state::AppState;
+use crate::state::{AppState, SidebarMode};
 use crate::theme::{radius, space};
 
 /// How a palette entry actually runs.
@@ -74,14 +74,17 @@ pub struct PaletteCommand {
 ///     because the two spell the same command differently ("Timer" vs
 ///     "Toggle Timer"). Same-behaviour-different-label is the one duplication
 ///     this registry has to catch by reading, not by test.
-pub fn registry() -> Vec<PaletteCommand> {
+pub fn registry(timer_panel_enabled: bool) -> Vec<PaletteCommand> {
     let mut out: Vec<PaletteCommand> = Vec::new();
 
     // ── 1. Bindable actions ────────────────────────────────────────────────
     for action in KeybindAction::all() {
         // `CiteFromLink` is still a `println!` no-op, and the palette itself
         // is not a thing to run from inside the palette.
-        if action.is_stub() || *action == KeybindAction::CommandPalette {
+        if action.is_stub()
+            || *action == KeybindAction::CommandPalette
+            || *action == KeybindAction::ToggleSidebarMode
+        {
             continue;
         }
         out.push(PaletteCommand {
@@ -202,10 +205,11 @@ pub fn registry() -> Vec<PaletteCommand> {
         ("Toggle Invisibility Mode", |s| {
             s.dispatch(crate::app::command::AppCommand::ToggleInvisibilityMode);
         }),
-        // Matches the ribbon's Nav button: switches the sidebar's mode *and*
-        // makes sure the sidebar is actually showing.
-        ("Toggle Navigation Sidebar", |s| {
-            s.dispatch(crate::app::command::AppCommand::ToggleSidebarMode);
+        ("Switch to Files", |s: &mut AppState| {
+            s.switch_sidebar_mode(SidebarMode::Files)
+        }),
+        ("Switch to Nav", |s: &mut AppState| {
+            s.switch_sidebar_mode(SidebarMode::Nav)
         }),
         ("Toggle Split View", |s| {
             if s.workspace().split_view {
@@ -264,6 +268,17 @@ pub fn registry() -> Vec<PaletteCommand> {
         label: "Open Tabroom",
         action: PaletteAction::Url("https://www.tabroom.com/index/index.mhtml"),
     });
+
+    if timer_panel_enabled {
+        out.push(PaletteCommand {
+            label: "Switch to Timer",
+            action: PaletteAction::State(|s| s.switch_sidebar_mode(SidebarMode::Timer)),
+        });
+        out.push(PaletteCommand {
+            label: "Toggle Timer Side Bar",
+            action: PaletteAction::State(AppState::toggle_timer),
+        });
+    }
 
     // First-wins dedupe. Order matters: block 1 gets to keep its entry so the
     // command shows its key combo.
@@ -358,8 +373,8 @@ pub fn fuzzy_score(query: &str, label: &str) -> Option<i32> {
 /// Sorted by `(score desc, label asc)` — a **total** order. Enter runs the top
 /// row, so a tie that reordered between frames would make "the top command"
 /// genuinely unpredictable.
-pub fn filtered(query: &str) -> Vec<PaletteCommand> {
-    let mut scored: Vec<(i32, PaletteCommand)> = registry()
+pub fn filtered(query: &str, timer_panel_enabled: bool) -> Vec<PaletteCommand> {
+    let mut scored: Vec<(i32, PaletteCommand)> = registry(timer_panel_enabled)
         .into_iter()
         .filter_map(|c| fuzzy_score(query, c.label).map(|s| (s, c)))
         .collect();
@@ -443,7 +458,13 @@ impl CommandPaletteView {
                 // Per the spec, Enter runs "the top recommended command" —
                 // there is no separate selection to track.
                 let query = self.query(cx);
-                if let Some(top) = filtered(&query).into_iter().next() {
+                if let Some(top) = filtered(
+                    &query,
+                    self.state.read(cx).preferences().timer_panel_enabled,
+                )
+                .into_iter()
+                .next()
+                {
                     self.activate(top.action, window, cx);
                 }
                 return;
@@ -501,7 +522,10 @@ impl Render for CommandPaletteView {
             self.focus_handle.clone().focus(window, cx);
         }
 
-        let results = filtered(&palette.query);
+        let results = filtered(
+            &palette.query,
+            self.state.read(cx).preferences().timer_panel_enabled,
+        );
         let total = results.len();
 
         div()
@@ -637,7 +661,7 @@ mod tests {
         // The dedupe is load-bearing: Condense reaches the registry three
         // separate ways (keybind, ribbon, Card Menu row) and would otherwise
         // appear three times.
-        let commands = registry();
+        let commands = registry(false);
         let mut labels: Vec<&str> = commands.iter().map(|c| c.label).collect();
         labels.sort_unstable();
         let mut deduped = labels.clone();
@@ -650,7 +674,7 @@ mod tests {
 
     #[test]
     fn registry_is_populated_and_every_keybind_entry_is_real() {
-        let commands = registry();
+        let commands = registry(false);
         assert!(
             commands.len() > 40,
             "registry looks truncated: {}",
@@ -677,7 +701,7 @@ mod tests {
     fn registry_covers_all_four_buckets() {
         // Guards against a block being dropped wholesale in a refactor —
         // "everything in Vimbatim" is the point of this registry.
-        let commands = registry();
+        let commands = registry(false);
         let has = |label: &str| commands.iter().any(|c| c.label == label);
         assert!(has("Save"), "bindable actions missing");
         assert!(has("Remove blank lines"), "Doc/Card menu rows missing");
@@ -704,10 +728,30 @@ mod tests {
     }
 
     #[test]
+    fn timer_panel_commands_are_conditional_and_sidebar_switches_are_direct() {
+        for enabled in [false, true] {
+            let commands = registry(enabled);
+            assert!(commands.iter().any(|c| c.label == "Switch to Files"));
+            assert!(commands.iter().any(|c| c.label == "Switch to Nav"));
+            assert_eq!(
+                commands.iter().any(|c| c.label == "Switch to Timer"),
+                enabled
+            );
+            assert_eq!(
+                commands.iter().any(|c| c.label == "Toggle Timer Side Bar"),
+                enabled
+            );
+            assert!(!commands
+                .iter()
+                .any(|c| c.label == "Toggle Files/Nav" || c.label == "Toggle Navigation Sidebar"));
+        }
+    }
+
+    #[test]
     fn fuzzy_matches_initials_and_ranks_them_first() {
         // The headline case: "cf" should find Clear Formatting, and rank it
         // above a label that merely happens to contain a c before an f.
-        let ranked = filtered("cf");
+        let ranked = filtered("cf", false);
         assert_eq!(ranked.first().map(|c| c.label), Some("Clear Formatting"));
     }
 
@@ -715,14 +759,20 @@ mod tests {
     fn fuzzy_matches_a_run_inside_one_word() {
         // A contiguous run beats scattered initials: "hili" sits inside
         // "Highlight" as one block.
-        assert_eq!(filtered("hili").first().map(|c| c.label), Some("Highlight"));
+        assert_eq!(
+            filtered("hili", false).first().map(|c| c.label),
+            Some("Highlight")
+        );
     }
 
     #[test]
     fn fuzzy_prefers_an_exact_prefix() {
         // "save" is a prefix of both "Save" and "Save As"; the exact one wins
         // on the length tiebreak.
-        assert_eq!(filtered("save").first().map(|c| c.label), Some("Save"));
+        assert_eq!(
+            filtered("save", false).first().map(|c| c.label),
+            Some("Save")
+        );
     }
 
     #[test]
@@ -733,20 +783,20 @@ mod tests {
 
     #[test]
     fn empty_query_returns_the_whole_registry() {
-        assert_eq!(filtered("").len(), registry().len());
+        assert_eq!(filtered("", false).len(), registry(false).len());
     }
 
     #[test]
     fn a_query_matching_nothing_returns_no_rows() {
-        assert!(filtered("zzzqqqxxx").is_empty());
+        assert!(filtered("zzzqqqxxx", false).is_empty());
     }
 
     #[test]
     fn ranking_is_a_total_order_so_the_top_row_is_stable() {
         // Enter runs row 0; if ties reordered between frames, "the top
         // recommended command" would be unpredictable.
-        let a: Vec<&str> = filtered("to").iter().map(|c| c.label).collect();
-        let b: Vec<&str> = filtered("to").iter().map(|c| c.label).collect();
+        let a: Vec<&str> = filtered("to", false).iter().map(|c| c.label).collect();
+        let b: Vec<&str> = filtered("to", false).iter().map(|c| c.label).collect();
         assert_eq!(a, b);
         assert!(a.windows(2).all(|w| w[0] != w[1]));
     }

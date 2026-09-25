@@ -31,10 +31,10 @@ jobs:
       - run: bash tools/check_packaging.sh
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Audit dependencies
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
 
   build:
     needs: quality
@@ -78,7 +78,9 @@ jobs:
       # ── macOS (x86_64 + arm64): cargo-bundle .app, wrapped in a .dmg ────
       - name: Install cargo-bundle
         if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
-        run: cargo install cargo-bundle --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bundle
 
       - name: Bundle .app
         if: matrix.label == 'macos-x86_64' || matrix.label == 'macos-arm64'
@@ -133,7 +135,9 @@ jobs:
       # ── Fedora (x86_64): .rpm via cargo-generate-rpm ─────────────────────
       - name: Install cargo-generate-rpm
         if: matrix.label == 'fedora-x86_64'
-        run: cargo install cargo-generate-rpm --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-generate-rpm
 
       - name: Build .rpm
         if: matrix.label == 'fedora-x86_64'

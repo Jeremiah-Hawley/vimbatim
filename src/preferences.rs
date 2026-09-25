@@ -38,6 +38,7 @@ pub struct Preferences {
     pub custom_font_colors: Vec<u32>,
     pub custom_highlight_colors: Vec<u32>,
     pub nav_fold_buttons: bool,
+    pub timer_panel_enabled: bool,
     pub search_from_list_enabled: bool,
     pub search_list_whole_words: bool,
     pub command_palette_enabled: bool,
@@ -83,6 +84,7 @@ impl Default for Preferences {
             custom_font_colors: Vec::new(),
             custom_highlight_colors: Vec::new(),
             nav_fold_buttons: false,
+            timer_panel_enabled: false,
             search_from_list_enabled: false,
             search_list_whole_words: true,
             command_palette_enabled: false,
@@ -188,6 +190,7 @@ impl Preferences {
         p.custom_font_colors = colors("custom_font_colors");
         p.custom_highlight_colors = colors("custom_highlight_colors");
         p.nav_fold_buttons = bool("nav_fold_buttons", p.nav_fold_buttons);
+        p.timer_panel_enabled = bool("timer_panel_enabled", p.timer_panel_enabled);
         p.search_from_list_enabled = bool("search_from_list", p.search_from_list_enabled);
         p.search_list_whole_words = bool("search_list_whole_words", p.search_list_whole_words);
         p.command_palette_enabled = bool("command_palette", p.command_palette_enabled);
